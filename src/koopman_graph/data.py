@@ -83,6 +83,12 @@ class GraphSnapshotSequence:
     dimension. Downstream training APIs should require at least two snapshots;
     construction here allows a single snapshot for inspection or prediction-only
     workflows.
+
+    Notes
+    -----
+    Read-only views of the shared topology and sequence metadata are exposed as
+    :attr:`snapshots`, :attr:`edge_index`, :attr:`num_nodes`,
+    :attr:`num_timesteps`, and :attr:`in_channels`.
     """
 
     def __init__(self, snapshots: Sequence[Data]) -> None:
