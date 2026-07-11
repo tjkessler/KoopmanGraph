@@ -83,19 +83,6 @@ class GraphSnapshotSequence:
     dimension. Downstream training APIs should require at least two snapshots;
     construction here allows a single snapshot for inspection or prediction-only
     workflows.
-
-    Attributes
-    ----------
-    snapshots : list of Data
-        Time-ordered PyG graph snapshots sharing the same topology.
-    edge_index : Tensor
-        Shared edge index, shape ``(2, num_edges)``.
-    num_nodes : int
-        Number of nodes in the graph topology.
-    num_timesteps : int
-        Length of the temporal sequence.
-    in_channels : int
-        Node feature dimension shared across snapshots.
     """
 
     def __init__(self, snapshots: Sequence[Data]) -> None:

@@ -15,6 +15,7 @@ Model
 
 .. automodule:: koopman_graph.model
    :members:
+   :exclude-members: GraphSnapshotSequence
    :show-inheritance:
 
 Encoders
@@ -50,6 +51,7 @@ Losses
 
 .. automodule:: koopman_graph.losses
    :members:
+   :exclude-members: GraphSnapshotSequence
    :show-inheritance:
 
 Training
@@ -57,6 +59,7 @@ Training
 
 .. automodule:: koopman_graph.training
    :members:
+   :exclude-members: GraphSnapshotSequence
    :show-inheritance:
 
 Datasets
