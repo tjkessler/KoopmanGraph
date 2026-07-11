@@ -11,7 +11,10 @@ import koopman_graph
 import koopman_graph.datasets
 
 _NUMPY_SECTION = re.compile(
-    r"^\s*(Parameters|Returns|Raises|Yields|Attributes|Notes|Examples|See Also|References|Warnings)\s*$",
+    r"^\s*("
+    r"Parameters|Returns|Raises|Yields|Attributes|Notes|Examples|"
+    r"See Also|References|Warnings"
+    r")\s*$",
     re.M,
 )
 _NUMPY_UNDERLINE = re.compile(r"^\s*-{3,}\s*$", re.M)
