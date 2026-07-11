@@ -12,7 +12,6 @@
 [![PyPI version](https://img.shields.io/pypi/v/koopman-graph)](https://pypi.org/project/koopman-graph/)
 [![codecov](https://codecov.io/gh/tjkessler/KoopmanGraph/graph/badge.svg)](https://codecov.io/gh/tjkessler/KoopmanGraph)
 [![Documentation Status](https://readthedocs.org/projects/koopmangraph/badge/?version=latest)](https://koopmangraph.readthedocs.io/en/latest/?badge=latest)
-[![Paper draft](https://github.com/tjkessler/KoopmanGraph/actions/workflows/draft-pdf.yml/badge.svg)](https://github.com/tjkessler/KoopmanGraph/actions/workflows/draft-pdf.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12-blue)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
