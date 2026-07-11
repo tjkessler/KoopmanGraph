@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributing guide
+    url: https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md
+    about: Development setup, code style, and testing instructions
+  - name: Questions & discussion
+    url: https://github.com/tjkessler/KoopmanGraph/discussions
+    about: Ask questions or share ideas that are not bug reports or feature requests

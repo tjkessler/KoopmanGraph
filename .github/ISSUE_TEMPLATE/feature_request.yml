@@ -1,0 +1,65 @@
+name: Feature request
+description: Suggest a new capability or improvement for KoopmanGraph
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. Describe the problem you are trying to solve and how KoopmanGraph could help.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What limitation or use case prompted this request?
+      placeholder: I'm trying to model ... but currently ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work in the library API or workflow?
+      placeholder: Add a ... method that ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you have tried or considered.
+      placeholder: I considered using ... instead.
+
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Application domain (optional)
+      description: Where would this feature be most useful?
+      options:
+        - General / library infrastructure
+        - Smart grid / power networks
+        - Traffic / transportation networks
+        - Epidemiology / diffusion on graphs
+        - Other scientific / engineering domain
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This affects the public API (new classes, methods, or breaking changes)
+          required: false
+        - label: This is primarily internal / implementation detail
+          required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to papers, related issues, or example data.
+      placeholder: Optional
