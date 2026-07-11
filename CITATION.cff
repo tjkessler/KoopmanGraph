@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "KoopmanGraph: Graph Neural Networks with Koopman Operator Theory"
+abstract: >-
+  A PyTorch Geometric library integrating Graph Neural Networks with Koopman
+  operator theory for topology-aware modeling of spatiotemporal graph dynamics.
+type: software
+authors:
+  - given-names: Travis
+    family-names: Kessler
+    orcid: "https://orcid.org/0000-0002-7363-4050"
+repository-code: "https://github.com/tjkessler/KoopmanGraph"
+url: "https://koopmangraph.readthedocs.io/"
+license: Apache-2.0
+version: 0.1.0
+keywords:
+  - koopman-operator
+  - graph-neural-networks
+  - pytorch-geometric
+  - spatiotemporal-dynamics
+  - dynamical-systems
+# TODO(release): set `date-released` to the archival release date (YYYY-MM-DD)
+#   when the version is tagged.
+# date-released: 2026-01-01
+#
+# TODO(JOSS): after Zenodo mints a version DOI for the archived release, add the
+#   DOI here and in paper.md (replacing the "DOI: TBD" placeholder):
+# doi: 10.5281/zenodo.XXXXXXX
+# identifiers:
+#   - type: doi
+#     value: 10.5281/zenodo.XXXXXXX
+#     description: "Archived software (version DOI)"

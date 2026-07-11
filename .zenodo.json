@@ -1,0 +1,27 @@
+{
+  "title": "KoopmanGraph: Graph Neural Networks with Koopman Operator Theory",
+  "description": "A PyTorch Geometric library integrating Graph Neural Networks with Koopman operator theory for topology-aware modeling of spatiotemporal graph dynamics.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "Apache-2.0",
+  "creators": [
+    {
+      "name": "Kessler, Travis",
+      "orcid": "0000-0002-7363-4050"
+    }
+  ],
+  "keywords": [
+    "Koopman operator",
+    "graph neural networks",
+    "PyTorch Geometric",
+    "spatiotemporal dynamics",
+    "dynamical systems"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/tjkessler/KoopmanGraph",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}

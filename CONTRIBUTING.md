@@ -4,8 +4,8 @@ Thank you for your interest in contributing to **KoopmanGraph**. This project
 aims to provide a well-tested, documented, and reproducible open-source library
 for spatiotemporal graph dynamics using Koopman operator theory. Community
 contributions—bug reports, documentation improvements, tests, and new
-features—are welcome and help us meet the standards expected of
-[Journal of Open Source Software (JOSS)](https://joss.theoj.org/) submissions.
+features—are welcome and help keep the project well-tested, documented, and
+reproducible for the research community.
 
 This document describes how to set up a development environment, run quality
 checks locally, and submit changes via pull request.
@@ -176,6 +176,20 @@ docstring updates (see [Documentation](#documentation)).
 Maintainers may request changes before merging. We aim to review pull requests
 in a timely manner and appreciate clear descriptions and test coverage.
 
+### Required status checks (maintainers)
+
+Branch protection on `main` is configured through GitHub
+(**Settings → Branches → Branch protection rules**), not through committed files.
+The following checks from [`ci.yml`](.github/workflows/ci.yml) should be marked
+as **required** before merge:
+
+- `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest, Ruff lint/format, and the
+  80% coverage gate across supported Python versions
+- `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
+
+The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))
+compiles `paper.md` on changes; it is informational and need not block merges.
+
 ## Documentation
 
 User-facing documentation is hosted on
@@ -244,6 +258,36 @@ One-time setup (maintainers):
 
 The release workflow requests short-lived upload credentials automatically via
 [`pypa/gh-action-pypi-publish`](https://github.com/pypa/gh-action-pypi-publish).
+
+### Software archiving (Zenodo)
+
+For a citable, archived snapshot of the software, the repository is set up to
+deposit tagged releases to [Zenodo](https://zenodo.org/):
+
+- **[`.zenodo.json`](.zenodo.json)** supplies archive metadata (title, description,
+  Apache-2.0 license, author + ORCID, keywords). Zenodo fills in the `version` and
+  publication date automatically from the GitHub release tag, so those are not
+  hard-coded.
+- **[`CITATION.cff`](CITATION.cff)** provides citation metadata surfaced by GitHub's
+  "Cite this repository" feature.
+
+One-time setup (maintainers), performed **before** the archival release:
+
+1. Sign in to [zenodo.org](https://zenodo.org/) with GitHub and enable archiving
+   for the `tjkessler/KoopmanGraph` repository (Zenodo adds a release webhook).
+2. Confirm `.zenodo.json` metadata is current.
+
+At archival release time:
+
+1. Create the GitHub Release (`vX.Y.Z`). Zenodo captures the tagged snapshot and
+   mints a **version DOI** plus a **concept DOI** (all versions).
+2. Add the version DOI to `CITATION.cff` (uncomment the `doi:`/`identifiers` block)
+   and replace the `DOI: TBD` placeholder in `paper.md`.
+3. Add the Zenodo DOI badge to the README.
+
+Enable Zenodo archiving and mint the version DOI when you cut a release you intend
+to cite; the metadata files above are prepared in advance so the archival step is
+straightforward at release time.
 
 ### Local build (debugging)
 
