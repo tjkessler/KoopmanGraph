@@ -2,8 +2,8 @@ Quickstart
 ==========
 
 This example trains a :class:`~koopman_graph.model.GraphKoopmanModel` on a
-synthetic spatiotemporal graph and predicts future snapshots. It mirrors the
-workflow from the project proposal: encode → linear Koopman advance → decode.
+synthetic spatiotemporal graph and predicts future snapshots. It follows the
+core KoopmanGraph workflow: encode → linear Koopman advance → decode.
 
 Generate data
 -------------
