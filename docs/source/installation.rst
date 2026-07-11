@@ -71,8 +71,21 @@ To build documentation locally:
 PyPI
 ~~~~
 
-A ``pip install koopman-graph`` release is planned; until then, use the editable
-install from source above.
+After PyTorch and PyG are installed, install KoopmanGraph from PyPI:
+
+.. code-block:: bash
+
+   pip install koopman-graph
+
+Pin a specific release when reproducing results:
+
+.. code-block:: bash
+
+   pip install koopman-graph==0.1.0
+
+Releases are published automatically when a maintainer creates a GitHub Release
+(see ``CONTRIBUTING.md`` in the repository). Until the first release is published,
+use the editable install from source above.
 
 Verify
 ------

@@ -84,7 +84,13 @@ During training, the model minimizes:
 
 ## Installation
 
-KoopmanGraph requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html). Install those first, then clone and install in editable mode:
+KoopmanGraph requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html). Install those first, then install KoopmanGraph:
+
+```bash
+pip install koopman-graph
+```
+
+For development from source:
 
 ```bash
 git clone https://github.com/tjkessler/KoopmanGraph.git
@@ -99,7 +105,7 @@ pip install -e ".[docs]"
 cd docs && make html
 ```
 
-A PyPI release (`pip install koopman-graph`) is planned. See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for platform-specific PyTorch/PyG wheels and verification steps.
+See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for platform-specific PyTorch/PyG wheels and verification steps. Release workflow and version policy are documented in [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 
 ## Quickstart
 

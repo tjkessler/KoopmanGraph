@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "koopman-graph"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Graph Neural Networks with Koopman operator theory for spatiotemporal graph dynamics"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     { name = "Travis Kessler", email = "travis.j.kessler@gmail.com" },
@@ -23,7 +24,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -37,6 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2.0",
     "pytest>=8.4.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.15.0",
@@ -54,11 +55,15 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/tjkessler/KoopmanGraph"
+Documentation = "https://koopmangraph.readthedocs.io/"
 Repository = "https://github.com/tjkessler/KoopmanGraph"
 Issues = "https://github.com/tjkessler/KoopmanGraph/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "koopman_graph.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

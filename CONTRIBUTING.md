@@ -20,6 +20,7 @@ checks locally, and submit changes via pull request.
 - [Code style](#code-style)
 - [Pull request process](#pull-request-process)
 - [Documentation](#documentation)
+- [Releasing](#releasing)
 - [Agent-assisted development](#agent-assisted-development)
 - [License](#license)
 
@@ -188,6 +189,78 @@ Update documentation when your change affects:
 
 Sphinx source lives in `docs/source/`. Rebuild locally with `make html` in
 `docs/` after installing `[docs]` extras.
+
+## Releasing
+
+KoopmanGraph follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
+While the project is pre-1.0, breaking API changes may appear in `0.x.y` releases;
+document them in release notes.
+
+### Version source of truth
+
+Bump the version in a single place:
+
+```python
+# src/koopman_graph/__init__.py
+__version__ = "0.1.0"
+```
+
+`pyproject.toml` reads this value dynamically at build time via
+`[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
+`pyproject.toml`.
+
+### Maintainer release checklist
+
+1. Ensure `main` is green (CI tests, lint, notebook smoke tests).
+2. Update `__version__` in `src/koopman_graph/__init__.py`.
+3. Merge any pending release-prep changes to `main`.
+4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.1.0`). Publishing the
+   release triggers `.github/workflows/release.yml`.
+5. Approve the `pypi` environment deployment if required by branch protection.
+6. Confirm the workflow uploaded artifacts to PyPI.
+7. Verify installation:
+
+   ```bash
+   pip install koopman-graph==X.Y.Z
+   python -c "import koopman_graph; print(koopman_graph.__version__)"
+   ```
+
+### PyPI trusted publishing
+
+Releases use [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)
+(OpenID Connect) — no long-lived API tokens are stored in GitHub Secrets.
+
+One-time setup (maintainers):
+
+1. On [pypi.org](https://pypi.org/manage/account/publishing/), register a
+   **pending publisher** (or add a publisher to an existing project) with:
+   - PyPI project name: `koopman-graph`
+   - Owner: `tjkessler`
+   - Repository: `KoopmanGraph`
+   - Workflow: `release.yml`
+   - Environment: `pypi`
+2. In GitHub **Settings → Environments**, create the `pypi` environment (optionally
+   with required reviewers).
+
+The release workflow requests short-lived upload credentials automatically via
+[`pypa/gh-action-pypi-publish`](https://github.com/pypa/gh-action-pypi-publish).
+
+### Local build (debugging)
+
+To build wheels locally without publishing:
+
+```bash
+pip install build
+python -m build
+ls dist/
+```
+
+Install a built wheel in a clean virtual environment (install PyTorch and PyG first):
+
+```bash
+pip install torch torch-geometric
+pip install dist/koopman_graph-*.whl
+```
 
 ## Agent-assisted development
 
