@@ -39,6 +39,7 @@ KoopmanGraph bridges that gap:
 - **Topology-aware lifting** — GCN and GAT encoders propagate information along edges before Koopman evolution.
 - **Explicit linear dynamics** — A learnable finite-dimensional Koopman matrix **K** governs latent evolution.
 - **Multi-step forecasting** — Roll out future graph snapshots from a single initial state.
+- **Spectral interpretability** — Eigendecomposition of the learned operator with continuous-time growth rates and spatial mode shapes.
 - **Built on PyTorch Geometric** — Native `Data` objects, standard GNN layers, and familiar training APIs.
 
 
@@ -46,16 +47,24 @@ KoopmanGraph bridges that gap:
 ## Key Features
 
 
-| Feature                     | Description                                                    |
-| --------------------------- | -------------------------------------------------------------- |
-| **GraphKoopmanModel**       | End-to-end encode → Koopman advance → decode pipeline          |
+| Feature | Description |
+| --- | --- |
+| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, and `evaluate` |
 | **GNNEncoder / GATEncoder** | Topology-aware latent lifting with GCN or multi-head attention |
-| **KoopmanOperator**         | Learnable linear propagator with configurable initialization   |
-| **Consistency losses**      | Forward and backward latent linearity constraints              |
-| **GraphSnapshotSequence**   | Time-ordered container for PyG graph snapshots                 |
-| **Benchmark datasets**      | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks  |
-| **Jupyter tutorials**       | Nine end-to-end notebooks with real networked datasets         |
-| **Tested & documented**     | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs     |
+| **KoopmanOperator** | Learnable linear propagator with identity, Xavier, or spectrally constrained (ODO) initialization |
+| **Spectral analysis** | `KoopmanSpectrum`, `compute_spectrum`, and `decode_mode_shapes` for eigenvalues, modes, and continuous-time frequencies |
+| **Model persistence** | `save` / `load` checkpoints with architecture config; optional best-epoch restoration in `fit` |
+| **Evaluation metrics** | Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via `evaluate_forecast` |
+| **Consistency losses** | Forward and backward latent linearity constraints plus optional eigenvalue stability regularization |
+| **Classical baselines** | `DMDBaseline`, `EDMDBaseline`, and `DMDcBaseline` for topology-agnostic comparison |
+| **Control inputs** | Koopman-with-control dynamics (`z_{t+1} = K z_t + B u_t`) for driven systems |
+| **Dynamic topology** | Per-snapshot `edge_index` support for rewiring contact networks |
+| **Edge weights** | End-to-end `edge_weight` propagation through GCN encoder/decoder and METR-LA benchmark |
+| **Advanced training** | LR schedulers, per-term loss history, multi-trajectory `fit`, and windowed mini-batching |
+| **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
+| **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks |
+| **Jupyter tutorials** | Ten end-to-end notebooks with real networked datasets |
+| **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs |
 
 
 
@@ -180,6 +189,7 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 | [`07_koopman_spectrum.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb) | Koopman eigenvalue analysis |
 | [`08_loss_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb) | Loss weighting and training stability |
 | [`09_topology_ablation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb) | Topology ablation study |
+| [`10_advanced_training.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/10_advanced_training.ipynb) | LR schedulers, rollout origins, multi-trajectory `fit` |
 
 
 
@@ -211,7 +221,7 @@ If you use KoopmanGraph in your research, please cite the repository:
   title        = {KoopmanGraph: Graph Neural Networks with Koopman Operator Theory},
   year         = {2026},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.1.0},
+  version      = {0.2.0},
 }
 ```
 

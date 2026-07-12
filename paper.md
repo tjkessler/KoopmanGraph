@@ -23,7 +23,7 @@ bibliography: paper.bib
 
 `KoopmanGraph` is a Python library for learning and forecasting spatiotemporal dynamics on graphs. Many systems of scientific interest---including power grids, traffic sensor networks, and epidemic contact graphs---evolve on fixed topologies where node states interact along edges. The library combines Graph Neural Networks (GNNs) with Koopman operator theory to learn latent representations in which dynamics advance approximately linearly while respecting graph structure.
 
-Each forecast step follows an encode--linear advance--decode workflow: GCN or GAT encoders lift node features into a latent space with message passing on the graph; a learnable finite-dimensional Koopman matrix propagates latent states; and a symmetric GNN decoder maps predictions back to physical node features. The `GraphKoopmanModel` class exposes `fit` and `predict` methods for training on sequences of PyTorch Geometric `Data` snapshots and rolling out multi-step forecasts. The software is available at \url{https://github.com/tjkessler/KoopmanGraph}.
+Each forecast step follows an encode--linear advance--decode workflow: GCN or GAT encoders lift node features into a latent space with message passing on the graph; a learnable finite-dimensional Koopman matrix propagates latent states; and a symmetric GNN decoder maps predictions back to physical node features. The `GraphKoopmanModel` class exposes `fit`, `predict`, and `evaluate` methods for training on sequences of PyTorch Geometric `Data` snapshots, rolling out multi-step forecasts, and reporting per-horizon error metrics. Spectral analysis of the learned operator, classical DMD/EDMD baselines, Koopman-with-control dynamics, and dynamic-topology sequences are supported for interpretation, comparison, and domain-specific experimentation. The software is available at \url{https://github.com/tjkessler/KoopmanGraph}.
 
 # Statement of need
 
@@ -51,7 +51,7 @@ PyG [@Fey/Lenssen/2019] provides message-passing layers, data loaders, and bench
 2. **Linear evolution (Koopman operator).** `KoopmanOperator` applies a learnable matrix $\mathbf{K} \in \mathbb{R}^{d \times d}$ via $\mathbf{z}_{t+1} \approx \mathbf{z}_t \mathbf{K}^\top$ at each node.
 3. **Reconstruction (decoder).** `GNNDecoder` maps latent states back to physical features $\hat{\mathbf{x}}_{t+1} \in \mathbb{R}^{N \times F}$.
 
-`GraphSnapshotSequence` validates that all timesteps share a consistent topology and provides helpers to build sequences from NumPy or PyTorch arrays. Training via `GraphKoopmanModel.fit` minimizes a weighted sum of reconstruction, forward consistency, and backward consistency losses. Optional gradient clipping, loss-weight schedules, and early stopping improve stability on longer sequences. `GraphKoopmanModel.predict` performs autoregressive rollout in eval mode and returns a list of PyG `Data` snapshots.
+`GraphSnapshotSequence` validates that all timesteps share a consistent topology (with an opt-in dynamic-topology mode for rewiring graphs) and provides helpers to build sequences from NumPy or PyTorch arrays, optionally carrying shared `edge_weight` tensors and per-timestep control inputs. Training via `GraphKoopmanModel.fit` minimizes a weighted sum of reconstruction, forward consistency, backward consistency, rollout, and optional eigenvalue regularization losses. Optional gradient clipping, loss-weight schedules, validation-aware early stopping, learning-rate schedulers, multi-trajectory aggregation, and windowed mini-batching improve stability and scalability on longer sequences. `GraphKoopmanModel.predict` performs autoregressive rollout in eval mode and returns a list of PyG `Data` snapshots; `GraphKoopmanModel.evaluate` reports per-horizon MAE, RMSE, and MAPE on held-out data. `GraphKoopmanModel.save` and `GraphKoopmanModel.load` persist trained weights together with encoder/decoder architecture configuration. `model.spectrum()` exposes eigendecomposition of the learned operator with continuous-time growth rates and frequencies derived from `time_step`, and `decode_mode_shapes` maps latent Koopman modes back to node-space patterns.
 
 The package is distributed on PyPI as `koopman-graph` [@koopmangraph2026], requires Python 3.10+, PyTorch, and PyTorch Geometric, and includes Sphinx documentation hosted on Read the Docs.
 
@@ -59,15 +59,20 @@ The package is distributed on PyPI as `koopman-graph` [@koopmangraph2026], requi
 
 At the time of writing, `KoopmanGraph` provides the following functionality:
 
-- **End-to-end model.** `GraphKoopmanModel` composes encoder, Koopman operator, and decoder with `fit` and `predict` APIs.
-- **Topology-aware encoders.** `GNNEncoder` (GCN) and `GATEncoder` (GAT) for latent lifting with message passing on `edge_index`.
-- **Learnable linear dynamics.** `KoopmanOperator` with configurable matrix initialization (`identity`, `identity_noise`, `xavier`).
-- **Consistency regularization.** `ForwardConsistencyLoss` and `BackwardConsistencyLoss` for latent linearity constraints during training.
-- **Sequence utilities.** `GraphSnapshotSequence` for validated, time-ordered PyG snapshot containers with an array builder helper.
+- **End-to-end model.** `GraphKoopmanModel` composes encoder, Koopman operator, and decoder with `fit`, `predict`, `evaluate`, `save`, `load`, and `spectrum` APIs.
+- **Topology-aware encoders.** `GNNEncoder` (GCN) and `GATEncoder` (GAT) for latent lifting with message passing on `edge_index`; GCN paths propagate optional scalar `edge_weight`.
+- **Learnable linear dynamics.** `KoopmanOperator` with configurable matrix initialization (`identity`, `identity_noise`, `xavier`) and an opt-in spectrally constrained orthogonal--diagonal--orthogonal parameterization for long-horizon stability.
+- **Koopman with control.** Optional input matrix `B` and per-timestep control sequences for driven dynamics (`z_{t+1} = K z_t + B u_t`).
+- **Consistency regularization.** `ForwardConsistencyLoss`, `BackwardConsistencyLoss`, and `EigenvalueRegularizationLoss` for latent linearity and unit-circle eigenvalue penalties during training.
+- **Spectral analysis.** `KoopmanSpectrum`, `compute_spectrum`, and `decode_mode_shapes` for eigenvalues, mode amplitudes, continuous-time frequencies, and spatial mode shapes.
+- **Sequence utilities.** `GraphSnapshotSequence` for validated, time-ordered PyG snapshot containers; `TemporalSplit` / `temporal_split` for train/validation/test partitioning; `WindowSampler` for fixed-length mini-batch training.
+- **Evaluation metrics.** `evaluate_forecast` and horizon-wise MAE, RMSE, and MAPE for multi-step benchmark reporting.
+- **Classical baselines.** `DMDBaseline`, `EDMDBaseline`, and `DMDcBaseline` for least-squares/SVD Koopman fits on flattened node states, enabling direct topology-aware versus vector-based comparisons.
+- **Dynamic topology.** Opt-in per-snapshot `edge_index` support for rewiring contact networks during training and rollout.
 - **Benchmark datasets.** Synthetic diffusion and grid graphs, IEEE 118-bus power network, and METR-LA traffic benchmarks (cached data with documented download scripts where needed).
-- **Tutorials and tests.** Nine Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
+- **Tutorials and tests.** Ten Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
 
-Tutorial notebooks cover synthetic dynamics, the IEEE 118-bus test system, and METR-LA traffic forecasting, including a comparison against a vectorized Koopman baseline that ignores graph structure.
+Tutorial notebooks cover synthetic dynamics, the IEEE 118-bus test system (including controlled load ramps), METR-LA traffic forecasting with per-horizon evaluation, epidemic rewiring on ring graphs, Koopman spectral analysis, operator stability, and topology ablation studies. The traffic tutorial compares `GraphKoopmanModel` against packaged `DMDBaseline` and `EDMDBaseline` baselines that ignore graph structure.
 
 # Example
 
@@ -104,7 +109,7 @@ After training, `future_graphs` contains five predicted PyG `Data` snapshots wit
 
 # Research impact statement
 
-`KoopmanGraph` is a new research software package. At the time of submission there are no external publications or downstream adoptions to cite, and no related companion manuscripts. Impact is demonstrated through reproducible tutorials on synthetic dynamics, the IEEE 118-bus test system, and the METR-LA traffic sensor network; an explicit topology-versus-vector comparison in the traffic tutorial; and open development artifacts including a PyPI release (v0.1.0), CI with pytest and an 80% coverage gate, nbmake notebook smoke tests, and API reference documentation.
+`KoopmanGraph` is a new research software package. At the time of submission there are no external publications or downstream adoptions to cite, and no related companion manuscripts. Impact is demonstrated through reproducible tutorials on synthetic dynamics, the IEEE 118-bus test system, and the METR-LA traffic sensor network; per-horizon evaluation on held-out traffic data; controlled-system demonstrations on the power-grid benchmark; epidemic rewiring on dynamic topologies; spectral and stability analysis notebooks; explicit topology-versus-vector comparisons using packaged DMD/EDMD baselines; and open development artifacts including PyPI releases (v0.1.0 initial release, v0.2.0 feature expansion), CI with pytest and an 80% coverage gate, nbmake notebook smoke tests, and API reference documentation.
 
 The author uses `KoopmanGraph` as a platform for experimenting with Koopman-theoretic forecasting on networked systems. The library is intended to lower the barrier for other researchers to train, evaluate, and extend topology-aware Koopman models on standard PyG workflows.
 
@@ -112,7 +117,7 @@ A versioned software archive with DOI is planned via Zenodo integration upon rel
 
 # Conclusion
 
-`KoopmanGraph` provides a central, PyG-native toolkit for topology-aware Koopman modeling of spatiotemporal graph dynamics. By combining GNN encoders and decoders with a learnable finite-dimensional Koopman operator and consistency losses, the library makes it straightforward to train and evaluate graph-respecting forecasting models that retain explicit linear latent dynamics. We hope that researchers and practitioners will use `KoopmanGraph` as a platform for experimentation on networked dynamical systems and for extending Koopman-theoretic methods to graph-structured data.
+`KoopmanGraph` provides a central, PyG-native toolkit for topology-aware Koopman modeling of spatiotemporal graph dynamics. By combining GNN encoders and decoders with a learnable finite-dimensional Koopman operator, consistency and stability losses, spectral analysis, classical baselines, and evaluation utilities, the library makes it straightforward to train, evaluate, and interpret graph-respecting forecasting models that retain explicit linear latent dynamics. We hope that researchers and practitioners will use `KoopmanGraph` as a platform for experimentation on networked dynamical systems and for extending Koopman-theoretic methods to graph-structured data.
 
 # AI usage disclosure
 

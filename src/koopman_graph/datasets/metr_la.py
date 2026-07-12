@@ -51,20 +51,14 @@ def _default_traffic_path(cache_dir: Path | None = None) -> Path:
     return root / TRAFFIC_FILENAME
 
 
-def download_sensor_ids(*, force: bool = False) -> list[str]:
+def download_sensor_ids() -> list[str]:
     """Download the ordered METR-LA sensor ID list from the DCRNN repository.
-
-    Parameters
-    ----------
-    force : bool, optional
-        Accepted for API symmetry; remote fetch is always performed.
 
     Returns
     -------
     list of str
         Sensor identifiers in graph node order.
     """
-    del force
     try:
         with urlopen(SENSOR_IDS_URL, timeout=60) as response:
             text = response.read().decode("utf-8").strip()
@@ -74,20 +68,14 @@ def download_sensor_ids(*, force: bool = False) -> list[str]:
     return text.split(",")
 
 
-def download_distances_csv(*, force: bool = False) -> str:
+def download_distances_csv() -> str:
     """Download the METR-LA pairwise road-distance CSV from DCRNN.
-
-    Parameters
-    ----------
-    force : bool, optional
-        Accepted for API symmetry; remote fetch is always performed.
 
     Returns
     -------
     str
         Raw CSV text with columns ``from``, ``to``, and ``cost``.
     """
-    del force
     try:
         with urlopen(DISTANCES_URL, timeout=60) as response:
             return response.read().decode("utf-8")
@@ -167,6 +155,29 @@ def adjacency_to_edge_index(adj_mx: np.ndarray) -> Tensor:
                 src.extend([row, col])
                 dst.extend([col, row])
     return torch.tensor([src, dst], dtype=torch.long)
+
+
+def adjacency_to_edge_weight(adj_mx: np.ndarray) -> Tensor:
+    """Extract scalar edge weights aligned with :func:`adjacency_to_edge_index`.
+
+    Parameters
+    ----------
+    adj_mx : ndarray
+        Weighted adjacency matrix.
+
+    Returns
+    -------
+    Tensor
+        Float tensor with shape ``(num_edges,)``.
+    """
+    weights: list[float] = []
+    num_nodes = adj_mx.shape[0]
+    for row in range(num_nodes):
+        for col in range(num_nodes):
+            if adj_mx[row, col] > 0.0:
+                weights.append(float(adj_mx[row, col]))
+                weights.append(float(adj_mx[col, row]))
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def read_h5_speed_window(
@@ -266,7 +277,9 @@ def preprocess_speeds(speeds: np.ndarray) -> np.ndarray:
         for step in range(num_timesteps - 1, -1, -1):
             if not np.isnan(series[step]):
                 next_valid = series[step]
-            elif not np.isnan(next_valid):
+            # After the forward pass, any remaining NaN is a leading gap, so a
+            # valid future value has always been seen by the backward scan.
+            elif not np.isnan(next_valid):  # pragma: no branch
                 series[step] = next_valid
 
         filled[:, sensor] = np.nan_to_num(series, nan=0.0)
@@ -334,12 +347,14 @@ def build_traffic_cache_payload(
     distance_csv = download_distances_csv()
     adj_mx = build_adjacency_matrix(distance_csv, sensor_ids, normalized_k=normalized_k)
     edge_index = adjacency_to_edge_index(adj_mx)
+    edge_weight = adjacency_to_edge_weight(adj_mx)
     cleaned = preprocess_speeds(speeds)
     normalized = normalize_speeds(cleaned)
 
     return {
         "sensor_ids": sensor_ids,
         "edge_index": edge_index,
+        "edge_weight": edge_weight,
         "speeds": torch.tensor(normalized, dtype=torch.float32).unsqueeze(-1),
         "num_nodes": len(sensor_ids),
         "source_h5_url": source_h5_url,
@@ -407,6 +422,39 @@ def ensure_traffic_cache(
     return path
 
 
+def _ensure_edge_weight(payload: dict[str, Any]) -> Tensor:
+    """Return edge weights from cache payload, recomputing legacy caches if needed.
+
+    Parameters
+    ----------
+    payload : dict
+        Cached METR-LA payload containing ``edge_index`` and ``sensor_ids``.
+
+    Returns
+    -------
+    Tensor
+        Scalar edge weights aligned with ``payload["edge_index"]``.
+    """
+    edge_weight = payload.get("edge_weight")
+    if edge_weight is not None:
+        return edge_weight
+
+    sensor_ids = payload["sensor_ids"]
+    normalized_k = float(payload.get("normalized_k", 0.1))
+    distance_csv = download_distances_csv()
+    adj_mx = build_adjacency_matrix(
+        distance_csv,
+        sensor_ids,
+        normalized_k=normalized_k,
+    )
+    edge_index = payload["edge_index"]
+    weights = [
+        float(adj_mx[int(edge_index[0, idx].item()), int(edge_index[1, idx].item())])
+        for idx in range(edge_index.shape[1])
+    ]
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def load_traffic_cache(
     cache_dir: Path | None = None,
     *,
@@ -430,6 +478,10 @@ def load_traffic_cache(
     payload = torch.load(path, weights_only=False)
     payload["edge_index"] = payload["edge_index"].to(dtype=torch.long)
     payload["speeds"] = payload["speeds"].to(dtype=dtype)
+    if payload.get("edge_weight") is None and "sensor_ids" in payload:
+        payload["edge_weight"] = _ensure_edge_weight(payload)
+    elif payload.get("edge_weight") is not None:
+        payload["edge_weight"] = payload["edge_weight"].to(dtype=dtype)
     return payload
 
 
@@ -475,13 +527,14 @@ class MetrLaTrafficBenchmark:
         Returns
         -------
         dict
-            Metadata with keys ``sensor_ids``, ``edge_index``, ``num_nodes``,
-            ``source_h5_url``, and ``normalized_k``.
+            Metadata with keys ``sensor_ids``, ``edge_index``, ``edge_weight``,
+            ``num_nodes``, ``source_h5_url``, and ``normalized_k``.
         """
         payload = load_traffic_cache(cache_dir, dtype=dtype)
         return {
             "sensor_ids": payload["sensor_ids"],
             "edge_index": payload["edge_index"],
+            "edge_weight": payload["edge_weight"],
             "num_nodes": payload["num_nodes"],
             "source_h5_url": payload["source_h5_url"],
             "normalized_k": payload["normalized_k"],
@@ -524,5 +577,6 @@ class MetrLaTrafficBenchmark:
         return GraphSnapshotSequence.from_arrays(
             speeds,
             payload["edge_index"],
+            edge_weight=payload.get("edge_weight"),
             dtype=dtype,
         )

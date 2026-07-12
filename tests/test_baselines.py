@@ -1,0 +1,489 @@
+"""Tests for classical Koopman baselines."""
+
+import pytest
+import torch
+from torch_geometric.data import Data
+
+from koopman_graph import DMDBaseline, DMDcBaseline, EDMDBaseline, GraphSnapshotSequence
+from koopman_graph.baselines import (
+    _fit_controlled_row_operator,
+    _flatten_snapshots,
+    _transition_controls,
+)
+
+
+def _linear_sequence(
+    operator: torch.Tensor,
+    initial_state: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Generate flattened states following ``x_next = x @ K.T``."""
+    states = [initial_state]
+    for _ in range(5):
+        states.append(states[-1] @ operator.T)
+    return states
+
+
+def _sequence_from_states(
+    states: list[torch.Tensor],
+    edge_index: torch.Tensor,
+    *,
+    num_nodes: int,
+    in_channels: int,
+    edge_weight: torch.Tensor | None = None,
+) -> GraphSnapshotSequence:
+    """Build a graph snapshot sequence from flattened states."""
+    snapshots = []
+    for state in states:
+        fields = {
+            "x": state.reshape(num_nodes, in_channels),
+            "edge_index": edge_index,
+        }
+        if edge_weight is not None:
+            fields["edge_weight"] = edge_weight
+        snapshots.append(Data(**fields))
+    return GraphSnapshotSequence(snapshots)
+
+
+def test_dmd_baseline_exactly_recovers_linear_dynamics(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify full-rank DMD recovers a known flattened linear system."""
+    operator = torch.tensor(
+        [[0.8, 0.1], [-0.2, 1.05]],
+        dtype=torch.float64,
+    )
+    states = _linear_sequence(
+        operator,
+        torch.tensor([1.0, -0.5], dtype=torch.float64),
+    )
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    baseline = DMDBaseline(time_step=0.25).fit(sequence)
+
+    assert baseline.K is not None
+    assert torch.allclose(baseline.K, operator, atol=1e-10)
+    predictions = baseline.predict(sequence[0], steps=3)
+    for prediction, expected in zip(predictions, states[1:4], strict=True):
+        assert torch.allclose(prediction.x.reshape(-1), expected, atol=1e-10)
+
+
+def test_dmd_baseline_preserves_prediction_topology(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify predictions keep graph shape and optional edge weights."""
+    operator = torch.diag(torch.tensor([0.9, 1.1], dtype=torch.float64))
+    edge_weight = torch.arange(synthetic_edge_index.shape[1], dtype=torch.float64)
+    sequence = _sequence_from_states(
+        _linear_sequence(operator, torch.tensor([1.0, 2.0], dtype=torch.float64)),
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+        edge_weight=edge_weight,
+    )
+
+    baseline = DMDBaseline().fit(sequence)
+    prediction = baseline.predict(sequence[0], steps=1)[0]
+
+    assert prediction.x.shape == (2, 1)
+    assert torch.equal(prediction.edge_index, synthetic_edge_index)
+    assert torch.equal(prediction.edge_weight, edge_weight)
+
+
+def test_dmd_baseline_spectrum_uses_analysis_api(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMD exposes continuous-time spectral analysis."""
+    operator = torch.diag(torch.tensor([0.5, 0.25], dtype=torch.float64))
+    sequence = _sequence_from_states(
+        _linear_sequence(operator, torch.tensor([2.0, 4.0], dtype=torch.float64)),
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    spectrum = DMDBaseline(time_step=0.5).fit(sequence).spectrum()
+
+    assert spectrum.time_step == 0.5
+    assert torch.allclose(
+        spectrum.eigenvalues.real,
+        torch.tensor([0.5, 0.25], dtype=torch.float64),
+        atol=1e-10,
+    )
+
+
+def test_edmd_baseline_lifts_polynomial_observables(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify EDMD fits linear dynamics in identity-plus-square observables."""
+    scale = 0.7
+    states = [torch.tensor([1.3 * (scale**t)], dtype=torch.float64) for t in range(6)]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=1,
+        in_channels=1,
+    )
+
+    baseline = EDMDBaseline(polynomial_degree=2).fit(sequence)
+
+    assert baseline.K is not None
+    assert baseline.K.shape == (2, 2)
+    prediction = baseline.predict(sequence[0], steps=3)[-1]
+    assert torch.allclose(prediction.x.reshape(-1), states[3], atol=1e-10)
+
+
+def test_edmd_baseline_spectrum_is_observable_space(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify EDMD spectrum reflects the observable-space operator."""
+    scale = 0.6
+    states = [torch.tensor([2.0 * (scale**t)], dtype=torch.float64) for t in range(6)]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=1,
+        in_channels=1,
+    )
+
+    spectrum = EDMDBaseline(time_step=2.0, polynomial_degree=2).fit(sequence).spectrum()
+
+    assert spectrum.time_step == 2.0
+    assert torch.allclose(
+        spectrum.eigenvalues.real,
+        torch.tensor([scale, scale**2], dtype=torch.float64),
+        atol=1e-10,
+    )
+
+
+@pytest.mark.parametrize("baseline_cls", [DMDBaseline, EDMDBaseline])
+def test_baselines_reject_single_snapshot(
+    baseline_cls: type[DMDBaseline] | type[EDMDBaseline],
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify fitting requires at least one transition."""
+    sequence = GraphSnapshotSequence(
+        [Data(x=torch.ones(2, 1), edge_index=synthetic_edge_index)]
+    )
+
+    with pytest.raises(ValueError, match="at least two snapshots"):
+        baseline_cls().fit(sequence)
+
+
+@pytest.mark.parametrize("baseline_cls", [DMDBaseline, EDMDBaseline])
+def test_baselines_reject_prediction_before_fit(
+    baseline_cls: type[DMDBaseline] | type[EDMDBaseline],
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify prediction requires a fitted operator."""
+    graph = Data(x=torch.ones(2, 1), edge_index=synthetic_edge_index)
+
+    with pytest.raises(RuntimeError, match="must be fit"):
+        baseline_cls().predict(graph, steps=1)
+
+
+def _linear_fit_sequence(
+    synthetic_edge_index: torch.Tensor,
+) -> GraphSnapshotSequence:
+    """Build a small deterministic linear sequence for baseline fitting."""
+    operator = torch.diag(torch.tensor([0.9, 1.1], dtype=torch.float64))
+    states = _linear_sequence(operator, torch.tensor([1.0, 2.0], dtype=torch.float64))
+    return _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+
+def _controlled_sequence(
+    synthetic_edge_index: torch.Tensor,
+    *,
+    per_node: bool = False,
+    num_timesteps: int = 6,
+) -> GraphSnapshotSequence:
+    """Build a controlled sequence with global or per-node controls."""
+    torch.manual_seed(0)
+    snapshots = [
+        Data(
+            x=torch.randn(2, 1, dtype=torch.float64),
+            edge_index=synthetic_edge_index,
+        )
+        for _ in range(num_timesteps)
+    ]
+    if per_node:
+        controls = torch.randn(num_timesteps, 2, 1, dtype=torch.float64)
+    else:
+        controls = torch.randn(num_timesteps, 1, dtype=torch.float64)
+    return GraphSnapshotSequence(snapshots, control_inputs=controls)
+
+
+def test_flatten_snapshots_rejects_empty_sequence() -> None:
+    """Verify flattening an empty snapshot list raises ``ValueError``."""
+
+    class _EmptySequence:
+        def __iter__(self):
+            return iter([])
+
+    with pytest.raises(ValueError, match="at least one snapshot"):
+        _flatten_snapshots(_EmptySequence())
+
+
+def test_flatten_snapshots_rejects_integer_features(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify integer node features raise ``TypeError``."""
+    snapshots = [
+        Data(x=torch.ones(2, 1, dtype=torch.long), edge_index=synthetic_edge_index)
+        for _ in range(2)
+    ]
+
+    with pytest.raises(TypeError, match="must be floating-point"):
+        _flatten_snapshots(GraphSnapshotSequence(snapshots))
+
+
+def test_dmd_baseline_truncated_rank_recovers_dynamics(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify rank-truncated DMD still recovers full-rank linear dynamics."""
+    operator = torch.diag(torch.tensor([0.9, 1.1], dtype=torch.float64))
+    states = _linear_sequence(operator, torch.tensor([1.0, 2.0], dtype=torch.float64))
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    baseline = DMDBaseline(rank=2).fit(sequence)
+
+    assert baseline.K is not None
+    assert torch.allclose(baseline.K, operator, atol=1e-8)
+
+
+def test_dmd_baseline_rejects_invalid_rank(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify rank bounds are enforced during fitting."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+
+    with pytest.raises(ValueError, match="rank must be >= 1"):
+        DMDBaseline(rank=0).fit(sequence)
+    with pytest.raises(ValueError, match="rank must be <="):
+        DMDBaseline(rank=99).fit(sequence)
+
+
+@pytest.mark.parametrize("baseline_cls", [DMDBaseline, DMDcBaseline, EDMDBaseline])
+def test_baselines_reject_non_positive_time_step(
+    baseline_cls: type,
+) -> None:
+    """Verify all baselines reject non-positive ``time_step``."""
+    with pytest.raises(ValueError, match="time_step must be positive"):
+        baseline_cls(time_step=0.0)
+
+
+def test_dmd_baseline_rejects_invalid_steps(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify prediction rejects ``steps < 1``."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+    baseline = DMDBaseline().fit(sequence)
+
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        baseline.predict(sequence[0], steps=0)
+
+
+def test_dmd_baseline_rejects_mismatched_initial_graph(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify initial graph shape validation against fitted metadata."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+    baseline = DMDBaseline().fit(sequence)
+
+    wrong_nodes = Data(
+        x=torch.ones(3, 1, dtype=torch.float64),
+        edge_index=synthetic_edge_index,
+    )
+    with pytest.raises(ValueError, match="nodes, expected"):
+        baseline.predict(wrong_nodes, steps=1)
+
+    wrong_channels = Data(
+        x=torch.ones(2, 2, dtype=torch.float64),
+        edge_index=synthetic_edge_index,
+    )
+    with pytest.raises(ValueError, match="feature dimension"):
+        baseline.predict(wrong_channels, steps=1)
+
+
+def test_fit_controlled_row_operator_validates_controls() -> None:
+    """Verify control shape and sample-count validation."""
+    left = torch.randn(4, 2, dtype=torch.float64)
+    right = torch.randn(4, 2, dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="controls must have shape"):
+        _fit_controlled_row_operator(
+            left,
+            right,
+            torch.randn(4, dtype=torch.float64),
+            None,
+        )
+    with pytest.raises(ValueError, match="samples, expected"):
+        _fit_controlled_row_operator(
+            left,
+            right,
+            torch.randn(3, 1, dtype=torch.float64),
+            None,
+        )
+
+
+def test_transition_controls_requires_controls(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify transition control extraction requires control inputs."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+
+    with pytest.raises(ValueError, match="does not contain control inputs"):
+        _transition_controls(sequence)
+
+
+def test_transition_controls_flattens_per_node_inputs(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify per-node controls are flattened per transition."""
+    sequence = _controlled_sequence(synthetic_edge_index, per_node=True)
+
+    controls = _transition_controls(sequence)
+
+    assert controls.shape == (sequence.num_timesteps - 1, 2)
+
+
+def test_dmdc_baseline_rejects_single_snapshot(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMDc fitting requires at least one transition."""
+    sequence = GraphSnapshotSequence(
+        [Data(x=torch.ones(2, 1), edge_index=synthetic_edge_index)],
+        control_inputs=torch.ones(1, 1),
+    )
+
+    with pytest.raises(ValueError, match="at least two snapshots"):
+        DMDcBaseline().fit(sequence)
+
+
+def test_dmdc_baseline_rejects_uncontrolled_sequence(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMDc fitting requires control inputs."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+
+    with pytest.raises(ValueError, match="requires sequences with control inputs"):
+        DMDcBaseline().fit(sequence)
+
+
+def test_dmdc_baseline_fits_per_node_controls(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMDc fits and predicts with per-node control inputs."""
+    sequence = _controlled_sequence(synthetic_edge_index, per_node=True)
+
+    baseline = DMDcBaseline().fit(sequence)
+
+    assert baseline.per_node_controls
+    assert baseline.num_nodes_control == 2
+    assert baseline.control_dim == 1
+
+    future_controls = [
+        torch.randn(2, 1, dtype=torch.float64),
+        torch.randn(2, 1, dtype=torch.float64),
+    ]
+    predictions = baseline.predict(sequence[0], steps=2, controls=future_controls)
+    assert len(predictions) == 2
+    assert predictions[0].x.shape == (2, 1)
+
+
+def test_dmdc_baseline_rejects_invalid_prediction_arguments(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMDc prediction argument validation."""
+    sequence = _controlled_sequence(synthetic_edge_index)
+    baseline = DMDcBaseline().fit(sequence)
+    control = torch.zeros(1, dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        baseline.predict(sequence[0], steps=0, controls=[])
+    with pytest.raises(ValueError, match="expected 2 control inputs"):
+        baseline.predict(sequence[0], steps=2, controls=[control])
+
+
+def test_dmdc_baseline_rejects_invalid_control_shapes(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify global and per-node control shape validation at prediction."""
+    global_baseline = DMDcBaseline().fit(_controlled_sequence(synthetic_edge_index))
+    with pytest.raises(ValueError, match="global controls must have shape"):
+        global_baseline.predict(
+            _controlled_sequence(synthetic_edge_index)[0],
+            steps=1,
+            controls=[torch.zeros(2, 1, dtype=torch.float64)],
+        )
+
+    per_node_baseline = DMDcBaseline().fit(
+        _controlled_sequence(synthetic_edge_index, per_node=True)
+    )
+    with pytest.raises(ValueError, match="per-node controls must have shape"):
+        per_node_baseline.predict(
+            _controlled_sequence(synthetic_edge_index, per_node=True)[0],
+            steps=1,
+            controls=[torch.zeros(1, dtype=torch.float64)],
+        )
+
+
+def test_dmdc_baseline_spectrum_and_unfitted_errors(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify DMDc spectrum access and pre-fit error handling."""
+    unfitted = DMDcBaseline()
+    with pytest.raises(RuntimeError, match="must be fit"):
+        unfitted.spectrum()
+
+    baseline = DMDcBaseline(time_step=0.5).fit(
+        _controlled_sequence(synthetic_edge_index)
+    )
+    spectrum = baseline.spectrum()
+    assert spectrum.time_step == 0.5
+    assert spectrum.eigenvalues.shape == (2,)
+
+
+def test_edmd_baseline_rejects_invalid_polynomial_degree() -> None:
+    """Verify unsupported polynomial degrees raise ``ValueError``."""
+    with pytest.raises(ValueError, match="polynomial_degree must be 1 or 2"):
+        EDMDBaseline(polynomial_degree=3)  # type: ignore[arg-type]
+
+
+def test_edmd_baseline_degree_one_matches_dmd(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify degree-1 EDMD reduces to identity observables."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+
+    baseline = EDMDBaseline(polynomial_degree=1).fit(sequence)
+
+    assert baseline.observable_dim == baseline.state_dim
+    dmd = DMDBaseline().fit(sequence)
+    assert baseline.K is not None
+    assert dmd.K is not None
+    assert torch.allclose(baseline.K, dmd.K, atol=1e-8)
+
+
+def test_edmd_baseline_rejects_invalid_steps(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify EDMD prediction rejects ``steps < 1``."""
+    baseline = EDMDBaseline().fit(_linear_fit_sequence(synthetic_edge_index))
+
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        baseline.predict(_linear_fit_sequence(synthetic_edge_index)[0], steps=0)

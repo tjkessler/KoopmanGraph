@@ -8,6 +8,8 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv, GCNConv
 
+from koopman_graph.data import _snapshot_edge_weight
+
 ActivationName = Literal["relu", "sigmoid", "tanh"]
 
 
@@ -42,8 +44,9 @@ def _resolve_activation(name: ActivationName) -> nn.Module:
 def _resolve_graph_inputs(
     x_or_data: Tensor | Data,
     edge_index: Tensor | None,
-) -> tuple[Tensor, Tensor]:
-    """Extract node features and edge index from PyG or tensor input.
+    edge_weight: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor | None]:
+    """Extract node features, edge index, and optional weights from input.
 
     Parameters
     ----------
@@ -51,11 +54,14 @@ def _resolve_graph_inputs(
         Either a PyG ``Data`` object or node features ``x``.
     edge_index : Tensor or None
         Edge index required when ``x_or_data`` is a tensor.
+    edge_weight : Tensor or None, optional
+        Edge weights required when ``x_or_data`` is a tensor and weights are
+        used. Ignored for ``Data`` input.
 
     Returns
     -------
-    tuple of (Tensor, Tensor)
-        Node features and edge index.
+    tuple of (Tensor, Tensor, Tensor or None)
+        Node features, edge index, and optional edge weights.
 
     Raises
     ------
@@ -63,11 +69,15 @@ def _resolve_graph_inputs(
         If ``x_or_data`` is a tensor and ``edge_index`` is ``None``.
     """
     if isinstance(x_or_data, Data):
-        return x_or_data.x, x_or_data.edge_index
+        return (
+            x_or_data.x,
+            x_or_data.edge_index,
+            _snapshot_edge_weight(x_or_data),
+        )
     if edge_index is None:
         msg = "edge_index is required when x_or_data is a tensor"
         raise ValueError(msg)
-    return x_or_data, edge_index
+    return x_or_data, edge_index, edge_weight
 
 
 def _validate_node_features(
@@ -267,6 +277,7 @@ class BaseGNNModule(nn.Module):
         self,
         x_or_data: Tensor | Data,
         edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Run the stacked message-passing layers on graph node features.
 
@@ -276,17 +287,28 @@ class BaseGNNModule(nn.Module):
             Either a PyG ``Data`` object or node features ``x``.
         edge_index : Tensor or None, optional
             Edge index required when ``x_or_data`` is a tensor.
+        edge_weight : Tensor or None, optional
+            Scalar edge weights with shape ``(num_edges,)``. Passed to
+            :class:`~torch_geometric.nn.GCNConv` when present. Ignored by
+            GAT layers.
 
         Returns
         -------
         Tensor
             Transformed node features with shape ``(num_nodes, out_channels)``.
         """
-        x, edge_index = _resolve_graph_inputs(x_or_data, edge_index)
+        x, edge_index, edge_weight = _resolve_graph_inputs(
+            x_or_data,
+            edge_index,
+            edge_weight,
+        )
         _validate_node_features(x, self.input_channels, self.input_dim_name)
 
         for layer_idx, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
+            if edge_weight is not None and isinstance(conv, GCNConv):
+                x = conv(x, edge_index, edge_weight=edge_weight)
+            else:
+                x = conv(x, edge_index)
             if layer_idx < len(self.convs) - 1:
                 x = self.activation(x)
         return x
@@ -375,6 +397,10 @@ class GATEncoder(BaseGNNModule):
     Applies stacked Graph Attention Network layers with configurable hidden
     activation. The final layer maps directly to ``latent_dim`` without an
     activation, producing per-node latent vectors suitable for Koopman propagation.
+
+    Scalar ``edge_weight`` arguments are accepted for API symmetry with
+    :class:`~koopman_graph.encoder.GNNEncoder` but are ignored because
+    :class:`~torch_geometric.nn.GATConv` does not consume scalar edge weights.
 
     Attributes
     ----------

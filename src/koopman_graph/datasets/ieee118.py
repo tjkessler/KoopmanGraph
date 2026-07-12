@@ -270,20 +270,14 @@ def topology_from_matpower_text(
     }
 
 
-def download_matpower_case118(*, force: bool = False) -> str:
+def download_matpower_case118() -> str:
     """Download the MATPOWER IEEE 118-bus case file text.
-
-    Parameters
-    ----------
-    force : bool, optional
-        When ``True``, always fetch from the remote source.
 
     Returns
     -------
     str
         Raw ``case118.m`` file contents.
     """
-    del force
     try:
         with urlopen(MATPOWER_CASE118_URL, timeout=60) as response:
             return response.read().decode("utf-8")
@@ -320,7 +314,7 @@ def ensure_topology_cache(
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    case_text = download_matpower_case118(force=force)
+    case_text = download_matpower_case118()
     topology = topology_from_matpower_text(case_text, dtype=dtype)
     torch.save(topology, path)
     return path
@@ -409,6 +403,7 @@ class IEEE118DynamicBenchmark:
         noise_std: float = 0.002,
         load_ramp_amplitude: float = 0.15,
         load_ramp_period: float = 20.0,
+        expose_load_ramp_control: bool = False,
         seed: int | None = 42,
         cache_dir: Path | None = None,
         dtype: torch.dtype = torch.float32,
@@ -429,6 +424,10 @@ class IEEE118DynamicBenchmark:
             Peak fractional change applied to ``Pd`` and ``Qd``. Default is ``0.15``.
         load_ramp_period : float, optional
             Sinusoidal load ramp period in timesteps. Default is ``20.0``.
+        expose_load_ramp_control : bool, optional
+            When ``True``, attach the sinusoidal load-ramp multiplier as global
+            control inputs with shape ``(num_timesteps, 1)``. Default is
+            ``False``.
         seed : int, optional
             Random seed for noise. Default is ``42``.
         cache_dir : Path, optional
@@ -483,6 +482,7 @@ class IEEE118DynamicBenchmark:
         base_loads = initial_features[:, 2:].clone()
         state = initial_features.clone()
         snapshots = [state.clone()]
+        ramp_controls: list[Tensor] = [torch.ones(1, dtype=dtype, device=state.device)]
 
         for step in range(num_timesteps - 1):
             voltage_state = apply_laplacian_diffusion_step(
@@ -493,6 +493,10 @@ class IEEE118DynamicBenchmark:
             ramp = 1.0 + load_ramp_amplitude * math.sin(
                 2.0 * math.pi * (step + 1) / load_ramp_period
             )
+            if expose_load_ramp_control:
+                ramp_controls.append(
+                    torch.tensor([ramp], dtype=dtype, device=state.device)
+                )
             load_state = base_loads * ramp
             state = torch.cat([voltage_state, load_state], dim=1)
             state = add_gaussian_noise(
@@ -504,4 +508,10 @@ class IEEE118DynamicBenchmark:
             snapshots.append(state.clone())
 
         features = torch.stack(snapshots, dim=0)
-        return diffusion_sequence_from_features(features, edge_index, dtype=dtype)
+        sequence = diffusion_sequence_from_features(features, edge_index, dtype=dtype)
+        if expose_load_ramp_control:
+            return GraphSnapshotSequence(
+                sequence.snapshots,
+                control_inputs=torch.stack(ramp_controls, dim=0),
+            )
+        return sequence

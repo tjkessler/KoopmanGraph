@@ -155,3 +155,15 @@ def test_exported_from_package() -> None:
     from koopman_graph import GNNDecoder as ExportedDecoder
 
     assert ExportedDecoder is GNNDecoder
+
+
+def test_weighted_vs_unweighted_outputs_differ() -> None:
+    """Verify scalar edge weights change GCN decoder outputs."""
+    edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 0, 1]], dtype=torch.long)
+    z = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    edge_weight = torch.tensor([2.0, 0.5, 0.5, 2.0])
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    decoder.eval()
+    out_unweighted = decoder(z, edge_index)
+    out_weighted = decoder(z, edge_index, edge_weight)
+    assert not torch.allclose(out_unweighted, out_weighted)
