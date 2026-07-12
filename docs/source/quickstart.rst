@@ -66,6 +66,70 @@ Roll out from the first snapshot in the sequence:
    print(f"Predicted {len(future_graphs)} future snapshots")
    print(f"First prediction shape: {future_graphs[0].x.shape}")
 
+Save and reload
+---------------
+
+Persist a trained model (weights and architecture) to a ``.pt`` checkpoint and
+reload it without reconstructing encoder/decoder classes manually:
+
+.. code-block:: python
+
+   model.save("checkpoints/synthetic_model.pt")
+   loaded_model = GraphKoopmanModel.load("checkpoints/synthetic_model.pt")
+   future_graphs = loaded_model.predict(initial_graph, steps=5)
+
+During training you can optionally restore or persist the lowest-loss epoch:
+
+.. code-block:: python
+
+   history = model.fit(
+       data_sequence,
+       epochs=20,
+       restore_best_weights=True,
+       checkpoint_path="checkpoints/best_model.pt",
+   )
+   print(f"Best epoch: {history.best_epoch}, loss: {history.best_loss:.6f}")
+
+Advanced training options
+-------------------------
+
+:meth:`~koopman_graph.model.GraphKoopmanModel.fit` also supports learning-rate
+schedulers, per-term loss history, multi-origin rollout loss, and multiple
+training trajectories:
+
+.. code-block:: python
+
+   from torch.optim.lr_scheduler import StepLR
+   from koopman_graph.training import constant_loss_weights
+
+   history = model.fit(
+       [trajectory_a, trajectory_b],
+       epochs=50,
+       lr_scheduler=lambda optim: StepLR(optim, step_size=10, gamma=0.5),
+       rollout_start_indices="all",
+       loss_weights=constant_loss_weights(reconstruction=1.0, rollout=0.5),
+   )
+   print(history.reconstruction_loss[-1], history.rollout_loss[-1])
+
+For longer trajectories, opt into fixed-length window mini-batches. By default,
+every valid window is shuffled and used once per epoch; set
+``windows_per_epoch`` to cap the work:
+
+.. code-block:: python
+
+   history = model.fit(
+       data_sequence,
+       epochs=50,
+       window_length=12,
+       batch_size=8,
+       windows_per_epoch=64,
+       window_seed=42,
+   )
+
+This performs one optimizer update per window batch. Leaving
+``window_length=None`` preserves the full-sequence, one-update-per-epoch
+behavior.
+
 Complete script
 ---------------
 

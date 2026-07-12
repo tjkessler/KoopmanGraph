@@ -16,6 +16,7 @@ from koopman_graph.datasets.metr_la import (
     NUM_SENSORS,
     _default_traffic_path,
     adjacency_to_edge_index,
+    adjacency_to_edge_weight,
     build_adjacency_matrix,
     build_traffic_cache_payload,
     download_distances_csv,
@@ -92,6 +93,16 @@ def test_adjacency_to_edge_index_builds_bidirectional_edges() -> None:
     assert edge_index.shape == (2, 2)
     assert edge_index[0, 0].item() == 0
     assert edge_index[1, 0].item() == 1
+
+
+def test_adjacency_to_edge_weight_aligns_with_edge_index() -> None:
+    """Verify edge weights align with bidirectional edge_index ordering."""
+    adj = np.array([[0.0, 2.0], [0.5, 0.0]], dtype=np.float32)
+    edge_index = adjacency_to_edge_index(adj)
+    edge_weight = adjacency_to_edge_weight(adj)
+    assert edge_weight.shape == (edge_index.shape[1],)
+    assert edge_weight[0].item() == pytest.approx(2.0)
+    assert edge_weight[1].item() == pytest.approx(0.5)
 
 
 def test_read_h5_speed_window_reads_requested_rows(tmp_path: Path) -> None:
@@ -192,6 +203,8 @@ def test_build_traffic_cache_payload_assembles_cache(tmp_path: Path) -> None:
     assert payload["num_nodes"] == 3
     assert payload["speeds"].shape == (2, 3, 1)
     assert payload["edge_index"].dtype == torch.long
+    assert payload["edge_weight"].shape == (payload["edge_index"].shape[1],)
+    assert payload["edge_weight"].max().item() > 0.0
 
 
 def test_build_traffic_cache_payload_validates_inputs() -> None:
@@ -316,6 +329,7 @@ def test_metr_la_load_sequence_success_with_valid_cache(tmp_path: Path) -> None:
         {
             "sensor_ids": ["a"] * NUM_SENSORS,
             "edge_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            "edge_weight": torch.tensor([1.0, 1.0], dtype=torch.float32),
             "speeds": torch.ones(3, NUM_SENSORS, 1),
             "num_nodes": NUM_SENSORS,
             "source_h5_url": "test",
@@ -327,3 +341,49 @@ def test_metr_la_load_sequence_success_with_valid_cache(tmp_path: Path) -> None:
     assert isinstance(sequence, GraphSnapshotSequence)
     assert sequence.num_nodes == NUM_SENSORS
     assert sequence.num_timesteps == 3
+
+
+def test_load_traffic_cache_recomputes_legacy_edge_weight(tmp_path: Path) -> None:
+    """Verify legacy caches without edge_weight recompute Gaussian weights."""
+    path = _default_traffic_path(tmp_path)
+    torch.save(
+        {
+            "sensor_ids": ["a", "b", "c"],
+            "edge_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            "speeds": torch.ones(2, 3, 1),
+            "num_nodes": 3,
+            "source_h5_url": "test",
+            "normalized_k": 0.0,
+        },
+        path,
+    )
+    distance_csv = "from,to,cost\na,a,0.0\na,b,10.0\nb,b,0.0\n"
+    with patch(
+        "koopman_graph.datasets.metr_la.download_distances_csv",
+        return_value=distance_csv,
+    ):
+        payload = load_traffic_cache(tmp_path)
+    assert payload["edge_weight"].shape == (payload["edge_index"].shape[1],)
+
+
+def test_metr_la_load_sequence_preserves_edge_weight(tmp_path: Path) -> None:
+    """Verify METR-LA sequences expose non-uniform Gaussian-kernel weights."""
+    path = _default_traffic_path(tmp_path)
+    edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 0, 1]], dtype=torch.long)
+    edge_weight = torch.tensor([0.9, 0.4, 0.4, 0.9], dtype=torch.float32)
+    torch.save(
+        {
+            "sensor_ids": ["a"] * NUM_SENSORS,
+            "edge_index": edge_index,
+            "edge_weight": edge_weight,
+            "speeds": torch.ones(3, NUM_SENSORS, 1),
+            "num_nodes": NUM_SENSORS,
+            "source_h5_url": "test",
+            "normalized_k": 0.1,
+        },
+        path,
+    )
+    sequence = MetrLaTrafficBenchmark.load_sequence(tmp_path)
+    assert sequence.edge_weight is not None
+    assert torch.equal(sequence.edge_weight, edge_weight)
+    assert not torch.allclose(sequence.edge_weight, torch.ones_like(edge_weight))

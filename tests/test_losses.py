@@ -124,13 +124,13 @@ def test_compute_training_loss_without_forward_term(
     """Verify weight=0 returns reconstruction loss only."""
     from koopman_graph.training import compute_sequence_loss
 
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(),
     )
     recon = compute_sequence_loss(trainable_model, scaling_sequence)
-    assert torch.allclose(total, recon)
+    assert torch.allclose(breakdown.total, recon)
 
 
 def test_compute_training_loss_with_forward_term(
@@ -141,7 +141,7 @@ def test_compute_training_loss_with_forward_term(
     from koopman_graph.training import compute_sequence_loss
 
     weight = 1.0
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(forward=weight),
@@ -149,7 +149,7 @@ def test_compute_training_loss_with_forward_term(
     recon = compute_sequence_loss(trainable_model, scaling_sequence)
     fc = compute_forward_consistency_sequence_loss(trainable_model, scaling_sequence)
     expected = recon + weight * fc
-    assert torch.allclose(total, expected)
+    assert torch.allclose(breakdown.total, expected)
 
 
 def test_fit_with_forward_consistency_weight(
@@ -267,7 +267,7 @@ def test_compute_training_loss_with_backward_term(
     from koopman_graph.training import compute_sequence_loss
 
     weight = 1.0
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(backward=weight),
@@ -275,7 +275,7 @@ def test_compute_training_loss_with_backward_term(
     recon = compute_sequence_loss(trainable_model, scaling_sequence)
     bc = compute_backward_consistency_sequence_loss(trainable_model, scaling_sequence)
     expected = recon + weight * bc
-    assert torch.allclose(total, expected)
+    assert torch.allclose(breakdown.total, expected)
 
 
 def test_compute_training_loss_with_forward_and_backward_terms(
@@ -286,7 +286,7 @@ def test_compute_training_loss_with_forward_and_backward_terms(
     from koopman_graph.training import compute_sequence_loss
 
     fw, bw = 0.5, 1.0
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(forward=fw, backward=bw),
@@ -295,7 +295,7 @@ def test_compute_training_loss_with_forward_and_backward_terms(
     fc = compute_forward_consistency_sequence_loss(trainable_model, scaling_sequence)
     bc = compute_backward_consistency_sequence_loss(trainable_model, scaling_sequence)
     expected = recon + fw * fc + bw * bc
-    assert torch.allclose(total, expected)
+    assert torch.allclose(breakdown.total, expected)
 
 
 def test_compute_training_loss_with_reconstruction_weight(
@@ -306,13 +306,13 @@ def test_compute_training_loss_with_reconstruction_weight(
     from koopman_graph.training import compute_sequence_loss
 
     weight = 0.5
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(reconstruction=weight),
     )
     recon = compute_sequence_loss(trainable_model, scaling_sequence)
-    assert torch.allclose(total, weight * recon)
+    assert torch.allclose(breakdown.total, weight * recon)
 
 
 def test_compute_training_loss_requires_two_snapshots(
@@ -365,20 +365,46 @@ def test_rollout_sequence_loss_rejects_negative_start(
         )
 
 
+def test_rollout_multi_start_loss_averages_origins(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify multi-start rollout loss averages valid origins."""
+    from koopman_graph.losses import rollout_multi_start_loss, rollout_sequence_loss
+
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(8)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    multi = rollout_multi_start_loss(
+        trainable_model,
+        sequence,
+        horizon=2,
+        start_indices=[0, 2, 4],
+    )
+    expected = (
+        rollout_sequence_loss(trainable_model, sequence, horizon=2, start=0)
+        + rollout_sequence_loss(trainable_model, sequence, horizon=2, start=2)
+        + rollout_sequence_loss(trainable_model, sequence, horizon=2, start=4)
+    ) / 3
+    assert torch.allclose(multi, expected)
+
+
 def test_compute_training_loss_with_rollout_weight(
     trainable_model: GraphKoopmanModel,
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
     """Verify rollout weight scales the rollout term."""
     weight = 0.25
-    total = compute_training_loss(
+    breakdown = compute_training_loss(
         trainable_model,
         scaling_sequence,
         constant_loss_weights(reconstruction=0.0, rollout=weight),
         rollout_horizon=2,
     )
     rollout = rollout_sequence_loss(trainable_model, scaling_sequence, horizon=2)
-    assert torch.allclose(total, weight * rollout)
+    assert torch.allclose(breakdown.total, weight * rollout)
 
 
 def test_fit_with_backward_consistency_weight(
@@ -404,3 +430,65 @@ def test_backward_consistency_sequence_loss_requires_two_snapshots(
     sequence = GraphSnapshotSequence([synthetic_graph])
     with pytest.raises(ValueError, match="at least 2 snapshots"):
         compute_backward_consistency_sequence_loss(trainable_model, sequence)
+
+
+def test_eigenvalue_loss_zero_on_unit_circle_dense() -> None:
+    """Verify eigenvalue hinge loss is zero for a unit-circle diagonal operator."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    koopman = KoopmanOperator(3, init_mode="identity")
+    with torch.no_grad():
+        koopman.K.copy_(torch.diag(torch.tensor([0.8, 1.0, -0.5])))
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman).item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_eigenvalue_loss_positive_outside_unit_circle_dense() -> None:
+    """Verify eigenvalue hinge loss penalizes unstable eigenvalues."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    koopman = KoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        koopman.K.copy_(torch.diag(torch.tensor([1.5, 0.5])))
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman).item() > 0.0
+
+
+def test_eigenvalue_loss_zero_for_odo_within_bound() -> None:
+    """Verify ODO eigenvalue loss is zero when diagonal stays within radius."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    koopman = KoopmanOperator(4, parameterization="odo", max_spectral_radius=0.8)
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman).item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_backward_consistency_dense_precomputes_inverse(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify dense backward sequence loss reuses one inverse matrix."""
+    from unittest.mock import patch
+
+    with patch.object(
+        trainable_model.koopman,
+        "dense_inverse_matrix",
+        wraps=trainable_model.koopman.dense_inverse_matrix,
+    ) as inverse_mock:
+        loss = compute_backward_consistency_sequence_loss(
+            trainable_model,
+            scaling_sequence,
+        )
+    assert loss.ndim == 0
+    assert inverse_mock.call_count == 1
+
+
+def test_compute_training_loss_with_eigenvalue_term(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify combined loss includes eigenvalue term when weight > 0."""
+    weights = constant_loss_weights(eigenvalue=0.5)
+    breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
+    assert breakdown.total.ndim == 0
+    assert torch.isfinite(breakdown.total).item()

@@ -216,7 +216,7 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
@@ -228,7 +228,7 @@ __version__ = "0.1.0"
 1. Ensure `main` is green (CI tests, lint, notebook smoke tests).
 2. Update `__version__` in `src/koopman_graph/__init__.py`.
 3. Merge any pending release-prep changes to `main`.
-4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.1.0`). Publishing the
+4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.2.0`). Publishing the
    release triggers `.github/workflows/release.yml`.
 5. Approve the `pypi` environment deployment if required by branch protection.
 6. Confirm the workflow uploaded artifacts to PyPI.

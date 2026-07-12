@@ -274,3 +274,15 @@ def test_gat_exported_from_package() -> None:
     from koopman_graph import GATEncoder as ExportedGATEncoder
 
     assert ExportedGATEncoder is GATEncoder
+
+
+def test_weighted_vs_unweighted_outputs_differ() -> None:
+    """Verify scalar edge weights change GCN encoder outputs."""
+    edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 0, 1]], dtype=torch.long)
+    x = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    edge_weight = torch.tensor([2.0, 0.5, 0.5, 2.0])
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    encoder.eval()
+    out_unweighted = encoder(x, edge_index)
+    out_weighted = encoder(x, edge_index, edge_weight)
+    assert not torch.allclose(out_unweighted, out_weighted)

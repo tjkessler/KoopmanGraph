@@ -7,7 +7,7 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel, LossWeights
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import GraphSnapshotSequence, temporal_split
 from koopman_graph.training import (
     FitHistory,
     compute_sequence_loss,
@@ -15,6 +15,7 @@ from koopman_graph.training import (
     constant_loss_weights,
     linear_ramp_loss_weights,
     one_step_loss,
+    resolve_lr_scheduler,
     should_stop_early,
 )
 
@@ -28,6 +29,11 @@ def trainable_model() -> GraphKoopmanModel:
     GraphKoopmanModel
         Model with hidden width 16 and latent dimension 8.
     """
+    return _make_trainable_model()
+
+
+def _make_trainable_model() -> GraphKoopmanModel:
+    """Construct the small model used by training tests."""
     encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
     decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
     return GraphKoopmanModel(
@@ -179,6 +185,7 @@ def test_constant_loss_weights_defaults() -> None:
         forward=0.0,
         backward=0.0,
         rollout=0.0,
+        eigenvalue=0.0,
     )
 
 
@@ -188,9 +195,9 @@ def test_compute_training_loss_skips_zero_reconstruction_weight(
 ) -> None:
     """Verify zero reconstruction weight skips the reconstruction term."""
     weights = LossWeights(reconstruction=0.0, forward=1.0, backward=0.0)
-    loss = compute_training_loss(trainable_model, scaling_sequence, weights)
-    assert loss.ndim == 0
-    assert torch.isfinite(loss).item()
+    breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
+    assert breakdown.total.ndim == 0
+    assert torch.isfinite(breakdown.total).item()
 
 
 def test_linear_ramp_loss_weights_interpolates() -> None:
@@ -418,3 +425,400 @@ def test_should_stop_early_tracks_improvement() -> None:
     assert stop is True
     assert best == 0.5
     assert count == 3
+
+
+def test_fit_records_validation_loss(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify validation loss is recorded when a validation sequence is provided."""
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(20)
+    ]
+    split = temporal_split(GraphSnapshotSequence(snapshots))
+    history = trainable_model.fit(
+        split.train,
+        validation_sequence=split.val,
+        epochs=2,
+    )
+    assert history.val_loss is not None
+    assert len(history.val_loss) == 2
+    assert all(value >= 0.0 for value in history.val_loss)
+
+
+def test_fit_early_stopping_uses_validation_loss(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify early stopping can monitor validation loss."""
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(20)
+    ]
+    split = temporal_split(GraphSnapshotSequence(snapshots))
+    history = trainable_model.fit(
+        split.train,
+        validation_sequence=split.val,
+        epochs=50,
+        lr=1e-4,
+        early_stopping_patience=2,
+        early_stopping_min_delta=1e9,
+        early_stopping_monitor="val",
+    )
+    assert history.stopped_early is True
+    assert history.epochs < 50
+    assert history.val_loss is not None
+
+
+def test_fit_rejects_val_monitor_without_validation_sequence(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify validation monitor requires a validation sequence."""
+    with pytest.raises(ValueError, match="validation_sequence"):
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=2,
+            early_stopping_monitor="val",
+        )
+
+
+def test_fit_rejects_short_validation_sequence(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify validation sequences need at least two snapshots."""
+    with pytest.raises(ValueError, match="validation_sequence"):
+        trainable_model.fit(
+            scaling_sequence,
+            validation_sequence=GraphSnapshotSequence([scaling_sequence[0]]),
+            epochs=2,
+        )
+
+
+def _latent_rollout_norm(
+    model: GraphKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    steps: int,
+) -> float:
+    """Return the final latent norm after an autoregressive rollout."""
+    model.eval()
+    with torch.no_grad():
+        edge_index = sequence[0].edge_index
+        z = model.encoder(sequence[0], edge_index)
+        for _ in range(steps):
+            z = model.koopman(z)
+        return float(z.norm().item())
+
+
+def test_odo_operator_stays_bounded_under_long_rollout(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify ODO parameterization avoids latent blow-up on long rollouts."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    stable_model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.1,
+        koopman_parameterization="odo",
+        koopman_max_spectral_radius=0.95,
+    )
+    torch.manual_seed(0)
+    stable_model.fit(
+        scaling_sequence,
+        epochs=5,
+        lr=1e-2,
+        loss_weights=constant_loss_weights(eigenvalue=0.1),
+    )
+    stable_norm = _latent_rollout_norm(stable_model, scaling_sequence, steps=40)
+
+    unstable_encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    unstable_decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    unstable_model = GraphKoopmanModel(
+        encoder=unstable_encoder,
+        decoder=unstable_decoder,
+        latent_dim=8,
+        time_step=0.1,
+    )
+    with torch.no_grad():
+        unstable_eigs = torch.tensor([1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7])
+        unstable_model.koopman.K.copy_(torch.diag(unstable_eigs))
+    unstable_norm = _latent_rollout_norm(unstable_model, scaling_sequence, steps=40)
+
+    assert stable_norm < unstable_norm
+    assert stable_norm < 1e3
+
+
+def _alternating_topology_sequence(
+    num_nodes: int = 5,
+    num_timesteps: int = 8,
+) -> GraphSnapshotSequence:
+    """Build a dynamic-topology sequence with alternating edge sets."""
+    edges_a = torch.tensor(
+        [[i for i in range(num_nodes - 1)], [i + 1 for i in range(num_nodes - 1)]],
+        dtype=torch.long,
+    )
+    edges_b = torch.tensor(
+        [[0, 1, 2, 3], [1, 2, 3, 4]],
+        dtype=torch.long,
+    )
+    snapshots = []
+    for t in range(num_timesteps):
+        edges = edges_a if t % 2 == 0 else edges_b
+        x = torch.ones(num_nodes, 3) * (0.9**t)
+        snapshots.append(Data(x=x, edge_index=edges))
+    return GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+
+
+def test_fit_on_dynamic_topology_sequence(trainable_model: GraphKoopmanModel) -> None:
+    """Verify training succeeds and loss decreases on dynamic topology."""
+    sequence = _alternating_topology_sequence()
+    torch.manual_seed(0)
+    history = trainable_model.fit(sequence, epochs=15, lr=1e-2)
+    assert len(history.loss) == 15
+    assert history.loss[-1] < history.loss[0]
+
+
+def test_fit_records_per_term_loss_history(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify FitHistory records unweighted per-term training losses."""
+    history = trainable_model.fit(
+        scaling_sequence,
+        epochs=2,
+        loss_weights=constant_loss_weights(forward=0.5, backward=0.25),
+    )
+    assert len(history.reconstruction_loss) == 2
+    assert len(history.forward_loss) == 2
+    assert len(history.backward_loss) == 2
+    assert len(history.rollout_loss) == 2
+    assert len(history.eigenvalue_loss) == 2
+    assert all(value >= 0.0 for value in history.forward_loss)
+
+
+def test_fit_records_per_term_validation_history(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify validation history includes all five unweighted loss terms."""
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(20)
+    ]
+    split = temporal_split(GraphSnapshotSequence(snapshots))
+    history = trainable_model.fit(
+        split.train,
+        validation_sequence=split.val,
+        epochs=2,
+        loss_weights=constant_loss_weights(forward=0.5),
+    )
+    assert history.val_reconstruction_loss is not None
+    assert history.val_forward_loss is not None
+    assert history.val_backward_loss is not None
+    assert history.val_rollout_loss is not None
+    assert history.val_eigenvalue_loss is not None
+    assert len(history.val_reconstruction_loss) == 2
+    assert len(history.val_forward_loss) == 2
+
+
+def test_fit_with_lr_scheduler_factory(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify fit accepts an LR scheduler factory without error."""
+    trainable_model.fit(
+        scaling_sequence,
+        epochs=2,
+        lr_scheduler=lambda optim: torch.optim.lr_scheduler.StepLR(
+            optim,
+            step_size=1,
+            gamma=0.5,
+        ),
+    )
+
+
+def test_resolve_lr_scheduler_factory_steps_learning_rate() -> None:
+    """Verify scheduler factories reduce the optimizer learning rate."""
+    model = torch.nn.Linear(2, 1)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-2)
+    scheduler = resolve_lr_scheduler(
+        lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=0.5),
+        optim,
+    )
+    assert scheduler is not None
+    optim.step()
+    scheduler.step()
+    assert optim.param_groups[0]["lr"] == pytest.approx(5e-3)
+
+
+def test_fit_rollout_start_indices_all_differs_from_default(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify multi-origin rollout loss can be enabled via fit kwargs."""
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(8)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    weights = constant_loss_weights(reconstruction=0.0, rollout=1.0)
+    default_breakdown = compute_training_loss(
+        trainable_model,
+        sequence,
+        weights,
+        rollout_horizon=2,
+        rollout_start_indices=[0],
+    )
+    all_breakdown = compute_training_loss(
+        trainable_model,
+        sequence,
+        weights,
+        rollout_horizon=2,
+        rollout_start_indices=[0, 1, 2, 3, 4],
+    )
+    assert not torch.allclose(default_breakdown.rollout, all_breakdown.rollout)
+
+
+def test_rollout_start_seed_makes_random_origins_reproducible(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify rollout_start_seed fixes random origin sampling per epoch."""
+    from koopman_graph.training import resolve_rollout_start_indices
+
+    kwargs = {
+        "horizon": 2,
+        "rollout_starts_per_epoch": 2,
+        "rollout_start_seed": 7,
+        "epoch": 0,
+    }
+    first = resolve_rollout_start_indices(scaling_sequence, **kwargs)
+    second = resolve_rollout_start_indices(scaling_sequence, **kwargs)
+    assert first == second
+
+
+def test_fit_accepts_multiple_training_sequences(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify fit accepts a list of trajectories and trains successfully."""
+    second = GraphSnapshotSequence(
+        [
+            Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
+            for t in range(scaling_sequence.num_timesteps)
+        ]
+    )
+    history = trainable_model.fit(
+        [scaling_sequence, second],
+        epochs=3,
+        lr=1e-2,
+    )
+    assert len(history.loss) == 3
+
+
+def test_fit_rejects_mismatched_validation_sequence_list(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify validation list length must match training trajectories."""
+    second = GraphSnapshotSequence(
+        [
+            Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
+            for t in range(scaling_sequence.num_timesteps)
+        ]
+    )
+    with pytest.raises(ValueError, match="validation_sequence list length"):
+        trainable_model.fit(
+            [scaling_sequence, second],
+            validation_sequence=[scaling_sequence],
+            epochs=1,
+        )
+
+
+def test_windowed_fit_takes_multiple_optimizer_steps(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify window batches trigger multiple optimizer updates per epoch."""
+
+    class CountingAdam(torch.optim.Adam):
+        steps = 0
+
+        def step(self, closure=None):
+            type(self).steps += 1
+            return super().step(closure)
+
+    CountingAdam.steps = 0
+    trainable_model.fit(
+        scaling_sequence,
+        epochs=2,
+        optimizer=CountingAdam,
+        window_length=3,
+        batch_size=2,
+        window_seed=0,
+    )
+
+    assert CountingAdam.steps == 4
+
+
+def test_windowed_and_full_sequence_training_both_converge(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify both training modes reduce loss on deterministic dynamics."""
+    torch.manual_seed(11)
+    full_model = _make_trainable_model()
+    torch.manual_seed(11)
+    windowed_model = _make_trainable_model()
+
+    torch.manual_seed(0)
+    full_history = full_model.fit(scaling_sequence, epochs=20, lr=5e-3)
+    torch.manual_seed(0)
+    windowed_history = windowed_model.fit(
+        scaling_sequence,
+        epochs=20,
+        lr=5e-3,
+        window_length=3,
+        batch_size=2,
+        window_seed=7,
+    )
+
+    assert full_history.loss[-1] < full_history.loss[0]
+    assert windowed_history.loss[-1] < windowed_history.loss[0]
+
+
+def test_windowed_fit_accepts_multiple_sequences(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify window sampling pools multiple training trajectories."""
+    history = trainable_model.fit(
+        [scaling_sequence, scaling_sequence],
+        epochs=2,
+        window_length=3,
+        batch_size=4,
+        windows_per_epoch=4,
+        window_seed=3,
+    )
+
+    assert history.epochs == 2
+    assert len(history.reconstruction_loss) == 2
+
+
+def test_windowed_fit_rejects_rollout_horizon_longer_than_window(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify rollout loss must fit inside each sampled window."""
+    with pytest.raises(ValueError, match="needs more than 3"):
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            window_length=3,
+            rollout_horizon=3,
+            loss_weights=LossWeights(reconstruction=0.0, rollout=1.0),
+        )

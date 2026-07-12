@@ -9,13 +9,14 @@ Package
 
 .. automodule:: koopman_graph
    :members: __version__
+   :no-index:
 
 Model
 -----
 
 .. automodule:: koopman_graph.model
    :members:
-   :exclude-members: GraphSnapshotSequence
+   :exclude-members: EvaluationResult, GATEncoder, GNNDecoder, GNNEncoder, GraphSnapshotSequence, KoopmanOperator
    :show-inheritance:
 
 Encoders
@@ -36,6 +37,20 @@ Koopman Operator
 ----------------
 
 .. automodule:: koopman_graph.operator
+   :members:
+   :show-inheritance:
+
+Spectral Analysis
+-----------------
+
+.. automodule:: koopman_graph.analysis
+   :members:
+   :show-inheritance:
+
+Baselines
+---------
+
+.. automodule:: koopman_graph.baselines
    :members:
    :show-inheritance:
 
@@ -60,6 +75,20 @@ Training
 .. automodule:: koopman_graph.training
    :members:
    :exclude-members: GraphSnapshotSequence
+   :show-inheritance:
+
+Metrics
+-------
+
+.. automodule:: koopman_graph.metrics
+   :members:
+   :show-inheritance:
+
+Serialization
+-------------
+
+.. automodule:: koopman_graph.serialization
+   :members:
    :show-inheritance:
 
 Datasets

@@ -117,7 +117,7 @@ def test_rollout_returns_correct_shapes(
     """Verify ``_rollout`` returns the expected tensor shapes."""
     predictions = graph_koopman_model._rollout(synthetic_graph, steps=3)
     assert len(predictions) == 3
-    for pred in predictions:
+    for pred, _, _ in predictions:
         assert pred.shape == (5, 3)
         assert torch.isfinite(pred).all()
 
@@ -160,6 +160,33 @@ def test_predict_with_tensor_inputs(
     assert all(pred.x.shape == synthetic_graph.x.shape for pred in predictions)
 
 
+def test_predict_hold_last_known_topology(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Verify partial future topologies are held for remaining rollout steps."""
+    alt_edges = torch.tensor([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=torch.long)
+    future_topologies = [Data(x=synthetic_graph.x, edge_index=alt_edges)]
+    predictions = graph_koopman_model.predict(
+        synthetic_graph,
+        steps=3,
+        future_topologies=future_topologies,
+    )
+    assert torch.equal(predictions[0].edge_index, alt_edges)
+    assert torch.equal(predictions[1].edge_index, alt_edges)
+    assert torch.equal(predictions[2].edge_index, alt_edges)
+
+
+def test_predict_without_future_topologies_uses_initial_topology(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Verify rollout without a schedule keeps the initial topology."""
+    predictions = graph_koopman_model.predict(synthetic_graph, steps=2)
+    for pred in predictions:
+        assert torch.equal(pred.edge_index, synthetic_graph.edge_index)
+
+
 def test_predict_runs_without_gradients(
     graph_koopman_model: GraphKoopmanModel,
     synthetic_graph: Data,
@@ -193,6 +220,26 @@ def test_predict_rejects_invalid_steps(
     """Verify invalid predict ``steps`` raises ``ValueError``."""
     with pytest.raises(ValueError, match="steps"):
         graph_koopman_model.predict(synthetic_graph, steps=0)
+
+
+def test_predict_preserves_edge_weight(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Verify weighted predictions retain edge weights on output snapshots."""
+    edge_weight = torch.tensor(
+        [1.0, 1.0, 0.5, 0.5, 1.0, 1.0, 0.5, 0.5],
+        dtype=torch.float32,
+    )
+    graph = Data(
+        x=synthetic_graph.x,
+        edge_index=synthetic_graph.edge_index,
+        edge_weight=edge_weight,
+    )
+    predictions = graph_koopman_model.predict(graph, steps=2)
+    for pred in predictions:
+        assert pred.edge_weight is not None
+        assert torch.equal(pred.edge_weight, edge_weight)
 
 
 def test_gradient_flow_end_to_end(
@@ -235,7 +282,7 @@ def test_integration_with_graph_snapshot_sequence(
 
     rollout = model._rollout(snapshot, steps=2)
     assert len(rollout) == 2
-    assert all(pred.shape == snapshot.x.shape for pred in rollout)
+    assert all(pred.shape == snapshot.x.shape for pred, _, _ in rollout)
 
 
 def test_public_export() -> None:
