@@ -290,3 +290,111 @@ def test_public_export() -> None:
     from koopman_graph import GraphKoopmanModel as ExportedModel
 
     assert ExportedModel is GraphKoopmanModel
+
+
+def test_constructor_rejects_negative_control_dim() -> None:
+    """Verify negative ``control_dim`` raises ``ValueError``."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    with pytest.raises(ValueError, match="control_dim must be non-negative"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            control_dim=-1,
+        )
+
+
+def test_model_evaluate_delegates_to_metrics(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify ``evaluate`` returns per-horizon forecast metrics."""
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(5)
+    ]
+    result = graph_koopman_model.evaluate(snapshots, horizons=(1, 2))
+    assert len(result.horizons) == 2
+    assert result.num_origins > 0
+
+
+def test_model_spectrum_uses_time_step(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Verify spectrum analysis reflects the model time step."""
+    spectrum = graph_koopman_model.spectrum()
+    assert spectrum.time_step == graph_koopman_model.time_step
+    assert spectrum.eigenvalues.shape == (graph_koopman_model.latent_dim,)
+
+
+def test_predict_rejects_controls_on_uncontrolled_model(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Verify controls passed to an uncontrolled model raise."""
+    with pytest.raises(ValueError, match="uncontrolled model"):
+        graph_koopman_model.predict(
+            synthetic_graph,
+            steps=1,
+            controls=[torch.zeros(1)],
+        )
+
+
+def _controlled_model() -> GraphKoopmanModel:
+    """Build a small controlled GraphKoopmanModel."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    return GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        control_dim=1,
+    )
+
+
+def test_controlled_predict_requires_matching_controls(
+    synthetic_graph: Data,
+) -> None:
+    """Verify controlled prediction validates control presence and length."""
+    model = _controlled_model()
+    with pytest.raises(ValueError, match="controls are required"):
+        model.predict(synthetic_graph, steps=1)
+    with pytest.raises(ValueError, match="expected 2 control inputs"):
+        model.predict(synthetic_graph, steps=2, controls=[torch.zeros(1)])
+
+
+def test_controlled_fit_rejects_control_dim_mismatch(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify sequences with a different control dimension are rejected."""
+    model = _controlled_model()
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(3)
+    ]
+    sequence = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(3, 2))
+    with pytest.raises(ValueError, match="must match"):
+        model.fit(sequence, epochs=1)
+
+
+def test_fit_moves_edge_weights_to_device(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify training sequences with edge weights are device-transferred."""
+    weight = torch.rand(synthetic_edge_index.shape[1])
+    snapshots = [
+        Data(
+            x=torch.randn(5, 3),
+            edge_index=synthetic_edge_index,
+            edge_weight=weight,
+        )
+        for _ in range(3)
+    ]
+    history = graph_koopman_model.fit(
+        GraphSnapshotSequence(snapshots),
+        epochs=1,
+        device="cpu",
+    )
+    assert history.epochs == 1

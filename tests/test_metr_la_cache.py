@@ -387,3 +387,16 @@ def test_metr_la_load_sequence_preserves_edge_weight(tmp_path: Path) -> None:
     assert sequence.edge_weight is not None
     assert torch.equal(sequence.edge_weight, edge_weight)
     assert not torch.allclose(sequence.edge_weight, torch.ones_like(edge_weight))
+
+
+def test_ensure_edge_weight_returns_existing_payload_weight() -> None:
+    """Verify payloads that already carry edge weights skip recomputation."""
+    from koopman_graph.datasets.metr_la import _ensure_edge_weight
+
+    edge_weight = torch.tensor([0.5, 0.25], dtype=torch.float32)
+    payload = {
+        "edge_weight": edge_weight,
+        "edge_index": torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+        "sensor_ids": ["a", "b"],
+    }
+    assert _ensure_edge_weight(payload) is edge_weight

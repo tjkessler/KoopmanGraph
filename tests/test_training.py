@@ -10,13 +10,20 @@ from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel, LossWeights
 from koopman_graph.data import GraphSnapshotSequence, temporal_split
 from koopman_graph.training import (
     FitHistory,
+    TrainingLossBreakdown,
     compute_sequence_loss,
     compute_training_loss,
     constant_loss_weights,
+    eval_one_epoch,
+    is_sequence_of_sequences,
     linear_ramp_loss_weights,
+    mean_training_loss_breakdown,
     one_step_loss,
     resolve_lr_scheduler,
+    resolve_rollout_start_indices,
+    resolve_validation_sequences,
     should_stop_early,
+    train_one_epoch,
 )
 
 
@@ -822,3 +829,167 @@ def test_windowed_fit_rejects_rollout_horizon_longer_than_window(
             rollout_horizon=3,
             loss_weights=LossWeights(reconstruction=0.0, rollout=1.0),
         )
+
+
+def test_training_loss_breakdown_zeros() -> None:
+    """Verify the zero breakdown has all terms set to zero."""
+    breakdown = TrainingLossBreakdown.zeros(torch.device("cpu"))
+    assert all(value == 0.0 for value in breakdown.to_floats().values())
+
+
+def test_mean_training_loss_breakdown_rejects_empty_input() -> None:
+    """Verify averaging requires at least one breakdown."""
+    with pytest.raises(ValueError, match="at least one entry"):
+        mean_training_loss_breakdown([])
+
+
+def test_resolve_rollout_start_indices_rejects_invalid_horizon(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify horizon validation in rollout origin resolution."""
+    with pytest.raises(ValueError, match="horizon must be >= 1"):
+        resolve_rollout_start_indices(scaling_sequence, horizon=0)
+
+
+def test_resolve_rollout_start_indices_rejects_empty_origin_list(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify an empty explicit origin list raises ``ValueError``."""
+    with pytest.raises(ValueError, match="at least one valid origin"):
+        resolve_rollout_start_indices(
+            scaling_sequence,
+            horizon=2,
+            rollout_start_indices=[],
+        )
+
+
+def test_resolve_rollout_start_indices_accepts_explicit_origins(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify valid explicit origin lists are returned unchanged."""
+    origins = resolve_rollout_start_indices(
+        scaling_sequence,
+        horizon=2,
+        rollout_start_indices=[0, 2],
+    )
+    assert origins == [0, 2]
+
+
+def test_resolve_rollout_start_indices_rejects_invalid_starts_per_epoch(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify ``rollout_starts_per_epoch`` bounds are enforced."""
+    with pytest.raises(ValueError, match="rollout_starts_per_epoch must be >= 1"):
+        resolve_rollout_start_indices(
+            scaling_sequence,
+            horizon=2,
+            rollout_starts_per_epoch=0,
+        )
+
+
+def test_resolve_rollout_start_indices_unseeded_sampling(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify unseeded random origin sampling returns valid origins."""
+    origins = resolve_rollout_start_indices(
+        scaling_sequence,
+        horizon=2,
+        rollout_starts_per_epoch=3,
+    )
+    assert len(origins) == 3
+    assert all(0 <= origin < 3 for origin in origins)
+
+
+def test_train_one_epoch_accepts_bare_sequence(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify a bare sequence is wrapped as a single trajectory."""
+    optimizer = torch.optim.Adam(trainable_model.parameters(), lr=1e-3)
+    breakdown = train_one_epoch(
+        trainable_model,
+        scaling_sequence,
+        optimizer,
+        constant_loss_weights(),
+    )
+    assert breakdown.total.ndim == 0
+
+
+def test_eval_one_epoch_accepts_bare_sequence(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify evaluation wraps a bare sequence as a single trajectory."""
+    breakdown = eval_one_epoch(
+        trainable_model,
+        scaling_sequence,
+        constant_loss_weights(),
+    )
+    assert breakdown.total.ndim == 0
+    assert not breakdown.total.requires_grad
+
+
+def test_is_sequence_of_sequences_edge_cases(
+    synthetic_graph: Data,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify sequence-of-sequences detection for edge case inputs."""
+    assert not is_sequence_of_sequences(None)
+    assert not is_sequence_of_sequences(scaling_sequence)
+    assert not is_sequence_of_sequences(synthetic_graph)
+    assert not is_sequence_of_sequences([])
+    assert not is_sequence_of_sequences([synthetic_graph])
+    assert is_sequence_of_sequences([scaling_sequence])
+
+
+def test_resolve_validation_sequences_accepts_matching_list(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify a validation list matching the training count is accepted."""
+    resolved = resolve_validation_sequences(
+        [scaling_sequence, scaling_sequence],
+        num_training_sequences=2,
+    )
+    assert resolved is not None
+    assert len(resolved) == 2
+
+
+def test_resolve_lr_scheduler_passes_through_instance(
+    trainable_model: GraphKoopmanModel,
+) -> None:
+    """Verify scheduler instances are returned unchanged."""
+    optimizer = torch.optim.Adam(trainable_model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    assert resolve_lr_scheduler(scheduler, optimizer) is scheduler
+    assert resolve_lr_scheduler(None, optimizer) is None
+
+
+def test_fit_with_validation_can_monitor_training_loss(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify validation loss is recorded while early stopping monitors train."""
+    history = trainable_model.fit(
+        scaling_sequence,
+        epochs=2,
+        validation_sequence=scaling_sequence,
+        early_stopping_monitor="train",
+        early_stopping_patience=5,
+    )
+    assert history.val_loss is not None
+    assert len(history.val_loss) == 2
+
+
+def test_windowed_fit_applies_gradient_clipping(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify windowed training clips gradients when requested."""
+    with patch("torch.nn.utils.clip_grad_norm_") as clip:
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            window_length=3,
+            max_grad_norm=1.0,
+        )
+    assert clip.called

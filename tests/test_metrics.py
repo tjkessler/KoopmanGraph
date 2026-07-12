@@ -95,3 +95,60 @@ def test_evaluate_forecast_rejects_invalid_start_index(
             horizons=(1,),
             start_indices=[99],
         )
+
+
+def test_evaluate_forecast_rejects_non_positive_horizons(
+    trainable_model,
+    scaling_sequence,
+) -> None:
+    """Verify horizons below one raise a clear error."""
+    with pytest.raises(ValueError, match="all horizons must be >= 1"):
+        evaluate_forecast(trainable_model, scaling_sequence, horizons=(0, 2))
+
+
+def test_evaluate_forecast_with_controlled_model(
+    synthetic_edge_index,
+) -> None:
+    """Verify controlled models pull rollout controls during evaluation."""
+    from torch_geometric.data import Data
+
+    from koopman_graph.data import GraphSnapshotSequence
+
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        control_dim=1,
+    )
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(5)
+    ]
+    sequence = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(5, 1))
+
+    result = evaluate_forecast(model, sequence, horizons=(1, 2))
+
+    assert result.num_origins == 3
+    assert all(metric.mae >= 0.0 for metric in result.horizons)
+
+
+def test_evaluate_forecast_with_dynamic_topology(trainable_model) -> None:
+    """Verify dynamic-topology sequences supply future topologies."""
+    from torch_geometric.data import Data
+
+    from koopman_graph.data import GraphSnapshotSequence
+
+    first_edges = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    second_edges = torch.tensor([[0, 2, 2, 1], [2, 0, 1, 2]], dtype=torch.long)
+    snapshots = [
+        Data(
+            x=torch.randn(5, 3),
+            edge_index=first_edges if t % 2 == 0 else second_edges,
+        )
+        for t in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+
+    result = evaluate_forecast(trainable_model, sequence, horizons=(1,))
+
+    assert result.num_origins == 3

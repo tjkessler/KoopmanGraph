@@ -277,7 +277,9 @@ def preprocess_speeds(speeds: np.ndarray) -> np.ndarray:
         for step in range(num_timesteps - 1, -1, -1):
             if not np.isnan(series[step]):
                 next_valid = series[step]
-            elif not np.isnan(next_valid):
+            # After the forward pass, any remaining NaN is a leading gap, so a
+            # valid future value has always been seen by the backward scan.
+            elif not np.isnan(next_valid):  # pragma: no branch
                 series[step] = next_valid
 
         filled[:, sensor] = np.nan_to_num(series, nan=0.0)

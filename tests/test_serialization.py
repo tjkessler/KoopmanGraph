@@ -339,3 +339,27 @@ def test_odo_model_round_trip_preserves_predictions(
     after = _predictions(loaded, scaling_sequence[0])
     for pred_before, pred_after in zip(before, after, strict=True):
         assert torch.allclose(pred_before, pred_after)
+
+
+def test_package_version_falls_back_when_metadata_missing() -> None:
+    """Verify the version helper returns a fallback without package metadata."""
+    from importlib.metadata import PackageNotFoundError
+    from unittest.mock import patch
+
+    from koopman_graph.serialization import _package_version
+
+    with patch(
+        "koopman_graph.serialization.version",
+        side_effect=PackageNotFoundError,
+    ):
+        assert _package_version() == "0.0.0"
+
+
+def test_encoder_type_rejects_unsupported_encoder() -> None:
+    """Verify unsupported encoder instances raise ``TypeError``."""
+    from torch import nn
+
+    from koopman_graph.serialization import _encoder_type
+
+    with pytest.raises(TypeError, match="Unsupported encoder type"):
+        _encoder_type(nn.Linear(3, 4))  # type: ignore[arg-type]

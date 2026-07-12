@@ -1132,7 +1132,7 @@ def resolve_training_sequences(
     if is_sequence_of_sequences(data_sequence):
         assert not isinstance(data_sequence, GraphSnapshotSequence)
         sequences = [resolve_sequence(sequence) for sequence in data_sequence]
-        if not sequences:
+        if not sequences:  # pragma: no cover - guarded by is_sequence_of_sequences
             msg = "data_sequence must contain at least one trajectory"
             raise ValueError(msg)
         return sequences

@@ -138,3 +138,113 @@ def test_dense_inverse_matrix_reused() -> None:
     z = torch.randn(5, 4)
     inverse = op.dense_inverse_matrix()
     assert torch.allclose(op.inverse_step(z, inverse_matrix=inverse), z, atol=1e-5)
+
+
+def test_negative_control_dim_raises() -> None:
+    """Verify negative ``control_dim`` raises ``ValueError``."""
+    with pytest.raises(ValueError, match="control_dim must be non-negative"):
+        KoopmanOperator(4, control_dim=-1)
+
+
+def test_unknown_parameterization_raises() -> None:
+    """Verify unknown parameterization raises ``ValueError``."""
+    with pytest.raises(ValueError, match="Unknown parameterization"):
+        KoopmanOperator(4, parameterization="bogus")  # type: ignore[arg-type]
+
+
+def test_reset_control_parameters_noop_without_control() -> None:
+    """Verify control reset is a no-op for uncontrolled operators."""
+    op = KoopmanOperator(4)
+    op.reset_control_parameters()
+    assert not hasattr(op, "B")
+
+
+def test_control_term_requires_positive_control_dim() -> None:
+    """Verify ``control_term`` rejects uncontrolled operators."""
+    op = KoopmanOperator(4)
+    with pytest.raises(ValueError, match="requires control_dim > 0"):
+        op.control_term(torch.zeros(1))
+
+
+def test_control_term_validates_shapes() -> None:
+    """Verify global, per-node, and rank validation in ``control_term``."""
+    op = KoopmanOperator(4, control_dim=2)
+    with pytest.raises(ValueError, match="Expected global control shape"):
+        op.control_term(torch.zeros(3))
+    with pytest.raises(ValueError, match="Expected per-node control shape"):
+        op.control_term(torch.zeros(5, 3))
+    with pytest.raises(ValueError, match="Per-node control has 4 rows"):
+        op.control_term(torch.zeros(4, 2), num_nodes=5)
+    with pytest.raises(ValueError, match="control input must have shape"):
+        op.control_term(torch.zeros(2, 2, 2))
+
+
+def test_forward_rejects_control_for_uncontrolled_operator() -> None:
+    """Verify controls passed to an uncontrolled operator raise."""
+    op = KoopmanOperator(4)
+    with pytest.raises(ValueError, match="uncontrolled operator"):
+        op(torch.randn(3, 4), control=torch.zeros(1))
+
+
+def test_forward_requires_control_when_controlled() -> None:
+    """Verify a controlled operator requires a control input."""
+    op = KoopmanOperator(4, control_dim=1)
+    with pytest.raises(ValueError, match="control input is required"):
+        op(torch.randn(3, 4))
+
+
+def test_inverse_step_requires_control_when_controlled() -> None:
+    """Verify inverse step requires control for controlled operators."""
+    op = KoopmanOperator(4, control_dim=1)
+    with pytest.raises(ValueError, match="control input is required"):
+        op.inverse_step(torch.randn(3, 4))
+
+
+def test_inverse_step_with_per_node_control() -> None:
+    """Verify controlled inverse step recovers state for per-node controls."""
+    op = KoopmanOperator(3, control_dim=2, init_mode="identity")
+    with torch.no_grad():
+        op.B.copy_(torch.randn(2, 3) * 0.1)
+    z = torch.randn(5, 3)
+    control = torch.randn(5, 2)
+    z_next = op(z, control=control)
+    recovered = op.inverse_step(z_next, control=control)
+    assert torch.allclose(recovered, z, atol=1e-5)
+
+
+def test_odo_xavier_init_constructs() -> None:
+    """Verify xavier initialization for the ODO parameterization."""
+    op = KoopmanOperator(4, parameterization="odo", init_mode="xavier")
+    assert torch.isfinite(op.K).all()
+
+
+def test_odo_reset_unknown_init_mode_raises() -> None:
+    """Verify unknown ``init_mode`` in ODO reset raises ``ValueError``."""
+    op = KoopmanOperator(3, parameterization="odo")
+    op.init_mode = "bogus"  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="Unknown init_mode"):
+        op.reset_parameters()
+
+
+def test_dense_spectral_radius_matches_eigvals() -> None:
+    """Verify dense spectral radius equals the max eigenvalue magnitude."""
+    op = KoopmanOperator(3, init_mode="identity")
+    with torch.no_grad():
+        op._parameters["K"].copy_(torch.diag(torch.tensor([0.5, -1.5, 0.9])))
+    assert torch.isclose(op.spectral_radius(), torch.tensor(1.5))
+
+
+def test_dense_inverse_matrix_rejects_odo() -> None:
+    """Verify ``dense_inverse_matrix`` is dense-only."""
+    op = KoopmanOperator(3, parameterization="odo")
+    with pytest.raises(ValueError, match="only available for dense"):
+        op.dense_inverse_matrix()
+
+
+def test_dense_inverse_matrix_falls_back_to_pinv() -> None:
+    """Verify singular dense matrices fall back to the pseudo-inverse."""
+    op = KoopmanOperator(3, init_mode="identity")
+    with torch.no_grad():
+        op._parameters["K"].zero_()
+    inverse = op.dense_inverse_matrix()
+    assert torch.allclose(inverse, torch.zeros(3, 3))

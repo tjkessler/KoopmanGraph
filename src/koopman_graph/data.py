@@ -450,7 +450,7 @@ def temporal_split(
     val_snapshots = sequence.snapshots[train_end:val_end]
     test_snapshots = sequence.snapshots[val_end:]
 
-    if len(train_snapshots) < min_train_timesteps:
+    if len(train_snapshots) < min_train_timesteps:  # pragma: no cover - defensive
         msg = (
             f"train split has {len(train_snapshots)} timesteps, "
             f"expected at least {min_train_timesteps}"
@@ -462,7 +462,7 @@ def temporal_split(
             f"expected at least {min_val_timesteps}"
         )
         raise ValueError(msg)
-    if len(test_snapshots) < min_test_timesteps:
+    if len(test_snapshots) < min_test_timesteps:  # pragma: no cover - defensive
         msg = (
             f"test split has {len(test_snapshots)} timesteps, "
             f"expected at least {min_test_timesteps}"

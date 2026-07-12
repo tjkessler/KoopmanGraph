@@ -492,3 +492,43 @@ def test_compute_training_loss_with_eigenvalue_term(
     breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
     assert breakdown.total.ndim == 0
     assert torch.isfinite(breakdown.total).item()
+
+
+def test_rollout_multi_start_loss_rejects_empty_origins(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify multi-start rollout loss requires at least one origin."""
+    from koopman_graph.losses import rollout_multi_start_loss
+
+    with pytest.raises(ValueError, match="at least one origin"):
+        rollout_multi_start_loss(
+            trainable_model,
+            scaling_sequence,
+            horizon=2,
+            start_indices=[],
+        )
+
+
+def test_rollout_sequence_loss_uses_sequence_controls(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify controlled models draw rollout controls from the sequence."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        control_dim=1,
+    )
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(4, 1))
+
+    loss = rollout_sequence_loss(model, sequence, horizon=2)
+
+    assert loss.ndim == 0
+    assert torch.isfinite(loss).item()
