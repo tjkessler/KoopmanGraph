@@ -8,6 +8,8 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv, GCNConv
 
+from koopman_graph.data import _snapshot_edge_weight
+
 ActivationName = Literal["relu", "sigmoid", "tanh"]
 
 
@@ -76,25 +78,6 @@ def _resolve_graph_inputs(
         msg = "edge_index is required when x_or_data is a tensor"
         raise ValueError(msg)
     return x_or_data, edge_index, edge_weight
-
-
-def _snapshot_edge_weight(snapshot: Data) -> Tensor | None:
-    """Return optional scalar edge weights attached to a graph snapshot.
-
-    Parameters
-    ----------
-    snapshot : Data
-        Graph snapshot that may carry ``edge_weight``.
-
-    Returns
-    -------
-    Tensor or None
-        Edge weights with shape ``(num_edges,)``, or ``None`` when absent.
-    """
-    edge_weight = getattr(snapshot, "edge_weight", None)
-    if edge_weight is None:
-        return None
-    return edge_weight
 
 
 def _validate_node_features(

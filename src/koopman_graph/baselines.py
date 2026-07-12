@@ -10,29 +10,13 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.analysis import KoopmanSpectrum, compute_spectrum
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    _snapshot_edge_weight,
+    resolve_sequence,
+)
 
 PolynomialDegree = Literal[1, 2]
-
-
-def _resolve_sequence(
-    sequence: GraphSnapshotSequence | Sequence[Data],
-) -> GraphSnapshotSequence:
-    """Return a validated graph snapshot sequence.
-
-    Parameters
-    ----------
-    sequence : GraphSnapshotSequence or sequence of Data
-        Input snapshots to validate or pass through.
-
-    Returns
-    -------
-    GraphSnapshotSequence
-        Validated graph snapshot sequence.
-    """
-    if isinstance(sequence, GraphSnapshotSequence):
-        return sequence
-    return GraphSnapshotSequence(sequence)
 
 
 def _flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:
@@ -187,10 +171,46 @@ def _copy_topology(initial_graph: Data) -> dict[str, Tensor]:
         Topology fields suitable for constructing a predicted ``Data`` object.
     """
     fields = {"edge_index": initial_graph.edge_index}
-    edge_weight = getattr(initial_graph, "edge_weight", None)
+    edge_weight = _snapshot_edge_weight(initial_graph)
     if edge_weight is not None:
         fields["edge_weight"] = edge_weight
     return fields
+
+
+def _check_initial_graph(
+    initial_graph: Data,
+    *,
+    num_nodes: int,
+    in_channels: int,
+) -> None:
+    """Validate an initial graph shape against fitted baseline metadata.
+
+    Parameters
+    ----------
+    initial_graph : Data
+        Initial graph snapshot for autoregressive prediction.
+    num_nodes : int
+        Node count recorded when the baseline was fit.
+    in_channels : int
+        Feature dimension recorded when the baseline was fit.
+
+    Raises
+    ------
+    ValueError
+        If node count or feature dimension does not match fitted metadata.
+    """
+    if initial_graph.num_nodes != num_nodes:
+        msg = (
+            f"initial graph has {initial_graph.num_nodes} nodes, "
+            f"expected {num_nodes}"
+        )
+        raise ValueError(msg)
+    if initial_graph.x.shape[1] != in_channels:
+        msg = (
+            f"initial graph has feature dimension {initial_graph.x.shape[1]}, "
+            f"expected {in_channels}"
+        )
+        raise ValueError(msg)
 
 
 class DMDBaseline:
@@ -257,7 +277,7 @@ class DMDBaseline:
         ValueError
             If fewer than two snapshots are provided or rank is invalid.
         """
-        resolved = _resolve_sequence(sequence)
+        resolved = resolve_sequence(sequence)
         if resolved.num_timesteps < 2:
             msg = "DMDBaseline.fit requires at least two snapshots"
             raise ValueError(msg)
@@ -289,7 +309,11 @@ class DMDBaseline:
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)
-        self._check_initial_graph(initial_graph)
+        _check_initial_graph(
+            initial_graph,
+            num_nodes=self.num_nodes,
+            in_channels=self.in_channels,
+        )
 
         assert self.K is not None
         assert self.num_nodes is not None
@@ -328,34 +352,6 @@ class DMDBaseline:
         if self.K is None:
             msg = "DMDBaseline must be fit before prediction or spectral analysis"
             raise RuntimeError(msg)
-
-    def _check_initial_graph(self, initial_graph: Data) -> None:
-        """Validate the initial graph shape against fitted metadata.
-
-        Parameters
-        ----------
-        initial_graph : Data
-            Initial graph snapshot for autoregressive prediction.
-
-        Raises
-        ------
-        ValueError
-            If node count or feature dimension does not match fitted metadata.
-        """
-        assert self.num_nodes is not None
-        assert self.in_channels is not None
-        if initial_graph.num_nodes != self.num_nodes:
-            msg = (
-                f"initial graph has {initial_graph.num_nodes} nodes, "
-                f"expected {self.num_nodes}"
-            )
-            raise ValueError(msg)
-        if initial_graph.x.shape[1] != self.in_channels:
-            msg = (
-                f"initial graph has feature dimension {initial_graph.x.shape[1]}, "
-                f"expected {self.in_channels}"
-            )
-            raise ValueError(msg)
 
 
 class DMDcBaseline:
@@ -428,7 +424,7 @@ class DMDcBaseline:
             If fewer than two snapshots are provided, controls are missing, or
             rank is invalid.
         """
-        resolved = _resolve_sequence(sequence)
+        resolved = resolve_sequence(sequence)
         if resolved.num_timesteps < 2:
             msg = "DMDcBaseline.fit requires at least two snapshots"
             raise ValueError(msg)
@@ -491,7 +487,11 @@ class DMDcBaseline:
         if len(controls) != steps:
             msg = f"expected {steps} control inputs, got {len(controls)}"
             raise ValueError(msg)
-        self._check_initial_graph(initial_graph)
+        _check_initial_graph(
+            initial_graph,
+            num_nodes=self.num_nodes,
+            in_channels=self.in_channels,
+        )
 
         assert self.K is not None
         assert self.B is not None
@@ -562,34 +562,6 @@ class DMDcBaseline:
         if self.K is None or self.B is None:
             msg = "DMDcBaseline must be fit before prediction or spectral analysis"
             raise RuntimeError(msg)
-
-    def _check_initial_graph(self, initial_graph: Data) -> None:
-        """Validate the initial graph shape against fitted metadata.
-
-        Parameters
-        ----------
-        initial_graph : Data
-            Initial graph snapshot for autoregressive prediction.
-
-        Raises
-        ------
-        ValueError
-            If node count or feature dimension does not match fitted metadata.
-        """
-        assert self.num_nodes is not None
-        assert self.in_channels is not None
-        if initial_graph.num_nodes != self.num_nodes:
-            msg = (
-                f"initial graph has {initial_graph.num_nodes} nodes, "
-                f"expected {self.num_nodes}"
-            )
-            raise ValueError(msg)
-        if initial_graph.x.shape[1] != self.in_channels:
-            msg = (
-                f"initial graph has feature dimension {initial_graph.x.shape[1]}, "
-                f"expected {self.in_channels}"
-            )
-            raise ValueError(msg)
 
 
 class EDMDBaseline:
@@ -675,7 +647,7 @@ class EDMDBaseline:
         ValueError
             If fewer than two snapshots are provided or rank is invalid.
         """
-        resolved = _resolve_sequence(sequence)
+        resolved = resolve_sequence(sequence)
         if resolved.num_timesteps < 2:
             msg = "EDMDBaseline.fit requires at least two snapshots"
             raise ValueError(msg)
@@ -717,7 +689,11 @@ class EDMDBaseline:
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)
-        self._check_initial_graph(initial_graph)
+        _check_initial_graph(
+            initial_graph,
+            num_nodes=self.num_nodes,
+            in_channels=self.in_channels,
+        )
 
         assert self.K is not None
         assert self.decoder is not None
@@ -776,31 +752,3 @@ class EDMDBaseline:
         if self.K is None or self.decoder is None:
             msg = "EDMDBaseline must be fit before prediction or spectral analysis"
             raise RuntimeError(msg)
-
-    def _check_initial_graph(self, initial_graph: Data) -> None:
-        """Validate the initial graph shape against fitted metadata.
-
-        Parameters
-        ----------
-        initial_graph : Data
-            Initial graph snapshot for autoregressive prediction.
-
-        Raises
-        ------
-        ValueError
-            If node count or feature dimension does not match fitted metadata.
-        """
-        assert self.num_nodes is not None
-        assert self.in_channels is not None
-        if initial_graph.num_nodes != self.num_nodes:
-            msg = (
-                f"initial graph has {initial_graph.num_nodes} nodes, "
-                f"expected {self.num_nodes}"
-            )
-            raise ValueError(msg)
-        if initial_graph.x.shape[1] != self.in_channels:
-            msg = (
-                f"initial graph has feature dimension {initial_graph.x.shape[1]}, "
-                f"expected {self.in_channels}"
-            )
-            raise ValueError(msg)

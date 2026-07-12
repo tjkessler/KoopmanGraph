@@ -161,7 +161,7 @@ class KoopmanOperator(nn.Module):
             raise ValueError(msg)
 
         if control_dim > 0:
-            self.B = nn.Parameter(torch.zeros(control_dim, latent_dim))
+            self.B = nn.Parameter(torch.empty(control_dim, latent_dim))
             self.reset_control_parameters()
 
     def reset_control_parameters(self) -> None:

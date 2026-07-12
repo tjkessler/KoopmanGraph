@@ -51,20 +51,14 @@ def _default_traffic_path(cache_dir: Path | None = None) -> Path:
     return root / TRAFFIC_FILENAME
 
 
-def download_sensor_ids(*, force: bool = False) -> list[str]:
+def download_sensor_ids() -> list[str]:
     """Download the ordered METR-LA sensor ID list from the DCRNN repository.
-
-    Parameters
-    ----------
-    force : bool, optional
-        Accepted for API symmetry; remote fetch is always performed.
 
     Returns
     -------
     list of str
         Sensor identifiers in graph node order.
     """
-    del force
     try:
         with urlopen(SENSOR_IDS_URL, timeout=60) as response:
             text = response.read().decode("utf-8").strip()
@@ -74,20 +68,14 @@ def download_sensor_ids(*, force: bool = False) -> list[str]:
     return text.split(",")
 
 
-def download_distances_csv(*, force: bool = False) -> str:
+def download_distances_csv() -> str:
     """Download the METR-LA pairwise road-distance CSV from DCRNN.
-
-    Parameters
-    ----------
-    force : bool, optional
-        Accepted for API symmetry; remote fetch is always performed.
 
     Returns
     -------
     str
         Raw CSV text with columns ``from``, ``to``, and ``cost``.
     """
-    del force
     try:
         with urlopen(DISTANCES_URL, timeout=60) as response:
             return response.read().decode("utf-8")

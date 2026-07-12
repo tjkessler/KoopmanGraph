@@ -7,7 +7,7 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor, nn
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import GraphSnapshotSequence, _snapshot_edge_weight
 from koopman_graph.operator import KoopmanOperator
 
 
@@ -183,31 +183,6 @@ class EigenvalueRegularizationLoss(nn.Module):
         return (violation**2).mean()
 
 
-def _inverse_koopman_step(
-    z: Tensor,
-    koopman: KoopmanOperator,
-    *,
-    inverse_matrix: Tensor | None = None,
-) -> Tensor:
-    """Apply one inverse Koopman step.
-
-    Parameters
-    ----------
-    z : Tensor
-        Latent states at time ``t+1``, shape ``(..., latent_dim)``.
-    koopman : :class:`~koopman_graph.operator.KoopmanOperator`
-        Operator whose inverse step is applied.
-    inverse_matrix : Tensor or None, optional
-        Precomputed dense inverse matrix reused across pair evaluations.
-
-    Returns
-    -------
-    Tensor
-        Recovered latent states at time ``t``, same shape as ``z``.
-    """
-    return koopman.inverse_step(z, inverse_matrix=inverse_matrix)
-
-
 def rollout_sequence_loss(
     model: nn.Module,
     sequence: GraphSnapshotSequence,
@@ -259,7 +234,7 @@ def rollout_sequence_loss(
 
     initial = sequence[start]
     edge_index = initial.edge_index
-    edge_weight = getattr(initial, "edge_weight", None)
+    edge_weight = _snapshot_edge_weight(initial)
     z = model.encoder(initial, edge_index, edge_weight)
 
     total_loss = torch.zeros((), device=z.device)
@@ -270,7 +245,7 @@ def rollout_sequence_loss(
         z = model.koopman(z, control=control)
         target = sequence[start + step]
         decode_edge_index = target.edge_index
-        decode_edge_weight = getattr(target, "edge_weight", None)
+        decode_edge_weight = _snapshot_edge_weight(target)
         prediction = model.decoder(z, decode_edge_index, decode_edge_weight)
         total_loss = total_loss + nn.functional.mse_loss(
             prediction,

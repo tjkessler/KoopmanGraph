@@ -270,20 +270,14 @@ def topology_from_matpower_text(
     }
 
 
-def download_matpower_case118(*, force: bool = False) -> str:
+def download_matpower_case118() -> str:
     """Download the MATPOWER IEEE 118-bus case file text.
-
-    Parameters
-    ----------
-    force : bool, optional
-        When ``True``, always fetch from the remote source.
 
     Returns
     -------
     str
         Raw ``case118.m`` file contents.
     """
-    del force
     try:
         with urlopen(MATPOWER_CASE118_URL, timeout=60) as response:
             return response.read().decode("utf-8")
@@ -320,7 +314,7 @@ def ensure_topology_cache(
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    case_text = download_matpower_case118(force=force)
+    case_text = download_matpower_case118()
     topology = topology_from_matpower_text(case_text, dtype=dtype)
     torch.save(topology, path)
     return path

@@ -889,28 +889,6 @@ class GraphSnapshotSequence:
             raise ValueError(msg)
         return [self.control_at(start + step) for step in range(steps)]
 
-    def with_controls_on_device(self, device: torch.device) -> GraphSnapshotSequence:
-        """Return a sequence copy with controls moved to a target device.
-
-        Parameters
-        ----------
-        device : torch.device
-            Destination device for control tensors.
-
-        Returns
-        -------
-        GraphSnapshotSequence
-            Sequence sharing snapshot references but with controls on ``device``.
-        """
-        controls = self._control_inputs
-        if controls is not None:
-            controls = controls.to(device)
-        return GraphSnapshotSequence(
-            self._snapshots,
-            allow_dynamic_topology=self._allow_dynamic_topology,
-            control_inputs=controls,
-        )
-
     @property
     def snapshots(self) -> list[Data]:
         """Return the underlying list of graph snapshots.
@@ -1071,3 +1049,26 @@ class GraphSnapshotSequence:
             Graph snapshot at each timestep.
         """
         return iter(self._snapshots)
+
+
+def resolve_sequence(
+    sequence: GraphSnapshotSequence | Sequence[Data],
+) -> GraphSnapshotSequence:
+    """Normalize input into a validated snapshot sequence.
+
+    Wraps a plain sequence of ``Data`` snapshots in
+    :class:`GraphSnapshotSequence`; existing sequences are returned unchanged.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence or sequence of Data
+        Raw snapshot input from a training, baseline, or inference API.
+
+    Returns
+    -------
+    GraphSnapshotSequence
+        Validated sequence container.
+    """
+    if isinstance(sequence, GraphSnapshotSequence):
+        return sequence
+    return GraphSnapshotSequence(sequence)

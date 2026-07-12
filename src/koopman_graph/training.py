@@ -12,7 +12,12 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence, WindowSampler
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    WindowSampler,
+    _snapshot_edge_weight,
+    resolve_sequence,
+)
 from koopman_graph.losses import (
     BackwardConsistencyLoss,
     EigenvalueRegularizationLoss,
@@ -390,9 +395,9 @@ def _forward_consistency_pair(
     snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
     edge_index_t = snapshot_t.edge_index
-    edge_weight_t = getattr(snapshot_t, "edge_weight", None)
+    edge_weight_t = _snapshot_edge_weight(snapshot_t)
     edge_index_t1 = snapshot_t1.edge_index
-    edge_weight_t1 = getattr(snapshot_t1, "edge_weight", None)
+    edge_weight_t1 = _snapshot_edge_weight(snapshot_t1)
     z_t = model.encoder(snapshot_t, edge_index_t, edge_weight_t)
     z_t1 = model.encoder(snapshot_t1, edge_index_t1, edge_weight_t1)
     return _FORWARD_CONSISTENCY_LOSS(
@@ -431,9 +436,9 @@ def _backward_consistency_pair(
     snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
     edge_index_t = snapshot_t.edge_index
-    edge_weight_t = getattr(snapshot_t, "edge_weight", None)
+    edge_weight_t = _snapshot_edge_weight(snapshot_t)
     edge_index_t1 = snapshot_t1.edge_index
-    edge_weight_t1 = getattr(snapshot_t1, "edge_weight", None)
+    edge_weight_t1 = _snapshot_edge_weight(snapshot_t1)
     z_t = model.encoder(snapshot_t, edge_index_t, edge_weight_t)
     z_t1 = model.encoder(snapshot_t1, edge_index_t1, edge_weight_t1)
     return _BACKWARD_CONSISTENCY_LOSS(
@@ -1076,30 +1081,6 @@ def resolve_early_stopping_monitor(
         msg = "early_stopping_monitor='val' requires validation_sequence"
         raise ValueError(msg)
     return monitor
-
-
-def resolve_sequence(
-    data_sequence: GraphSnapshotSequence | Sequence[Data],
-) -> GraphSnapshotSequence:
-    """Normalize input into a validated snapshot sequence.
-
-    Wraps input in :class:`~koopman_graph.data.GraphSnapshotSequence` when
-    needed.
-
-    Parameters
-    ----------
-    data_sequence : :class:`~koopman_graph.data.GraphSnapshotSequence` or \
-sequence of Data
-        Raw snapshot input from a training or inference API.
-
-    Returns
-    -------
-    :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Validated sequence container.
-    """
-    if isinstance(data_sequence, GraphSnapshotSequence):
-        return data_sequence
-    return GraphSnapshotSequence(data_sequence)
 
 
 def is_sequence_of_sequences(

@@ -34,14 +34,13 @@ def _package_version() -> str:
         return "0.0.0"
 
 
-EncoderType = str
-_SUPPORTED_ENCODER_TYPES: dict[EncoderType, type[GNNEncoder] | type[GATEncoder]] = {
+_SUPPORTED_ENCODER_TYPES: dict[str, type[GNNEncoder] | type[GATEncoder]] = {
     "gcn": GNNEncoder,
     "gat": GATEncoder,
 }
 
 
-def _encoder_type(encoder: GNNEncoder | GATEncoder) -> EncoderType:
+def _encoder_type(encoder: GNNEncoder | GATEncoder) -> str:
     """Return the checkpoint encoder type string for an encoder instance.
 
     Parameters

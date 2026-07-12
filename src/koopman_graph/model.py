@@ -13,7 +13,12 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 
 from koopman_graph.analysis import KoopmanSpectrum, compute_spectrum
-from koopman_graph.data import GraphSnapshotSequence, WindowSampler
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    WindowSampler,
+    _snapshot_edge_weight,
+    resolve_sequence,
+)
 from koopman_graph.decoder import GNNDecoder
 from koopman_graph.encoder import GATEncoder, GNNEncoder
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
@@ -38,7 +43,6 @@ from koopman_graph.training import (
     resolve_loss_weights_for_epoch,
     resolve_lr_scheduler,
     resolve_rollout_start_indices,
-    resolve_sequence,
     resolve_training_sequences,
     resolve_validation_sequences,
     should_stop_early,
@@ -308,11 +312,7 @@ class GraphKoopmanModel(nn.Module):
         for step in range(steps):
             if future_topologies is not None and step < len(future_topologies):
                 current_edge_index = future_topologies[step].edge_index
-                current_edge_weight = getattr(
-                    future_topologies[step],
-                    "edge_weight",
-                    None,
-                )
+                current_edge_weight = _snapshot_edge_weight(future_topologies[step])
             control = None if controls is None else controls[step]
             z = self.koopman(z, control=control)
             prediction = self.decoder(z, current_edge_index, current_edge_weight)
@@ -867,7 +867,7 @@ sequence of GraphSnapshotSequence, or None, optional
             Edge weights with shape ``(num_edges,)``, or ``None`` when unweighted.
         """
         if isinstance(x_or_data, Data):
-            return getattr(x_or_data, "edge_weight", None)
+            return _snapshot_edge_weight(x_or_data)
         return edge_weight
 
     def _validate_controls(
@@ -954,7 +954,7 @@ sequence of GraphSnapshotSequence, or None, optional
             "x": snapshot.x.to(device),
             "edge_index": snapshot.edge_index.to(device),
         }
-        edge_weight = getattr(snapshot, "edge_weight", None)
+        edge_weight = _snapshot_edge_weight(snapshot)
         if edge_weight is not None:
             fields["edge_weight"] = edge_weight.to(device)
         return Data(**fields)
