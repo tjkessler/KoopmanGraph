@@ -113,7 +113,7 @@ After training, `future_graphs` contains five predicted PyG `Data` snapshots wit
 
 The author uses `KoopmanGraph` as a platform for experimenting with Koopman-theoretic forecasting on networked systems. The library is intended to lower the barrier for other researchers to train, evaluate, and extend topology-aware Koopman models on standard PyG workflows.
 
-A versioned software archive with DOI is planned via Zenodo integration upon release tagging (software archive DOI: TBD --- Zenodo deposit pending).
+A versioned software archive is available on Zenodo (software archive DOI: [10.5281/zenodo.21326273](https://doi.org/10.5281/zenodo.21326273), version 0.2.0).
 
 # Conclusion
 

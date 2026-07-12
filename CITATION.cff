@@ -13,20 +13,15 @@ repository-code: "https://github.com/tjkessler/KoopmanGraph"
 url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
 version: 0.2.0
+date-released: 2026-07-12
+doi: 10.5281/zenodo.21326273
 keywords:
   - koopman-operator
   - graph-neural-networks
   - pytorch-geometric
   - spatiotemporal-dynamics
   - dynamical-systems
-# TODO(release): set `date-released` to the archival release date (YYYY-MM-DD)
-#   when the version is tagged.
-# date-released: 2026-01-01
-#
-# TODO(JOSS): after Zenodo mints a version DOI for the archived release, add the
-#   DOI here and in paper.md (replacing the "DOI: TBD" placeholder):
-# doi: 10.5281/zenodo.XXXXXXX
-# identifiers:
-#   - type: doi
-#     value: 10.5281/zenodo.XXXXXXX
-#     description: "Archived software (version DOI)"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21326273
+    description: "Archived software (version DOI)"
