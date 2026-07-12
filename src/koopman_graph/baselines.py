@@ -200,10 +200,7 @@ def _check_initial_graph(
         If node count or feature dimension does not match fitted metadata.
     """
     if initial_graph.num_nodes != num_nodes:
-        msg = (
-            f"initial graph has {initial_graph.num_nodes} nodes, "
-            f"expected {num_nodes}"
-        )
+        msg = f"initial graph has {initial_graph.num_nodes} nodes, expected {num_nodes}"
         raise ValueError(msg)
     if initial_graph.x.shape[1] != in_channels:
         msg = (
