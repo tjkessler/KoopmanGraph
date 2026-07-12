@@ -63,7 +63,7 @@ KoopmanGraph bridges that gap:
 | **Advanced training** | LR schedulers, per-term loss history, multi-trajectory `fit`, and windowed mini-batching |
 | **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
 | **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks |
-| **Jupyter tutorials** | Nine end-to-end notebooks with real networked datasets |
+| **Jupyter tutorials** | Ten end-to-end notebooks with real networked datasets |
 | **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs |
 
 
@@ -189,6 +189,7 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 | [`07_koopman_spectrum.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb) | Koopman eigenvalue analysis |
 | [`08_loss_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb) | Loss weighting and training stability |
 | [`09_topology_ablation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb) | Topology ablation study |
+| [`10_advanced_training.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/10_advanced_training.ipynb) | LR schedulers, rollout origins, multi-trajectory `fit` |
 
 
 

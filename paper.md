@@ -70,7 +70,7 @@ At the time of writing, `KoopmanGraph` provides the following functionality:
 - **Classical baselines.** `DMDBaseline`, `EDMDBaseline`, and `DMDcBaseline` for least-squares/SVD Koopman fits on flattened node states, enabling direct topology-aware versus vector-based comparisons.
 - **Dynamic topology.** Opt-in per-snapshot `edge_index` support for rewiring contact networks during training and rollout.
 - **Benchmark datasets.** Synthetic diffusion and grid graphs, IEEE 118-bus power network, and METR-LA traffic benchmarks (cached data with documented download scripts where needed).
-- **Tutorials and tests.** Nine Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
+- **Tutorials and tests.** Ten Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
 
 Tutorial notebooks cover synthetic dynamics, the IEEE 118-bus test system (including controlled load ramps), METR-LA traffic forecasting with per-horizon evaluation, epidemic rewiring on ring graphs, Koopman spectral analysis, operator stability, and topology ablation studies. The traffic tutorial compares `GraphKoopmanModel` against packaged `DMDBaseline` and `EDMDBaseline` baselines that ignore graph structure.
 
