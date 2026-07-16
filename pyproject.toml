@@ -44,13 +44,19 @@ dev = [
     "pre-commit>=4.0.0",
     "nbmake>=0.5.0",
     "matplotlib>=3.8.0",
+    "scipy>=1.11.0",
     "ipykernel>=6.29.0",
     "pandas>=2.0.0",
+    "gymnasium>=1.0.0",
 ]
 docs = [
     "sphinx>=8.0.0",
     "furo>=2024.8.6",
     "sphinx-copybutton>=0.5.2",
+]
+rl = [
+    "gymnasium>=1.0.0",
+    "stable-baselines3>=2.3.0",
 ]
 
 [project.urls]

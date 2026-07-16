@@ -7,8 +7,93 @@ from collections.abc import Sequence
 import torch
 from torch import Tensor, nn
 
-from koopman_graph.data import GraphSnapshotSequence, _snapshot_edge_weight
+from koopman_graph.continuous import ContinuousKoopmanOperator
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    _snapshot_edge_weight,
+    resolve_pair_delta_t,
+)
 from koopman_graph.operator import KoopmanOperator
+
+KoopmanPropagator = KoopmanOperator | ContinuousKoopmanOperator
+
+
+def _propagate_latent(
+    koopman: KoopmanPropagator,
+    z: Tensor,
+    *,
+    control: Tensor | None = None,
+    delta_t: float | Tensor | None = None,
+) -> Tensor:
+    """Advance latent states with discrete or continuous Koopman operators.
+
+    Returns
+    -------
+    Tensor
+        Advanced latent states.
+    """
+    if isinstance(koopman, ContinuousKoopmanOperator):
+        interval = 1.0 if delta_t is None else delta_t
+        return koopman.advance(z, interval, control=control)
+    return koopman(z, control=control)
+
+
+def _inverse_propagate_latent(
+    koopman: KoopmanPropagator,
+    z: Tensor,
+    *,
+    control: Tensor | None = None,
+    delta_t: float | Tensor | None = None,
+    inverse_matrix: Tensor | None = None,
+) -> Tensor:
+    """Apply one inverse Koopman propagation step.
+
+    Returns
+    -------
+    Tensor
+        Recovered latent states.
+    """
+    if isinstance(koopman, ContinuousKoopmanOperator):
+        interval = 1.0 if delta_t is None else delta_t
+        return koopman.inverse_advance(z, interval, control=control)
+    return koopman.inverse_step(
+        z,
+        control=control,
+        inverse_matrix=inverse_matrix,
+    )
+
+
+def masked_mse_loss(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Compute mean squared error over observed nodes only.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``. ``True`` marks an
+        observed node included in the average.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean squared error.
+    """
+    node_mask = mask.to(device=prediction.device, dtype=prediction.dtype)
+    if node_mask.dtype != prediction.dtype:
+        node_mask = node_mask.to(dtype=prediction.dtype)
+    expanded = node_mask.unsqueeze(-1)
+    diff_sq = (prediction - target) ** 2
+    denom = expanded.sum() * prediction.shape[-1]
+    if denom <= 0:
+        return torch.zeros((), device=prediction.device, dtype=prediction.dtype)
+    return (diff_sq * expanded).sum() / denom
 
 
 class ForwardConsistencyLoss(nn.Module):
@@ -31,9 +116,10 @@ class ForwardConsistencyLoss(nn.Module):
         self,
         z_t: Tensor,
         z_t1: Tensor,
-        koopman: KoopmanOperator,
+        koopman: KoopmanPropagator,
         *,
         control: Tensor | None = None,
+        delta_t: float | Tensor | None = None,
     ) -> Tensor:
         """Compute forward consistency loss between consecutive latent states.
 
@@ -43,17 +129,20 @@ class ForwardConsistencyLoss(nn.Module):
             Latent encoding at time ``t``, shape ``(..., latent_dim)``.
         z_t1 : Tensor
             Latent encoding at time ``t+1``, same shape as ``z_t``.
-        koopman : :class:`~koopman_graph.operator.KoopmanOperator`
+        koopman : KoopmanOperator or ContinuousKoopmanOperator
             Learnable linear propagator applied to ``z_t``.
         control : Tensor or None, optional
             Control input driving the transition from ``t`` to ``t+1``.
+        delta_t : float, Tensor, or None, optional
+            Integration interval for continuous-time operators. Ignored for
+            discrete operators.
 
         Returns
         -------
         Tensor
-            Scalar mean-squared error between ``koopman(z_t, control)`` and ``z_t1``.
+            Scalar mean-squared error between propagated ``z_t`` and ``z_t1``.
         """
-        z_pred = koopman(z_t, control=control)
+        z_pred = _propagate_latent(koopman, z_t, control=control, delta_t=delta_t)
         return nn.functional.mse_loss(z_pred, z_t1)
 
 
@@ -94,10 +183,11 @@ class BackwardConsistencyLoss(nn.Module):
         self,
         z_t: Tensor,
         z_t1: Tensor,
-        koopman: KoopmanOperator,
+        koopman: KoopmanPropagator,
         *,
         control: Tensor | None = None,
         inverse_matrix: Tensor | None = None,
+        delta_t: float | Tensor | None = None,
     ) -> Tensor:
         """Compute backward consistency loss between consecutive latent states.
 
@@ -122,10 +212,12 @@ class BackwardConsistencyLoss(nn.Module):
             Scalar mean-squared error between ``z_t`` and the inverse
             propagation of ``z_t1``.
         """
-        z_recovered = koopman.inverse_step(
+        z_recovered = _inverse_propagate_latent(
+            koopman,
             z_t1,
             control=control,
             inverse_matrix=inverse_matrix,
+            delta_t=delta_t,
         )
         return nn.functional.mse_loss(z_recovered, z_t)
 
@@ -160,23 +252,56 @@ class EigenvalueRegularizationLoss(nn.Module):
     :class:`~koopman_graph.operator.KoopmanOperator`.
     """
 
-    def forward(self, koopman: KoopmanOperator) -> Tensor:
-        """Compute the unit-circle eigenvalue hinge penalty.
+    def forward(self, koopman: KoopmanPropagator) -> Tensor:
+        """Compute the stability eigenvalue hinge penalty.
+
+        Discrete operators penalize magnitudes outside the unit circle.
+        Continuous generators penalize positive real parts.
 
         Parameters
         ----------
-        koopman : :class:`~koopman_graph.operator.KoopmanOperator`
-            Operator whose eigenvalue magnitudes are penalized.
+        koopman : KoopmanOperator or ContinuousKoopmanOperator
+            Operator whose eigenvalues are penalized.
 
         Returns
         -------
         Tensor
-            Scalar hinge penalty (zero when all magnitudes are <= 1).
+            Scalar hinge penalty.
         """
+        if isinstance(koopman, ContinuousKoopmanOperator):
+            if koopman.parameterization in {"odo", "schur", "lyapunov"}:
+                if koopman.parameterization == "odo":
+                    raw = koopman.diag_raw
+                elif koopman.parameterization == "schur":
+                    raw = koopman.schur_diag_raw
+                else:
+                    raw = koopman.lyap_diag_raw
+                bound = max(koopman.max_real_eigenvalue - 1e-4, 1e-4)
+                real_parts = -torch.tanh(raw).abs() * bound
+            elif koopman.parameterization == "dissipative":
+                return torch.zeros((), device=koopman.dissipative_L.device)
+            else:
+                real_parts = torch.linalg.eigvals(koopman.L).real
+            violation = torch.relu(real_parts)
+            return (violation**2).mean()
+
         if koopman.parameterization == "odo":
             magnitudes = (
                 torch.tanh(koopman.diag_raw).abs() * koopman.max_spectral_radius
             )
+        elif koopman.parameterization in {"schur", "lyapunov"}:
+            raw = (
+                koopman.schur_diag_raw
+                if koopman.parameterization == "schur"
+                else koopman.lyap_diag_raw
+            )
+            bound = max(
+                koopman.max_spectral_radius - 1e-4,
+                1e-4,
+            )
+            magnitudes = torch.tanh(raw).abs() * bound
+        elif koopman.parameterization == "dissipative":
+            return torch.zeros((), device=koopman.dissipative_L.device)
         else:
             magnitudes = torch.linalg.eigvals(koopman.K).abs()
         violation = torch.relu(magnitudes - 1.0)
@@ -233,24 +358,35 @@ def rollout_sequence_loss(
         raise ValueError(msg)
 
     initial = sequence[start]
-    edge_index = initial.edge_index
-    edge_weight = _snapshot_edge_weight(initial)
-    z = model.encoder(initial, edge_index, edge_weight)
+    z = model.encode(initial)
 
     total_loss = torch.zeros((), device=z.device)
+    time_step = getattr(model, "time_step", 1.0)
     for step in range(1, horizon + 1):
         control = None
         if sequence.has_controls:
             control = sequence.control_at(start + step - 1)
-        z = model.koopman(z, control=control)
+        delta_t = resolve_pair_delta_t(
+            sequence,
+            start + step - 1,
+            default_time_step=time_step,
+        )
+        z = _propagate_latent(
+            model.koopman,
+            z,
+            control=control,
+            delta_t=delta_t,
+        )
         target = sequence[start + step]
         decode_edge_index = target.edge_index
         decode_edge_weight = _snapshot_edge_weight(target)
         prediction = model.decoder(z, decode_edge_index, decode_edge_weight)
-        total_loss = total_loss + nn.functional.mse_loss(
-            prediction,
-            target.x,
-        )
+        if sequence.has_observation_masks:
+            node_mask = sequence.observation_mask_at(start + step)
+            step_loss = masked_mse_loss(prediction, target.x, node_mask)
+        else:
+            step_loss = nn.functional.mse_loss(prediction, target.x)
+        total_loss = total_loss + step_loss
     return total_loss / horizon
 
 

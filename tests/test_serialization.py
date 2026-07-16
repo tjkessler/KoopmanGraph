@@ -12,6 +12,7 @@ from koopman_graph import GATEncoder, GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.serialization import (
     FORMAT_VERSION,
+    build_checkpoint,
     build_model_config,
     load_checkpoint,
     reconstruct_model,
@@ -149,6 +150,58 @@ def test_gat_save_load_round_trip(
 
     for original, loaded_pred in zip(original_preds, loaded_preds, strict=True):
         torch.testing.assert_close(original, loaded_pred)
+
+
+def test_save_checkpoint_uses_current_format_version(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Verify new checkpoints are saved with the current format version."""
+    checkpoint = build_checkpoint(graph_koopman_model)
+    assert checkpoint["format_version"] == FORMAT_VERSION
+    assert FORMAT_VERSION == 2
+
+
+def test_load_v1_checkpoint_migrates_defaults(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify v0.2.x format_version 1 checkpoints load with v0.3 defaults."""
+    v1_config = {
+        "latent_dim": 4,
+        "time_step": 0.1,
+        "koopman_init_mode": "identity",
+        "koopman_init_scale": 1e-2,
+        "encoder": {
+            "type": "gcn",
+            "in_channels": 3,
+            "hidden_channels": 8,
+            "latent_dim": 4,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+        "decoder": {
+            "latent_dim": 4,
+            "hidden_channels": 8,
+            "out_channels": 3,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+    }
+    path = tmp_path / "v1_model.pt"
+    torch.save(
+        {
+            "format_version": 1,
+            "package_version": "0.2.0",
+            "config": v1_config,
+            "state_dict": graph_koopman_model.state_dict(),
+        },
+        path,
+    )
+    loaded = load_checkpoint(path)
+    assert loaded.dynamics_mode == "discrete"
+    assert loaded.physics_dim == 0
+    assert loaded.control_dim == 0
+    assert loaded.koopman.parameterization == "dense"
 
 
 def test_load_checkpoint_missing_file_raises(tmp_path: Path) -> None:
@@ -336,6 +389,33 @@ def test_odo_model_round_trip_preserves_predictions(
     loaded = GraphKoopmanModel.load(path)
     assert loaded.koopman.parameterization == "odo"
     assert loaded.koopman.max_spectral_radius == 0.85
+    after = _predictions(loaded, scaling_sequence[0])
+    for pred_before, pred_after in zip(before, after, strict=True):
+        assert torch.allclose(pred_before, pred_after)
+
+
+def test_lyapunov_model_round_trip_preserves_predictions(
+    scaling_sequence: GraphSnapshotSequence,
+    tmp_path: Path,
+) -> None:
+    """Verify Lyapunov structural parameterization survives save/load."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.1,
+        koopman_parameterization="lyapunov",
+    )
+    torch.manual_seed(2)
+    model.fit(scaling_sequence, epochs=2, lr=1e-2)
+    before = _predictions(model, scaling_sequence[0])
+
+    path = tmp_path / "lyapunov_model.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.parameterization == "lyapunov"
     after = _predictions(loaded, scaling_sequence[0])
     for pred_before, pred_after in zip(before, after, strict=True):
         assert torch.allclose(pred_before, pred_after)

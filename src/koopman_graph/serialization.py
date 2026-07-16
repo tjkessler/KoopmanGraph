@@ -1,4 +1,19 @@
-"""Checkpoint serialization for :class:`~koopman_graph.model.GraphKoopmanModel`."""
+"""Checkpoint serialization for :class:`~koopman_graph.model.GraphKoopmanModel`.
+
+Checkpoint format versions
+--------------------------
+``format_version`` 1 (v0.2.x)
+    Discrete dynamics only; config omits ``dynamics_mode``, ``physics``,
+    ``control_dim``, and structured-operator fields added in v0.3.0.
+
+``format_version`` 2 (v0.3.0+)
+    Full config including continuous-time mode, hybrid physics observables,
+    control dimension, and Koopman parameterization metadata.
+
+Loaders accept both versions. v1 checkpoints are migrated in memory by filling
+missing optional fields with defaults (``dynamics_mode="discrete"``, no physics,
+``control_dim=0``, ``koopman_parameterization="dense"``).
+"""
 
 from __future__ import annotations
 
@@ -12,11 +27,40 @@ from torch import nn
 
 from koopman_graph.decoder import GNNDecoder
 from koopman_graph.encoder import GATEncoder, GNNEncoder
+from koopman_graph.observables import PhysicsLiftingFn, resolve_physics_lifting_fn
 
 if TYPE_CHECKING:
     from koopman_graph.model import GraphKoopmanModel
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = frozenset({1, 2})
+
+
+def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str, Any]:
+    """Fill v0.2.x checkpoint config defaults for v0.3.0 fields.
+
+    Parameters
+    ----------
+    config : dict
+        Architecture configuration block from a saved checkpoint.
+    format_version : int
+        Checkpoint ``format_version`` before migration.
+
+    Returns
+    -------
+    dict
+        Config with v0.3.0 optional fields populated when absent.
+    """
+    if format_version >= 2:
+        return config
+
+    migrated = dict(config)
+    migrated.setdefault("dynamics_mode", "discrete")
+    migrated.setdefault("koopman_parameterization", "dense")
+    migrated.setdefault("koopman_max_spectral_radius", 1.0)
+    migrated.setdefault("control_dim", 0)
+    migrated.setdefault("physics", None)
+    return migrated
 
 
 def _package_version() -> str:
@@ -94,14 +138,28 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         encoder_config["heads"] = encoder.heads
         encoder_config["dropout"] = encoder.dropout
 
+    physics_config: dict[str, Any] | None = None
+    if model.physics_dim > 0:
+        physics_config = {
+            "dim": model.physics_dim,
+            "preset": model.physics_preset,
+            "position": model.physics_position,
+        }
+
     return {
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
+        "dynamics_mode": model.dynamics_mode,
         "koopman_init_mode": model.koopman.init_mode,
         "koopman_init_scale": model.koopman.init_scale,
         "koopman_parameterization": model.koopman.parameterization,
-        "koopman_max_spectral_radius": model.koopman.max_spectral_radius,
+        "koopman_max_spectral_radius": (
+            model.koopman.max_real_eigenvalue
+            if model.dynamics_mode == "continuous"
+            else model.koopman.max_spectral_radius
+        ),
         "control_dim": model.control_dim,
+        "physics": physics_config,
         "encoder": encoder_config,
         "decoder": {
             "latent_dim": decoder.latent_dim,
@@ -153,18 +211,31 @@ def _build_encoder(config: dict[str, Any]) -> GNNEncoder | GATEncoder:
     return GNNEncoder(**common_kwargs)
 
 
-def reconstruct_model(config: dict[str, Any]) -> GraphKoopmanModel:
+def reconstruct_model(
+    config: dict[str, Any],
+    *,
+    physics_lifting_fn: PhysicsLiftingFn | None = None,
+) -> GraphKoopmanModel:
     """Reconstruct a :class:`GraphKoopmanModel` from a checkpoint configuration.
 
     Parameters
     ----------
     config : dict
         Architecture configuration produced by :func:`build_model_config`.
+    physics_lifting_fn : callable or None, optional
+        Custom physics lifting function for hybrid checkpoints that do not store
+        a registered preset.
 
     Returns
     -------
     GraphKoopmanModel
         Uninitialized-weight model matching the saved architecture.
+
+    Raises
+    ------
+    ValueError
+        If a hybrid checkpoint requires a physics lifting function that is not
+        provided and cannot be resolved from a preset.
     """
     from koopman_graph.model import GraphKoopmanModel
 
@@ -177,16 +248,40 @@ def reconstruct_model(config: dict[str, Any]) -> GraphKoopmanModel:
         activation=decoder_config["activation"],
     )
     encoder = _build_encoder(config["encoder"])
+
+    physics_config = config.get("physics")
+    physics_dim = 0
+    physics_preset: str | None = None
+    resolved_physics_fn: PhysicsLiftingFn | None = None
+    if isinstance(physics_config, dict):
+        physics_dim = int(physics_config.get("dim", 0))
+        physics_preset = physics_config.get("preset")
+        if physics_dim > 0:
+            resolved_physics_fn = resolve_physics_lifting_fn(
+                physics_preset=physics_preset,
+                physics_lifting_fn=physics_lifting_fn,
+            )
+            if resolved_physics_fn is None:
+                msg = (
+                    "Checkpoint uses hybrid physics observables but no preset is "
+                    "stored; pass physics_lifting_fn to load_checkpoint"
+                )
+                raise ValueError(msg)
+
     return GraphKoopmanModel(
         encoder=encoder,
         decoder=decoder,
         latent_dim=config["latent_dim"],
         time_step=config["time_step"],
+        dynamics_mode=config.get("dynamics_mode", "discrete"),
         koopman_init_mode=config["koopman_init_mode"],
         koopman_init_scale=config["koopman_init_scale"],
         koopman_parameterization=config.get("koopman_parameterization", "dense"),
         koopman_max_spectral_radius=config.get("koopman_max_spectral_radius", 1.0),
         control_dim=config.get("control_dim", 0),
+        physics_lifting_fn=resolved_physics_fn,
+        physics_preset=physics_preset,
+        physics_dim=physics_dim,
     )
 
 
@@ -230,6 +325,7 @@ def load_checkpoint(
     path: str | Path,
     *,
     map_location: str | torch.device | None = None,
+    physics_lifting_fn: PhysicsLiftingFn | None = None,
 ) -> GraphKoopmanModel:
     """Load a trained model from a checkpoint file.
 
@@ -239,6 +335,9 @@ def load_checkpoint(
         Checkpoint ``.pt`` file produced by :func:`save_checkpoint`.
     map_location : str, torch.device, or None, optional
         Device mapping forwarded to :func:`torch.load`.
+    physics_lifting_fn : callable or None, optional
+        Custom physics lifting function for hybrid checkpoints without a stored
+        preset.
 
     Returns
     -------
@@ -263,10 +362,13 @@ def load_checkpoint(
         raise ValueError(msg)
 
     format_version = payload.get("format_version")
-    if format_version != FORMAT_VERSION:
+    if format_version not in SUPPORTED_FORMAT_VERSIONS:
+        supported = ", ".join(
+            str(version) for version in sorted(SUPPORTED_FORMAT_VERSIONS)
+        )
         msg = (
             f"Unsupported checkpoint format_version {format_version!r}; "
-            f"expected {FORMAT_VERSION}"
+            f"supported versions: {supported}"
         )
         raise ValueError(msg)
 
@@ -276,7 +378,8 @@ def load_checkpoint(
         msg = "Checkpoint must contain 'config' and 'state_dict' dictionaries"
         raise ValueError(msg)
 
-    model = reconstruct_model(config)
+    migrated_config = _migrate_config(config, format_version=int(format_version))
+    model = reconstruct_model(migrated_config, physics_lifting_fn=physics_lifting_fn)
     model.load_state_dict(state_dict)
     model.eval()
     return model

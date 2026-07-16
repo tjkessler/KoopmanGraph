@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch import Tensor, nn
@@ -12,7 +12,17 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 
-from koopman_graph.analysis import KoopmanSpectrum, compute_spectrum
+from koopman_graph.adaptation import AdaptationStepResult, RecursiveKoopmanAdapter
+from koopman_graph.analysis import (
+    KoopmanSpectrum,
+    compute_generator_spectrum,
+    compute_spectrum,
+    discrete_spectrum_at_delta_t,
+)
+from koopman_graph.continuous import (
+    ContinuousKoopmanOperator,
+    GeneratorParameterization,
+)
 from koopman_graph.data import (
     GraphSnapshotSequence,
     WindowSampler,
@@ -22,6 +32,13 @@ from koopman_graph.data import (
 from koopman_graph.decoder import GNNDecoder
 from koopman_graph.encoder import GATEncoder, GNNEncoder
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
+from koopman_graph.observables import (
+    PHYSICS_POSITION,
+    PhysicsLiftingFn,
+    concatenate_observables,
+    resolve_physics_lifting_fn,
+    validate_physics_output,
+)
 from koopman_graph.operator import InitMode, KoopmanOperator, Parameterization
 from koopman_graph.serialization import (
     load_checkpoint,
@@ -50,7 +67,12 @@ from koopman_graph.training import (
     train_windowed_epoch,
 )
 
+if TYPE_CHECKING:
+    from koopman_graph.env import GraphKoopmanEnv
+
 Encoder = GNNEncoder | GATEncoder
+DynamicsMode = Literal["discrete", "continuous"]
+KoopmanModule = KoopmanOperator | ContinuousKoopmanOperator
 
 
 class GraphKoopmanModel(nn.Module):
@@ -71,8 +93,11 @@ class GraphKoopmanModel(nn.Module):
         Physical time increment associated with one model step. Used by
         :meth:`spectrum` to convert discrete eigenvalues into continuous-time
         growth rates and frequencies.
-    koopman : KoopmanOperator
+    koopman : KoopmanOperator or ContinuousKoopmanOperator
         Learnable linear propagator in latent space.
+    dynamics_mode : {"discrete", "continuous"}
+        Whether latent evolution uses a discrete step map or a continuous
+        generator integrated with matrix exponentials.
     """
 
     def __init__(
@@ -82,11 +107,17 @@ class GraphKoopmanModel(nn.Module):
         latent_dim: int,
         time_step: float,
         *,
+        dynamics_mode: DynamicsMode = "discrete",
         koopman_init_mode: InitMode = "identity_noise",
         koopman_init_scale: float = 1e-2,
-        koopman_parameterization: Parameterization = "dense",
+        koopman_parameterization: (
+            Parameterization | GeneratorParameterization
+        ) = "dense",
         koopman_max_spectral_radius: float = 1.0,
         control_dim: int = 0,
+        physics_lifting_fn: PhysicsLiftingFn | None = None,
+        physics_preset: str | None = None,
+        physics_dim: int = 0,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
@@ -97,34 +128,64 @@ class GraphKoopmanModel(nn.Module):
         decoder : GNNDecoder
             Symmetric GNN decoder for physical reconstruction.
         latent_dim : int
-            Latent space dimension shared by encoder, operator, and decoder.
+            Total latent space dimension per node. When physics-informed
+            observables are enabled, ``latent_dim = physics_dim +
+            encoder.latent_dim``.
         time_step : float
-            Physical time increment associated with one model step.
+            Physical time increment associated with one model step when
+            timestamps are absent.
+        dynamics_mode : {"discrete", "continuous"}, optional
+            Latent evolution mode. ``"discrete"`` preserves the v0.2 behavior;
+            ``"continuous"`` learns a generator integrated via matrix
+            exponentials. Default is ``"discrete"``.
         koopman_init_mode : {"identity", "identity_noise", "xavier"}, optional
             Initialization strategy for the Koopman matrix. Default is
             ``"identity_noise"``.
         koopman_init_scale : float, optional
             Noise scale when ``koopman_init_mode="identity_noise"``.
             Default is ``1e-2``.
-        koopman_parameterization : {"dense", "odo"}, optional
+        koopman_parameterization : {"dense", "odo", "schur", "dissipative", "lyapunov"},
+            optional
             Koopman matrix parameterization. ``"odo"`` enforces a spectral-radius
-            bound via orthogonal-diagonal-orthogonal factors. Default is
-            ``"dense"``.
+            bound via orthogonal-diagonal-orthogonal factors. ``"schur"``,
+            ``"dissipative"``, and ``"lyapunov"`` embed structural stability
+            guarantees for long-horizon rollouts. Default is ``"dense"``.
         koopman_max_spectral_radius : float, optional
-            Maximum eigenvalue magnitude for ``koopman_parameterization="odo"``.
-            Default is ``1.0``.
+            Maximum eigenvalue magnitude for bounded/structural parameterizations.
+            Structurally stable modes enforce a strict interior margin below
+            this value. Default is ``1.0``.
         control_dim : int, optional
             Dimension of exogenous control inputs. When ``0``, the model is
             uncontrolled. Default is ``0``.
+        physics_lifting_fn : callable or None, optional
+            Callable mapping a PyG ``Data`` snapshot to physics-informed node
+            features with shape ``(num_nodes, physics_dim)``. When provided,
+            features are **prepended** to GNN embeddings before Koopman
+            propagation: ``z = [z_physics || z_gnn]``.
+        physics_preset : str or None, optional
+            Registered preset name (for example ``"graph_laplacian"``) used when
+            ``physics_lifting_fn`` is omitted. Custom callables take precedence
+            over presets.
+        physics_dim : int, optional
+            Number of physics-informed features per node. Must be positive when
+            a physics lifting function or preset is supplied, and ``0`` otherwise.
+            For ``physics_preset="graph_laplacian"``, set ``physics_dim`` equal to
+            ``in_channels``.
 
         Raises
         ------
         ValueError
             If ``latent_dim`` is not positive, ``time_step <= 0``,
-            ``control_dim < 0``, or encoder/decoder latent dimensions do not
-            match ``latent_dim``.
+            ``control_dim < 0``, physics settings are inconsistent, or encoder/
+            decoder latent dimensions do not match the effective hybrid layout.
         """
         super().__init__()
+        if dynamics_mode not in {"discrete", "continuous"}:
+            msg = (
+                "dynamics_mode must be 'discrete' or 'continuous', "
+                f"got {dynamics_mode!r}"
+            )
+            raise ValueError(msg)
         if latent_dim < 1:
             msg = f"latent_dim must be positive, got {latent_dim}"
             raise ValueError(msg)
@@ -134,10 +195,30 @@ class GraphKoopmanModel(nn.Module):
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
             raise ValueError(msg)
-        if encoder.latent_dim != latent_dim:
+        if physics_dim < 0:
+            msg = f"physics_dim must be non-negative, got {physics_dim}"
+            raise ValueError(msg)
+
+        resolved_physics_fn = resolve_physics_lifting_fn(
+            physics_preset=physics_preset,
+            physics_lifting_fn=physics_lifting_fn,
+        )
+        if (resolved_physics_fn is None) != (physics_dim == 0):
             msg = (
-                f"encoder.latent_dim ({encoder.latent_dim}) must match "
-                f"latent_dim ({latent_dim})"
+                "physics_dim must be positive when physics lifting is enabled "
+                "and zero otherwise"
+            )
+            raise ValueError(msg)
+        if physics_preset is not None and resolved_physics_fn is None:
+            msg = "physics_preset requires a registered preset or physics_lifting_fn"
+            raise ValueError(msg)
+
+        gnn_latent_dim = encoder.latent_dim
+        expected_latent_dim = gnn_latent_dim + physics_dim
+        if latent_dim != expected_latent_dim:
+            msg = (
+                f"latent_dim ({latent_dim}) must equal encoder.latent_dim "
+                f"({gnn_latent_dim}) + physics_dim ({physics_dim})"
             )
             raise ValueError(msg)
         if decoder.latent_dim != latent_dim:
@@ -150,30 +231,315 @@ class GraphKoopmanModel(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.latent_dim = latent_dim
+        self.gnn_latent_dim = gnn_latent_dim
+        self.physics_dim = physics_dim
+        self.physics_preset = physics_preset
+        self.physics_lifting_fn = resolved_physics_fn
+        self.physics_position = PHYSICS_POSITION
         self.time_step = time_step
         self.control_dim = control_dim
-        self.koopman = KoopmanOperator(
-            latent_dim,
-            init_mode=koopman_init_mode,
-            init_scale=koopman_init_scale,
-            parameterization=koopman_parameterization,
-            max_spectral_radius=koopman_max_spectral_radius,
-            control_dim=control_dim,
-        )
+        self.dynamics_mode = dynamics_mode
+        if dynamics_mode == "continuous":
+            self.koopman = ContinuousKoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,  # type: ignore[arg-type]
+                max_real_eigenvalue=koopman_max_spectral_radius,
+                control_dim=control_dim,
+            )
+        else:
+            self.koopman = KoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,  # type: ignore[arg-type]
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+            )
 
-    def spectrum(self) -> KoopmanSpectrum:
+    @property
+    def is_continuous(self) -> bool:
+        """Return whether the model uses continuous-time generator dynamics.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`dynamics_mode` is ``"continuous"``.
+        """
+        return self.dynamics_mode == "continuous"
+
+    def _resolve_delta_t(self, delta_t: float | Tensor | None) -> float | Tensor:
+        """Return the integration interval for one propagation step.
+
+        Returns
+        -------
+        float or Tensor
+            Resolved integration interval.
+        """
+        if delta_t is not None:
+            return delta_t
+        return self.time_step
+
+    def _advance_latent(
+        self,
+        z: Tensor,
+        *,
+        control: Tensor | None = None,
+        delta_t: float | Tensor | None = None,
+    ) -> Tensor:
+        """Advance latent states with the active Koopman operator.
+
+        Returns
+        -------
+        Tensor
+            Advanced latent states.
+        """
+        if self.is_continuous:
+            return self.koopman.advance(
+                z,
+                self._resolve_delta_t(delta_t),
+                control=control,
+            )
+        return self.koopman(z, control=control)
+
+    def spectrum(self, *, delta_t: float | None = None) -> KoopmanSpectrum:
         """Analyze the learned Koopman operator spectrum.
 
-        Uses :attr:`time_step` to convert discrete eigenvalues into
-        continuous-time growth rates and frequencies.
+        In continuous mode, returns the generator spectrum by default. Pass
+        ``delta_t`` to obtain the discrete-time spectrum of ``exp(L·Δt)``.
 
         Returns
         -------
         KoopmanSpectrum
-            Magnitude-sorted eigenvalues, eigenvectors, and continuous-time
-            mode characteristics.
+            Magnitude-sorted eigenvalues, eigenvectors, and time scales.
         """
+        if self.is_continuous:
+            if delta_t is None:
+                return compute_generator_spectrum(self.koopman.L)
+            return discrete_spectrum_at_delta_t(self.koopman.L, delta_t)
         return compute_spectrum(self.koopman.K, self.time_step)
+
+    def encode_latent(self, snapshot: Data) -> Tensor:
+        """Encode a graph snapshot into latent node features.
+
+        Parameters
+        ----------
+        snapshot : Data
+            Graph snapshot with node features and topology.
+
+        Returns
+        -------
+        Tensor
+            Latent node features with shape ``(num_nodes, latent_dim)``.
+        """
+        return self.encode(snapshot)
+
+    def encode(
+        self,
+        x_or_data: Tensor | Data,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+    ) -> Tensor:
+        """Lift graph node features into the hybrid Koopman latent space.
+
+        When physics-informed observables are configured, returns
+        ``[z_physics || z_gnn]`` with shape ``(num_nodes, latent_dim)``.
+
+        Parameters
+        ----------
+        x_or_data : Tensor or Data
+            Node features or a PyG ``Data`` snapshot.
+        edge_index : Tensor or None, optional
+            Edge index required when ``x_or_data`` is a tensor.
+        edge_weight : Tensor or None, optional
+            Optional scalar edge weights for tensor input.
+
+        Returns
+        -------
+        Tensor
+            Latent node features with shape ``(num_nodes, latent_dim)``.
+        """
+        edge_index = self._resolve_edge_index(x_or_data, edge_index)
+        edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
+        z_gnn = self.encoder(x_or_data, edge_index, edge_weight)
+        if self.physics_lifting_fn is None:
+            return z_gnn
+
+        snapshot = self._as_data(x_or_data, edge_index, edge_weight)
+        physics_features = self.physics_lifting_fn(snapshot)
+        validate_physics_output(
+            physics_features,
+            physics_dim=self.physics_dim,
+            num_nodes=z_gnn.size(0),
+        )
+        return concatenate_observables(
+            physics_features,
+            z_gnn,
+            position=self.physics_position,
+        )
+
+    @property
+    def uses_physics_observables(self) -> bool:
+        """Return whether physics-informed observables are enabled.
+
+        Returns
+        -------
+        bool
+            ``True`` when a physics lifting function is configured.
+        """
+        return self.physics_lifting_fn is not None
+
+    def enable_online_adaptation(
+        self,
+        *,
+        forgetting_factor: float = 0.99,
+        regularization: float = 1e3,
+    ) -> RecursiveKoopmanAdapter:
+        """Enable recursive least-squares adaptation of the Koopman operator.
+
+        Freezes encoder and decoder parameters so only the dense Koopman
+        operator is updated by :meth:`adapt_step`. Requires
+        ``koopman_parameterization="dense"``.
+
+        Parameters
+        ----------
+        forgetting_factor : float, optional
+            RLS forgetting factor in ``(0, 1]``. Default is ``0.99``.
+        regularization : float, optional
+            Initial covariance scale for the RLS regressor. Default is ``1e3``.
+
+        Returns
+        -------
+        RecursiveKoopmanAdapter
+            Adapter instance stored on the model.
+
+        Raises
+        ------
+        ValueError
+            If the Koopman operator is not densely parameterized.
+        """
+        if self.koopman.parameterization != "dense":
+            msg = (
+                "Online adaptation requires dense Koopman parameterization; "
+                f"got {self.koopman.parameterization!r}."
+            )
+            raise ValueError(msg)
+
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.decoder.parameters():
+            parameter.requires_grad_(False)
+
+        mode: Literal["discrete", "continuous"] = (
+            "continuous" if self.is_continuous else "discrete"
+        )
+        adapter = RecursiveKoopmanAdapter.from_operator(
+            self.koopman,
+            mode=mode,
+            forgetting_factor=forgetting_factor,
+            regularization=regularization,
+        )
+        self._adaptation_adapter = adapter
+        return adapter
+
+    @property
+    def online_adaptation_enabled(self) -> bool:
+        """Return whether online adaptation is active.
+
+        Returns
+        -------
+        bool
+            ``True`` when :meth:`enable_online_adaptation` has been called and
+            :meth:`disable_online_adaptation` has not.
+        """
+        return getattr(self, "_adaptation_adapter", None) is not None
+
+    def adapt_step(
+        self,
+        snapshot_t: Data,
+        snapshot_tp1: Data,
+        *,
+        control: Tensor | None = None,
+        delta_t: float | Tensor | None = None,
+    ) -> AdaptationStepResult:
+        """Apply one online RLS update from a pair of graph snapshots.
+
+        Encodes both snapshots with the frozen encoder, updates the Koopman
+        operator via recursive least squares, and writes the estimate back
+        into :attr:`koopman`.
+
+        Parameters
+        ----------
+        snapshot_t : Data
+            Source graph snapshot at time ``t``.
+        snapshot_tp1 : Data
+            Target graph snapshot at time ``t+1``.
+        control : Tensor or None, optional
+            Control input applied during the transition. Required for
+            controlled models.
+        delta_t : float or Tensor or None, optional
+            Integration interval for continuous models. Defaults to
+            :attr:`time_step` when omitted.
+
+        Returns
+        -------
+        AdaptationStepResult
+            Diagnostics for the adaptation step.
+
+        Notes
+        -----
+        For ``dynamics_mode="continuous"``, RLS fits a discrete propagator per
+        interval and maps it to a generator via ``logm(K(Δt))/Δt`` with control
+        scaling ``B(Δt)/Δt``. This is a first-order approximation that does not
+        match the Van Loan integration used in forward propagation. Prefer
+        discrete adaptation for uniformly sampled sequences; see
+        :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` for
+        breakdown conditions (large or varying ``delta_t``, controlled dynamics).
+
+        Raises
+        ------
+        RuntimeError
+            If :meth:`enable_online_adaptation` has not been called.
+        ValueError
+            If continuous mode is used without a positive ``delta_t``.
+        """
+        adapter = getattr(self, "_adaptation_adapter", None)
+        if adapter is None:
+            msg = "call enable_online_adaptation() before adapt_step()"
+            raise RuntimeError(msg)
+
+        resolved_delta = delta_t
+        if self.is_continuous and resolved_delta is None:
+            resolved_delta = self.time_step
+
+        with torch.no_grad():
+            z_t = self.encode_latent(snapshot_t)
+            z_tp1 = self.encode_latent(snapshot_tp1)
+            result = adapter.update(
+                z_t,
+                z_tp1,
+                control=control,
+                delta_t=resolved_delta,
+            )
+            adapter.apply_to(self.koopman)
+        return result
+
+    def disable_online_adaptation(self, *, unfreeze: bool = True) -> None:
+        """Disable online adaptation and optionally unfreeze encoder/decoder.
+
+        Parameters
+        ----------
+        unfreeze : bool, optional
+            When ``True``, restore ``requires_grad`` on encoder and decoder
+            parameters. Default is ``True``.
+        """
+        self._adaptation_adapter = None
+        if unfreeze:
+            for parameter in self.encoder.parameters():
+                parameter.requires_grad_(True)
+            for parameter in self.decoder.parameters():
+                parameter.requires_grad_(True)
 
     def save(self, path: str | Path) -> None:
         """Persist model weights and architecture configuration to disk.
@@ -192,6 +558,7 @@ class GraphKoopmanModel(nn.Module):
         path: str | Path,
         *,
         map_location: str | torch.device | None = None,
+        physics_lifting_fn: PhysicsLiftingFn | None = None,
     ) -> GraphKoopmanModel:
         """Load a trained model from a checkpoint file.
 
@@ -204,13 +571,20 @@ class GraphKoopmanModel(nn.Module):
             Checkpoint file produced by :meth:`save`.
         map_location : str, torch.device, or None, optional
             Device mapping forwarded to :func:`torch.load`.
+        physics_lifting_fn : callable or None, optional
+            Custom physics lifting function required when the checkpoint stores
+            hybrid observables without a registered preset.
 
         Returns
         -------
         GraphKoopmanModel
             Ready-to-use model in evaluation mode.
         """
-        return load_checkpoint(path, map_location=map_location)
+        return load_checkpoint(
+            path,
+            map_location=map_location,
+            physics_lifting_fn=physics_lifting_fn,
+        )
 
     def forward(
         self,
@@ -218,6 +592,7 @@ class GraphKoopmanModel(nn.Module):
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         control: Tensor | None = None,
+        delta_t: float | Tensor | None = None,
     ) -> Tensor:
         """Predict the next graph snapshot from the current one.
 
@@ -238,6 +613,9 @@ class GraphKoopmanModel(nn.Module):
         control : Tensor or None, optional
             Exogenous control input for this step. Required when
             :attr:`control_dim` is positive.
+        delta_t : float, Tensor, or None, optional
+            Integration interval for continuous-time dynamics. Defaults to
+            :attr:`time_step` when omitted.
 
         Returns
         -------
@@ -246,8 +624,8 @@ class GraphKoopmanModel(nn.Module):
         """
         edge_index = self._resolve_edge_index(x_or_data, edge_index)
         edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
-        z = self.encoder(x_or_data, edge_index, edge_weight)
-        z_next = self.koopman(z, control=control)
+        z = self.encode(x_or_data, edge_index, edge_weight)
+        z_next = self._advance_latent(z, control=control, delta_t=delta_t)
         return self.decoder(z_next, edge_index, edge_weight)
 
     def _rollout(
@@ -258,6 +636,7 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | None = None,
+        step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
     ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
         """Autoregressively advance latent state and decode for multiple steps.
 
@@ -284,6 +663,9 @@ class GraphKoopmanModel(nn.Module):
             Known graph topologies for rollout decode steps. Entry ``step`` is
             used when present; otherwise the last known topology is held
             (starting from the initial graph).
+        step_deltas : sequence of float or Tensor or None, optional
+            Integration interval for each rollout step. When omitted, each step
+            uses :attr:`time_step`.
 
         Returns
         -------
@@ -304,7 +686,10 @@ class GraphKoopmanModel(nn.Module):
         edge_index = self._resolve_edge_index(x_or_data, edge_index)
         edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
         self._validate_controls(controls, steps=steps)
-        z = self.encoder(x_or_data, edge_index, edge_weight)
+        if step_deltas is not None and len(step_deltas) != steps:
+            msg = f"expected {steps} step_deltas for rollout, got {len(step_deltas)}"
+            raise ValueError(msg)
+        z = self.encode(x_or_data, edge_index, edge_weight)
 
         current_edge_index = edge_index
         current_edge_weight = edge_weight
@@ -314,7 +699,8 @@ class GraphKoopmanModel(nn.Module):
                 current_edge_index = future_topologies[step].edge_index
                 current_edge_weight = _snapshot_edge_weight(future_topologies[step])
             control = None if controls is None else controls[step]
-            z = self.koopman(z, control=control)
+            delta_t = None if step_deltas is None else step_deltas[step]
+            z = self._advance_latent(z, control=control, delta_t=delta_t)
             prediction = self.decoder(z, current_edge_index, current_edge_weight)
             outputs.append((prediction, current_edge_index, current_edge_weight))
         return outputs
@@ -399,6 +785,138 @@ class GraphKoopmanModel(nn.Module):
                 fields["edge_weight"] = step_edge_weight
             output_snapshots.append(Data(**fields))
         return output_snapshots
+
+    def predict_at(
+        self,
+        initial_graph: Tensor | Data,
+        *,
+        query_times: Sequence[float] | Sequence[Tensor] | None = None,
+        step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+        controls: Sequence[Tensor] | None = None,
+        future_topologies: Sequence[Data] | None = None,
+    ) -> list[Data]:
+        """Forecast graph snapshots at arbitrary query times.
+
+        Exactly one of ``query_times`` or ``step_deltas`` must be provided.
+        ``query_times`` are absolute times relative to the initial snapshot at
+        ``t = 0``. ``step_deltas`` are positive integration intervals applied
+        sequentially from the initial state.
+
+        In discrete mode, non-uniform ``step_deltas`` or ``query_times`` raise
+        :class:`ValueError` because the learned operator is tied to a fixed
+        :attr:`time_step`.
+
+        Parameters
+        ----------
+        initial_graph : Tensor or Data
+            Initial graph snapshot at ``t = 0``.
+        query_times : sequence of float or Tensor or None, optional
+            Strictly increasing absolute query times, each positive.
+        step_deltas : sequence of float or Tensor or None, optional
+            Strictly positive integration intervals applied in order.
+        edge_index, edge_weight, controls, future_topologies
+            Same semantics as :meth:`predict`.
+
+        Returns
+        -------
+        list of Data
+            Predicted snapshots, one per query interval.
+        """
+        increments = self._resolve_time_increments(
+            query_times=query_times,
+            step_deltas=step_deltas,
+        )
+        if not self.is_continuous:
+            self._validate_uniform_discrete_increments(increments)
+
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                rollout = self._rollout(
+                    initial_graph,
+                    len(increments),
+                    edge_index,
+                    edge_weight,
+                    controls=controls,
+                    future_topologies=future_topologies,
+                    step_deltas=increments,
+                )
+        finally:
+            self.train(was_training)
+
+        output_snapshots: list[Data] = []
+        for prediction, step_edge_index, step_edge_weight in rollout:
+            fields: dict[str, Tensor] = {
+                "x": prediction,
+                "edge_index": step_edge_index,
+            }
+            if step_edge_weight is not None:
+                fields["edge_weight"] = step_edge_weight
+            output_snapshots.append(Data(**fields))
+        return output_snapshots
+
+    @staticmethod
+    def _resolve_time_increments(
+        *,
+        query_times: Sequence[float] | Sequence[Tensor] | None,
+        step_deltas: Sequence[float] | Sequence[Tensor] | None,
+    ) -> list[float]:
+        """Convert query specification into positive integration increments.
+
+        Returns
+        -------
+        list of float
+            Strictly positive integration intervals.
+        """
+        if (query_times is None) == (step_deltas is None):
+            msg = "exactly one of query_times or step_deltas must be provided"
+            raise ValueError(msg)
+
+        if step_deltas is not None:
+            increments = [float(torch.as_tensor(value).item()) for value in step_deltas]
+            if not increments or any(value <= 0 for value in increments):
+                msg = "step_deltas must be non-empty and strictly positive"
+                raise ValueError(msg)
+            return increments
+
+        assert query_times is not None
+        times = [float(torch.as_tensor(value).item()) for value in query_times]
+        if not times or any(value <= 0 for value in times):
+            msg = "query_times must be non-empty and strictly positive"
+            raise ValueError(msg)
+        previous = 0.0
+        increments = []
+        for value in times:
+            if value <= previous:
+                msg = "query_times must be strictly increasing"
+                raise ValueError(msg)
+            increments.append(value - previous)
+            previous = value
+        return increments
+
+    def _validate_uniform_discrete_increments(
+        self,
+        increments: Sequence[float],
+    ) -> None:
+        """Ensure discrete models only receive uniform time increments.
+
+        Raises
+        ------
+        ValueError
+            If any increment differs from :attr:`time_step`.
+        """
+        tolerance = max(1e-6, 1e-4 * self.time_step)
+        for value in increments:
+            if abs(value - self.time_step) > tolerance:
+                msg = (
+                    "discrete dynamics_mode requires uniform increments equal to "
+                    f"time_step={self.time_step}; got {value}. Use "
+                    "dynamics_mode='continuous' for irregular sampling."
+                )
+                raise ValueError(msg)
 
     def evaluate(
         self,
@@ -813,6 +1331,11 @@ sequence of GraphSnapshotSequence, or None, optional
                 if sequence.control_inputs is None
                 else sequence.control_inputs.to(train_device)
             ),
+            timestamps=(
+                None
+                if sequence.timestamps is None
+                else sequence.timestamps.to(train_device)
+            ),
         )
 
     @staticmethod
@@ -869,6 +1392,35 @@ sequence of GraphSnapshotSequence, or None, optional
         if isinstance(x_or_data, Data):
             return _snapshot_edge_weight(x_or_data)
         return edge_weight
+
+    @staticmethod
+    def _as_data(
+        x_or_data: Tensor | Data,
+        edge_index: Tensor,
+        edge_weight: Tensor | None,
+    ) -> Data:
+        """Build a PyG ``Data`` object from tensor or ``Data`` inputs.
+
+        Parameters
+        ----------
+        x_or_data : Tensor or Data
+            Node features or an existing snapshot.
+        edge_index : Tensor
+            Edge index with shape ``(2, num_edges)``.
+        edge_weight : Tensor or None
+            Optional edge weights with shape ``(num_edges,)``.
+
+        Returns
+        -------
+        Data
+            Snapshot suitable for physics lifting callables.
+        """
+        if isinstance(x_or_data, Data):
+            return x_or_data
+        data = Data(x=x_or_data, edge_index=edge_index)
+        if edge_weight is not None:
+            data.edge_weight = edge_weight
+        return data
 
     def _validate_controls(
         self,
@@ -958,3 +1510,86 @@ sequence of GraphSnapshotSequence, or None, optional
         if edge_weight is not None:
             fields["edge_weight"] = edge_weight.to(device)
         return Data(**fields)
+
+    def to_latent_env(
+        self,
+        sequence: GraphSnapshotSequence,
+        reward_fn: Callable[[Data, int], float],
+        *,
+        control_low: float | Sequence[float] = -1.0,
+        control_high: float | Sequence[float] = 1.0,
+        max_episode_steps: int = 50,
+        start_index: int | None = None,
+        random_start: bool = True,
+        delta_t: float | None = None,
+        device: torch.device | str | None = None,
+    ) -> GraphKoopmanEnv:
+        """Build a Gymnasium environment for latent-space closed-loop control.
+
+        Freezes encoder and decoder parameters so RL interacts only through the
+        Koopman control input while rewards are computed on decoded physical
+        graph states. Requires ``control_dim > 0`` and the optional
+        ``[rl]`` install extra (``gymnasium``).
+
+        Parameters
+        ----------
+        sequence : GraphSnapshotSequence
+            Reference snapshots for reset states and fixed episode topology.
+        reward_fn : callable
+            ``reward_fn(decoded_snapshot, step_index) -> float``.
+        control_low : float or sequence of float, optional
+            Lower action bounds. Default is ``-1.0``.
+        control_high : float or sequence of float, optional
+            Upper action bounds. Default is ``1.0``.
+        max_episode_steps : int, optional
+            Episode horizon. Default is ``50``.
+        start_index : int or None, optional
+            Fixed reset index into ``sequence``. When set, ``random_start`` is
+            ignored.
+        random_start : bool, optional
+            Sample a random snapshot on each ``reset``. Default is ``True``.
+        delta_t : float or None, optional
+            Integration interval for each environment step. When ``None``,
+            uses :attr:`time_step`. Continuous models may use a custom
+            horizon; discrete models require ``delta_t is None`` or
+            ``delta_t == time_step``.
+        device : torch.device or str or None, optional
+            Inference device. Defaults to the model's current device.
+
+        Returns
+        -------
+        GraphKoopmanEnv
+            Configured Gymnasium environment with flattened latent
+            observations.
+
+        Raises
+        ------
+        ValueError
+            If ``control_dim`` is zero or arguments are invalid.
+        ImportError
+            If Gymnasium is not installed.
+        """
+        from koopman_graph.env import GraphKoopmanEnv
+
+        if self.control_dim <= 0:
+            msg = "to_latent_env requires control_dim > 0"
+            raise ValueError(msg)
+
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad_(False)
+        for parameter in self.decoder.parameters():
+            parameter.requires_grad_(False)
+        self.eval()
+
+        return GraphKoopmanEnv(
+            self,
+            sequence,
+            reward_fn,
+            control_low=control_low,
+            control_high=control_high,
+            max_episode_steps=max_episode_steps,
+            start_index=start_index,
+            random_start=random_start,
+            delta_t=delta_t,
+            device=device,
+        )

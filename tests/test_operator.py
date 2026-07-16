@@ -248,3 +248,148 @@ def test_dense_inverse_matrix_falls_back_to_pinv() -> None:
         op._parameters["K"].zero_()
     inverse = op.dense_inverse_matrix()
     assert torch.allclose(inverse, torch.zeros(3, 3))
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
+def test_structural_parameterizations_construct(parameterization: str) -> None:
+    """Verify structurally stable parameterizations build finite matrices."""
+    op = KoopmanOperator(4, parameterization=parameterization, init_mode="identity")  # type: ignore[arg-type]
+    assert op.K.shape == (4, 4)
+    assert torch.isfinite(op.K).all()
+    assert op.spectral_radius().item() < 1.0
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
+def test_structural_spectral_radius_bounded(parameterization: str) -> None:
+    """Verify structural modes keep eigenvalues strictly inside the unit disk."""
+    op = KoopmanOperator(5, parameterization=parameterization, init_mode="xavier")  # type: ignore[arg-type]
+    assert op.spectral_radius().item() <= 1.0 - 1e-4 + 1e-5
+    eigenvalues = torch.linalg.eigvals(op.K)
+    assert eigenvalues.abs().max().item() < 1.0
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
+def test_structural_inverse_recovers_forward_step(parameterization: str) -> None:
+    """Verify inverse step recovers the previous latent state."""
+    op = KoopmanOperator(
+        5,
+        parameterization=parameterization,  # type: ignore[arg-type]
+        init_mode="identity_noise",
+    )
+    z = torch.randn(7, 5)
+    z_next = op(z)
+    recovered = op.inverse_step(z_next)
+    assert torch.allclose(recovered, z, atol=1e-4)
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
+def test_structural_gradient_flow(parameterization: str) -> None:
+    """Verify gradients reach structural parameter tensors."""
+    op = KoopmanOperator(
+        4,
+        parameterization=parameterization,  # type: ignore[arg-type]
+        init_mode="identity_noise",
+    )
+    z = torch.randn(3, 4, requires_grad=True)
+    loss = op(z).sum()
+    loss.backward()
+    assert any(
+        param.grad is not None and torch.isfinite(param.grad).all()
+        for name, param in op.named_parameters()
+        if name != "B"
+    )
+
+
+def test_schur_spectral_radius_uses_diagonal_without_eigvals() -> None:
+    """Verify Schur spectral radius matches the triangular diagonal bound."""
+    op = KoopmanOperator(4, parameterization="schur", init_mode="identity")
+    with torch.no_grad():
+        op.schur_off_raw.copy_(torch.randn_like(op.schur_off_raw))
+        op.schur_off_raw.copy_(torch.triu(op.schur_off_raw, diagonal=1))
+    radius = op.spectral_radius()
+    diag_vals = torch.tanh(op.schur_diag_raw).abs() * (1.0 - 1e-4)
+    assert torch.allclose(radius, diag_vals.max())
+
+
+def test_lyapunov_stability_certificate() -> None:
+    """Verify Lyapunov certificate satisfies K^T P K - P ≺ 0."""
+    op = KoopmanOperator(4, parameterization="lyapunov", init_mode="identity")
+    certificate = op.stability_certificate()
+    assert certificate is not None
+    assert "lyapunov_matrix" in certificate
+    assert certificate["margin"].item() > 0
+    p = certificate["lyapunov_matrix"]
+    residual = op.K.T @ p @ op.K - p
+    eigenvalues = torch.linalg.eigvalsh(residual)
+    assert eigenvalues.max().item() < 1e-5
+
+
+def test_dissipative_stability_certificate() -> None:
+    """Verify dissipative mode reports a positive spectral margin."""
+    op = KoopmanOperator(3, parameterization="dissipative", init_mode="identity")
+    certificate = op.stability_certificate()
+    assert certificate is not None
+    assert certificate["margin"].item() > 0
+
+
+def test_schur_stability_certificate() -> None:
+    """Verify Schur mode reports a positive spectral margin inside unit circle."""
+    op = KoopmanOperator(4, parameterization="schur", init_mode="identity")
+    certificate = op.stability_certificate()
+    assert certificate is not None
+    assert certificate["margin"].item() > 0
+    assert op.spectral_radius().item() < op.max_spectral_radius
+
+
+def test_stability_certificate_none_for_dense() -> None:
+    """Verify dense operators do not expose a stability certificate."""
+    op = KoopmanOperator(3)
+    assert op.stability_certificate() is None
+
+
+def test_long_rollout_latent_norm_bounded_for_structural_modes(
+    scaling_sequence,
+) -> None:
+    """Verify 200-step latent rollouts stay bounded for structural modes."""
+    from koopman_graph.decoder import GNNDecoder
+    from koopman_graph.encoder import GNNEncoder
+    from koopman_graph.model import GraphKoopmanModel
+
+    def latent_rollout_norm(model, sequence, steps: int) -> float:
+        model.eval()
+        with torch.no_grad():
+            edge_index = sequence[0].edge_index
+            z = model.encoder(sequence[0], edge_index)
+            for _ in range(steps):
+                z = model.koopman(z)
+            return float(z.norm().item())
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    stable_model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.1,
+        koopman_parameterization="lyapunov",
+    )
+    torch.manual_seed(0)
+    stable_model.fit(scaling_sequence, epochs=5, lr=1e-2)
+    stable_norm = latent_rollout_norm(stable_model, scaling_sequence, steps=200)
+
+    unstable_encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    unstable_decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    unstable_model = GraphKoopmanModel(
+        encoder=unstable_encoder,
+        decoder=unstable_decoder,
+        latent_dim=8,
+        time_step=0.1,
+    )
+    with torch.no_grad():
+        unstable_eigs = torch.tensor([1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.7])
+        unstable_model.koopman.K.copy_(torch.diag(unstable_eigs))
+    unstable_norm = latent_rollout_norm(unstable_model, scaling_sequence, steps=200)
+
+    assert stable_norm < unstable_norm
+    assert stable_norm < 1e3
+    assert unstable_norm > 1e3

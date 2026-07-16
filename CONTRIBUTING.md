@@ -216,19 +216,35 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
 `[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
 `pyproject.toml`.
 
+### Checkpoint migration (v0.3.0)
+
+Model checkpoints include a ``format_version`` field (see
+``src/koopman_graph/serialization.py``):
+
+| Version | Introduced | Notes |
+| --- | --- | --- |
+| 1 | v0.2.x | Discrete dynamics; config omits continuous-time, physics, and control fields |
+| 2 | v0.3.0 | Full config for continuous mode, hybrid physics observables, and control |
+
+``GraphKoopmanModel.load`` accepts both v1 and v2 checkpoints. v1 payloads are
+migrated in memory by filling missing optional fields with defaults
+(``dynamics_mode="discrete"``, no physics observables, ``control_dim=0``,
+``koopman_parameterization="dense"``). New saves always use the current
+``FORMAT_VERSION`` (2 as of v0.3.0).
+
 ### Maintainer release checklist
 
 1. Ensure `main` is green (CI tests, lint, notebook smoke tests).
 2. Update `__version__` in `src/koopman_graph/__init__.py`.
 3. Merge any pending release-prep changes to `main`.
-4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.2.0`). Publishing the
+4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.3.0`). Publishing the
    release triggers `.github/workflows/release.yml`.
 5. Approve the `pypi` environment deployment if required by branch protection.
 6. Confirm the workflow uploaded artifacts to PyPI.

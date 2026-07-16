@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.losses import masked_mse_loss
 from koopman_graph.training import resolve_rollout_start_indices
 
 _EPS = 1e-8
@@ -75,6 +76,100 @@ def mape(
         Scalar mean absolute percentage error (not scaled to 0–100).
     """
     return torch.mean(torch.abs((prediction - target) / (target.abs() + eps)))
+
+
+def _masked_node_average(
+    values: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Average per-node scalar values over observed nodes.
+
+    Parameters
+    ----------
+    values : Tensor
+        Per-node values with shape ``(num_nodes,)``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar average over observed nodes.
+    """
+    node_mask = mask.to(device=values.device, dtype=values.dtype)
+    denom = node_mask.sum()
+    if denom <= 0:
+        return torch.zeros((), device=values.device, dtype=values.dtype)
+    return (values.abs() * node_mask).sum() / denom
+
+
+def masked_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Compute mean absolute error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean absolute error.
+    """
+    return _masked_node_average((prediction - target).abs().mean(dim=-1), mask)
+
+
+def masked_rmse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Compute root mean squared error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked root mean squared error.
+    """
+    return torch.sqrt(masked_mse_loss(prediction, target, mask))
+
+
+def masked_mape(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+    *,
+    eps: float = _EPS,
+) -> Tensor:
+    """Compute mean absolute percentage error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+    eps : float, optional
+        Small constant added to the denominator for numerical stability.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean absolute percentage error.
+    """
+    per_node = ((prediction - target) / (target.abs() + eps)).abs().mean(dim=-1)
+    return _masked_node_average(per_node, mask)
 
 
 @dataclass(frozen=True)
@@ -202,9 +297,21 @@ def evaluate_forecast(
                 for horizon in sorted_horizons:
                     pred = predictions[horizon - 1].x
                     target = sequence[start + horizon].x
-                    mae_sums[horizon] += float(mae(pred, target).cpu())
-                    rmse_sums[horizon] += float(rmse(pred, target).cpu())
-                    mape_sums[horizon] += float(mape(pred, target).cpu())
+                    if sequence.has_observation_masks:
+                        node_mask = sequence.observation_mask_at(start + horizon)
+                        mae_sums[horizon] += float(
+                            masked_mae(pred, target, node_mask).cpu()
+                        )
+                        rmse_sums[horizon] += float(
+                            masked_rmse(pred, target, node_mask).cpu()
+                        )
+                        mape_sums[horizon] += float(
+                            masked_mape(pred, target, node_mask).cpu()
+                        )
+                    else:
+                        mae_sums[horizon] += float(mae(pred, target).cpu())
+                        rmse_sums[horizon] += float(rmse(pred, target).cpu())
+                        mape_sums[horizon] += float(mape(pred, target).cpu())
     finally:
         model.train(was_training)
 

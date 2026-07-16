@@ -33,10 +33,24 @@ Decoder
    :members:
    :show-inheritance:
 
+Physics-Informed Observables
+----------------------------
+
+.. automodule:: koopman_graph.observables
+   :members:
+   :show-inheritance:
+
 Koopman Operator
 ----------------
 
 .. automodule:: koopman_graph.operator
+   :members:
+   :show-inheritance:
+
+Continuous-Time Operator
+------------------------
+
+.. automodule:: koopman_graph.continuous
    :members:
    :show-inheritance:
 
@@ -81,6 +95,20 @@ Metrics
 -------
 
 .. automodule:: koopman_graph.metrics
+   :members:
+   :show-inheritance:
+
+Online Adaptation
+-----------------
+
+.. automodule:: koopman_graph.adaptation
+   :members:
+   :show-inheritance:
+
+RL Environment
+--------------
+
+.. automodule:: koopman_graph.env
    :members:
    :show-inheritance:
 

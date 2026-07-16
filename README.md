@@ -52,8 +52,9 @@ KoopmanGraph bridges that gap:
 | --- | --- |
 | **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, and `evaluate` |
 | **GNNEncoder / GATEncoder** | Topology-aware latent lifting with GCN or multi-head attention |
-| **KoopmanOperator** | Learnable linear propagator with identity, Xavier, or spectrally constrained (ODO) initialization |
+| **KoopmanOperator** | Learnable linear propagator; soft modes (`dense`, `odo` + eigenloss) or structural guarantees (`schur`, `dissipative`, `lyapunov`) |
 | **Spectral analysis** | `KoopmanSpectrum`, `compute_spectrum`, and `decode_mode_shapes` for eigenvalues, modes, and continuous-time frequencies |
+| **Dynamical similarity** | `spectrum_distance`, `koopman_std`, `dynamical_similarity`, `detect_anomaly`, and `calibrate_anomaly_threshold` for comparing spectra across regimes |
 | **Model persistence** | `save` / `load` checkpoints with architecture config; optional best-epoch restoration in `fit` |
 | **Evaluation metrics** | Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via `evaluate_forecast` |
 | **Consistency losses** | Forward and backward latent linearity constraints plus optional eigenvalue stability regularization |
@@ -62,10 +63,17 @@ KoopmanGraph bridges that gap:
 | **Dynamic topology** | Per-snapshot `edge_index` support for rewiring contact networks |
 | **Edge weights** | End-to-end `edge_weight` propagation through GCN encoder/decoder and METR-LA benchmark |
 | **Advanced training** | LR schedulers, per-term loss history, multi-trajectory `fit`, and windowed mini-batching |
+| **Structural stability** | Guaranteed-stable parameterizations (`schur`, `dissipative`, `lyapunov`) for 200+ step rollouts — distinct from soft `odo`/eigenloss regularization |
+| **Continuous-time dynamics** | `ContinuousKoopmanOperator` with `dynamics_mode="continuous"`, irregular timestamps, and `predict_at` |
+| **Online adaptation** | `RecursiveKoopmanAdapter` and `adapt_step` for RLS updates to a frozen encoder |
+| **Physics-informed observables** | Hybrid `graph_laplacian_features` concatenated with GNN latents before linear propagation |
+| **RL environment** | `GraphKoopmanEnv` and `to_latent_env` for Gymnasium / Stable-Baselines3 closed-loop control |
 | **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
 | **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks |
-| **Jupyter tutorials** | Ten end-to-end notebooks with real networked datasets |
+| **Jupyter tutorials** | Sixteen end-to-end notebooks with real networked datasets |
 | **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs |
+
+**Stability mode selection:** use `dense` or `odo` with optional eigenvalue loss when you want flexible training and can tolerate occasional long-horizon drift; choose `schur`, `dissipative`, or `lyapunov` when you need eigenvalues mathematically forced inside the unit disk (see [`11_long_horizon_stability.ipynb`](examples/11_long_horizon_stability.ipynb) vs [`08_loss_stability.ipynb`](examples/08_loss_stability.ipynb)).
 
 
 
@@ -191,6 +199,12 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 | [`08_loss_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb) | Loss weighting and training stability |
 | [`09_topology_ablation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb) | Topology ablation study |
 | [`10_advanced_training.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/10_advanced_training.ipynb) | LR schedulers, rollout origins, multi-trajectory `fit` |
+| [`11_long_horizon_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb) | Structural stability parameterizations, 200-step IEEE 118 rollout |
+| [`12_irregular_sampling_continuous_time.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/12_irregular_sampling_continuous_time.ipynb) | Synthetic continuous-time demo: generator recovery, irregular Δt comparison, `predict_at` (METR-LA forecasting → notebook 03) |
+| [`13_online_adaptation_traffic_drift.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_traffic_drift.ipynb) | Recursive least-squares online Koopman adaptation |
+| [`14_physics_informed_diffusion.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_diffusion.ipynb) | Hybrid physics-informed observables |
+| [`15_closed_loop_voltage_control_rl.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb) | Latent-space PPO voltage control on IEEE 118 |
+| [`16_spectral_similarity_anomalies.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb) | Spectral distance clustering and anomaly detection on IEEE 118 |
 
 
 

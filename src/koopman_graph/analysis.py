@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor
@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from koopman_graph.model import GraphKoopmanModel
+
+SpectrumDistanceMethod = Literal["wasserstein", "subspace_angle"]
+AnomalyThresholdMethod = Literal["percentile", "mean_std"]
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,88 @@ def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
     )
 
 
+def compute_generator_spectrum(generator: Tensor) -> KoopmanSpectrum:
+    """Compute the sorted spectrum of a continuous-time Koopman generator.
+
+    Growth rates are the real parts of the eigenvalues; frequencies are the
+    imaginary parts scaled to cycles per unit time.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Square generator matrix with shape ``(latent_dim, latent_dim)``.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Eigenpairs sorted by descending magnitude with native continuous-time
+        growth rates and frequencies.
+
+    Raises
+    ------
+    ValueError
+        If ``generator`` is not a non-empty square matrix.
+    TypeError
+        If ``generator`` is not floating-point or complex.
+    """
+    if generator.ndim != 2 or generator.shape[0] != generator.shape[1]:
+        msg = f"generator must be a square matrix, got shape {tuple(generator.shape)}"
+        raise ValueError(msg)
+    if generator.shape[0] == 0:
+        raise ValueError("generator must be non-empty")
+    if not (generator.is_floating_point() or generator.is_complex()):
+        msg = f"generator must be floating-point or complex, got {generator.dtype}"
+        raise TypeError(msg)
+
+    eigenvalues, eigenvectors = torch.linalg.eig(generator)
+    magnitudes = eigenvalues.abs()
+    order = torch.argsort(magnitudes, descending=True)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    magnitudes = magnitudes[order]
+
+    growth_rates = eigenvalues.real
+    frequencies = eigenvalues.imag / (2 * torch.pi)
+    return KoopmanSpectrum(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        magnitudes=magnitudes,
+        growth_rates=growth_rates,
+        frequencies=frequencies,
+        time_step=1.0,
+    )
+
+
+def discrete_spectrum_at_delta_t(
+    generator: Tensor,
+    delta_t: float,
+) -> KoopmanSpectrum:
+    """Compute the spectrum of ``exp(L · Δt)`` for a generator ``L``.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Continuous-time generator matrix.
+    delta_t : float
+        Integration interval.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Discrete-time spectrum at horizon ``delta_t``.
+
+    Raises
+    ------
+    ValueError
+        If ``delta_t`` is not positive.
+    """
+    if delta_t <= 0:
+        msg = f"delta_t must be positive, got {delta_t}"
+        raise ValueError(msg)
+    transition = torch.linalg.matrix_exp(generator * delta_t)
+    return compute_spectrum(transition, delta_t)
+
+
 def decode_mode_shapes(
     model: GraphKoopmanModel,
     x_or_data: Tensor | Data,
@@ -198,7 +283,7 @@ def decode_mode_shapes(
     model.eval()
     try:
         with torch.no_grad():
-            latent = model.encoder(x_or_data, edges, edge_weight)
+            latent = model.encode(x_or_data, edges, edge_weight)
             mode_shapes = [
                 _decode_complex_direction(
                     model,
@@ -310,3 +395,412 @@ def _decode_real_direction(
     plus = model.decoder(latent + perturbation * direction, edge_index, edge_weight)
     minus = model.decoder(latent - perturbation * direction, edge_index, edge_weight)
     return (plus - minus) / (2 * perturbation)
+
+
+@dataclass(frozen=True)
+class AnomalyDetectionResult:
+    """Outcome of comparing a test spectrum against reference spectra.
+
+    Attributes
+    ----------
+    is_anomaly : bool
+        ``True`` when ``distance`` exceeds ``threshold``.
+    distance : float
+        Mean spectral distance from ``test_spectrum`` to each reference.
+    reference_mean_distance : float
+        Mean pairwise distance among reference spectra (baseline spread).
+        Useful for calibrating ``threshold`` from in-distribution variation.
+    """
+
+    is_anomaly: bool
+    distance: float
+    reference_mean_distance: float
+
+
+def spectrum_distance(
+    spectrum_a: KoopmanSpectrum,
+    spectrum_b: KoopmanSpectrum,
+    method: SpectrumDistanceMethod = "wasserstein",
+    *,
+    num_modes: int | None = None,
+) -> Tensor:
+    """Measure dynamical dissimilarity between two Koopman spectra.
+
+    Parameters
+    ----------
+    spectrum_a, spectrum_b : KoopmanSpectrum
+        Spectra to compare. May differ in ``latent_dim``; shorter spectra are
+        zero-padded when comparing magnitudes or subspaces.
+    method : {"wasserstein", "subspace_angle"}, optional
+        Distance definition. ``"wasserstein"`` applies 1D Wasserstein-1 to
+        sorted eigenvalue magnitudes. ``"subspace_angle"`` returns the mean
+        principal angle (radians) between dominant eigenvector subspaces.
+        Default is ``"wasserstein"``.
+    num_modes : int or None, optional
+        Number of leading modes to compare for ``"subspace_angle"``. Defaults
+        to ``min(latent_dim_a, latent_dim_b)``. Ignored by ``"wasserstein"``.
+
+    Returns
+    -------
+    Tensor
+        Scalar distance (magnitude units for Wasserstein, radians for subspace
+        angle). The result is detached from the autograd graph.
+
+    Raises
+    ------
+    ValueError
+        If ``method`` is unknown or ``num_modes`` is out of range.
+    """
+    if method == "wasserstein":
+        return _wasserstein_magnitude_distance(
+            spectrum_a.magnitudes,
+            spectrum_b.magnitudes,
+        )
+    if method == "subspace_angle":
+        modes = _resolve_num_modes(
+            spectrum_a.eigenvectors.shape[0],
+            spectrum_b.eigenvectors.shape[0],
+            num_modes,
+        )
+        return _subspace_angle_distance(
+            spectrum_a.eigenvectors[:, :modes],
+            spectrum_b.eigenvectors[:, :modes],
+        )
+    msg = f"method must be 'wasserstein' or 'subspace_angle', got {method!r}"
+    raise ValueError(msg)
+
+
+def koopman_std(
+    spectra: Sequence[KoopmanSpectrum],
+    method: SpectrumDistanceMethod = "wasserstein",
+    *,
+    num_modes: int | None = None,
+) -> Tensor:
+    """Build a pairwise dynamical-similarity distance matrix (KoopSTD).
+
+    Parameters
+    ----------
+    spectra : sequence of KoopmanSpectrum
+        Spectra to compare, one per trajectory, model, or regime.
+    method : {"wasserstein", "subspace_angle"}, optional
+        Distance passed to :func:`spectrum_distance`. Default is
+        ``"wasserstein"``.
+    num_modes : int or None, optional
+        Leading modes for subspace-angle comparisons. Default is the minimum
+        latent dimension across all spectra.
+
+    Returns
+    -------
+    Tensor
+        Symmetric matrix with shape ``(len(spectra), len(spectra))`` and zero
+        diagonal.
+
+    Raises
+    ------
+    ValueError
+        If ``spectra`` is empty.
+    """
+    if not spectra:
+        raise ValueError("spectra must be non-empty")
+
+    count = len(spectra)
+    matrix = torch.zeros((count, count), dtype=torch.float64)
+    for row in range(count):
+        for col in range(row + 1, count):
+            distance = spectrum_distance(
+                spectra[row],
+                spectra[col],
+                method,
+                num_modes=num_modes,
+            )
+            value = distance.to(dtype=matrix.dtype, device=matrix.device)
+            matrix[row, col] = value
+            matrix[col, row] = value
+    return matrix
+
+
+def dynamical_similarity(
+    model_a: GraphKoopmanModel,
+    model_b: GraphKoopmanModel,
+    method: SpectrumDistanceMethod = "wasserstein",
+    *,
+    num_modes: int | None = None,
+    delta_t: float | None = None,
+) -> Tensor:
+    """Compare learned dynamics of two GraphKoopmanModel instances.
+
+    Parameters
+    ----------
+    model_a, model_b : GraphKoopmanModel
+        Models whose Koopman operators are compared via
+        :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum`.
+    method : {"wasserstein", "subspace_angle"}, optional
+        Distance definition. Default is ``"wasserstein"``.
+    num_modes : int or None, optional
+        Leading modes for subspace-angle comparisons.
+    delta_t : float or None, optional
+        Integration horizon forwarded to
+        :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum` for
+        continuous-time models.
+
+    Returns
+    -------
+    Tensor
+        Scalar spectral distance between the two models.
+    """
+    return spectrum_distance(
+        model_a.spectrum(delta_t=delta_t),
+        model_b.spectrum(delta_t=delta_t),
+        method,
+        num_modes=num_modes,
+    )
+
+
+def calibrate_anomaly_threshold(
+    reference_spectra: Sequence[KoopmanSpectrum],
+    method: AnomalyThresholdMethod = "percentile",
+    *,
+    distance_method: SpectrumDistanceMethod = "wasserstein",
+    num_modes: int | None = None,
+    q: float = 95.0,
+    k: float = 2.0,
+) -> float:
+    """Derive an anomaly threshold from pairwise reference-spectrum distances.
+
+    Builds the upper triangle of :func:`koopman_std` among
+    ``reference_spectra`` and summarizes those in-distribution distances.
+    Pass the returned scalar to :func:`detect_anomaly` as ``threshold``.
+
+    Calibration uses only reference replicates. It does not validate operating
+    limits: few replicates, metric choice, and trajectory length all affect the
+    scale. Prefer held-out nominal checks before deploying a threshold.
+
+    Parameters
+    ----------
+    reference_spectra : sequence of KoopmanSpectrum
+        At least two in-distribution reference spectra.
+    method : {"percentile", "mean_std"}, optional
+        Summary rule. ``"percentile"`` returns the ``q``-th percentile of
+        pairwise distances. ``"mean_std"`` returns ``mean + k * std`` (sample
+        standard deviation over the pairwise distances). Default is
+        ``"percentile"``.
+    distance_method : {"wasserstein", "subspace_angle"}, optional
+        Spectral distance forwarded to :func:`koopman_std`. Default is
+        ``"wasserstein"``.
+    num_modes : int or None, optional
+        Leading modes for subspace-angle comparisons.
+    q : float, optional
+        Percentile in ``[0, 100]`` when ``method="percentile"``. Default is
+        ``95``.
+    k : float, optional
+        Non-negative multiplier for the standard-deviation term when
+        ``method="mean_std"``. Default is ``2``.
+
+    Returns
+    -------
+    float
+        Scalar threshold in the same units as :func:`spectrum_distance`.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two references are provided, ``method`` is unknown, or
+        ``q`` / ``k`` are out of range.
+    """
+    if len(reference_spectra) < 2:
+        raise ValueError("reference_spectra must contain at least two spectra")
+
+    matrix = koopman_std(reference_spectra, distance_method, num_modes=num_modes)
+    mask = torch.triu(torch.ones_like(matrix, dtype=torch.bool), diagonal=1)
+    pairwise = matrix[mask]
+
+    if method == "percentile":
+        if not 0.0 <= q <= 100.0:
+            msg = f"q must be in [0, 100], got {q}"
+            raise ValueError(msg)
+        return torch.quantile(pairwise, q / 100.0).item()
+
+    if method == "mean_std":
+        if k < 0.0:
+            msg = f"k must be >= 0, got {k}"
+            raise ValueError(msg)
+        mean = pairwise.mean()
+        if pairwise.numel() > 1:
+            std = pairwise.std(unbiased=False)
+        else:
+            std = mean.new_zeros(())
+        return (mean + k * std).item()
+
+    msg = f"method must be 'percentile' or 'mean_std', got {method!r}"
+    raise ValueError(msg)
+
+
+def detect_anomaly(
+    reference_spectra: Sequence[KoopmanSpectrum],
+    test_spectrum: KoopmanSpectrum,
+    threshold: float,
+    method: SpectrumDistanceMethod = "wasserstein",
+    *,
+    num_modes: int | None = None,
+) -> AnomalyDetectionResult:
+    """Flag a test spectrum as anomalous when it is far from reference dynamics.
+
+    ``threshold`` is required. Derive it from in-distribution reference
+    spectra with :func:`calibrate_anomaly_threshold` (percentile or
+    mean-plus-``k``-std of pairwise :func:`koopman_std` distances), or supply a
+    domain-specific operating limit.
+
+    Parameters
+    ----------
+    reference_spectra : sequence of KoopmanSpectrum
+        In-distribution reference spectra (healthy baselines or known regimes).
+    test_spectrum : KoopmanSpectrum
+        Spectrum to evaluate.
+    threshold : float
+        Maximum acceptable mean distance from ``test_spectrum`` to the
+        references. Distances above this value are flagged as anomalies.
+    method : {"wasserstein", "subspace_angle"}, optional
+        Distance definition. Default is ``"wasserstein"``.
+    num_modes : int or None, optional
+        Leading modes for subspace-angle comparisons.
+
+    Returns
+    -------
+    AnomalyDetectionResult
+        ``is_anomaly`` is ``True`` when the mean reference distance exceeds
+        ``threshold``.
+
+    Raises
+    ------
+    ValueError
+        If ``reference_spectra`` is empty or ``threshold`` is negative.
+    """
+    if not reference_spectra:
+        raise ValueError("reference_spectra must be non-empty")
+    if threshold < 0.0:
+        msg = f"threshold must be >= 0, got {threshold}"
+        raise ValueError(msg)
+
+    test_distances = [
+        spectrum_distance(test_spectrum, reference, method, num_modes=num_modes)
+        for reference in reference_spectra
+    ]
+    distance = torch.stack(test_distances).mean().item()
+
+    if len(reference_spectra) == 1:
+        reference_mean_distance = 0.0
+    else:
+        reference_matrix = koopman_std(reference_spectra, method, num_modes=num_modes)
+        upper = reference_matrix.triu(diagonal=1)
+        reference_mean_distance = upper[upper > 0].mean().item()
+
+    return AnomalyDetectionResult(
+        is_anomaly=distance > threshold,
+        distance=distance,
+        reference_mean_distance=reference_mean_distance,
+    )
+
+
+def _resolve_num_modes(
+    latent_dim_a: int,
+    latent_dim_b: int,
+    num_modes: int | None,
+) -> int:
+    """Resolve the number of eigenvector columns to compare.
+
+    Parameters
+    ----------
+    latent_dim_a, latent_dim_b : int
+        Latent dimensions of the two spectra.
+    num_modes : int or None
+        Requested mode count. ``None`` uses ``min(latent_dim_a, latent_dim_b)``.
+
+    Returns
+    -------
+    int
+        Validated number of leading modes to compare.
+
+    Raises
+    ------
+    ValueError
+        If ``num_modes`` is outside ``[1, min(latent_dim_a, latent_dim_b)]``.
+    """
+    maximum = min(latent_dim_a, latent_dim_b)
+    if num_modes is None:
+        return maximum
+    if num_modes < 1 or num_modes > maximum:
+        msg = f"num_modes must be in [1, {maximum}], got {num_modes}"
+        raise ValueError(msg)
+    return num_modes
+
+
+def _pad_magnitudes(magnitudes: Tensor, length: int) -> Tensor:
+    """Zero-pad a magnitude vector to a target length.
+
+    Parameters
+    ----------
+    magnitudes : Tensor
+        Sorted eigenvalue magnitudes.
+    length : int
+        Target vector length.
+
+    Returns
+    -------
+    Tensor
+        Magnitudes truncated or zero-padded to ``length``.
+    """
+    if magnitudes.numel() >= length:
+        return magnitudes[:length]
+    padding = torch.zeros(
+        length - magnitudes.numel(),
+        dtype=magnitudes.dtype,
+        device=magnitudes.device,
+    )
+    return torch.cat([magnitudes, padding])
+
+
+def _wasserstein_magnitude_distance(
+    magnitudes_a: Tensor,
+    magnitudes_b: Tensor,
+) -> Tensor:
+    """Compute 1D Wasserstein-1 distance between eigenvalue magnitudes.
+
+    Parameters
+    ----------
+    magnitudes_a, magnitudes_b : Tensor
+        Sorted eigenvalue magnitudes, possibly of different lengths.
+
+    Returns
+    -------
+    Tensor
+        Scalar mean absolute difference after zero-padding.
+    """
+    length = max(magnitudes_a.numel(), magnitudes_b.numel())
+    if length == 0:
+        return torch.tensor(0.0, dtype=torch.float64)
+    a = _pad_magnitudes(magnitudes_a.detach().to(torch.float64), length)
+    b = _pad_magnitudes(magnitudes_b.detach().to(torch.float64), length)
+    return torch.mean(torch.abs(a - b))
+
+
+def _subspace_angle_distance(vectors_a: Tensor, vectors_b: Tensor) -> Tensor:
+    """Compute the mean principal angle between eigenvector subspaces.
+
+    Parameters
+    ----------
+    vectors_a, vectors_b : Tensor
+        Eigenvector columns with shape ``(latent_dim, num_modes)``.
+
+    Returns
+    -------
+    Tensor
+        Mean principal angle in radians.
+    """
+    if vectors_a.numel() == 0:
+        return torch.tensor(0.0, dtype=torch.float64)
+
+    dtype = torch.complex128 if vectors_a.is_complex() else torch.float64
+    basis_a, _ = torch.linalg.qr(vectors_a.detach().to(dtype))
+    basis_b, _ = torch.linalg.qr(vectors_b.detach().to(dtype))
+    cosines = torch.linalg.svdvals(basis_a.conj().T @ basis_b).clamp(0.0, 1.0)
+    return torch.arccos(cosines).mean().to(torch.float64)

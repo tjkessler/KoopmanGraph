@@ -81,7 +81,7 @@ Pin a specific release when reproducing results:
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.2.0
+   pip install koopman-graph==0.3.0
 
 Releases are published automatically when a maintainer creates a GitHub Release
 (see ``CONTRIBUTING.md`` in the repository). Until the first release is published,

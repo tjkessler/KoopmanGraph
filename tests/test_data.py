@@ -748,3 +748,53 @@ def test_resolve_sequence_passthrough_and_wrap(
     wrapped = resolve_sequence(snapshots)
     assert isinstance(wrapped, GraphSnapshotSequence)
     assert wrapped.num_timesteps == len(snapshots)
+
+
+def test_observation_masks_validation(
+    synthetic_edge_index: torch.Tensor,
+    make_snapshots: Callable[..., list[Data]],
+) -> None:
+    """Verify observation mask shape, dtype, and per-timestep constraints."""
+    snapshots = make_snapshots(synthetic_edge_index, num_timesteps=3, num_nodes=4)
+    valid = torch.tensor(
+        [
+            [True, True, False, True],
+            [False, True, True, True],
+            [True, False, True, True],
+        ]
+    )
+    sequence = GraphSnapshotSequence(snapshots, observation_masks=valid)
+    assert sequence.has_observation_masks
+    assert torch.equal(sequence.observation_mask_at(1), valid[1])
+    assert torch.equal(sequence.pair_observation_mask(0), valid[0] & valid[1])
+
+    with pytest.raises(ValueError, match="observation_masks shape"):
+        GraphSnapshotSequence(
+            snapshots,
+            observation_masks=torch.ones(3, 3, dtype=torch.bool),
+        )
+    with pytest.raises(ValueError, match="at least one observed node"):
+        GraphSnapshotSequence(
+            snapshots,
+            observation_masks=torch.zeros(3, 4, dtype=torch.bool),
+        )
+
+
+def test_sequence_slice_preserves_observation_masks(
+    synthetic_edge_index: torch.Tensor,
+    make_snapshots: Callable[..., list[Data]],
+) -> None:
+    """Verify contiguous slices preserve observation masks."""
+    snapshots = make_snapshots(synthetic_edge_index, num_timesteps=5, num_nodes=4)
+    masks = torch.tensor(
+        [
+            [True, True, False, True],
+            [False, True, True, True],
+            [True, False, True, True],
+            [True, True, True, False],
+            [False, True, True, True],
+        ]
+    )
+    sequence = GraphSnapshotSequence(snapshots, observation_masks=masks)
+    window = sequence.slice(1, 4)
+    assert torch.equal(window.observation_masks, masks[1:4])

@@ -216,6 +216,107 @@ def _snapshot_edge_weight(snapshot: Data) -> Tensor | None:
     return edge_weight
 
 
+def _validate_timestamps(
+    timestamps: Tensor,
+    *,
+    num_timesteps: int,
+) -> None:
+    """Validate optional per-snapshot timestamps.
+
+    Parameters
+    ----------
+    timestamps : Tensor
+        Monotone increasing timestamps with shape ``(num_timesteps,)``.
+    num_timesteps : int
+        Expected number of snapshots.
+
+    Raises
+    ------
+    ValueError
+        If ``timestamps`` has invalid shape or is not strictly increasing.
+    """
+    if timestamps.ndim != 1:
+        msg = (
+            "timestamps must have shape (num_timesteps,), "
+            f"got {tuple(timestamps.shape)}"
+        )
+        raise ValueError(msg)
+    if timestamps.shape[0] != num_timesteps:
+        msg = f"timestamps has {timestamps.shape[0]} entries, expected {num_timesteps}"
+        raise ValueError(msg)
+    if num_timesteps >= 2:
+        deltas = timestamps[1:] - timestamps[:-1]
+        if not torch.all(deltas > 0):
+            msg = "timestamps must be strictly monotone increasing"
+            raise ValueError(msg)
+
+
+def _validate_observation_masks(
+    observation_masks: Tensor,
+    *,
+    num_timesteps: int,
+    num_nodes: int,
+) -> Tensor:
+    """Validate optional per-snapshot node observation masks.
+
+    Parameters
+    ----------
+    observation_masks : Tensor
+        Boolean or 0/1 mask with shape ``(num_timesteps, num_nodes)``.
+        ``True`` (or ``1``) means the node is observed at that timestep.
+    num_timesteps : int
+        Expected number of snapshots.
+    num_nodes : int
+        Expected node count.
+
+    Returns
+    -------
+    Tensor
+        Boolean mask with shape ``(num_timesteps, num_nodes)``.
+
+    Raises
+    ------
+    ValueError
+        If ``observation_masks`` has invalid shape, dtype, or no observed nodes
+        at any timestep.
+    """
+    if observation_masks.ndim != 2:
+        msg = (
+            "observation_masks must have shape (num_timesteps, num_nodes), "
+            f"got {tuple(observation_masks.shape)}"
+        )
+        raise ValueError(msg)
+    if observation_masks.shape != (num_timesteps, num_nodes):
+        msg = (
+            "observation_masks shape "
+            f"{tuple(observation_masks.shape)} does not match "
+            f"(num_timesteps={num_timesteps}, num_nodes={num_nodes})"
+        )
+        raise ValueError(msg)
+    if observation_masks.dtype not in (torch.bool, torch.float, torch.int, torch.long):
+        msg = (
+            "observation_masks must be boolean or numeric 0/1, "
+            f"got dtype {observation_masks.dtype}"
+        )
+        raise ValueError(msg)
+
+    if observation_masks.dtype != torch.bool:
+        unique = torch.unique(observation_masks)
+        if not torch.all((unique == 0) | (unique == 1)):
+            msg = "numeric observation_masks must contain only 0 and 1"
+            raise ValueError(msg)
+
+    mask = observation_masks.bool()
+    empty_timesteps = torch.where(~mask.any(dim=1))[0]
+    if empty_timesteps.numel() > 0:
+        msg = (
+            "observation_masks must have at least one observed node per timestep; "
+            f"timesteps with no observations: {empty_timesteps.tolist()}"
+        )
+        raise ValueError(msg)
+    return mask
+
+
 def _validate_control_inputs(
     control_inputs: Tensor,
     *,
@@ -478,6 +579,14 @@ def temporal_split(
                 if sequence.control_inputs is None
                 else sequence.control_inputs[:train_end]
             ),
+            timestamps=(
+                None if sequence.timestamps is None else sequence.timestamps[:train_end]
+            ),
+            observation_masks=(
+                None
+                if sequence.observation_masks is None
+                else sequence.observation_masks[:train_end]
+            ),
         ),
         val=GraphSnapshotSequence(
             val_snapshots,
@@ -487,6 +596,16 @@ def temporal_split(
                 if sequence.control_inputs is None
                 else sequence.control_inputs[train_end:val_end]
             ),
+            timestamps=(
+                None
+                if sequence.timestamps is None
+                else sequence.timestamps[train_end:val_end]
+            ),
+            observation_masks=(
+                None
+                if sequence.observation_masks is None
+                else sequence.observation_masks[train_end:val_end]
+            ),
         ),
         test=GraphSnapshotSequence(
             test_snapshots,
@@ -495,6 +614,14 @@ def temporal_split(
                 None
                 if sequence.control_inputs is None
                 else sequence.control_inputs[val_end:]
+            ),
+            timestamps=(
+                None if sequence.timestamps is None else sequence.timestamps[val_end:]
+            ),
+            observation_masks=(
+                None
+                if sequence.observation_masks is None
+                else sequence.observation_masks[val_end:]
             ),
         ),
     )
@@ -508,7 +635,12 @@ class GraphSnapshotSequence:
     ``allow_dynamic_topology=True`` to permit per-snapshot ``edge_index`` while
     still requiring a fixed node count and feature dimension. Optional
     :attr:`control_inputs` store exogenous inputs ``u_t`` applied when
-    advancing from snapshot ``t`` to ``t+1``. Downstream training APIs should
+    advancing from snapshot ``t`` to ``t+1``. Optional
+    :attr:`observation_masks` mark which nodes are measured at each timestep
+    (``True`` = observed). When masks are present, training and evaluation
+    losses average only over observed nodes; reconstruction at pair
+    ``(t, t+1)`` uses ``mask[t+1]``, and consistency terms use
+    ``mask[t] & mask[t+1]``. Downstream training APIs should
     require at least two snapshots; construction here allows a single snapshot
     for inspection or prediction-only workflows.
 
@@ -517,7 +649,8 @@ class GraphSnapshotSequence:
     Read-only views of sequence metadata are exposed as :attr:`snapshots`,
     :attr:`edge_index`, :attr:`edge_weight`, :attr:`is_dynamic_topology`,
     :attr:`control_inputs`, :attr:`has_controls`, :attr:`control_dim`,
-    :attr:`num_nodes`, :attr:`num_timesteps`, and :attr:`in_channels`. The
+    :attr:`timestamps`, :attr:`has_timestamps`, :attr:`observation_masks`,
+    :attr:`has_observation_masks`, and :attr:`num_nodes`,
     :attr:`edge_index` and :attr:`edge_weight` properties are only defined for
     static-topology sequences; use ``sequence[t].edge_index`` when
     :attr:`is_dynamic_topology` is ``True``.
@@ -529,6 +662,8 @@ class GraphSnapshotSequence:
         *,
         allow_dynamic_topology: bool = False,
         control_inputs: Tensor | None = None,
+        timestamps: Tensor | None = None,
+        observation_masks: Tensor | None = None,
     ) -> None:
         """Initialize from a sequence of graph snapshots.
 
@@ -546,6 +681,14 @@ class GraphSnapshotSequence:
             ``(num_timesteps, control_dim)``; per-node controls use
             ``(num_timesteps, num_nodes, control_dim)``. Entry ``t`` drives the
             transition from ``snapshots[t]`` to ``snapshots[t+1]``.
+        timestamps : Tensor or None, optional
+            Strictly increasing physical timestamps with shape
+            ``(num_timesteps,)``. When present, training uses per-pair
+            ``Δt = timestamps[t+1] - timestamps[t]``.
+        observation_masks : Tensor or None, optional
+            Per-timestep node observation mask with shape
+            ``(num_timesteps, num_nodes)``. ``True`` (or ``1``) marks an
+            observed node measurement at that snapshot.
         """
         snapshot_list = list(snapshots)
         if allow_dynamic_topology:
@@ -558,8 +701,22 @@ class GraphSnapshotSequence:
                 num_timesteps=len(snapshot_list),
                 num_nodes=int(snapshot_list[0].num_nodes),
             )
+        if timestamps is not None:
+            _validate_timestamps(
+                timestamps,
+                num_timesteps=len(snapshot_list),
+            )
+        validated_masks = None
+        if observation_masks is not None:
+            validated_masks = _validate_observation_masks(
+                observation_masks,
+                num_timesteps=len(snapshot_list),
+                num_nodes=int(snapshot_list[0].num_nodes),
+            )
         self._snapshots = snapshot_list
         self._control_inputs = control_inputs
+        self._timestamps = timestamps
+        self._observation_masks = validated_masks
         self._allow_dynamic_topology = allow_dynamic_topology
         self._is_dynamic_topology = (
             allow_dynamic_topology and _snapshots_have_dynamic_topology(snapshot_list)
@@ -573,6 +730,8 @@ class GraphSnapshotSequence:
         *,
         edge_weight: ArrayLike | None = None,
         control_inputs: ArrayLike | None = None,
+        timestamps: ArrayLike | None = None,
+        observation_masks: ArrayLike | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
         """Build a sequence from node feature arrays and a shared topology.
@@ -589,6 +748,12 @@ class GraphSnapshotSequence:
         control_inputs : array-like, optional
             Per-timestep control inputs with shape ``(num_timesteps,
             control_dim)`` or ``(num_timesteps, num_nodes, control_dim)``.
+        timestamps : array-like, optional
+            Strictly increasing physical timestamps with shape
+            ``(num_timesteps,)``.
+        observation_masks : array-like, optional
+            Per-timestep node observation mask with shape
+            ``(num_timesteps, num_nodes)``.
         dtype : torch.dtype, optional
             Floating dtype used when converting numpy inputs to torch tensors.
             Default is ``torch.float32``.
@@ -609,6 +774,12 @@ class GraphSnapshotSequence:
         weights = None if edge_weight is None else _as_tensor(edge_weight, dtype=dtype)
         controls = (
             None if control_inputs is None else _as_tensor(control_inputs, dtype=dtype)
+        )
+        times = None if timestamps is None else _as_tensor(timestamps, dtype=dtype)
+        masks = (
+            None
+            if observation_masks is None
+            else _as_tensor(observation_masks, dtype=torch.bool)
         )
 
         if features.ndim != 3:
@@ -647,7 +818,12 @@ class GraphSnapshotSequence:
                         edge_weight=weights.clone(),
                     )
                 )
-        return cls(snapshots, control_inputs=controls)
+        return cls(
+            snapshots,
+            control_inputs=controls,
+            timestamps=times,
+            observation_masks=masks,
+        )
 
     @classmethod
     def from_dynamic_arrays(
@@ -657,6 +833,8 @@ class GraphSnapshotSequence:
         *,
         edge_weights: Sequence[ArrayLike | None] | None = None,
         control_inputs: ArrayLike | None = None,
+        timestamps: ArrayLike | None = None,
+        observation_masks: ArrayLike | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
         """Build a dynamic-topology sequence from per-timestep edge indices.
@@ -674,6 +852,12 @@ class GraphSnapshotSequence:
         control_inputs : array-like, optional
             Per-timestep control inputs with shape ``(num_timesteps,
             control_dim)`` or ``(num_timesteps, num_nodes, control_dim)``.
+        timestamps : array-like, optional
+            Strictly increasing physical timestamps with shape
+            ``(num_timesteps,)``.
+        observation_masks : array-like, optional
+            Per-timestep node observation mask with shape
+            ``(num_timesteps, num_nodes)``.
         dtype : torch.dtype, optional
             Floating dtype used when converting numpy inputs to torch tensors.
             Default is ``torch.float32``.
@@ -753,10 +937,18 @@ class GraphSnapshotSequence:
         controls = (
             None if control_inputs is None else _as_tensor(control_inputs, dtype=dtype)
         )
+        times = None if timestamps is None else _as_tensor(timestamps, dtype=dtype)
+        masks = (
+            None
+            if observation_masks is None
+            else _as_tensor(observation_masks, dtype=torch.bool)
+        )
         return cls(
             snapshots,
             allow_dynamic_topology=True,
             control_inputs=controls,
+            timestamps=times,
+            observation_masks=masks,
         )
 
     @property
@@ -820,6 +1012,132 @@ class GraphSnapshotSequence:
         if self._control_inputs.ndim == 2:
             return int(self._control_inputs.shape[1])
         return int(self._control_inputs.shape[2])
+
+    @property
+    def timestamps(self) -> Tensor | None:
+        """Return per-snapshot physical timestamps when present.
+
+        Returns
+        -------
+        Tensor or None
+            Timestamps with shape ``(num_timesteps,)``.
+        """
+        return self._timestamps
+
+    @property
+    def has_timestamps(self) -> bool:
+        """Return whether the sequence carries timestamps.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`timestamps` is not ``None``.
+        """
+        return self._timestamps is not None
+
+    def delta_t_at(self, index: int) -> Tensor:
+        """Return ``timestamps[index + 1] - timestamps[index]``.
+
+        Parameters
+        ----------
+        index : int
+            Source snapshot index for the transition pair.
+
+        Raises
+        ------
+        ValueError
+            If timestamps are absent or ``index`` is out of range.
+        """
+        if self._timestamps is None:
+            msg = "sequence does not contain timestamps"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps - 1:
+            msg = (
+                f"delta_t index {index} is out of range for "
+                f"{self.num_timesteps} timesteps"
+            )
+            raise ValueError(msg)
+        return self._timestamps[index + 1] - self._timestamps[index]
+
+    @property
+    def observation_masks(self) -> Tensor | None:
+        """Return per-timestep node observation masks when present.
+
+        Returns
+        -------
+        Tensor or None
+            Boolean mask with shape ``(num_timesteps, num_nodes)``.
+        """
+        return self._observation_masks
+
+    @property
+    def has_observation_masks(self) -> bool:
+        """Return whether the sequence carries observation masks.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`observation_masks` is not ``None``.
+        """
+        return self._observation_masks is not None
+
+    def observation_mask_at(self, index: int) -> Tensor:
+        """Return the observation mask for snapshot ``index``.
+
+        Parameters
+        ----------
+        index : int
+            Timestep index in ``[0, num_timesteps - 1]``.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask with shape ``(num_nodes,)``.
+
+        Raises
+        ------
+        ValueError
+            If masks are absent or ``index`` is out of range.
+        """
+        if self._observation_masks is None:
+            msg = "sequence does not contain observation_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps:
+            msg = (
+                f"observation mask index {index} is out of range for "
+                f"{self.num_timesteps} timesteps"
+            )
+            raise ValueError(msg)
+        return self._observation_masks[index]
+
+    def pair_observation_mask(self, index: int) -> Tensor:
+        """Return ``mask[index] & mask[index + 1]`` for transition pairs.
+
+        Parameters
+        ----------
+        index : int
+            Source snapshot index for the transition pair.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask with shape ``(num_nodes,)``.
+
+        Raises
+        ------
+        ValueError
+            If masks are absent or ``index`` is out of range for a pair.
+        """
+        if self._observation_masks is None:
+            msg = "sequence does not contain observation_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps - 1:
+            msg = (
+                f"pair observation mask index {index} is out of range for "
+                f"{self.num_timesteps} timesteps"
+            )
+            raise ValueError(msg)
+        return self._observation_masks[index] & self._observation_masks[index + 1]
 
     def control_at(self, index: int) -> Tensor:
         """Return the control input driving transition from snapshot ``index``.
@@ -1038,6 +1356,14 @@ class GraphSnapshotSequence:
             control_inputs=(
                 None if self.control_inputs is None else self.control_inputs[start:stop]
             ),
+            timestamps=(
+                None if self.timestamps is None else self.timestamps[start:stop]
+            ),
+            observation_masks=(
+                None
+                if self.observation_masks is None
+                else self.observation_masks[start:stop]
+            ),
         )
 
     def __iter__(self) -> Iterator[Data]:
@@ -1072,3 +1398,30 @@ def resolve_sequence(
     if isinstance(sequence, GraphSnapshotSequence):
         return sequence
     return GraphSnapshotSequence(sequence)
+
+
+def resolve_pair_delta_t(
+    sequence: GraphSnapshotSequence,
+    timestep: int,
+    *,
+    default_time_step: float,
+) -> float:
+    """Return the integration interval for transition ``timestep -> timestep + 1``.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence
+        Snapshot sequence that may carry timestamps.
+    timestep : int
+        Source snapshot index.
+    default_time_step : float
+        Fallback interval when timestamps are absent.
+
+    Returns
+    -------
+    float
+        Positive integration interval.
+    """
+    if sequence.has_timestamps:
+        return float(sequence.delta_t_at(timestep).item())
+    return default_time_step

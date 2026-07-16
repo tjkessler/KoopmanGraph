@@ -70,9 +70,11 @@ At the time of writing, `KoopmanGraph` provides the following functionality:
 - **Classical baselines.** `DMDBaseline`, `EDMDBaseline`, and `DMDcBaseline` for least-squares/SVD Koopman fits on flattened node states, enabling direct topology-aware versus vector-based comparisons.
 - **Dynamic topology.** Opt-in per-snapshot `edge_index` support for rewiring contact networks during training and rollout.
 - **Benchmark datasets.** Synthetic diffusion and grid graphs, IEEE 118-bus power network, and METR-LA traffic benchmarks (cached data with documented download scripts where needed).
-- **Tutorials and tests.** Ten Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
+- **Tutorials and tests.** Sixteen Jupyter notebooks, Sphinx API reference, pytest suite with an enforced 80% coverage gate, and nbmake smoke tests in CI.
 
-Tutorial notebooks cover synthetic dynamics, the IEEE 118-bus test system (including controlled load ramps), METR-LA traffic forecasting with per-horizon evaluation, epidemic rewiring on ring graphs, Koopman spectral analysis, operator stability, and topology ablation studies. The traffic tutorial compares `GraphKoopmanModel` against packaged `DMDBaseline` and `EDMDBaseline` baselines that ignore graph structure.
+Tutorial notebooks cover synthetic dynamics, the IEEE 118-bus test system (including controlled load ramps and latent-space RL voltage control), METR-LA traffic forecasting with per-horizon evaluation, epidemic rewiring on ring graphs, Koopman spectral analysis, operator stability, topology ablation studies, long-horizon structural stability, continuous-time irregular sampling, online RLS adaptation, hybrid physics-informed observables, and spectral similarity / anomaly detection. The traffic tutorial compares `GraphKoopmanModel` against packaged `DMDBaseline` and `EDMDBaseline` baselines that ignore graph structure.
+
+**v0.3.0 additions** extend the library with guaranteed long-horizon stability via structurally constrained Koopman parameterizations (`schur`, `dissipative`, `lyapunov`); continuous-time generator learning with matrix-exponential integration and `predict_at` for irregular sampling; recursive least-squares online adaptation of the Koopman operator with a frozen GNN encoder; hybrid physics-informed observables that concatenate known structural features with learned latents; dynamical similarity metrics (`spectrum_distance`, `koopman_std`, `detect_anomaly`) for regime comparison; and a Gymnasium environment wrapper (`GraphKoopmanEnv`) for latent-space reinforcement learning.
 
 # Example
 
@@ -109,11 +111,11 @@ After training, `future_graphs` contains five predicted PyG `Data` snapshots wit
 
 # Research impact statement
 
-`KoopmanGraph` is a new research software package. At the time of submission there are no external publications or downstream adoptions to cite, and no related companion manuscripts. Impact is demonstrated through reproducible tutorials on synthetic dynamics, the IEEE 118-bus test system, and the METR-LA traffic sensor network; per-horizon evaluation on held-out traffic data; controlled-system demonstrations on the power-grid benchmark; epidemic rewiring on dynamic topologies; spectral and stability analysis notebooks; explicit topology-versus-vector comparisons using packaged DMD/EDMD baselines; and open development artifacts including PyPI releases (v0.1.0 initial release, v0.2.0 feature expansion), CI with pytest and an 80% coverage gate, nbmake notebook smoke tests, and API reference documentation.
+`KoopmanGraph` is a new research software package. At the time of submission there are no external publications or downstream adoptions to cite, and no related companion manuscripts. Impact is demonstrated through reproducible tutorials on synthetic dynamics, the IEEE 118-bus test system, and the METR-LA traffic sensor network; per-horizon evaluation on held-out traffic data; controlled-system demonstrations on the power-grid benchmark; epidemic rewiring on dynamic topologies; spectral and stability analysis notebooks; explicit topology-versus-vector comparisons using packaged DMD/EDMD baselines; long-horizon structural stability and continuous-time forecasting; online RLS adaptation under distributional shift; hybrid physics-informed observables; spectral similarity and anomaly detection; latent-space RL control; and open development artifacts including PyPI releases (v0.1.0 initial release, v0.2.0 feature expansion, v0.3.0 stability/continuous-time/adaptation extensions), CI with pytest and an 80% coverage gate, nbmake notebook smoke tests, and API reference documentation.
 
 The author uses `KoopmanGraph` as a platform for experimenting with Koopman-theoretic forecasting on networked systems. The library is intended to lower the barrier for other researchers to train, evaluate, and extend topology-aware Koopman models on standard PyG workflows.
 
-A versioned software archive is available on Zenodo (software archive DOI: [10.5281/zenodo.21326273](https://doi.org/10.5281/zenodo.21326273), version 0.2.0).
+A versioned software archive for v0.2.0 is available on Zenodo (software archive DOI: [10.5281/zenodo.21326273](https://doi.org/10.5281/zenodo.21326273)). A v0.3.0 archive DOI will be added when that release is published.
 
 # Conclusion
 

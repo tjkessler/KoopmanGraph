@@ -16,12 +16,16 @@ from koopman_graph.data import (
     GraphSnapshotSequence,
     WindowSampler,
     _snapshot_edge_weight,
+    resolve_pair_delta_t,
     resolve_sequence,
 )
 from koopman_graph.losses import (
     BackwardConsistencyLoss,
     EigenvalueRegularizationLoss,
     ForwardConsistencyLoss,
+    _inverse_propagate_latent,
+    _propagate_latent,
+    masked_mse_loss,
     rollout_multi_start_loss,
     rollout_sequence_loss,
 )
@@ -31,6 +35,28 @@ _BACKWARD_CONSISTENCY_LOSS = BackwardConsistencyLoss()
 _EIGENVALUE_REGULARIZATION_LOSS = EigenvalueRegularizationLoss()
 
 PairLossFn = Callable[[nn.Module, GraphSnapshotSequence, int], Tensor]
+
+
+def _encode_snapshot(model: nn.Module, snapshot: Data) -> Tensor:
+    """Encode a snapshot using hybrid observables when available.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Model exposing ``encode`` or ``encoder``.
+    snapshot : Data
+        Graph snapshot to encode.
+
+    Returns
+    -------
+    Tensor
+        Latent node features.
+    """
+    encode = getattr(model, "encode", None)
+    if callable(encode):
+        return encode(snapshot)
+    edge_weight = _snapshot_edge_weight(snapshot)
+    return model.encoder(snapshot.x, snapshot.edge_index, edge_weight)
 
 
 @dataclass(frozen=True)
@@ -326,6 +352,8 @@ def one_step_loss(
     snapshot_t1: Data,
     *,
     control: Tensor | None = None,
+    delta_t: float | Tensor | None = None,
+    target_mask: Tensor | None = None,
 ) -> Tensor:
     """Compute one-step MSE between model prediction and the next snapshot.
 
@@ -340,15 +368,22 @@ def one_step_loss(
         Graph snapshot at time ``t+1`` (prediction target).
     control : Tensor or None, optional
         Control input driving the transition from ``t`` to ``t+1``.
+    delta_t : float, Tensor, or None, optional
+        Integration interval for continuous-time models.
+    target_mask : Tensor or None, optional
+        Boolean node mask with shape ``(num_nodes,)``. When provided, the loss
+        averages only over observed nodes at the target snapshot.
 
     Returns
     -------
     Tensor
         Scalar mean-squared error loss.
     """
-    prediction = model(snapshot_t, control=control)
+    prediction = model(snapshot_t, control=control, delta_t=delta_t)
     target = snapshot_t1.x
-    return nn.functional.mse_loss(prediction, target)
+    if target_mask is None:
+        return nn.functional.mse_loss(prediction, target)
+    return masked_mse_loss(prediction, target, target_mask)
 
 
 def _pair_control(sequence: GraphSnapshotSequence, timestep: int) -> Tensor | None:
@@ -394,17 +429,32 @@ def _forward_consistency_pair(
     """
     snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
-    edge_index_t = snapshot_t.edge_index
-    edge_weight_t = _snapshot_edge_weight(snapshot_t)
-    edge_index_t1 = snapshot_t1.edge_index
-    edge_weight_t1 = _snapshot_edge_weight(snapshot_t1)
-    z_t = model.encoder(snapshot_t, edge_index_t, edge_weight_t)
-    z_t1 = model.encoder(snapshot_t1, edge_index_t1, edge_weight_t1)
+    z_t = _encode_snapshot(model, snapshot_t)
+    z_t1 = _encode_snapshot(model, snapshot_t1)
+    delta_t = resolve_pair_delta_t(
+        sequence,
+        timestep,
+        default_time_step=getattr(model, "time_step", 1.0),
+    )
+    control = _pair_control(sequence, timestep)
+    if sequence.has_observation_masks:
+        z_pred = _propagate_latent(
+            model.koopman,
+            z_t,
+            control=control,
+            delta_t=delta_t,
+        )
+        return masked_mse_loss(
+            z_pred,
+            z_t1,
+            sequence.pair_observation_mask(timestep),
+        )
     return _FORWARD_CONSISTENCY_LOSS(
         z_t,
         z_t1,
         model.koopman,
-        control=_pair_control(sequence, timestep),
+        control=control,
+        delta_t=delta_t,
     )
 
 
@@ -435,18 +485,34 @@ def _backward_consistency_pair(
     """
     snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
-    edge_index_t = snapshot_t.edge_index
-    edge_weight_t = _snapshot_edge_weight(snapshot_t)
-    edge_index_t1 = snapshot_t1.edge_index
-    edge_weight_t1 = _snapshot_edge_weight(snapshot_t1)
-    z_t = model.encoder(snapshot_t, edge_index_t, edge_weight_t)
-    z_t1 = model.encoder(snapshot_t1, edge_index_t1, edge_weight_t1)
+    z_t = _encode_snapshot(model, snapshot_t)
+    z_t1 = _encode_snapshot(model, snapshot_t1)
+    delta_t = resolve_pair_delta_t(
+        sequence,
+        timestep,
+        default_time_step=getattr(model, "time_step", 1.0),
+    )
+    control = _pair_control(sequence, timestep)
+    if sequence.has_observation_masks:
+        z_recovered = _inverse_propagate_latent(
+            model.koopman,
+            z_t1,
+            control=control,
+            inverse_matrix=inverse_matrix,
+            delta_t=delta_t,
+        )
+        return masked_mse_loss(
+            z_recovered,
+            z_t,
+            sequence.pair_observation_mask(timestep),
+        )
     return _BACKWARD_CONSISTENCY_LOSS(
         z_t,
         z_t1,
         model.koopman,
-        control=_pair_control(sequence, timestep),
+        control=control,
         inverse_matrix=inverse_matrix,
+        delta_t=delta_t,
     )
 
 
@@ -508,11 +574,20 @@ def _one_step_pair(
     Tensor
         Scalar one-step reconstruction loss.
     """
+    target_mask = None
+    if sequence.has_observation_masks:
+        target_mask = sequence.observation_mask_at(timestep + 1)
     return one_step_loss(
         model,
         sequence[timestep],
         sequence[timestep + 1],
         control=_pair_control(sequence, timestep),
+        delta_t=resolve_pair_delta_t(
+            sequence,
+            timestep,
+            default_time_step=getattr(model, "time_step", 1.0),
+        ),
+        target_mask=target_mask,
     )
 
 
@@ -600,7 +675,10 @@ def compute_backward_consistency_sequence_loss(
         raise ValueError(msg)
 
     inverse_matrix = None
-    if model.koopman.parameterization == "dense":
+    if (
+        getattr(model, "dynamics_mode", "discrete") == "discrete"
+        and model.koopman.parameterization == "dense"
+    ):
         inverse_matrix = model.koopman.dense_inverse_matrix()
 
     total_loss = torch.zeros((), device=next(model.parameters()).device)
