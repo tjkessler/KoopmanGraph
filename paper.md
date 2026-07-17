@@ -61,7 +61,7 @@ Tutorial notebooks under `examples/` demonstrate end-to-end training and forecas
 
 The author uses `KoopmanGraph` as a platform for experimenting with Koopman-theoretic forecasting on networked systems. The library is intended to lower the barrier for other researchers to train, evaluate, and extend topology-aware Koopman models on standard PyG workflows.
 
-Versioned software archives are available on Zenodo (v0.3.0 DOI: \url{[https://doi.org/10.5281/zenodo.21404269}](https://doi.org/10.5281/zenodo.21404269}); v0.2.0 DOI: \url{[https://doi.org/10.5281/zenodo.21326273}](https://doi.org/10.5281/zenodo.21326273})).
+Versioned software archives are available on Zenodo (v0.4.0 DOI: \url{[https://doi.org/10.5281/zenodo.21420623}](https://doi.org/10.5281/zenodo.21420623}); v0.3.0 DOI: \url{[https://doi.org/10.5281/zenodo.21404269}](https://doi.org/10.5281/zenodo.21404269}); v0.2.0 DOI: \url{[https://doi.org/10.5281/zenodo.21326273}](https://doi.org/10.5281/zenodo.21326273})).
 
 # Conclusion
 
