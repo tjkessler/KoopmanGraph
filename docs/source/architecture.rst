@@ -63,8 +63,8 @@ Convert a flat module into a capability package when **any** of these hold:
 * **Room to grow peers** — a new classical method or GNN variant should land
   as a sibling module, not another flat mega-file.
 
-Phase 8 capability packages (TASK-740–745): ``training/``, ``data/``,
-``operators/``, ``nn/``, ``analysis/``, and ``baselines/`` (all landed).
+Phase 8 capability packages: ``training/``, ``data/``, ``operators/``,
+``nn/``, ``analysis/``, and ``baselines/`` (all landed).
 
 ``koopman_graph.training`` package layout:
 
@@ -95,7 +95,7 @@ Phase 8 capability packages (TASK-740–745): ``training/``, ``data/``,
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
-``koopman_graph.continuous`` were removed in v0.3.0 (TASK-746).
+``koopman_graph.continuous`` were removed in v0.3.0.
 
 ``koopman_graph.nn`` package layout (peer encoder / decoder / GNN primitives;
 PyG-style ``nn`` capability package, no ``conv/`` subtree):
@@ -109,8 +109,8 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
 
 Prefer ``from koopman_graph.nn import …`` (or the root façade for public
 classes). Former root modules ``koopman_graph.encoder``,
-``koopman_graph.decoder``, and ``koopman_graph.gnn`` were removed in v0.3.0
-(TASK-746). Encoder and decoder remain peers: both import from ``nn.gnn``;
+``koopman_graph.decoder``, and ``koopman_graph.gnn`` were removed in v0.3.0.
+Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
 ``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
@@ -189,8 +189,8 @@ Moving files must **not** change the layering contract above:
 
 Folders are an organization tool; they do not create a fourth API tier.
 
-Compatibility contract (TASK-740–746)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Compatibility contract
+~~~~~~~~~~~~~~~~~~~~~~
 
 When splitting or nesting modules:
 
@@ -206,7 +206,7 @@ When splitting or nesting modules:
   * **Migrate in-repo** — update every docs/tests/notebook deep import to the
     new path and record the rename here. **Do not** add long-lived root shim
     modules for renamed paths (``operator`` → ``operators``, ``encoder`` →
-    ``nn.encoder``, …). v0.3.0 removed the TASK-742/743 shims (TASK-746).
+    ``nn.encoder``, …). v0.3.0 removed those temporary root shims.
 
 Do not leave half-migrated import paths. Serialization type strings and
 checkpoint reconstruct rules stay intact unless a task explicitly bumps
@@ -223,10 +223,10 @@ Public façade
 Stable, supported entry points re-exported from :mod:`koopman_graph` (see
 ``__all__``). Prefer these in tutorials, notebooks, and application code.
 
-v0.3.0 uses a **thin** root façade (TASK-747–750): keep the core encode →
-evolve → decode / fit / evaluate workflow at the package root; import
-specialized helpers from capability modules. Demotions are a **hard cut**
-(no root deprecation aliases), consistent with TASK-746 shim removal.
+v0.3.0 uses a **thin** root façade: keep the core encode → evolve → decode /
+fit / evaluate workflow at the package root; import specialized helpers from
+capability modules. Demotions are a **hard cut** (no root deprecation
+aliases), consistent with the shim-removal policy above.
 
 **Keep in** ``koopman_graph.__all__`` (core workflow):
 
@@ -268,16 +268,15 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
 ``__all__``):
 
 * :mod:`koopman_graph.metrics` — ``mae``, ``rmse``, ``mape``,
-  ``HorizonMetrics`` (landed in TASK-748)
+  ``HorizonMetrics``
 * :mod:`koopman_graph.analysis` — ``compute_generator_spectrum``,
   ``discrete_spectrum_at_delta_t``, ``decode_mode_shapes``,
   ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
   ``detect_anomaly``, ``calibrate_anomaly_threshold``,
-  ``AnomalyDetectionResult`` (landed in TASK-749)
-* :mod:`koopman_graph.data` — ``as_multi_trajectory`` (landed in TASK-750)
-* :mod:`koopman_graph.adaptation` — ``AdaptationStepResult`` (landed in TASK-750)
+  ``AnomalyDetectionResult``
+* :mod:`koopman_graph.data` — ``as_multi_trajectory``
+* :mod:`koopman_graph.adaptation` — ``AdaptationStepResult``
 * :mod:`koopman_graph.observables` — ``graph_laplacian_features``
-  (landed in TASK-750)
 
 .. code-block:: python
 
@@ -535,7 +534,7 @@ of assembled ``K`` / ``L`` via ``eigvals``. Prefer ``bound_metric`` for ODO
 factor monitoring and structural certificates. Discrete ODO still satisfies
 ``ρ(K) ≤ bound_metric`` via the operator 2-norm; continuous ODO does **not**
 guarantee Hurwitz stability from the factor bound alone. See the quickstart
-stability section and TASK-608 docs.
+stability section.
 ``KoopmanPropagator`` in :mod:`koopman_graph.graph_utils` is an alias of the
 Protocol and is the single typing surface for losses and adaptation.
 
@@ -925,9 +924,9 @@ No ``FORMAT_VERSION`` bump was required: the field was already emitted in v2.
 v0.3.0 architectural consistency outcomes
 -----------------------------------------
 
-Phase 8 (TASK-700–752) standardized style and release quality without bumping
-the package beyond ``0.3.0`` or ``FORMAT_VERSION`` 2. Outcomes folded into the
-first public v0.3.0 cut:
+Phase 8 standardized style and release quality without bumping the package
+beyond ``0.3.0`` or ``FORMAT_VERSION`` 2. Outcomes folded into the first public
+v0.3.0 cut:
 
 **Highest-impact API remediations (second style audit)**
 
@@ -968,9 +967,8 @@ first public v0.3.0 cut:
 
 * Layout policy plus ``training/``, ``data/``, ``operators/``, ``nn/``,
   ``analysis/``, and ``baselines/`` capability packages; deep-import shim
-  hard cut (TASK-746); thin root ``__all__`` with metrics / analysis / data /
-  adaptation / observables secondaries demoted to capability imports
-  (TASK-747–750).
+  hard cut; thin root ``__all__`` with metrics / analysis / data /
+  adaptation / observables secondaries demoted to capability imports.
 
 **Analysis UX and release quality**
 
