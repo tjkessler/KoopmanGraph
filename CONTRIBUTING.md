@@ -14,6 +14,7 @@ checks locally, and submit changes via pull request.
 
 - [Code of conduct](#code-of-conduct)
 - [Ways to contribute](#ways-to-contribute)
+- [Support](#support)
 - [Development environment](#development-environment)
 - [Running checks locally](#running-checks-locally)
 - [Testing and coverage requirements](#testing-and-coverage-requirements)
@@ -26,9 +27,11 @@ checks locally, and submit changes via pull request.
 
 ## Code of conduct
 
-Please be respectful and constructive in all project interactions. Report
-behavior concerns through [GitHub Issues](https://github.com/tjkessler/KoopmanGraph/issues)
-or by contacting the maintainers listed in `pyproject.toml`.
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md) (v2.1).
+Please be respectful and constructive in all project interactions. To report
+unacceptable behavior, email the maintainer at
+[travis.j.kessler@gmail.com](mailto:travis.j.kessler@gmail.com) (see
+[Enforcement](CODE_OF_CONDUCT.md#enforcement) in the full code of conduct).
 
 ## Ways to contribute
 
@@ -41,6 +44,26 @@ You can contribute without writing code:
 
 For code changes, please follow the development setup and pull request process
 below.
+
+## Support
+
+Need help using KoopmanGraph? Prefer the channels below so maintainers and other
+users can find questions and answers in one place.
+
+| Kind of request | Where to go |
+|-----------------|-------------|
+| Usage / how-to questions, modeling advice, “am I holding this wrong?” | [GitHub Discussions](https://github.com/tjkessler/KoopmanGraph/discussions) |
+| Suspected bugs (crashes, incorrect results, install failures with a repro) | [Bug report](https://github.com/tjkessler/KoopmanGraph/issues/new?template=bug_report.yml) |
+| New features or API changes | [Feature request](https://github.com/tjkessler/KoopmanGraph/issues/new?template=feature_request.yml) |
+
+**Bug report vs usage question:** If you can show unexpected behavior with a
+minimal reproducible example (versions, code, and expected vs actual output),
+open a bug report. If you are unsure how to configure a model, interpret
+outputs, or choose an API for your problem, start a Discussion instead.
+
+Blank issues are disabled; the issue chooser also links to Discussions for
+non-bug questions. Responses are **best-effort** from maintainers and the
+community—there is **no SLA** or guaranteed response time.
 
 ## Development environment
 
@@ -228,7 +251,7 @@ handling, read the maintainer architecture guide:
 
 KoopmanGraph follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
 While the project is pre-1.0, breaking API changes may appear in `0.x.y` releases;
-document them in release notes.
+document them in [CHANGELOG.md](CHANGELOG.md) and in GitHub Release notes.
 
 ### Version source of truth
 
@@ -269,12 +292,14 @@ checkpoint migration path.
 
 1. Ensure `main` is green (CI tests, lint, notebook smoke tests).
 2. Update `__version__` in `src/koopman_graph/__init__.py`.
-3. Merge any pending release-prep changes to `main`.
-4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.3.0`). Publishing the
+3. Update [CHANGELOG.md](CHANGELOG.md) with user-facing notes for the new version
+   (features, changes, fixes, and any breaking notes).
+4. Merge any pending release-prep changes to `main`.
+5. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.3.0`). Publishing the
    release triggers `.github/workflows/release.yml`.
-5. Approve the `pypi` environment deployment if required by branch protection.
-6. Confirm the workflow uploaded artifacts to PyPI.
-7. Verify installation:
+6. Approve the `pypi` environment deployment if required by branch protection.
+7. Confirm the workflow uploaded artifacts to PyPI.
+8. Verify installation:
 
    ```bash
    pip install koopman-graph==X.Y.Z
