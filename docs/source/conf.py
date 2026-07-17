@@ -15,7 +15,7 @@ copyright = "2026, Travis Kessler"
 try:
     from koopman_graph import __version__ as release
 except ImportError:
-    release = "0.2.0"
+    release = "0.3.0"
 
 version = release
 

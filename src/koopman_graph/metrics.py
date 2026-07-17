@@ -9,8 +9,9 @@ import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence
-from koopman_graph.training import resolve_rollout_start_indices
+from koopman_graph.data import GraphSnapshotSequence, resolve_rollout_start_indices
+from koopman_graph.losses import masked_mse_loss
+from koopman_graph.protocols import TrainableKoopmanModel
 
 _EPS = 1e-8
 
@@ -77,6 +78,103 @@ def mape(
     return torch.mean(torch.abs((prediction - target) / (target.abs() + eps)))
 
 
+def _masked_node_average(
+    values: Tensor,
+    mask: Tensor,
+) -> Tensor:
+    """Average per-node scalar values over observed nodes.
+
+    Parameters
+    ----------
+    values : Tensor
+        Per-node values with shape ``(num_nodes,)``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar average over observed nodes.
+    """
+    node_mask = mask.to(device=values.device, dtype=values.dtype)
+    denom = node_mask.sum()
+    if denom <= 0:
+        return torch.zeros((), device=values.device, dtype=values.dtype)
+    return (values.abs() * node_mask).sum() / denom
+
+
+def masked_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Compute mean absolute error over observed nodes.
+
+    Averages absolute error over the feature dimension per node, then averages
+    those per-node values over masked (observed) nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean absolute error.
+    """
+    return _masked_node_average((prediction - target).abs().mean(dim=-1), mask)
+
+
+def masked_rmse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Compute root mean squared error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked root mean squared error.
+    """
+    return torch.sqrt(masked_mse_loss(prediction, target, mask))
+
+
+def masked_mape(
+    prediction: Tensor,
+    target: Tensor,
+    mask: Tensor,
+    *,
+    eps: float = _EPS,
+) -> Tensor:
+    """Compute mean absolute percentage error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+    eps : float, optional
+        Small constant added to the denominator for numerical stability.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean absolute percentage error.
+    """
+    per_node = ((prediction - target) / (target.abs() + eps)).abs().mean(dim=-1)
+    return _masked_node_average(per_node, mask)
+
+
 @dataclass(frozen=True)
 class HorizonMetrics:
     """Forecast metrics at a single prediction horizon.
@@ -125,7 +223,7 @@ class EvaluationResult:
 
 
 def evaluate_forecast(
-    model: nn.Module,
+    model: TrainableKoopmanModel,
     sequence: GraphSnapshotSequence,
     *,
     horizons: Sequence[int] = (3, 6, 12),
@@ -138,8 +236,10 @@ def evaluate_forecast(
 
     Parameters
     ----------
-    model : nn.Module
-        Model implementing :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
+    model : TrainableKoopmanModel
+        Trainable model implementing
+        :meth:`~koopman_graph.protocols.TrainableKoopmanModel.predict` and the
+        Module train/eval façade.
     sequence : GraphSnapshotSequence
         Evaluation snapshots with shared topology.
     horizons : sequence of int, optional
@@ -186,7 +286,7 @@ def evaluate_forecast(
             for start in origins:
                 initial_graph: Data = sequence[start]
                 controls = None
-                if getattr(model, "control_dim", 0) > 0:
+                if model.control_dim > 0:
                     controls = sequence.rollout_controls(start, max_horizon)
                 future_topologies = None
                 if sequence.is_dynamic_topology:
@@ -202,9 +302,21 @@ def evaluate_forecast(
                 for horizon in sorted_horizons:
                     pred = predictions[horizon - 1].x
                     target = sequence[start + horizon].x
-                    mae_sums[horizon] += float(mae(pred, target).cpu())
-                    rmse_sums[horizon] += float(rmse(pred, target).cpu())
-                    mape_sums[horizon] += float(mape(pred, target).cpu())
+                    if sequence.has_observation_masks:
+                        node_mask = sequence.observation_mask_at(start + horizon)
+                        mae_sums[horizon] += float(
+                            masked_mae(pred, target, node_mask).cpu()
+                        )
+                        rmse_sums[horizon] += float(
+                            masked_rmse(pred, target, node_mask).cpu()
+                        )
+                        mape_sums[horizon] += float(
+                            masked_mape(pred, target, node_mask).cpu()
+                        )
+                    else:
+                        mae_sums[horizon] += float(mae(pred, target).cpu())
+                        rmse_sums[horizon] += float(rmse(pred, target).cpu())
+                        mape_sums[horizon] += float(mape(pred, target).cpu())
     finally:
         model.train(was_training)
 

@@ -1,4 +1,11 @@
-"""Shared Laplacian diffusion dynamics for benchmark datasets."""
+"""Shared Laplacian diffusion dynamics for benchmark datasets.
+
+Uses the same symmetric normalized Laplacian ``L_sym`` core as
+:func:`~koopman_graph.observables.graph_laplacian_features` (via
+:mod:`koopman_graph.graph_utils`), but assembles a **dense** one-step diffusion
+operator for offline benchmark rollouts. Prefer the sparse matvec path in
+``observables`` for hybrid physics lifting at training time.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +15,7 @@ import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
 
 InitialStateName = Literal["random", "ones"]
 
@@ -21,7 +29,9 @@ def normalized_step_operator(
 ) -> Tensor:
     """Build one-step Laplacian diffusion operator ``I - alpha * L_sym``.
 
-    The symmetric normalized Laplacian is ``L_sym = I - D^{-1/2} A D^{-1/2}``.
+    The symmetric normalized Laplacian is ``L_sym = I - D^{-1/2} A D^{-1/2}``,
+    sharing its adjacency normalization with
+    :func:`~koopman_graph.graph_utils.symmetric_normalized_adjacency_edge_weights`.
     The returned operator is ``(1 - alpha) * I + alpha * D^{-1/2} A D^{-1/2}``.
 
     Parameters
@@ -40,17 +50,12 @@ def normalized_step_operator(
     Tensor
         Step operator with shape ``(num_nodes, num_nodes)``.
     """
-    row, col = edge_index
-    deg = torch.zeros(num_nodes, dtype=dtype)
-    deg.index_add_(0, row, torch.ones(row.size(0), dtype=dtype))
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
-
-    norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
-    adj = torch.zeros((num_nodes, num_nodes), dtype=dtype)
-    adj[row, col] = norm
-
-    eye = torch.eye(num_nodes, dtype=dtype)
+    adj = dense_symmetric_normalized_adjacency(
+        edge_index,
+        num_nodes,
+        dtype=dtype,
+    )
+    eye = torch.eye(num_nodes, dtype=dtype, device=edge_index.device)
     return (1.0 - diffusion_rate) * eye + diffusion_rate * adj
 
 
@@ -83,12 +88,17 @@ def validate_diffusion_generation_params(
 ) -> None:
     """Validate shared diffusion benchmark generation parameters.
 
+    Used by Laplacian-diffusion generators (synthetic, grid, IEEE 118). The
+    shared ``decay_rate`` domain is ``> 0`` (values ``>= 1`` are allowed and
+    amplify rather than damp). Anisotropic advection uses a stricter open
+    interval via :func:`validate_advection_decay_rate`.
+
     Parameters
     ----------
     decay_rate : float
-        Global amplitude decay applied each diffusion step.
+        Global amplitude decay applied each diffusion step. Must be ``> 0``.
     noise_std : float
-        Standard deviation of additive Gaussian noise.
+        Standard deviation of additive Gaussian noise. Must be ``>= 0``.
     diffusion_rate : float or None, optional
         Laplacian diffusion strength in ``[0, 1]``. Validated when provided.
     initial_state : {"random", "ones"} or None, optional
@@ -110,6 +120,28 @@ def validate_diffusion_generation_params(
         raise ValueError(msg)
     if initial_state is not None and initial_state not in {"random", "ones"}:
         msg = f"initial_state must be 'random' or 'ones', got {initial_state!r}"
+        raise ValueError(msg)
+
+
+def validate_advection_decay_rate(decay_rate: float) -> None:
+    """Validate anisotropic-advection self-retention ``decay_rate``.
+
+    Unlike Laplacian diffusion (where ``decay_rate > 0``), advection treats
+    ``decay_rate`` as a self-retention factor that must lie in the open
+    interval ``(0, 1)`` so neighbor mass remains strictly positive.
+
+    Parameters
+    ----------
+    decay_rate : float
+        Self-retention factor. Must satisfy ``0 < decay_rate < 1``.
+
+    Raises
+    ------
+    ValueError
+        If ``decay_rate`` is outside ``(0, 1)``.
+    """
+    if not 0.0 < decay_rate < 1.0:
+        msg = f"decay_rate must be in (0, 1), got {decay_rate}"
         raise ValueError(msg)
 
 

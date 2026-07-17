@@ -5,7 +5,8 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import DMDBaseline, DMDcBaseline, EDMDBaseline, GraphSnapshotSequence
-from koopman_graph.baselines import (
+from koopman_graph.baselines import ClassicalBaseline
+from koopman_graph.baselines.base import (
     _fit_controlled_row_operator,
     _flatten_snapshots,
     _transition_controls,
@@ -132,7 +133,10 @@ def test_edmd_baseline_lifts_polynomial_observables(
     baseline = EDMDBaseline(polynomial_degree=2).fit(sequence)
 
     assert baseline.K is not None
+    assert baseline.reconstruction_matrix is not None
     assert baseline.K.shape == (2, 2)
+    assert baseline.reconstruction_matrix.shape == (1, 2)
+    assert "decoder" not in baseline.__dict__
     prediction = baseline.predict(sequence[0], steps=3)[-1]
     assert torch.allclose(prediction.x.reshape(-1), states[3], atol=1e-10)
 
@@ -172,6 +176,56 @@ def test_baselines_reject_single_snapshot(
 
     with pytest.raises(ValueError, match="at least two snapshots"):
         baseline_cls().fit(sequence)
+
+
+def _dynamic_topology_sequence(
+    *,
+    num_timesteps: int = 4,
+    with_controls: bool = False,
+) -> GraphSnapshotSequence:
+    """Build a short sequence with alternating edge sets."""
+    edge_a = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    edge_b = torch.tensor([[0, 0], [1, 1]], dtype=torch.long)
+    snapshots = [
+        Data(
+            x=torch.randn(2, 1),
+            edge_index=edge_a if i % 2 == 0 else edge_b,
+        )
+        for i in range(num_timesteps)
+    ]
+    controls = torch.randn(num_timesteps, 1) if with_controls else None
+    return GraphSnapshotSequence(
+        snapshots,
+        control_inputs=controls,
+        allow_dynamic_topology=True,
+    )
+
+
+@pytest.mark.parametrize("baseline_cls", [DMDBaseline, EDMDBaseline, DMDcBaseline])
+def test_baselines_reject_dynamic_topology(
+    baseline_cls: type[DMDBaseline] | type[EDMDBaseline] | type[DMDcBaseline],
+) -> None:
+    """Verify classical baselines reject dynamic-topology sequences at fit."""
+    sequence = _dynamic_topology_sequence(
+        with_controls=baseline_cls is DMDcBaseline,
+    )
+    assert sequence.is_dynamic_topology
+
+    with pytest.raises(ValueError, match="is_dynamic_topology"):
+        baseline_cls().fit(sequence)
+
+
+def test_baselines_accept_static_topology_with_dynamic_flag(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify allow_dynamic_topology alone does not reject identical edges."""
+    sequence = GraphSnapshotSequence(
+        [Data(x=torch.randn(2, 1), edge_index=synthetic_edge_index) for _ in range(4)],
+        allow_dynamic_topology=True,
+    )
+    assert not sequence.is_dynamic_topology
+    baseline = DMDBaseline().fit(sequence)
+    assert baseline.K is not None
 
 
 @pytest.mark.parametrize("baseline_cls", [DMDBaseline, EDMDBaseline])
@@ -265,6 +319,32 @@ def test_dmd_baseline_truncated_rank_recovers_dynamics(
     assert torch.allclose(baseline.K, operator, atol=1e-8)
 
 
+def test_dmd_baseline_truncated_rank_on_low_rank_data(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify truncated SVD recovers dynamics embedded in a higher-dim state."""
+    embedded = torch.diag(torch.tensor([0.9, 0.7], dtype=torch.float64))
+    operator = torch.zeros(4, 4, dtype=torch.float64)
+    operator[:2, :2] = embedded
+    initial = torch.tensor([1.0, -0.5, 0.0, 0.0], dtype=torch.float64)
+    states = _linear_sequence(operator, initial)
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=2,
+    )
+
+    baseline = DMDBaseline(rank=2).fit(sequence)
+
+    assert baseline.K is not None
+    left = torch.stack(states[:-1])
+    right = torch.stack(states[1:])
+    predicted = left @ baseline.K.T
+    assert torch.allclose(predicted, right, atol=1e-8)
+    assert torch.linalg.matrix_rank(baseline.K, atol=1e-8).item() <= 2
+
+
 def test_dmd_baseline_rejects_invalid_rank(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
@@ -275,6 +355,17 @@ def test_dmd_baseline_rejects_invalid_rank(
         DMDBaseline(rank=0).fit(sequence)
     with pytest.raises(ValueError, match="rank must be <="):
         DMDBaseline(rank=99).fit(sequence)
+
+
+@pytest.mark.parametrize("baseline_cls", [DMDBaseline, DMDcBaseline, EDMDBaseline])
+def test_baselines_share_classical_baseline_scaffold(
+    baseline_cls: type[ClassicalBaseline],
+) -> None:
+    """Verify DMD-family baselines inherit shared ClassicalBaseline scaffolding."""
+    baseline = baseline_cls(time_step=0.5)
+    assert isinstance(baseline, ClassicalBaseline)
+    assert baseline.time_step == 0.5
+    assert baseline.K is None
 
 
 @pytest.mark.parametrize("baseline_cls", [DMDBaseline, DMDcBaseline, EDMDBaseline])
@@ -350,15 +441,14 @@ def test_transition_controls_requires_controls(
         _transition_controls(sequence)
 
 
-def test_transition_controls_flattens_per_node_inputs(
+def test_transition_controls_rejects_per_node_inputs(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify per-node controls are flattened per transition."""
+    """Verify per-node controls are rejected (no silent flatten)."""
     sequence = _controlled_sequence(synthetic_edge_index, per_node=True)
 
-    controls = _transition_controls(sequence)
-
-    assert controls.shape == (sequence.num_timesteps - 1, 2)
+    with pytest.raises(ValueError, match="does not support per-node"):
+        _transition_controls(sequence)
 
 
 def test_dmdc_baseline_rejects_single_snapshot(
@@ -384,25 +474,14 @@ def test_dmdc_baseline_rejects_uncontrolled_sequence(
         DMDcBaseline().fit(sequence)
 
 
-def test_dmdc_baseline_fits_per_node_controls(
+def test_dmdc_baseline_rejects_per_node_controls(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify DMDc fits and predicts with per-node control inputs."""
+    """Verify DMDc rejects per-node (3-D) control inputs at fit."""
     sequence = _controlled_sequence(synthetic_edge_index, per_node=True)
 
-    baseline = DMDcBaseline().fit(sequence)
-
-    assert baseline.per_node_controls
-    assert baseline.num_nodes_control == 2
-    assert baseline.control_dim == 1
-
-    future_controls = [
-        torch.randn(2, 1, dtype=torch.float64),
-        torch.randn(2, 1, dtype=torch.float64),
-    ]
-    predictions = baseline.predict(sequence[0], steps=2, controls=future_controls)
-    assert len(predictions) == 2
-    assert predictions[0].x.shape == (2, 1)
+    with pytest.raises(ValueError, match="does not support per-node"):
+        DMDcBaseline().fit(sequence)
 
 
 def test_dmdc_baseline_rejects_invalid_prediction_arguments(
@@ -422,7 +501,7 @@ def test_dmdc_baseline_rejects_invalid_prediction_arguments(
 def test_dmdc_baseline_rejects_invalid_control_shapes(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify global and per-node control shape validation at prediction."""
+    """Verify global control shape validation at prediction."""
     global_baseline = DMDcBaseline().fit(_controlled_sequence(synthetic_edge_index))
     with pytest.raises(ValueError, match="global controls must have shape"):
         global_baseline.predict(
@@ -430,15 +509,11 @@ def test_dmdc_baseline_rejects_invalid_control_shapes(
             steps=1,
             controls=[torch.zeros(2, 1, dtype=torch.float64)],
         )
-
-    per_node_baseline = DMDcBaseline().fit(
-        _controlled_sequence(synthetic_edge_index, per_node=True)
-    )
-    with pytest.raises(ValueError, match="per-node controls must have shape"):
-        per_node_baseline.predict(
-            _controlled_sequence(synthetic_edge_index, per_node=True)[0],
+    with pytest.raises(ValueError, match="global controls must have shape"):
+        global_baseline.predict(
+            _controlled_sequence(synthetic_edge_index)[0],
             steps=1,
-            controls=[torch.zeros(1, dtype=torch.float64)],
+            controls=[torch.zeros(2, dtype=torch.float64)],
         )
 
 

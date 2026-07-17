@@ -1,10 +1,11 @@
-"""Unit tests for GNNDecoder."""
+"""Unit tests for GNNDecoder and GATDecoder."""
 
 import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph.decoder import GNNDecoder
+from koopman_graph.model import GraphKoopmanModel
+from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder
 
 
 def test_forward_with_data_object(synthetic_graph: Data) -> None:
@@ -167,3 +168,126 @@ def test_weighted_vs_unweighted_outputs_differ() -> None:
     out_unweighted = decoder(z, edge_index)
     out_weighted = decoder(z, edge_index, edge_weight)
     assert not torch.allclose(out_unweighted, out_weighted)
+
+
+def test_gat_forward_with_data_object(synthetic_graph: Data) -> None:
+    """Verify GAT decoder accepts a PyG ``Data`` object."""
+    z = torch.randn(5, 4)
+    graph = Data(x=z, edge_index=synthetic_graph.edge_index)
+    decoder = GATDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    out = decoder(graph)
+    assert out.shape == (5, 3)
+
+
+def test_gat_forward_with_tensor_inputs(synthetic_graph: Data) -> None:
+    """Verify GAT decoder accepts separate tensor inputs."""
+    z = torch.randn(5, 4)
+    decoder = GATDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    out = decoder(z, synthetic_graph.edge_index)
+    assert out.shape == (5, 3)
+
+
+def test_gat_multi_layer_output_shape() -> None:
+    """Verify GAT decoder output shape with multiple layers."""
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    z = torch.randn(3, 8)
+    decoder = GATDecoder(
+        latent_dim=8,
+        hidden_channels=16,
+        out_channels=2,
+        num_layers=3,
+        heads=2,
+    )
+    out = decoder(z, edge_index)
+    assert out.shape == (3, 2)
+
+
+def test_gat_single_layer_output_shape() -> None:
+    """Verify GAT decoder output shape with a single layer."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    z = torch.randn(2, 6)
+    decoder = GATDecoder(
+        latent_dim=6,
+        hidden_channels=8,
+        out_channels=3,
+        num_layers=1,
+        heads=2,
+    )
+    out = decoder(z, edge_index)
+    assert out.shape == (2, 3)
+
+
+def test_gat_gradient_flow(synthetic_graph: Data) -> None:
+    """Verify gradients flow through the GAT decoder."""
+    z = torch.randn(5, 4, requires_grad=True)
+    decoder = GATDecoder(latent_dim=4, hidden_channels=8, out_channels=3, heads=2)
+    out = decoder(z, synthetic_graph.edge_index)
+    loss = out.sum()
+    loss.backward()
+    assert z.grad is not None
+    assert torch.isfinite(z.grad).all()
+    for param in decoder.parameters():
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
+
+
+def test_gat_ignores_edge_weight() -> None:
+    """Verify scalar edge weights do not change GAT decoder outputs."""
+    edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 0, 1]], dtype=torch.long)
+    z = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    edge_weight = torch.tensor([2.0, 0.5, 0.5, 2.0])
+    decoder = GATDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    decoder.eval()
+    out_unweighted = decoder(z, edge_index)
+    out_weighted = decoder(z, edge_index, edge_weight)
+    assert torch.allclose(out_unweighted, out_weighted)
+
+
+def test_gat_invalid_heads_raises() -> None:
+    """Verify non-positive ``heads`` raises ``ValueError``."""
+    with pytest.raises(ValueError, match="heads must be positive"):
+        GATDecoder(latent_dim=4, hidden_channels=8, out_channels=3, heads=0)
+
+
+def test_gat_invalid_dropout_raises() -> None:
+    """Verify out-of-range ``dropout`` raises ``ValueError``."""
+    with pytest.raises(ValueError, match="dropout must be in"):
+        GATDecoder(latent_dim=4, hidden_channels=8, out_channels=3, dropout=1.5)
+
+
+def test_gat_exported_from_package() -> None:
+    """Verify ``GATDecoder`` is exported from the package root."""
+    from koopman_graph import GATDecoder as ExportedGATDecoder
+
+    assert ExportedGATDecoder is GATDecoder
+
+
+def test_gat_encoder_decoder_pairing(synthetic_graph: Data) -> None:
+    """Verify GAT encoder/decoder pairing works end-to-end in the model."""
+    encoder = GATEncoder(
+        in_channels=3,
+        hidden_channels=8,
+        latent_dim=4,
+        heads=2,
+        dropout=0.0,
+    )
+    decoder = GATDecoder(
+        latent_dim=4,
+        hidden_channels=8,
+        out_channels=3,
+        heads=2,
+        dropout=0.0,
+    )
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+    )
+    out = model(synthetic_graph)
+    assert out.shape == synthetic_graph.x.shape
+    loss = out.sum()
+    loss.backward()
+    for param in model.parameters():
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()

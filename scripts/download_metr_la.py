@@ -12,6 +12,7 @@ from koopman_graph.datasets.metr_la import (
     DEFAULT_CACHE_DIR,
     DEFAULT_H5_MIRROR_URL,
     DEFAULT_NUM_TIMESTEPS,
+    DEFAULT_TIMESTEP_OFFSET,
     ensure_traffic_cache,
 )
 
@@ -31,6 +32,10 @@ Graph metadata (sensor IDs, road distances)
 After downloading metr-la.h5 locally, rebuild the tutorial cache with:
 
   python scripts/download_metr_la.py --h5-path /path/to/metr-la.h5 --force
+
+Defaults cache one weekday (288 five-minute samples) starting at HDF5 row
+offset {DEFAULT_TIMESTEP_OFFSET} (a high-contrast congestion day used by the
+METR-LA tutorial notebook). Override with --num-timesteps / --offset.
 """
 
 
@@ -103,8 +108,11 @@ def main() -> None:
     parser.add_argument(
         "--offset",
         type=int,
-        default=0,
-        help="Starting row offset in the HDF5 speed table (default: 0).",
+        default=DEFAULT_TIMESTEP_OFFSET,
+        help=(
+            "Starting row offset in the HDF5 speed table "
+            f"(default: {DEFAULT_TIMESTEP_OFFSET})."
+        ),
     )
     parser.add_argument(
         "--force",

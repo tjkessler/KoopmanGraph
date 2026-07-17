@@ -1,5 +1,7 @@
 """Tests for benchmark datasets."""
 
+import inspect
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import numpy as np
@@ -13,8 +15,64 @@ from koopman_graph.datasets import (
     IEEE118DynamicBenchmark,
     MetrLaTrafficBenchmark,
     SyntheticDynamicGraphBenchmark,
+    TopologyPayload,
+)
+from koopman_graph.datasets.dynamics import (
+    validate_advection_decay_rate,
+    validate_diffusion_generation_params,
 )
 from koopman_graph.datasets.grid import _grid_edge_index, grid_node_index
+
+
+@pytest.mark.parametrize(
+    "benchmark_cls",
+    [
+        SyntheticDynamicGraphBenchmark,
+        GridDynamicGraphBenchmark,
+        AnisotropicAdvectionGridBenchmark,
+        IEEE118DynamicBenchmark,
+    ],
+)
+def test_generate_defaults_seed_to_none(benchmark_cls: type) -> None:
+    """Verify simulated generate() methods share an unseeded default."""
+    assert inspect.signature(benchmark_cls.generate).parameters["seed"].default is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"decay_rate": 0.0, "noise_std": 0.0}, "decay_rate must be > 0"),
+        ({"decay_rate": 0.5, "noise_std": -0.1}, "noise_std must be >= 0"),
+        (
+            {"decay_rate": 0.5, "noise_std": 0.0, "diffusion_rate": 1.5},
+            r"diffusion_rate must be in \[0, 1\]",
+        ),
+        (
+            {"decay_rate": 0.5, "noise_std": 0.0, "initial_state": "invalid"},
+            "initial_state must be 'random' or 'ones'",
+        ),
+    ],
+)
+def test_validate_diffusion_generation_params_raises(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    """Verify shared diffusion validators raise explicit range errors."""
+    with pytest.raises(ValueError, match=match):
+        validate_diffusion_generation_params(**kwargs)  # type: ignore[arg-type]
+
+
+def test_validate_diffusion_allows_decay_rate_at_or_above_one() -> None:
+    """Verify diffusion decay_rate > 0 accepts values outside (0, 1)."""
+    validate_diffusion_generation_params(decay_rate=1.0, noise_std=0.0)
+    validate_diffusion_generation_params(decay_rate=1.5, noise_std=0.0)
+
+
+@pytest.mark.parametrize("decay_rate", [0.0, 1.0, -0.1])
+def test_validate_advection_decay_rate_raises(decay_rate: float) -> None:
+    """Verify advection self-retention uses the open (0, 1) interval."""
+    with pytest.raises(ValueError, match=r"decay_rate must be in \(0, 1\)"):
+        validate_advection_decay_rate(decay_rate)
 
 
 def test_generate_returns_graph_snapshot_sequence() -> None:
@@ -69,6 +127,40 @@ def test_generate_ring_topology_edge_count() -> None:
     assert sequence.edge_index.shape[1] == 2 * sequence.num_nodes
 
 
+def test_advection_grid_one_step_matches_closed_form_mixture() -> None:
+    """Verify one advection step against hand-computed 2x2 neighbor mixtures."""
+    decay_rate = 0.8
+    west_weight = 0.5
+    north_weight = 0.2
+    remaining = 1.0 - west_weight - north_weight
+    sequence = AnisotropicAdvectionGridBenchmark.generate(
+        num_rows=2,
+        num_cols=2,
+        num_timesteps=2,
+        in_channels=1,
+        decay_rate=decay_rate,
+        west_weight=west_weight,
+        north_weight=north_weight,
+        noise_std=0.0,
+        seed=0,
+        initial_state="random",
+    )
+    state = sequence[0].x
+    # Node layout: (0,0)=0, (0,1)=1, (1,0)=2, (1,1)=3.
+    # Border preferred directions reserve weight from the leftover budget but
+    # are not assigned when the neighbor is missing.
+    mix0 = 0.5 * state[1] + 0.5 * state[2]  # east+south share remaining only
+    mix1 = (west_weight * state[0] + remaining * state[3]) / (west_weight + remaining)
+    mix2 = (north_weight * state[0] + remaining * state[3]) / (north_weight + remaining)
+    mix3 = (west_weight * state[2] + north_weight * state[1]) / (
+        west_weight + north_weight
+    )
+    expected = decay_rate * state + (1.0 - decay_rate) * torch.stack(
+        [mix0, mix1, mix2, mix3]
+    )
+    assert torch.allclose(sequence[1].x, expected, atol=1e-6)
+
+
 def test_advection_grid_generate_returns_graph_snapshot_sequence() -> None:
     """Verify the advection benchmark generator returns a validated sequence."""
     sequence = AnisotropicAdvectionGridBenchmark.generate(
@@ -86,6 +178,28 @@ def test_advection_grid_rejects_invalid_weights() -> None:
     """Verify directional weights must leave mass for other neighbors."""
     with pytest.raises(ValueError, match="west_weight"):
         AnisotropicAdvectionGridBenchmark.generate(west_weight=0.8, north_weight=0.3)
+
+
+def test_advection_zero_preferred_weights_keeps_self_retention_without_nan() -> None:
+    """Corner nodes with zero preferred weights must not NaN; pure decay applies."""
+    decay_rate = 0.75
+    sequence = AnisotropicAdvectionGridBenchmark.generate(
+        num_rows=2,
+        num_cols=2,
+        num_timesteps=2,
+        in_channels=1,
+        decay_rate=decay_rate,
+        west_weight=0.0,
+        north_weight=0.0,
+        noise_std=0.0,
+        seed=0,
+        initial_state="random",
+    )
+    assert torch.isfinite(sequence[1].x).all()
+    # SE corner (node 3) only has west+north neighbors; both weights are 0, so
+    # the assigned-weight sum is zero and the update is pure self-retention.
+    expected_corner = decay_rate * sequence[0].x[3]
+    assert torch.allclose(sequence[1].x[3], expected_corner, atol=1e-6)
 
 
 def test_advection_grid_gat_beats_gcn_on_rollout() -> None:
@@ -291,9 +405,15 @@ def test_ieee118_generate_is_reproducible_with_seed() -> None:
 def test_ieee118_load_topology_has_expected_fields() -> None:
     """Verify cached topology exposes bus tables and edge index."""
     topology = IEEE118DynamicBenchmark.load_topology()
+    assert isinstance(topology, TopologyPayload)
+    assert topology.num_nodes == IEEE118DynamicBenchmark.NUM_BUSES
     assert topology["num_nodes"] == IEEE118DynamicBenchmark.NUM_BUSES
+    assert topology.initial_features is not None
+    assert topology.initial_features.shape == (118, 4)
     assert topology["initial_features"].shape == (118, 4)
-    assert topology["edge_index"].dtype == torch.long
+    assert topology.edge_index.dtype == torch.long
+    with pytest.raises(FrozenInstanceError):
+        topology.num_nodes = 0  # type: ignore[misc]
 
 
 @pytest.mark.parametrize(
@@ -314,6 +434,23 @@ def test_ieee118_generate_invalid_parameters_raise(
     """Verify invalid IEEE 118 generation parameters raise clear errors."""
     with pytest.raises(ValueError, match=param_name):
         IEEE118DynamicBenchmark.generate(**kwargs)
+
+
+def test_ieee118_generate_accepts_decay_rate_above_one() -> None:
+    """Verify IEEE 118 uses shared diffusion decay_rate > 0 (not (0, 1))."""
+    sequence = IEEE118DynamicBenchmark.generate(
+        num_timesteps=3,
+        decay_rate=1.0,
+        noise_std=0.0,
+        seed=0,
+    )
+    assert sequence.num_timesteps == 3
+
+
+def test_advection_rejects_decay_rate_one_with_open_interval_message() -> None:
+    """Verify advection rejects decay_rate=1.0 via the named open-interval validator."""
+    with pytest.raises(ValueError, match=r"decay_rate must be in \(0, 1\)"):
+        AnisotropicAdvectionGridBenchmark.generate(decay_rate=1.0)
 
 
 def test_metr_la_load_sequence_returns_graph_snapshot_sequence() -> None:
@@ -337,9 +474,13 @@ def test_metr_la_load_sequence_is_reproducible() -> None:
 def test_metr_la_load_topology_has_expected_fields() -> None:
     """Verify cached METR-LA topology exposes sensor IDs and edge index."""
     topology = MetrLaTrafficBenchmark.load_topology()
-    assert topology["num_nodes"] == MetrLaTrafficBenchmark.NUM_SENSORS
+    assert isinstance(topology, TopologyPayload)
+    assert topology.num_nodes == MetrLaTrafficBenchmark.NUM_SENSORS
+    assert topology.sensor_ids is not None
+    assert len(topology.sensor_ids) == MetrLaTrafficBenchmark.NUM_SENSORS
     assert len(topology["sensor_ids"]) == MetrLaTrafficBenchmark.NUM_SENSORS
-    assert topology["edge_index"].dtype == torch.long
+    assert topology.edge_index.dtype == torch.long
+    assert "initial_features" not in topology
 
 
 def test_metr_la_build_adjacency_matrix_shape() -> None:

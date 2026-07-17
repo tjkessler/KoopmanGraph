@@ -19,7 +19,9 @@ from koopman_graph.datasets.dynamics import (
     diffusion_sequence_from_features,
     make_generator,
     normalized_step_operator,
+    validate_diffusion_generation_params,
 )
+from koopman_graph.datasets.topology import TopologyPayload
 
 MATPOWER_CASE118_URL = (
     "https://raw.githubusercontent.com/MATPOWER/matpower/master/data/case118.m"
@@ -232,7 +234,7 @@ def topology_from_matpower_text(
     text: str,
     *,
     dtype: torch.dtype = torch.float32,
-) -> dict[str, Any]:
+) -> TopologyPayload:
     """Convert MATPOWER case text into tensors used by the benchmark.
 
     Parameters
@@ -244,8 +246,8 @@ def topology_from_matpower_text(
 
     Returns
     -------
-    dict
-        Topology payload with keys ``base_mva``, ``bus_ids``, ``edge_index``,
+    TopologyPayload
+        Frozen topology with ``base_mva``, ``bus_ids``, ``edge_index``,
         ``initial_features``, ``num_nodes``, and ``source_url``.
     """
     parsed = parse_matpower_case(text)
@@ -260,14 +262,14 @@ def topology_from_matpower_text(
         dtype=dtype,
     )
     bus_ids = torch.tensor([int(row[0]) for row in bus_rows], dtype=torch.long)
-    return {
-        "base_mva": base_mva,
-        "bus_ids": bus_ids,
-        "edge_index": edge_index,
-        "initial_features": initial_features,
-        "num_nodes": len(bus_rows),
-        "source_url": MATPOWER_CASE118_URL,
-    }
+    return TopologyPayload(
+        base_mva=base_mva,
+        bus_ids=bus_ids,
+        edge_index=edge_index,
+        initial_features=initial_features,
+        num_nodes=len(bus_rows),
+        source_url=MATPOWER_CASE118_URL,
+    )
 
 
 def download_matpower_case118() -> str:
@@ -316,7 +318,7 @@ def ensure_topology_cache(
     path.parent.mkdir(parents=True, exist_ok=True)
     case_text = download_matpower_case118()
     topology = topology_from_matpower_text(case_text, dtype=dtype)
-    torch.save(topology, path)
+    torch.save(topology.to_dict(), path)
     return path
 
 
@@ -324,8 +326,12 @@ def load_topology(
     cache_dir: Path | None = None,
     *,
     dtype: torch.dtype = torch.float32,
-) -> dict[str, Any]:
+) -> TopologyPayload:
     """Load cached IEEE 118 topology, creating the cache on first use.
+
+    Prefer :meth:`IEEE118DynamicBenchmark.load_topology` in application and
+    notebook code. This free function remains as the shared implementation
+    (and a shim for download scripts / low-level tests).
 
     Parameters
     ----------
@@ -336,14 +342,24 @@ def load_topology(
 
     Returns
     -------
-    dict
-        Topology payload with ``edge_index`` and ``initial_features``.
+    TopologyPayload
+        Frozen topology with ``edge_index`` and ``initial_features`` (also
+        supports mapping-style ``payload["edge_index"]`` access).
     """
     path = ensure_topology_cache(cache_dir, dtype=dtype)
-    topology = torch.load(path, weights_only=False)
-    topology["edge_index"] = topology["edge_index"].to(dtype=torch.long)
-    topology["initial_features"] = topology["initial_features"].to(dtype=dtype)
-    return topology
+    raw = torch.load(path, weights_only=False)
+    topology = TopologyPayload.from_mapping(raw)
+    if topology.initial_features is None:
+        msg = "IEEE 118 topology cache is missing initial_features"
+        raise ValueError(msg)
+    return TopologyPayload(
+        edge_index=topology.edge_index.to(dtype=torch.long),
+        num_nodes=topology.num_nodes,
+        initial_features=topology.initial_features.to(dtype=dtype),
+        bus_ids=topology.bus_ids,
+        base_mva=topology.base_mva,
+        source_url=topology.source_url,
+    )
 
 
 class IEEE118DynamicBenchmark:
@@ -353,6 +369,9 @@ class IEEE118DynamicBenchmark:
     Voltages and angles evolve via graph Laplacian diffusion on the real IEEE
     118 transmission topology; loads follow a slow sinusoidal ramp to emulate
     changing grid conditions over time.
+
+    Public entry points are the classmethods ``load_topology`` and ``generate``.
+    Prefer those over the module-level ``load_topology`` free function.
 
     For large-scale optimal power flow snapshots, see the PowerGraph dataset
     (``https://arxiv.org/abs/2402.02827``).
@@ -374,7 +393,7 @@ class IEEE118DynamicBenchmark:
         cache_dir: Path | None = None,
         *,
         dtype: torch.dtype = torch.float32,
-    ) -> dict[str, Any]:
+    ) -> TopologyPayload:
         """Load the cached IEEE 118 topology tables.
 
         Parameters
@@ -387,8 +406,8 @@ class IEEE118DynamicBenchmark:
 
         Returns
         -------
-        dict
-            Topology payload with keys ``base_mva``, ``bus_ids``, ``edge_index``,
+        TopologyPayload
+            Frozen topology with ``base_mva``, ``bus_ids``, ``edge_index``,
             ``initial_features``, ``num_nodes``, and ``source_url``.
         """
         return load_topology(cache_dir, dtype=dtype)
@@ -404,7 +423,7 @@ class IEEE118DynamicBenchmark:
         load_ramp_amplitude: float = 0.15,
         load_ramp_period: float = 20.0,
         expose_load_ramp_control: bool = False,
-        seed: int | None = 42,
+        seed: int | None = None,
         cache_dir: Path | None = None,
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
@@ -429,7 +448,8 @@ class IEEE118DynamicBenchmark:
             control inputs with shape ``(num_timesteps, 1)``. Default is
             ``False``.
         seed : int, optional
-            Random seed for noise. Default is ``42``.
+            Random seed for noise. ``None`` uses unseeded randomness; tutorials
+            should pass an explicit seed (e.g. ``42``).
         cache_dir : Path, optional
             Directory containing cached topology artifacts.
         dtype : torch.dtype, optional
@@ -448,15 +468,11 @@ class IEEE118DynamicBenchmark:
         if num_timesteps < 1:
             msg = f"num_timesteps must be >= 1, got {num_timesteps}"
             raise ValueError(msg)
-        if not 0.0 <= diffusion_rate <= 1.0:
-            msg = f"diffusion_rate must be in [0, 1], got {diffusion_rate}"
-            raise ValueError(msg)
-        if decay_rate <= 0.0:
-            msg = f"decay_rate must be > 0, got {decay_rate}"
-            raise ValueError(msg)
-        if noise_std < 0.0:
-            msg = f"noise_std must be >= 0, got {noise_std}"
-            raise ValueError(msg)
+        validate_diffusion_generation_params(
+            diffusion_rate=diffusion_rate,
+            decay_rate=decay_rate,
+            noise_std=noise_std,
+        )
         if load_ramp_amplitude < 0.0:
             msg = f"load_ramp_amplitude must be >= 0, got {load_ramp_amplitude}"
             raise ValueError(msg)
@@ -465,9 +481,12 @@ class IEEE118DynamicBenchmark:
             raise ValueError(msg)
 
         topology = cls.load_topology(cache_dir, dtype=dtype)
-        edge_index = topology["edge_index"]
-        initial_features = topology["initial_features"]
-        num_nodes = int(topology["num_nodes"])
+        edge_index = topology.edge_index
+        if topology.initial_features is None:
+            msg = "IEEE 118 topology is missing initial_features"
+            raise ValueError(msg)
+        initial_features = topology.initial_features
+        num_nodes = int(topology.num_nodes)
         if num_nodes != NUM_BUSES:
             msg = f"Expected {NUM_BUSES} buses, got {num_nodes}"
             raise ValueError(msg)

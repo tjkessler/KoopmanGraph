@@ -107,7 +107,7 @@ ruff check src/ tests/
 ruff format --check src/ tests/
 
 # Tests with coverage gate
-pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=80
+pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
 To auto-fix lint issues and apply formatting:
@@ -130,18 +130,18 @@ All contributions that change behavior must include appropriate tests in the
 
 ### Coverage threshold
 
-The project enforces a minimum of **80% line coverage** on `koopman_graph`:
+The project enforces a minimum of **90% line coverage** on `koopman_graph`:
 
-- Configuration: `[tool.coverage.report]` in `pyproject.toml` (`fail_under = 80`)
-- CI: `--cov-fail-under=80` in `.github/workflows/ci.yml`
+- Configuration: `[tool.coverage.report]` in `pyproject.toml` (`fail_under = 90`)
+- CI: `--cov-fail-under=90` in `.github/workflows/ci.yml`
 
 Generate a local coverage report:
 
 ```bash
-pytest tests/ --cov=koopman_graph --cov-report=term-missing --cov-fail-under=80
+pytest tests/ --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
-Pull requests that drop coverage below 80% will fail CI.
+Pull requests that drop coverage below 90% will fail CI.
 
 ## Code style
 
@@ -184,7 +184,9 @@ The following checks from [`ci.yml`](.github/workflows/ci.yml) should be marked
 as **required** before merge:
 
 - `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest, Ruff lint/format, and the
-  80% coverage gate across supported Python versions
+  90% coverage gate across supported Python versions
+- `notebooks` — tutorial nbmake smoke tests (Python 3.12, parallel with the
+  test matrix)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))
@@ -204,6 +206,24 @@ Update documentation when your change affects:
 Sphinx source lives in `docs/source/`. Rebuild locally with `make html` in
 `docs/` after installing `[docs]` extras.
 
+Before changing package layout, `__all__` exports, shared helpers, or device
+handling, read the maintainer architecture guide:
+
+- Sphinx: [`docs/source/architecture.rst`](docs/source/architecture.rst)
+  (built page: *Architecture and API layers* on Read the Docs)
+- It defines the public façade vs power-user modules vs private (`_`-prefixed)
+  helpers (**thin root `__all__`**: keep core workflow symbols; demote
+  specialized helpers to `metrics` / `analysis` / `data` / `adaptation` /
+  `observables` — TASK-747–750), device/tensor conventions across `fit`, the
+  RL env, online adaptation, and classical baselines/datasets, plus
+  **optional-dependency** (fail-at-call / `[rl]` soft-import) and **frozen
+  dataclass result-type** conventions.
+- **Package layout** (same page): when to nest into one-level capability
+  packages vs stay flat; keep `model.py` at the package root; no deep trees;
+  three-layer API preserved under any folder move; compatibility contract for
+  root `__all__` vs power-user deep imports (same-named packages or in-repo
+  migration — no long-lived root shim modules after TASK-746).
+
 ## Releasing
 
 KoopmanGraph follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
@@ -216,19 +236,41 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
 `[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
 `pyproject.toml`.
 
+### Checkpoint migration (v0.3.0)
+
+Model checkpoints include a ``format_version`` field (see
+``src/koopman_graph/serialization.py``):
+
+| Version | Introduced | Notes |
+| --- | --- | --- |
+| 1 | v0.2.x | Discrete dynamics; config omits continuous-time, physics, and control fields |
+| 2 | v0.3.0 | Full config for continuous mode, hybrid physics observables, control, and encoder/decoder ``type`` (``"gcn"`` / ``"gat"``; missing decoder ``type`` defaults to ``"gcn"``) |
+
+``GraphKoopmanModel.load`` accepts both v1 and v2 checkpoints. v1 payloads are
+migrated in memory by filling missing optional fields with defaults
+(``dynamics_mode="discrete"``, no physics observables, ``control_dim=0``,
+``koopman_parameterization="dense"``). Phase 8 architectural consistency
+(symmetric ``GATDecoder``, preferred ``encode``, shared operator contracts,
+shared rollout primitives, optional ``koopman=`` injection, frozen result
+types, baseline / ``ForecastModel`` call-site clarity, capability packages,
+thin public façade, and spectrum plot helpers) did **not** require a
+new ``format_version``; new saves still use ``FORMAT_VERSION`` 2. Custom
+injected operators are rejected on ``save`` and are therefore outside the
+checkpoint migration path.
+
 ### Maintainer release checklist
 
 1. Ensure `main` is green (CI tests, lint, notebook smoke tests).
 2. Update `__version__` in `src/koopman_graph/__init__.py`.
 3. Merge any pending release-prep changes to `main`.
-4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.2.0`). Publishing the
+4. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.3.0`). Publishing the
    release triggers `.github/workflows/release.yml`.
 5. Approve the `pypi` environment deployment if required by branch protection.
 6. Confirm the workflow uploaded artifacts to PyPI.
@@ -315,9 +357,11 @@ work—particularly useful when using AI coding agents:
   acceptance criteria, dependencies, and agent logs.
 
 Agents working from the blueprint should read one task at a time, present a
-plan for user approval, and update the blueprint status upon completion. Human
-contributors may use the blueprint as a roadmap but are not required to follow
-it.
+plan for user approval, and update the blueprint status upon completion. During
+the plan gate, consult
+[`docs/source/architecture.rst`](docs/source/architecture.rst) whenever a task
+touches exports, internal helpers, or device placement. Human contributors may
+use the blueprint as a roadmap but are not required to follow it.
 
 ## License
 

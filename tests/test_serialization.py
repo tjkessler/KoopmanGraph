@@ -8,10 +8,17 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import GATEncoder, GNNDecoder, GNNEncoder, GraphKoopmanModel
+from koopman_graph import (
+    GATDecoder,
+    GATEncoder,
+    GNNDecoder,
+    GNNEncoder,
+    GraphKoopmanModel,
+)
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.serialization import (
     FORMAT_VERSION,
+    build_checkpoint,
     build_model_config,
     load_checkpoint,
     reconstruct_model,
@@ -90,6 +97,43 @@ def test_build_model_config_captures_gat_hyperparameters() -> None:
     assert config["encoder"]["type"] == "gat"
     assert config["encoder"]["heads"] == 2
     assert config["encoder"]["dropout"] == 0.1
+    assert config["decoder"]["type"] == "gcn"
+
+
+def test_build_model_config_captures_gat_decoder_hyperparameters() -> None:
+    """Verify GAT decoder settings are included in decoder config."""
+    encoder = GATEncoder(in_channels=2, hidden_channels=16, latent_dim=8, heads=2)
+    decoder = GATDecoder(
+        latent_dim=8,
+        hidden_channels=16,
+        out_channels=2,
+        heads=2,
+        dropout=0.1,
+    )
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.05,
+    )
+    config = build_model_config(model)
+    assert config["decoder"]["type"] == "gat"
+    assert config["decoder"]["heads"] == 2
+    assert config["decoder"]["dropout"] == 0.1
+    rebuilt = reconstruct_model(config)
+    assert isinstance(rebuilt.decoder, GATDecoder)
+    assert rebuilt.decoder.heads == 2
+    assert rebuilt.decoder.dropout == 0.1
+
+
+def test_reconstruct_model_defaults_missing_decoder_type_to_gcn(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Verify checkpoints without decoder type still rebuild a GCN decoder."""
+    config = build_model_config(graph_koopman_model)
+    del config["decoder"]["type"]
+    rebuilt = reconstruct_model(config)
+    assert isinstance(rebuilt.decoder, GNNDecoder)
 
 
 def test_reconstruct_model_matches_original_architecture(
@@ -151,6 +195,87 @@ def test_gat_save_load_round_trip(
         torch.testing.assert_close(original, loaded_pred)
 
 
+def test_gat_encoder_decoder_save_load_round_trip(
+    scaling_sequence: GraphSnapshotSequence,
+    tmp_path: Path,
+) -> None:
+    """Verify paired GAT encoder/decoder models serialize and reload."""
+    encoder = GATEncoder(in_channels=3, hidden_channels=16, latent_dim=8, heads=2)
+    decoder = GATDecoder(latent_dim=8, hidden_channels=16, out_channels=3, heads=2)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.1,
+    )
+    torch.manual_seed(2)
+    model.fit(scaling_sequence, epochs=2, lr=1e-2)
+
+    initial_graph = scaling_sequence[0]
+    original_preds = _predictions(model, initial_graph)
+    checkpoint = tmp_path / "gat_pair_model.pt"
+    model.save(checkpoint)
+    loaded = GraphKoopmanModel.load(checkpoint)
+    assert isinstance(loaded.decoder, GATDecoder)
+    assert loaded.decoder.heads == 2
+    loaded_preds = _predictions(loaded, initial_graph)
+
+    for original, loaded_pred in zip(original_preds, loaded_preds, strict=True):
+        torch.testing.assert_close(original, loaded_pred)
+
+
+def test_save_checkpoint_uses_current_format_version(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Verify new checkpoints are saved with the current format version."""
+    checkpoint = build_checkpoint(graph_koopman_model)
+    assert checkpoint["format_version"] == FORMAT_VERSION
+    assert FORMAT_VERSION == 2
+
+
+def test_load_v1_checkpoint_migrates_defaults(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify v0.2.x format_version 1 checkpoints load with v0.3 defaults."""
+    v1_config = {
+        "latent_dim": 4,
+        "time_step": 0.1,
+        "koopman_init_mode": "identity",
+        "koopman_init_scale": 1e-2,
+        "encoder": {
+            "type": "gcn",
+            "in_channels": 3,
+            "hidden_channels": 8,
+            "latent_dim": 4,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+        "decoder": {
+            "latent_dim": 4,
+            "hidden_channels": 8,
+            "out_channels": 3,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+    }
+    path = tmp_path / "v1_model.pt"
+    torch.save(
+        {
+            "format_version": 1,
+            "package_version": "0.2.0",
+            "config": v1_config,
+            "state_dict": graph_koopman_model.state_dict(),
+        },
+        path,
+    )
+    loaded = load_checkpoint(path)
+    assert loaded.dynamics_mode == "discrete"
+    assert loaded.physics_dim == 0
+    assert loaded.control_dim == 0
+    assert loaded.koopman.parameterization == "dense"
+
+
 def test_load_checkpoint_missing_file_raises(tmp_path: Path) -> None:
     """Verify missing checkpoint paths raise FileNotFoundError."""
     with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
@@ -202,6 +327,44 @@ def test_load_checkpoint_unsupported_encoder_type(tmp_path: Path) -> None:
         load_checkpoint(path)
 
 
+def test_load_checkpoint_unsupported_decoder_type(tmp_path: Path) -> None:
+    """Verify unknown decoder types raise ValueError."""
+    config = {
+        "latent_dim": 4,
+        "time_step": 0.1,
+        "koopman_init_mode": "identity_noise",
+        "koopman_init_scale": 1e-2,
+        "encoder": {
+            "type": "gcn",
+            "in_channels": 3,
+            "hidden_channels": 8,
+            "latent_dim": 4,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+        "decoder": {
+            "type": "unknown",
+            "latent_dim": 4,
+            "hidden_channels": 8,
+            "out_channels": 3,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+    }
+    path = tmp_path / "bad_decoder.pt"
+    torch.save(
+        {
+            "format_version": FORMAT_VERSION,
+            "package_version": "0.1.0",
+            "config": config,
+            "state_dict": {},
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="Unsupported decoder type"):
+        load_checkpoint(path)
+
+
 def test_fit_restore_best_weights_reloads_lowest_loss_epoch(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
@@ -242,7 +405,7 @@ def test_fit_restore_best_weights_reloads_lowest_loss_epoch(
 
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(
-            "koopman_graph.model.train_one_epoch",
+            "koopman_graph.training.loop.train_one_epoch",
             fake_train_one_epoch,
         )
         history = model.fit(
@@ -341,6 +504,33 @@ def test_odo_model_round_trip_preserves_predictions(
         assert torch.allclose(pred_before, pred_after)
 
 
+def test_lyapunov_model_round_trip_preserves_predictions(
+    scaling_sequence: GraphSnapshotSequence,
+    tmp_path: Path,
+) -> None:
+    """Verify Lyapunov structural parameterization survives save/load."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+    decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=8,
+        time_step=0.1,
+        koopman_parameterization="lyapunov",
+    )
+    torch.manual_seed(2)
+    model.fit(scaling_sequence, epochs=2, lr=1e-2)
+    before = _predictions(model, scaling_sequence[0])
+
+    path = tmp_path / "lyapunov_model.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.parameterization == "lyapunov"
+    after = _predictions(loaded, scaling_sequence[0])
+    for pred_before, pred_after in zip(before, after, strict=True):
+        assert torch.allclose(pred_before, pred_after)
+
+
 def test_package_version_falls_back_when_metadata_missing() -> None:
     """Verify the version helper returns a fallback without package metadata."""
     from importlib.metadata import PackageNotFoundError
@@ -363,3 +553,85 @@ def test_encoder_type_rejects_unsupported_encoder() -> None:
 
     with pytest.raises(TypeError, match="Unsupported encoder type"):
         _encoder_type(nn.Linear(3, 4))  # type: ignore[arg-type]
+
+
+def test_decoder_type_rejects_unsupported_decoder() -> None:
+    """Verify unsupported decoder instances raise ``TypeError``."""
+    from torch import nn
+
+    from koopman_graph.serialization import _decoder_type
+
+    with pytest.raises(TypeError, match="Unsupported decoder type"):
+        _decoder_type(nn.Linear(3, 4))  # type: ignore[arg-type]
+
+
+def test_build_model_config_rejects_custom_injected_operator() -> None:
+    """Verify custom injected operators are not checkpoint-serializable."""
+    from torch import nn
+
+    class _CustomOperator(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.latent_dim = 4
+            self.control_dim = 0
+            self.parameterization = "dense"
+            self._matrix = nn.Parameter(torch.eye(4))
+
+        @property
+        def matrix(self) -> torch.Tensor:
+            return self._matrix
+
+        def advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del delta_t, control
+            return z @ self._matrix.T
+
+        def inverse_advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+            inverse_matrix: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del delta_t, control, inverse_matrix
+            return z
+
+        def bound_metric(self) -> torch.Tensor:
+            return torch.tensor(1.0)
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        koopman=_CustomOperator(),
+    )
+    with pytest.raises(TypeError, match="not round-trippable"):
+        build_model_config(model)
+
+
+def test_injected_builtin_operator_remains_serializable() -> None:
+    """Verify injecting a built-in operator still serializes factory metadata."""
+    from koopman_graph.operators import KoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = KoopmanOperator(4, parameterization="dense")
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        koopman=operator,
+    )
+    config = build_model_config(model)
+    assert config["koopman_parameterization"] == "dense"
+    assert config["dynamics_mode"] == "discrete"

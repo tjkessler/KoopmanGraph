@@ -12,8 +12,12 @@ from koopman_graph import (
     GraphKoopmanModel,
 )
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.graph_utils import (
+    autoregressive_latent_rollout,
+    snapshot_topology_at,
+)
 from koopman_graph.losses import rollout_sequence_loss
-from koopman_graph.operator import KoopmanOperator
+from koopman_graph.operators import KoopmanOperator
 from koopman_graph.training import (
     compute_backward_consistency_sequence_loss,
     compute_forward_consistency_sequence_loss,
@@ -432,6 +436,33 @@ def test_backward_consistency_sequence_loss_requires_two_snapshots(
         compute_backward_consistency_sequence_loss(trainable_model, sequence)
 
 
+def test_masked_mse_loss_matches_hand_computed() -> None:
+    """Masked MSE averages squared error over observed nodes × features."""
+    from koopman_graph.losses import masked_mse_loss
+
+    prediction = torch.tensor(
+        [
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+        ]
+    )
+    target = torch.tensor(
+        [
+            [1.0, 2.0],
+            [0.0, 0.0],
+            [7.0, 8.0],
+        ]
+    )
+    mask = torch.tensor([False, True, True])
+    # Observed nodes 1 and 2: diffs (3,4) and (-2,-2); sum sq = 9+16+4+4 = 33
+    # denom = 2 nodes * 2 features = 4 → 33/4
+    assert masked_mse_loss(prediction, target, mask).item() == pytest.approx(
+        33.0 / 4.0,
+        abs=1e-6,
+    )
+
+
 def test_eigenvalue_loss_zero_on_unit_circle_dense() -> None:
     """Verify eigenvalue hinge loss is zero for a unit-circle diagonal operator."""
     from koopman_graph.losses import EigenvalueRegularizationLoss
@@ -454,13 +485,72 @@ def test_eigenvalue_loss_positive_outside_unit_circle_dense() -> None:
     assert loss_fn(koopman).item() > 0.0
 
 
+def test_eigenvalue_loss_discrete_dense_exact_hinge_value() -> None:
+    """Discrete hinge mean(relu(|λ|-1)^2) is 0.125 for diag(1.5, 0.5)."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    koopman = KoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        koopman.K.copy_(torch.diag(torch.tensor([1.5, 0.5])))
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman).item() == pytest.approx(0.125, abs=1e-6)
+
+
 def test_eigenvalue_loss_zero_for_odo_within_bound() -> None:
-    """Verify ODO eigenvalue loss is zero when diagonal stays within radius."""
+    """Verify discrete ODO eigenvalue loss is zero when ρ(K) ≤ 1."""
     from koopman_graph.losses import EigenvalueRegularizationLoss
 
     koopman = KoopmanOperator(4, parameterization="odo", max_spectral_radius=0.8)
     loss_fn = EigenvalueRegularizationLoss()
     assert loss_fn(koopman).item() == pytest.approx(0.0, abs=1e-6)
+
+
+def test_eigenvalue_loss_continuous_odo_uses_true_spectrum() -> None:
+    """Continuous ODO eigenloss must penalize unstable assembled generators."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import ContinuousKoopmanOperator
+
+    torch.manual_seed(0)
+    koopman = ContinuousKoopmanOperator(8, parameterization="odo")
+    with torch.no_grad():
+        koopman.cayley_O1.copy_(torch.randn(8, 8) * 2)
+        koopman.cayley_O2.copy_(torch.randn(8, 8) * 2)
+        koopman.diag_raw.copy_(torch.randn(8) * 3)
+
+    assert koopman.max_real_part().item() > 0.0
+    assert koopman.bound_metric().item() <= 0.0
+    loss_fn = EigenvalueRegularizationLoss()
+    penalty = loss_fn(koopman, dynamics_mode="continuous")
+    assert penalty.item() > 0.0
+
+
+def test_eigenvalue_loss_continuous_dense_uses_matrix_real_parts() -> None:
+    """Continuous hinge uses eigvals(matrix).real, not concrete .L aliases."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import ContinuousKoopmanOperator
+
+    koopman = ContinuousKoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        koopman.L.copy_(torch.diag(torch.tensor([0.5, -1.0])))
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman, dynamics_mode="continuous").item() > 0.0
+    assert loss_fn(koopman, dynamics_mode="continuous").item() == pytest.approx(
+        0.125,
+        abs=1e-5,
+    )
+
+
+def test_eigenvalue_loss_dissipative_zero_continuous() -> None:
+    """Dissipative continuous operators keep a zero eigenvalue penalty."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import ContinuousKoopmanOperator
+
+    koopman = ContinuousKoopmanOperator(3, parameterization="dissipative")
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(koopman, dynamics_mode="continuous").item() == pytest.approx(
+        0.0,
+        abs=1e-8,
+    )
 
 
 def test_backward_consistency_dense_precomputes_inverse(
@@ -481,6 +571,71 @@ def test_backward_consistency_dense_precomputes_inverse(
         )
     assert loss.ndim == 0
     assert inverse_mock.call_count == 1
+
+
+def test_backward_consistency_without_dense_inverse_helper(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify Protocol operators without ``dense_inverse_matrix`` still train."""
+    from torch import nn
+
+    from koopman_graph.model import GraphKoopmanModel
+    from koopman_graph.nn import GNNDecoder, GNNEncoder
+
+    class _ContractOnlyOperator(nn.Module):
+        def __init__(self, latent_dim: int) -> None:
+            super().__init__()
+            self.latent_dim = latent_dim
+            self.control_dim = 0
+            self.parameterization = "dense"
+            self._matrix = nn.Parameter(torch.eye(latent_dim))
+
+        @property
+        def matrix(self) -> torch.Tensor:
+            return self._matrix
+
+        def advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del delta_t, control
+            return z @ self._matrix.T
+
+        def inverse_advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+            inverse_matrix: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del delta_t, control
+            inv = (
+                inverse_matrix
+                if inverse_matrix is not None
+                else torch.linalg.pinv(self._matrix)
+            )
+            return z @ inv.T
+
+        def bound_metric(self) -> torch.Tensor:
+            return torch.linalg.eigvals(self._matrix).abs().max()
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=4, latent_dim=4, num_layers=1)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=4, out_channels=3, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        koopman=_ContractOnlyOperator(4),
+    )
+    assert not hasattr(model.koopman, "dense_inverse_matrix")
+    loss = compute_backward_consistency_sequence_loss(model, scaling_sequence)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss).item()
 
 
 def test_compute_training_loss_with_eigenvalue_term(
@@ -532,3 +687,45 @@ def test_rollout_sequence_loss_uses_sequence_controls(
 
     assert loss.ndim == 0
     assert torch.isfinite(loss).item()
+
+
+def test_predict_and_rollout_loss_agree_on_static_topology(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify predict and training rollout share predictions when topologies align.
+
+    On a static-topology sequence, hold-last inference topology matches teacher
+    target edges, so decoded rollouts must agree within numerical tolerance.
+    """
+    horizon = 2
+    start = 0
+    trainable_model.eval()
+    with torch.no_grad():
+        predicted = trainable_model.predict(scaling_sequence[start], steps=horizon)
+        z = trainable_model.encode(scaling_sequence[start])
+        targets = [scaling_sequence[start + step] for step in range(1, horizon + 1)]
+        rollout = autoregressive_latent_rollout(
+            trainable_model.koopman,
+            trainable_model.decoder,
+            z,
+            steps=horizon,
+            topology_at=snapshot_topology_at(targets),
+            default_delta_t=trainable_model.time_step,
+        )
+
+        total = torch.zeros(())
+        for step, (prediction, _, _) in enumerate(rollout):
+            assert torch.allclose(prediction, predicted[step].x, atol=1e-6)
+            total = total + torch.nn.functional.mse_loss(
+                prediction,
+                targets[step].x,
+            )
+        expected_loss = total / horizon
+        loss = rollout_sequence_loss(
+            trainable_model,
+            scaling_sequence,
+            horizon=horizon,
+            start=start,
+        )
+        assert torch.allclose(loss, expected_loss, atol=1e-6)

@@ -7,7 +7,12 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel, LossWeights
-from koopman_graph.data import GraphSnapshotSequence, temporal_split
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    MultiTrajectory,
+    resolve_rollout_start_indices,
+    temporal_split,
+)
 from koopman_graph.training import (
     FitHistory,
     TrainingLossBreakdown,
@@ -15,12 +20,11 @@ from koopman_graph.training import (
     compute_training_loss,
     constant_loss_weights,
     eval_one_epoch,
-    is_sequence_of_sequences,
     linear_ramp_loss_weights,
     mean_training_loss_breakdown,
     one_step_loss,
     resolve_lr_scheduler,
-    resolve_rollout_start_indices,
+    resolve_training_sequences,
     resolve_validation_sequences,
     should_stop_early,
     train_one_epoch,
@@ -80,6 +84,32 @@ def test_fit_returns_fit_history(
     assert history.epochs == 3
     assert len(history.loss) == 3
     assert all(isinstance(value, float) for value in history.loss)
+    assert isinstance(history.loss, tuple)
+    assert isinstance(history.reconstruction_loss, tuple)
+
+
+def test_fit_history_is_frozen() -> None:
+    """Verify ``FitHistory`` is a frozen dataclass with tuple series."""
+    history = FitHistory(
+        loss=(1.0, 0.5),
+        epochs=2,
+        reconstruction_loss=(0.8, 0.4),
+        forward_loss=(0.1, 0.05),
+        backward_loss=(0.0, 0.0),
+        rollout_loss=(0.2, 0.1),
+        eigenvalue_loss=(0.0, 0.0),
+        val_loss=(1.1, 0.6),
+        stopped_early=False,
+        best_epoch=1,
+        best_loss=0.6,
+    )
+    assert history.loss[-1] == 0.5
+    assert history.val_loss is not None
+    assert history.val_loss.index(min(history.val_loss)) == 1
+    with pytest.raises(AttributeError):
+        history.epochs = 3  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        history.loss = (0.0,)  # type: ignore[misc]
 
 
 def test_fit_accepts_list_of_data(
@@ -234,7 +264,7 @@ def test_fit_applies_gradient_clipping(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
     """Verify ``max_grad_norm`` triggers gradient clipping."""
-    with patch("koopman_graph.training.nn.utils.clip_grad_norm_") as clip_mock:
+    with patch("koopman_graph.training.loop.nn.utils.clip_grad_norm_") as clip_mock:
         trainable_model.fit(scaling_sequence, epochs=1, max_grad_norm=1.0)
     clip_mock.assert_called_once()
     assert clip_mock.call_args.args[1] == 1.0
@@ -245,7 +275,7 @@ def test_fit_without_gradient_clipping_skips_clip(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
     """Verify clipping is skipped when ``max_grad_norm`` is None."""
-    with patch("koopman_graph.training.nn.utils.clip_grad_norm_") as clip_mock:
+    with patch("koopman_graph.training.loop.nn.utils.clip_grad_norm_") as clip_mock:
         trainable_model.fit(scaling_sequence, epochs=1)
     clip_mock.assert_not_called()
 
@@ -694,8 +724,6 @@ def test_rollout_start_seed_makes_random_origins_reproducible(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
     """Verify rollout_start_seed fixes random origin sampling per epoch."""
-    from koopman_graph.training import resolve_rollout_start_indices
-
     kwargs = {
         "horizon": 2,
         "rollout_starts_per_epoch": 2,
@@ -712,7 +740,7 @@ def test_fit_accepts_multiple_training_sequences(
     scaling_sequence: GraphSnapshotSequence,
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify fit accepts a list of trajectories and trains successfully."""
+    """Verify fit accepts MultiTrajectory and trains successfully."""
     second = GraphSnapshotSequence(
         [
             Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
@@ -720,7 +748,7 @@ def test_fit_accepts_multiple_training_sequences(
         ]
     )
     history = trainable_model.fit(
-        [scaling_sequence, second],
+        MultiTrajectory((scaling_sequence, second)),
         epochs=3,
         lr=1e-2,
     )
@@ -732,7 +760,7 @@ def test_fit_rejects_mismatched_validation_sequence_list(
     scaling_sequence: GraphSnapshotSequence,
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify validation list length must match training trajectories."""
+    """Verify validation MultiTrajectory length must match training."""
     second = GraphSnapshotSequence(
         [
             Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
@@ -741,8 +769,8 @@ def test_fit_rejects_mismatched_validation_sequence_list(
     )
     with pytest.raises(ValueError, match="validation_sequence list length"):
         trainable_model.fit(
-            [scaling_sequence, second],
-            validation_sequence=[scaling_sequence],
+            MultiTrajectory((scaling_sequence, second)),
+            validation_sequence=MultiTrajectory((scaling_sequence,)),
             epochs=1,
         )
 
@@ -804,7 +832,7 @@ def test_windowed_fit_accepts_multiple_sequences(
 ) -> None:
     """Verify window sampling pools multiple training trajectories."""
     history = trainable_model.fit(
-        [scaling_sequence, scaling_sequence],
+        MultiTrajectory((scaling_sequence, scaling_sequence)),
         epochs=2,
         window_length=3,
         batch_size=4,
@@ -835,6 +863,16 @@ def test_training_loss_breakdown_zeros() -> None:
     """Verify the zero breakdown has all terms set to zero."""
     breakdown = TrainingLossBreakdown.zeros(torch.device("cpu"))
     assert all(value == 0.0 for value in breakdown.to_floats().values())
+
+
+def test_training_loss_breakdown_is_frozen() -> None:
+    """Verify ``TrainingLossBreakdown`` is a frozen value snapshot."""
+    import koopman_graph
+
+    breakdown = TrainingLossBreakdown.zeros(torch.device("cpu"))
+    with pytest.raises(AttributeError):
+        breakdown.total = torch.ones(())  # type: ignore[misc]
+    assert "TrainingLossBreakdown" not in koopman_graph.__all__
 
 
 def test_mean_training_loss_breakdown_rejects_empty_input() -> None:
@@ -929,29 +967,65 @@ def test_eval_one_epoch_accepts_bare_sequence(
     assert not breakdown.total.requires_grad
 
 
-def test_is_sequence_of_sequences_edge_cases(
+def test_resolve_training_sequences_discriminates_input_kinds(
     synthetic_graph: Data,
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
-    """Verify sequence-of-sequences detection for edge case inputs."""
-    assert not is_sequence_of_sequences(None)
-    assert not is_sequence_of_sequences(scaling_sequence)
-    assert not is_sequence_of_sequences(synthetic_graph)
-    assert not is_sequence_of_sequences([])
-    assert not is_sequence_of_sequences([synthetic_graph])
-    assert is_sequence_of_sequences([scaling_sequence])
+    """Verify empty, list[Data], MultiTrajectory, and bare-list rejection."""
+    with pytest.raises(ValueError, match="non-empty"):
+        resolve_training_sequences([])
+    single_from_data = resolve_training_sequences([synthetic_graph, synthetic_graph])
+    assert len(single_from_data) == 1
+    assert single_from_data[0].num_timesteps == 2
+
+    multi = resolve_training_sequences(
+        MultiTrajectory((scaling_sequence, scaling_sequence))
+    )
+    assert len(multi) == 2
+    assert multi[0] is scaling_sequence
+
+    with pytest.raises(TypeError, match="MultiTrajectory"):
+        resolve_training_sequences([scaling_sequence, scaling_sequence])
+
+    with pytest.raises(ValueError, match="cannot mix"):
+        resolve_training_sequences([scaling_sequence, synthetic_graph])
 
 
-def test_resolve_validation_sequences_accepts_matching_list(
+def test_resolve_validation_sequences_requires_multi_trajectory(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
-    """Verify a validation list matching the training count is accepted."""
-    resolved = resolve_validation_sequences(
-        [scaling_sequence, scaling_sequence],
+    """Verify multi-trajectory validation must use MultiTrajectory."""
+    with pytest.raises(TypeError, match="MultiTrajectory"):
+        resolve_validation_sequences(
+            [scaling_sequence, scaling_sequence],
+            num_training_sequences=2,
+        )
+    multi = resolve_validation_sequences(
+        MultiTrajectory((scaling_sequence, scaling_sequence)),
         num_training_sequences=2,
     )
-    assert resolved is not None
-    assert len(resolved) == 2
+    assert multi is not None
+    assert len(multi) == 2
+
+
+def test_fit_accepts_multi_trajectory_wrapper(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify fit accepts MultiTrajectory and trains successfully."""
+    second = GraphSnapshotSequence(
+        [
+            Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
+            for t in range(scaling_sequence.num_timesteps)
+        ]
+    )
+    history = trainable_model.fit(
+        MultiTrajectory((scaling_sequence, second)),
+        epochs=3,
+        lr=1e-2,
+    )
+    assert len(history.loss) == 3
 
 
 def test_resolve_lr_scheduler_passes_through_instance(

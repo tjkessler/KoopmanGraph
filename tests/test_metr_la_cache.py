@@ -87,22 +87,38 @@ def test_build_adjacency_matrix_skips_unknown_sensor_ids() -> None:
 
 
 def test_adjacency_to_edge_index_builds_bidirectional_edges() -> None:
-    """Verify adjacency conversion yields bidirectional edge_index pairs."""
+    """Verify one-sided adjacency is mirrored into bidirectional edges."""
     adj = np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.float32)
     edge_index = adjacency_to_edge_index(adj)
+    edge_weight = adjacency_to_edge_weight(adj)
     assert edge_index.shape == (2, 2)
+    assert edge_weight.shape == (2,)
     assert edge_index[0, 0].item() == 0
     assert edge_index[1, 0].item() == 1
+    assert edge_weight.tolist() == pytest.approx([1.0, 1.0])
 
 
 def test_adjacency_to_edge_weight_aligns_with_edge_index() -> None:
-    """Verify edge weights align with bidirectional edge_index ordering."""
+    """Verify two-sided adjacency emits each direction once with stored weights."""
     adj = np.array([[0.0, 2.0], [0.5, 0.0]], dtype=np.float32)
     edge_index = adjacency_to_edge_index(adj)
     edge_weight = adjacency_to_edge_weight(adj)
+    assert edge_index.shape == (2, 2)
     assert edge_weight.shape == (edge_index.shape[1],)
     assert edge_weight[0].item() == pytest.approx(2.0)
     assert edge_weight[1].item() == pytest.approx(0.5)
+
+
+def test_adjacency_conversion_does_not_double_count_two_sided() -> None:
+    """Two-sided nonzero pairs must not emit four edges."""
+    adj = np.array(
+        [[0.0, 0.8, 0.0], [0.3, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=np.float32,
+    )
+    edge_index = adjacency_to_edge_index(adj)
+    edge_weight = adjacency_to_edge_weight(adj)
+    assert edge_index.shape[1] == 2
+    assert edge_weight.tolist() == pytest.approx([0.8, 0.3])
 
 
 def test_read_h5_speed_window_reads_requested_rows(tmp_path: Path) -> None:
@@ -265,6 +281,7 @@ def test_ensure_traffic_cache_builds_from_h5(tmp_path: Path) -> None:
             force=True,
             h5_path=h5_path,
             num_timesteps=3,
+            offset=0,
         )
     assert path.exists()
     payload = torch.load(path, weights_only=False)

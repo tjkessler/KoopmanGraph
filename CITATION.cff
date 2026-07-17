@@ -12,16 +12,13 @@ authors:
 repository-code: "https://github.com/tjkessler/KoopmanGraph"
 url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
-version: 0.2.0
-date-released: 2026-07-12
-doi: 10.5281/zenodo.21326273
+version: 0.3.0
+# date-released / doi: set when tagging the GitHub Release and Zenodo mints the
+# v0.3.0 version DOI. Do not reuse 10.5281/zenodo.21326273 (that is the v0.2.0
+# version DOI).
 keywords:
   - koopman-operator
   - graph-neural-networks
   - pytorch-geometric
   - spatiotemporal-dynamics
   - dynamical-systems
-identifiers:
-  - type: doi
-    value: 10.5281/zenodo.21326273
-    description: "Archived software (version DOI)"

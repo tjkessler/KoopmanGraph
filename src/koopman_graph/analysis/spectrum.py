@@ -1,89 +1,20 @@
-"""Spectral analysis utilities for finite-dimensional Koopman operators."""
+"""Spectrum computation and spatial mode-shape decoding."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
+from koopman_graph.graph_utils import resolve_edge_index, resolve_edge_weight
+from koopman_graph.spectrum_types import KoopmanSpectrum
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from koopman_graph.model import GraphKoopmanModel
-
-
-@dataclass(frozen=True)
-class KoopmanSpectrum:
-    """Eigendecomposition and time scales of a discrete Koopman operator.
-
-    Eigenpairs are sorted by descending eigenvalue magnitude. Frequencies are
-    reported in cycles per unit time; multiply by ``2 * pi`` for angular
-    frequency.
-
-    Attributes
-    ----------
-    eigenvalues : Tensor
-        Complex eigenvalues with shape ``(latent_dim,)``.
-    eigenvectors : Tensor
-        Complex right eigenvectors stored as columns, with shape
-        ``(latent_dim, latent_dim)``.
-    magnitudes : Tensor
-        Eigenvalue magnitudes with shape ``(latent_dim,)``.
-    growth_rates : Tensor
-        Continuous-time exponential growth rates ``log(|lambda|) / time_step``.
-    frequencies : Tensor
-        Signed continuous-time frequencies
-        ``angle(lambda) / (2 * pi * time_step)`` in cycles per unit time.
-    time_step : float
-        Physical duration represented by one discrete Koopman step.
-    """
-
-    eigenvalues: Tensor
-    eigenvectors: Tensor
-    magnitudes: Tensor
-    growth_rates: Tensor
-    frequencies: Tensor
-    time_step: float
-
-    def mode_amplitudes(self, latent_states: Tensor) -> Tensor:
-        """Project latent states onto the Koopman eigenvector basis.
-
-        For a latent row vector ``z``, the returned amplitudes ``a`` satisfy
-        ``z.T = eigenvectors @ a``. Any leading dimensions are preserved.
-
-        Parameters
-        ----------
-        latent_states : Tensor
-            Latent states with shape ``(..., latent_dim)``.
-
-        Returns
-        -------
-        Tensor
-            Complex mode amplitudes with the same shape as ``latent_states``.
-
-        Raises
-        ------
-        ValueError
-            If the trailing latent dimension does not match the spectrum.
-        RuntimeError
-            If the eigenvector matrix is singular.
-        """
-        latent_dim = self.eigenvectors.shape[0]
-        if latent_states.ndim == 0 or latent_states.shape[-1] != latent_dim:
-            msg = (
-                f"Expected trailing dimension {latent_dim}, "
-                f"got shape {tuple(latent_states.shape)}"
-            )
-            raise ValueError(msg)
-
-        vectors = self.eigenvectors.to(device=latent_states.device)
-        states = latent_states.to(dtype=vectors.dtype)
-        flat_states = states.reshape(-1, latent_dim)
-        amplitudes = torch.linalg.solve(vectors, flat_states.T).T
-        return amplitudes.reshape(latent_states.shape)
 
 
 def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
@@ -142,6 +73,88 @@ def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
     )
 
 
+def compute_generator_spectrum(generator: Tensor) -> KoopmanSpectrum:
+    """Compute the sorted spectrum of a continuous-time Koopman generator.
+
+    Growth rates are the real parts of the eigenvalues; frequencies are the
+    imaginary parts scaled to cycles per unit time.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Square generator matrix with shape ``(latent_dim, latent_dim)``.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Eigenpairs sorted by descending magnitude with native continuous-time
+        growth rates and frequencies.
+
+    Raises
+    ------
+    ValueError
+        If ``generator`` is not a non-empty square matrix.
+    TypeError
+        If ``generator`` is not floating-point or complex.
+    """
+    if generator.ndim != 2 or generator.shape[0] != generator.shape[1]:
+        msg = f"generator must be a square matrix, got shape {tuple(generator.shape)}"
+        raise ValueError(msg)
+    if generator.shape[0] == 0:
+        raise ValueError("generator must be non-empty")
+    if not (generator.is_floating_point() or generator.is_complex()):
+        msg = f"generator must be floating-point or complex, got {generator.dtype}"
+        raise TypeError(msg)
+
+    eigenvalues, eigenvectors = torch.linalg.eig(generator)
+    magnitudes = eigenvalues.abs()
+    order = torch.argsort(magnitudes, descending=True)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    magnitudes = magnitudes[order]
+
+    growth_rates = eigenvalues.real
+    frequencies = eigenvalues.imag / (2 * torch.pi)
+    return KoopmanSpectrum(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        magnitudes=magnitudes,
+        growth_rates=growth_rates,
+        frequencies=frequencies,
+        time_step=1.0,
+    )
+
+
+def discrete_spectrum_at_delta_t(
+    generator: Tensor,
+    delta_t: float,
+) -> KoopmanSpectrum:
+    """Compute the spectrum of ``exp(L · Δt)`` for a generator ``L``.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Continuous-time generator matrix.
+    delta_t : float
+        Integration interval.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Discrete-time spectrum at horizon ``delta_t``.
+
+    Raises
+    ------
+    ValueError
+        If ``delta_t`` is not positive.
+    """
+    if delta_t <= 0:
+        msg = f"delta_t must be positive, got {delta_t}"
+        raise ValueError(msg)
+    transition = torch.linalg.matrix_exp(generator * delta_t)
+    return compute_spectrum(transition, delta_t)
+
+
 def decode_mode_shapes(
     model: GraphKoopmanModel,
     x_or_data: Tensor | Data,
@@ -156,6 +169,10 @@ def decode_mode_shapes(
     centered finite-difference directional derivative around the encoded graph.
     Real and imaginary parts of complex eigenvectors are probed separately and
     combined into a complex-valued mode shape.
+
+    Hard-typed to :class:`~koopman_graph.model.GraphKoopmanModel` because it
+    needs ``encode`` / ``decode`` and a GNN decoder. Spectrum-only comparisons
+    use :func:`~koopman_graph.analysis.dynamical_similarity` instead.
 
     Parameters
     ----------
@@ -192,13 +209,13 @@ def decode_mode_shapes(
         msg = f"mode_indices must be between 0 and {latent_dim - 1}, got {indices}"
         raise ValueError(msg)
 
-    edges = model._resolve_edge_index(x_or_data, edge_index)
-    edge_weight = model._resolve_edge_weight(x_or_data, None)
+    edges = resolve_edge_index(x_or_data, edge_index)
+    edge_weight = resolve_edge_weight(x_or_data, None)
     was_training = model.training
     model.eval()
     try:
         with torch.no_grad():
-            latent = model.encoder(x_or_data, edges, edge_weight)
+            latent = model.encode(x_or_data, edges, edge_weight)
             mode_shapes = [
                 _decode_complex_direction(
                     model,

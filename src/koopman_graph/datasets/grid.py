@@ -13,6 +13,7 @@ from koopman_graph.datasets.dynamics import (
     initial_node_features,
     laplacian_diffusion_rollout,
     make_generator,
+    validate_advection_decay_rate,
     validate_diffusion_generation_params,
 )
 
@@ -96,7 +97,8 @@ class GridDynamicGraphBenchmark:
     noise_std : float, optional
         Standard deviation of additive Gaussian noise. Default is ``0.01``.
     seed : int, optional
-        Random seed for the initial state and noise.
+        Random seed for the initial state and noise. ``None`` uses unseeded
+        randomness; tutorials should pass an explicit seed (e.g. ``42``).
     initial_state : {"random", "ones"}, optional
         Initial node feature pattern. Default is ``"ones"``.
     dtype : torch.dtype, optional
@@ -114,7 +116,7 @@ class GridDynamicGraphBenchmark:
         diffusion_rate: float = 0.1,
         decay_rate: float = 0.99,
         noise_std: float = 0.01,
-        seed: int | None = 42,
+        seed: int | None = None,
         initial_state: InitialStateName = "ones",
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
@@ -137,7 +139,8 @@ class GridDynamicGraphBenchmark:
         noise_std : float, optional
             Standard deviation of additive Gaussian noise. Default is ``0.01``.
         seed : int, optional
-            Random seed for the initial state and noise.
+            Random seed for the initial state and noise. ``None`` uses unseeded
+            randomness; tutorials should pass an explicit seed (e.g. ``42``).
         initial_state : {"random", "ones"}, optional
             Initial node feature pattern. Default is ``"ones"``.
         dtype : torch.dtype, optional
@@ -245,7 +248,14 @@ class AnisotropicAdvectionGridBenchmark:
                          {\\sum_{j \\in \\mathcal{N}(i)} w_{ij}}
 
     with ``w_{i,\\text{west}} = west_weight``, ``w_{i,\\text{north}} = north_weight``,
-    and remaining neighbors sharing the leftover mass equally.
+    and remaining neighbors sharing leftover mass
+    ``1 - west_weight - north_weight`` equally. If a preferred direction has
+    no neighbor (grid border), that weight is still reserved from the leftover
+    budget but never assigned, so border nodes mix less strongly than
+    interior nodes; the mixture is then renormalized by the sum of assigned
+    weights. When that assigned-weight sum is zero (for example both preferred
+    weights are zero at a corner that only has west/north neighbors), the node
+    keeps pure self-retention ``decay_rate · x_t`` with no neighbor mixture.
 
     Parameters
     ----------
@@ -266,7 +276,8 @@ class AnisotropicAdvectionGridBenchmark:
     noise_std : float, optional
         Standard deviation of additive Gaussian noise. Default is ``0.005``.
     seed : int, optional
-        Random seed for the initial state and noise.
+        Random seed for the initial state and noise. ``None`` uses unseeded
+        randomness; tutorials should pass an explicit seed (e.g. ``42``).
     initial_state : {"random", "ones"}, optional
         Initial node feature pattern. Default is ``"ones"``.
     dtype : torch.dtype, optional
@@ -285,7 +296,7 @@ class AnisotropicAdvectionGridBenchmark:
         west_weight: float = 0.7,
         north_weight: float = 0.2,
         noise_std: float = 0.005,
-        seed: int | None = 42,
+        seed: int | None = None,
         initial_state: InitialStateName = "ones",
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
@@ -310,7 +321,8 @@ class AnisotropicAdvectionGridBenchmark:
         noise_std : float, optional
             Standard deviation of additive Gaussian noise. Default is ``0.005``.
         seed : int, optional
-            Random seed for the initial state and noise.
+            Random seed for the initial state and noise. ``None`` uses unseeded
+            randomness; tutorials should pass an explicit seed (e.g. ``42``).
         initial_state : {"random", "ones"}, optional
             Initial node feature pattern. Default is ``"ones"``.
         dtype : torch.dtype, optional
@@ -338,9 +350,7 @@ class AnisotropicAdvectionGridBenchmark:
         if in_channels < 1:
             msg = f"in_channels must be >= 1, got {in_channels}"
             raise ValueError(msg)
-        if not 0.0 < decay_rate < 1.0:
-            msg = f"decay_rate must be in (0, 1), got {decay_rate}"
-            raise ValueError(msg)
+        validate_advection_decay_rate(decay_rate)
         if west_weight < 0.0 or north_weight < 0.0:
             msg = "west_weight and north_weight must be non-negative"
             raise ValueError(msg)
@@ -399,6 +409,8 @@ class AnisotropicAdvectionGridBenchmark:
                             weights[index] = share
 
                     weight_sum = sum(weights.values())
+                    if weight_sum <= 0.0:
+                        continue
                     mixture = torch.zeros(in_channels, dtype=dtype)
                     for neighbor, weight in weights.items():
                         mixture = mixture + weight * state[neighbor]
