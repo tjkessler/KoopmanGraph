@@ -62,7 +62,12 @@ jobs:
 
       - name: Execute tutorial notebooks
         if: matrix.python-version == '3.12'
-        run: pytest --nbmake examples/ -v
+        env:
+          # Limit BLAS/OpenMP oversubscription when notebooks run in parallel.
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+        run: pytest --nbmake examples/ -v -n 2
 
   docs:
     runs-on: ubuntu-latest
