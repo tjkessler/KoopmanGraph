@@ -1,104 +1,21 @@
-"""Finite-dimensional Koopman operator for latent-state linear propagation."""
+"""Discrete finite-dimensional Koopman operator matrix **K**."""
 
 from __future__ import annotations
-
-from typing import Literal, TypedDict
 
 import torch
 from torch import Tensor, nn
 
-InitMode = Literal["identity", "identity_noise", "xavier"]
-Parameterization = Literal["dense", "odo", "schur", "dissipative", "lyapunov"]
-
-STABILITY_EPS_MARGIN = 1e-4
-DISSIPATIVE_MIN_EIGENVALUE = 1e-3
-
-
-class StabilityCertificate(TypedDict, total=False):
-    """Lyapunov or spectral stability certificate for constrained operators.
-
-    Attributes
-    ----------
-    lyapunov_matrix : Tensor
-        Positive-definite Lyapunov matrix when available.
-    margin : Tensor
-        Stability margin (distance from the unit-circle boundary).
-    """
-
-    lyapunov_matrix: Tensor
-    margin: Tensor
-
-
-def _strict_spectral_bound(max_spectral_radius: float) -> float:
-    """Return the strict interior bound ``max_spectral_radius - epsilon``.
-
-    Parameters
-    ----------
-    max_spectral_radius : float
-        Configured spectral-radius upper limit.
-
-    Returns
-    -------
-    float
-        Strict interior bound used by structurally stable modes.
-    """
-    return max(max_spectral_radius - STABILITY_EPS_MARGIN, STABILITY_EPS_MARGIN)
-
-
-def _cayley_orthogonal(skew_params: Tensor) -> Tensor:
-    """Build an orthogonal matrix via the Cayley transform.
-
-    Parameters
-    ----------
-    skew_params : Tensor
-        Square parameter matrix; only its skew-symmetric part is used.
-
-    Returns
-    -------
-    Tensor
-        Orthogonal matrix with the same shape as ``skew_params``.
-    """
-    skew = 0.5 * (skew_params - skew_params.T)
-    identity = torch.eye(skew.shape[0], device=skew.device, dtype=skew.dtype)
-    return torch.linalg.solve(identity - skew, identity + skew)
-
-
-def _bounded_diagonal(raw: Tensor, max_radius: float) -> Tensor:
-    """Map unconstrained parameters to a bounded diagonal matrix.
-
-    Parameters
-    ----------
-    raw : Tensor
-        Unconstrained diagonal parameters with shape ``(latent_dim,)``.
-    max_radius : float
-        Maximum absolute value on the diagonal.
-
-    Returns
-    -------
-    Tensor
-        Diagonal matrix with spectral values in ``[-max_radius, max_radius]``.
-    """
-    values = torch.tanh(raw) * max_radius
-    return torch.diag(values)
-
-
-def _strict_diagonal_values(raw: Tensor, max_spectral_radius: float) -> Tensor:
-    """Map raw parameters to strictly bounded diagonal eigenvalues.
-
-    Parameters
-    ----------
-    raw : Tensor
-        Unconstrained diagonal parameters with shape ``(latent_dim,)``.
-    max_spectral_radius : float
-        Configured spectral-radius upper limit.
-
-    Returns
-    -------
-    Tensor
-        Diagonal eigenvalues strictly inside ``[-bound, bound]``.
-    """
-    bound = _strict_spectral_bound(max_spectral_radius)
-    return torch.tanh(raw) * bound
+from koopman_graph.operators.contract import (
+    DISSIPATIVE_MIN_EIGENVALUE,
+    InitMode,
+    Parameterization,
+    StabilityCertificate,
+    _bounded_diagonal,
+    _safe_diagonal_inverse,
+    _strict_diagonal_values,
+    cayley_orthogonal,
+    strict_spectral_bound,
+)
 
 
 class KoopmanOperator(nn.Module):
@@ -125,30 +42,40 @@ class KoopmanOperator(nn.Module):
 
     Stability modes
     ---------------
-    **Soft (no mathematical guarantee on assembled *K*):**
+    **Soft (no strict structural certificate):**
 
     - ``"dense"`` — unconstrained learnable matrix. Pair with
       :class:`~koopman_graph.losses.EigenvalueRegularizationLoss` during training
       for empirical unit-circle penalization.
     - ``"odo"`` — orthogonal–diagonal–orthogonal factorization
-      (DeepKoopFormer-style). Cayley factors and a bounded diagonal ``D`` only;
-      the assembled ``K = O_1 D O_2^T`` is **not** guaranteed to have spectral
-      radius ``\\leq max_spectral_radius``. :meth:`spectral_radius` reports a
-      diagonal-factor bound, not ``\\max |\\lambda_i(K)|``. Combine with
-      eigenvalue regularization for long rollouts.
+      (DeepKoopFormer-style). Cayley factors are orthogonal, so
+      ``\\|K\\|_2 = \\|D\\|_2 = \\max |d_i|`` and therefore
+      ``\\rho(K) \\leq \\max |d_i| \\leq max_spectral_radius``. This is an
+      operator-norm bound, not a structural certificate: there is no strict
+      ε-interior margin, no Lyapunov certificate, and non-normal transient
+      growth remains possible. :meth:`bound_metric` reports the diagonal-factor
+      bound; :meth:`spectral_radius` returns ``\\max |\\lambda_i(K)|`` via
+      ``eigvals``. Prefer structural modes for long-horizon guarantees.
 
-    **Structural (eigenvalues forced inside the unit disk):**
+    **Structural (eigenvalues forced strictly inside the unit disk):**
 
     Opt-in modes force eigenvalues strictly inside the unit disk for
     long-horizon stability (Mallada, 2025; stability-constrained Deep Koopman
-    literature):
+    literature). For these modes ``max_spectral_radius`` must lie in
+    ``(0, 1]``:
 
-    - ``"schur"`` — real Schur form ``K = Q T Q^T`` with triangular ``T`` and
-      diagonal magnitudes bounded below ``max_spectral_radius``.
+    - ``"schur"`` — orthogonally similar upper-triangular form
+      ``K = Q T Q^T`` with real diagonal magnitudes strictly inside
+      ``(-max_spectral_radius, max_spectral_radius)`` via a ``tanh`` map
+      (forces real eigenvalues; unlike classical real Schur, there are no
+      2×2 blocks).
     - ``"dissipative"`` — symmetric contraction ``K = exp(-S)`` with
-      ``S = L L^T + \\varepsilon I`` positive definite.
+      ``S = L L^T + \\varepsilon I`` positive definite. The contraction is
+      fixed by :data:`DISSIPATIVE_MIN_EIGENVALUE`; ``max_spectral_radius`` is
+      accepted for API consistency but does not tighten the bound.
     - ``"lyapunov"`` — ``K = Q \\operatorname{diag}(d) Q^T`` with certified
-      Lyapunov matrix ``P = Q \\operatorname{diag}(p) Q^T`` and ``|d_i| < 1``.
+      Lyapunov matrix ``P = Q \\operatorname{diag}(p) Q^T`` and
+      ``|d_i| < max_spectral_radius \\leq 1``.
 
     Attributes
     ----------
@@ -163,8 +90,10 @@ class KoopmanOperator(nn.Module):
     parameterization : str
         Parameterization used for ``K``.
     max_spectral_radius : float
-        Target spectral bound; structurally stable modes use
-        ``max_spectral_radius - STABILITY_EPS_MARGIN`` internally.
+        Target spectral bound. For ``"odo"`` this may exceed ``1``. For
+        structural modes it must be in ``(0, 1]``; Schur/Lyapunov use
+        ``max_spectral_radius - STABILITY_EPS_MARGIN`` internally, while
+        dissipative ignores the value for matrix assembly.
     """
 
     def __init__(
@@ -194,15 +123,22 @@ class KoopmanOperator(nn.Module):
             Matrix parameterization. ``"dense"`` stores ``K`` directly with no
             stability guarantee (optional eigenvalue loss during training).
             ``"odo"`` factorizes ``K = O_1 D O_2^\\top`` with orthogonal Cayley
-            factors and a bounded diagonal ``D``; this bounds diagonal factors
-            only — assembled ``K`` is not structurally constrained. ``"schur"``,
-            ``"dissipative"``, and ``"lyapunov"`` embed **structural** stability
-            guarantees (strict unit-disk eigenvalues). Default is ``"dense"``.
+            factors and a bounded diagonal ``D``, which implies
+            ``\\rho(K) \\leq \\max |d_i| \\leq max_spectral_radius`` via the
+            operator 2-norm, but without a strict ε-interior certificate.
+            ``"schur"``, ``"dissipative"``, and ``"lyapunov"`` embed
+            **structural** stability guarantees (strict unit-disk eigenvalues)
+            and require ``max_spectral_radius`` in ``(0, 1]``. Dissipative
+            ignores the numeric value when assembling ``K``. Default is
+            ``"dense"``.
         max_spectral_radius : float, optional
             Target spectral bound for ``"odo"`` diagonal factors and for
-            structurally stable modes. Structurally stable parameterizations
-            enforce a strict interior margin of :data:`STABILITY_EPS_MARGIN`
-            below this value. Default is ``1.0``.
+            Schur/Lyapunov diagonals. Soft modes (``"odo"``) may use values
+            greater than ``1``. Structural modes require ``(0, 1]``; Schur and
+            Lyapunov enforce a strict interior margin of
+            :data:`STABILITY_EPS_MARGIN` below this value, while dissipative
+            always contracts via :data:`DISSIPATIVE_MIN_EIGENVALUE`. Default is
+            ``1.0``.
         control_dim : int, optional
             Dimension of exogenous control inputs. When ``0``, the operator
             is uncontrolled. When positive, a learnable input matrix ``B``
@@ -213,7 +149,8 @@ class KoopmanOperator(nn.Module):
         ------
         ValueError
             If ``latent_dim < 1``, ``init_scale < 0``,
-            ``max_spectral_radius <= 0``, or ``control_dim < 0``.
+            ``max_spectral_radius <= 0``, structural modes receive
+            ``max_spectral_radius > 1``, or ``control_dim < 0``.
         """
         super().__init__()
         if latent_dim < 1:
@@ -224,6 +161,15 @@ class KoopmanOperator(nn.Module):
             raise ValueError(msg)
         if max_spectral_radius <= 0:
             msg = f"max_spectral_radius must be positive, got {max_spectral_radius}"
+            raise ValueError(msg)
+        if (
+            parameterization in {"schur", "dissipative", "lyapunov"}
+            and max_spectral_radius > 1.0
+        ):
+            msg = (
+                "structural parameterizations require max_spectral_radius <= 1 "
+                f"for unit-disk certificates, got {max_spectral_radius}"
+            )
             raise ValueError(msg)
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
@@ -352,6 +298,8 @@ class KoopmanOperator(nn.Module):
 
         For ``parameterization="dense"`` this is the learnable parameter.
         Other modes assemble ``K`` from their factorized parameters.
+        Prefer :attr:`matrix` when writing code against
+        :class:`KoopmanOperatorContract`.
 
         Returns
         -------
@@ -364,6 +312,75 @@ class KoopmanOperator(nn.Module):
                 raise AttributeError("K")
             return dense_k
         return self._assemble_matrix()
+
+    @property
+    def matrix(self) -> Tensor:
+        """Assembled operator matrix (alias of :attr:`K`).
+
+        Returns
+        -------
+        Tensor
+            Current discrete Koopman matrix ``K``.
+        """
+        return self.K
+
+    def set_dense_matrix(
+        self,
+        matrix: Tensor,
+        *,
+        control_matrix: Tensor | None = None,
+    ) -> None:
+        """Write dense Koopman parameters in place.
+
+        Parameters
+        ----------
+        matrix : Tensor
+            Dense operator ``K`` with shape ``(latent_dim, latent_dim)``.
+        control_matrix : Tensor or None, optional
+            Dense control matrix ``B`` with shape
+            ``(control_dim, latent_dim)``. Required when ``control_dim > 0``.
+
+        Raises
+        ------
+        ValueError
+            If the operator is not densely parameterized or control shapes
+            are invalid.
+        """
+        if self.parameterization != "dense":
+            msg = (
+                "set_dense_matrix requires parameterization='dense', "
+                f"got {self.parameterization!r}"
+            )
+            raise ValueError(msg)
+        if matrix.shape != (self.latent_dim, self.latent_dim):
+            msg = (
+                f"Expected matrix shape ({self.latent_dim}, {self.latent_dim}), "
+                f"got {tuple(matrix.shape)}"
+            )
+            raise ValueError(msg)
+
+        dense_k = self._parameters.get("K")
+        if dense_k is None:
+            raise AttributeError("K")
+        with torch.no_grad():
+            dense_k.copy_(matrix.to(device=dense_k.device, dtype=dense_k.dtype))
+            if self.control_dim > 0:
+                if control_matrix is None:
+                    msg = "control_matrix is required when control_dim > 0"
+                    raise ValueError(msg)
+                expected = (self.control_dim, self.latent_dim)
+                if control_matrix.shape != expected:
+                    msg = (
+                        f"Expected control_matrix shape {expected}, "
+                        f"got {tuple(control_matrix.shape)}"
+                    )
+                    raise ValueError(msg)
+                self.B.copy_(
+                    control_matrix.to(device=self.B.device, dtype=self.B.dtype)
+                )
+            elif control_matrix is not None:
+                msg = "control_matrix provided to an uncontrolled operator"
+                raise ValueError(msg)
 
     def reset_parameters(self) -> None:
         """Reinitialize operator parameters according to :attr:`init_mode`.
@@ -421,7 +438,7 @@ class KoopmanOperator(nn.Module):
         float
             Unconstrained diagonal parameter mapped near the strict bound.
         """
-        bound = _strict_spectral_bound(self.max_spectral_radius)
+        bound = strict_spectral_bound(self.max_spectral_radius)
         target = bound * (1.0 - 1e-6)
         ratio = target / bound
         return float(torch.atanh(torch.tensor(ratio)).item())
@@ -486,7 +503,7 @@ class KoopmanOperator(nn.Module):
         elif self.init_mode == "identity_noise":
             nn.init.constant_(diag_param, self._identity_strict_diag_raw())
             with torch.no_grad():
-                bound = _strict_spectral_bound(self.max_spectral_radius)
+                bound = strict_spectral_bound(self.max_spectral_radius)
                 noise = torch.randn_like(diag_param) * self.init_scale
                 current = torch.tanh(diag_param) * bound
                 updated = (current + noise).clamp(
@@ -552,7 +569,7 @@ class KoopmanOperator(nn.Module):
         tuple of Tensor
             Orthogonal matrices ``(O_1, O_2)``.
         """
-        return _cayley_orthogonal(self.cayley_O1), _cayley_orthogonal(self.cayley_O2)
+        return cayley_orthogonal(self.cayley_O1), cayley_orthogonal(self.cayley_O2)
 
     def _odo_diagonal(self) -> Tensor:
         """Build the bounded diagonal factor for the ODO parameterization.
@@ -599,7 +616,7 @@ class KoopmanOperator(nn.Module):
         Tensor
             Assembled Schur-form operator matrix.
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         return q @ self._schur_triangular() @ q.T
 
     def _dissipative_factor(self) -> Tensor:
@@ -651,7 +668,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Diagonal eigenvalues strictly inside the unit disk.
+            Diagonal eigenvalues strictly inside
+            ``(-max_spectral_radius, max_spectral_radius)`` with
+            ``max_spectral_radius <= 1``, so they lie inside the unit disk.
         """
         return _strict_diagonal_values(self.lyap_diag_raw, self.max_spectral_radius)
 
@@ -663,7 +682,7 @@ class KoopmanOperator(nn.Module):
         Tensor
             Symmetric positive-definite Lyapunov matrix.
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         p = torch.nn.functional.softplus(self.lyap_p_raw) + 1e-6
         return q @ torch.diag(p) @ q.T
 
@@ -675,7 +694,7 @@ class KoopmanOperator(nn.Module):
         Tensor
             Lyapunov-certified symmetric operator matrix.
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         return q @ torch.diag(self._lyapunov_diagonal()) @ q.T
 
     def _assemble_matrix(self) -> Tensor:
@@ -694,24 +713,21 @@ class KoopmanOperator(nn.Module):
         }
         return assemblers[self.parameterization]()
 
-    def spectral_radius(self) -> Tensor:
-        """Return the spectral radius of the assembled operator matrix.
+    def bound_metric(self) -> Tensor:
+        """Return the cheap soft/structural monitoring bound.
 
-        For structurally stable modes (``"schur"``, ``"dissipative"``,
-        ``"lyapunov"``), this is a certified upper bound on
-        ``\\max |\\lambda_i(K)|``. For ``"odo"``, the returned value is the
-        maximum bounded diagonal entry of ``D`` only — **not** the spectral
-        radius of assembled ``K``. Use ``torch.linalg.eigvals(self.K)`` when
-        you need the true radius for ODO or dense operators.
-
-        Structurally stable modes use closed-form or structured bounds instead
-        of a general ``eigvals`` call where possible.
+        For ``"odo"``, this is the maximum bounded diagonal entry of ``D`` —
+        **not** the spectral radius of assembled ``K``. For structurally
+        stable modes, this is a closed-form certified upper bound on
+        ``\\max |\\lambda_i(K)|``. For ``"dense"``, this equals
+        :meth:`spectral_radius`. Prefer :meth:`bound_metric` when writing
+        code against :class:`KoopmanOperatorContract`; use
+        :meth:`spectral_radius` for the true spectrum via ``eigvals``.
 
         Returns
         -------
         Tensor
-            Scalar tensor. For structural modes, the maximum eigenvalue
-            magnitude bound; for ``"odo"``, the diagonal-factor bound.
+            Scalar bound metric for the active parameterization.
         """
         if self.parameterization == "odo":
             return torch.tanh(self.diag_raw).abs().max() * self.max_spectral_radius
@@ -726,35 +742,46 @@ class KoopmanOperator(nn.Module):
             generator = self._dissipative_generator()
             min_eval = torch.linalg.eigvalsh(generator).min()
             return torch.exp(-min_eval)
+        return self.spectral_radius()
+
+    def spectral_radius(self) -> Tensor:
+        """Return the true spectral radius ``\\max |\\lambda_i(K)|``.
+
+        Always computed from the assembled operator via ``eigvals``. For the
+        cheap soft/structural monitoring bound (diagonal-factor bound for
+        ``"odo"``, closed-form certificates for structural modes), use
+        :meth:`bound_metric`.
+
+        Returns
+        -------
+        Tensor
+            Scalar tensor ``\\max_i |\\lambda_i(K)|``.
+        """
         eigenvalues = torch.linalg.eigvals(self.K)
         return eigenvalues.abs().max()
 
     def stability_certificate(self) -> StabilityCertificate | None:
         """Return a stability certificate when the parameterization provides one.
 
-        For ``"lyapunov"``, returns the Lyapunov matrix ``P`` and the margin
-        ``1 - \\max |d_i|``. For ``"schur"`` and ``"dissipative"``, returns
-        the spectral margin ``max_spectral_radius - \\rho(K)`` (strict modes
-        use the interior bound). Returns ``None`` for ``"dense"`` and ``"odo"``.
+        Discrete structural modes (``"schur"``, ``"dissipative"``,
+        ``"lyapunov"``) all report the unit-disk gap ``1 - bound_metric``.
+        Lyapunov also returns the certificate matrix ``P``. Returns ``None``
+        for ``"dense"`` and ``"odo"``.
 
         Returns
         -------
         StabilityCertificate or None
-            Certificate dictionary when available.
+            Frozen certificate with ``margin`` and optional ``lyapunov_matrix``.
         """
         if self.parameterization == "lyapunov":
-            diagonal = self._lyapunov_diagonal()
-            margin = 1.0 - diagonal.abs().max()
-            return {
-                "lyapunov_matrix": self._lyapunov_matrix(),
-                "margin": margin,
-            }
-        if self.parameterization == "schur":
-            radius = self.spectral_radius()
-            return {"margin": torch.as_tensor(self.max_spectral_radius - radius)}
-        if self.parameterization == "dissipative":
-            radius = self.spectral_radius()
-            return {"margin": torch.as_tensor(1.0 - radius)}
+            radius = self.bound_metric()
+            return StabilityCertificate(
+                margin=torch.as_tensor(1.0 - radius),
+                lyapunov_matrix=self._lyapunov_matrix(),
+            )
+        if self.parameterization in {"schur", "dissipative"}:
+            radius = self.bound_metric()
+            return StabilityCertificate(margin=torch.as_tensor(1.0 - radius))
         return None
 
     def forward(self, z: Tensor, control: Tensor | None = None) -> Tensor:
@@ -855,6 +882,69 @@ class KoopmanOperator(nn.Module):
         inverse_k = self._inverse_matrix(inverse_matrix=inverse_matrix)
         return adjusted @ inverse_k.T
 
+    def advance(
+        self,
+        z: Tensor,
+        delta_t: float | Tensor | None = None,
+        *,
+        control: Tensor | None = None,
+    ) -> Tensor:
+        """Advance latent states by one discrete Koopman step.
+
+        Implements :class:`KoopmanOperatorContract`. ``delta_t`` is accepted for
+        API symmetry with continuous operators and is ignored.
+
+        Parameters
+        ----------
+        z : Tensor
+            Latent states with shape ``(..., latent_dim)``.
+        delta_t : float, Tensor, or None, optional
+            Ignored for discrete operators.
+        control : Tensor or None, optional
+            Exogenous control input. Required when :attr:`control_dim` is
+            positive.
+
+        Returns
+        -------
+        Tensor
+            Advanced latent states with the same shape as ``z``.
+        """
+        _ = delta_t
+        return self.forward(z, control=control)
+
+    def inverse_advance(
+        self,
+        z: Tensor,
+        delta_t: float | Tensor | None = None,
+        *,
+        control: Tensor | None = None,
+        inverse_matrix: Tensor | None = None,
+    ) -> Tensor:
+        """Recover the previous latent state (contract alias of :meth:`inverse_step`).
+
+        Parameters
+        ----------
+        z : Tensor
+            Latent states at time ``t+1``.
+        delta_t : float, Tensor, or None, optional
+            Ignored for discrete operators.
+        control : Tensor or None, optional
+            Control that drove the forward transition.
+        inverse_matrix : Tensor or None, optional
+            Optional precomputed ``K^{-1}``.
+
+        Returns
+        -------
+        Tensor
+            Recovered latent states at time ``t``.
+        """
+        _ = delta_t
+        return self.inverse_step(
+            z,
+            control=control,
+            inverse_matrix=inverse_matrix,
+        )
+
     def _inverse_matrix(self, *, inverse_matrix: Tensor | None = None) -> Tensor:
         """Return ``K^{-1}`` for the active parameterization.
 
@@ -874,13 +964,10 @@ class KoopmanOperator(nn.Module):
             return self.dense_inverse_matrix()
         if self.parameterization == "odo":
             o1, o2 = self._odo_orthogonal_factors()
-            diagonal = self._odo_diagonal()
-            diag_values = torch.diag(diagonal)
-            eps = torch.finfo(diag_values.dtype).eps
-            inverse_diag = torch.diag(1.0 / diag_values.clamp_min(eps))
-            return o2 @ inverse_diag @ o1.T
+            diag_values = torch.diag(self._odo_diagonal())
+            return o2 @ _safe_diagonal_inverse(diag_values) @ o1.T
         if self.parameterization == "schur":
-            q = _cayley_orthogonal(self.cayley_Q)
+            q = cayley_orthogonal(self.cayley_Q)
             triangular = self._schur_triangular()
             triangular_inv = torch.linalg.inv(triangular)
             return q @ triangular_inv @ q.T
@@ -888,11 +975,8 @@ class KoopmanOperator(nn.Module):
             generator = self._dissipative_generator()
             return torch.linalg.matrix_exp(generator)
         if self.parameterization == "lyapunov":
-            q = _cayley_orthogonal(self.cayley_Q)
-            diag_values = self._lyapunov_diagonal()
-            eps = torch.finfo(diag_values.dtype).eps
-            inverse_diag = torch.diag(1.0 / diag_values.clamp_min(eps))
-            return q @ inverse_diag @ q.T
+            q = cayley_orthogonal(self.cayley_Q)
+            return q @ _safe_diagonal_inverse(self._lyapunov_diagonal()) @ q.T
         msg = f"Unknown parameterization: {self.parameterization!r}"
         raise ValueError(msg)
 

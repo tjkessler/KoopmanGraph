@@ -9,12 +9,14 @@ from torch_geometric.data import Data
 
 from koopman_graph.data import (
     GraphSnapshotSequence,
+    MultiTrajectory,
     TemporalSplit,
     WindowSampler,
-    _snapshots_have_dynamic_topology,
+    as_multi_trajectory,
     resolve_sequence,
     temporal_split,
 )
+from koopman_graph.data.containers import _snapshots_have_dynamic_topology
 
 
 def test_construct_from_data_list(
@@ -317,20 +319,78 @@ def test_exported_from_package() -> None:
     assert ExportedSequence is GraphSnapshotSequence
 
 
+def test_multi_trajectory_requires_non_empty(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify MultiTrajectory rejects empty input and accepts sequences."""
+    with pytest.raises(ValueError, match="at least one"):
+        MultiTrajectory(())
+    bundle = MultiTrajectory((scaling_sequence,))
+    assert len(bundle) == 1
+    assert bundle[0] is scaling_sequence
+    assert list(bundle) == [scaling_sequence]
+
+
+def test_multi_trajectory_rejects_non_sequence(
+    synthetic_graph: Data,
+) -> None:
+    """Verify MultiTrajectory requires GraphSnapshotSequence elements."""
+    with pytest.raises(TypeError, match="GraphSnapshotSequence"):
+        MultiTrajectory((synthetic_graph,))  # type: ignore[arg-type]
+
+
+def test_as_multi_trajectory_accepts_varargs_and_iterable(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Verify the helper builds MultiTrajectory from varargs or an iterable."""
+    from_varargs = as_multi_trajectory(scaling_sequence, scaling_sequence)
+    from_iterable = as_multi_trajectory([scaling_sequence, scaling_sequence])
+    assert from_varargs.sequences == (scaling_sequence, scaling_sequence)
+    assert from_iterable.sequences == (scaling_sequence, scaling_sequence)
+
+
+def test_multi_trajectory_exported_from_package() -> None:
+    """Verify MultiTrajectory stays at root; helper lives in ``data``."""
+    from koopman_graph import MultiTrajectory as ExportedMulti
+    from koopman_graph.data import as_multi_trajectory as module_helper
+
+    assert ExportedMulti is MultiTrajectory
+    assert module_helper is as_multi_trajectory
+    assert "as_multi_trajectory" not in __import__("koopman_graph").__all__
+
+
 def test_snapshots_property(
     synthetic_edge_index: torch.Tensor,
     make_snapshots: Callable[..., list[Data]],
 ) -> None:
-    """Verify the ``snapshots`` property exposes underlying storage."""
+    """Verify ``snapshots`` is an immutable tuple of borrowed ``Data`` objects."""
     snapshots = make_snapshots(synthetic_edge_index)
     sequence = GraphSnapshotSequence(snapshots)
-    assert sequence.snapshots == snapshots
+    assert isinstance(sequence.snapshots, tuple)
+    assert sequence.snapshots == tuple(snapshots)
     assert sequence.snapshots[0] is snapshots[0]
+    with pytest.raises(AttributeError):
+        sequence.snapshots.append(snapshots[0])  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        sequence.snapshots[0] = snapshots[0]  # type: ignore[index]
+
+
+def test_snapshots_collection_independent_of_input_list(
+    synthetic_edge_index: torch.Tensor,
+    make_snapshots: Callable[..., list[Data]],
+) -> None:
+    """Verify mutating the input list after construction does not alter storage."""
+    snapshots = make_snapshots(synthetic_edge_index)
+    sequence = GraphSnapshotSequence(snapshots)
+    original_length = len(sequence)
+    snapshots.append(snapshots[0])
+    assert len(sequence) == original_length
+    assert len(sequence.snapshots) == original_length
 
 
 def test_as_tensor_converts_dtype() -> None:
     """Verify ``_as_tensor`` converts tensor dtype when requested."""
-    from koopman_graph.data import _as_tensor
+    from koopman_graph.data.containers import _as_tensor
 
     value = torch.randn(2, 3, dtype=torch.float64)
     converted = _as_tensor(value, dtype=torch.float32)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 from torch_geometric.data import Data
@@ -18,6 +19,35 @@ from koopman_graph.analysis import (
     discrete_spectrum_at_delta_t,
 )
 from koopman_graph.data import resolve_pair_delta_t
+from koopman_graph.operators import (
+    STABILITY_EPS_MARGIN,
+    matrix_log,
+    van_loan_factors,
+    van_loan_generator_from_discrete,
+)
+from koopman_graph.operators.continuous import _negative_strict_diagonal_values
+
+
+def test_matrix_log_round_trips_spd_matrix() -> None:
+    """Principal log should satisfy exp(log(M)) ≈ M for well-conditioned SPD M."""
+    torch.manual_seed(1)
+    factor = torch.randn(4, 4)
+    spd = factor @ factor.T + 0.5 * torch.eye(4)
+    recovered = torch.linalg.matrix_exp(matrix_log(spd))
+    assert torch.allclose(recovered, spd, atol=1e-5)
+
+
+def test_matrix_log_of_matrix_exp_recovers_symmetric_generator() -> None:
+    """log(exp(L)) ≈ L for a symmetric Hurwitz generator."""
+    generator = torch.tensor(
+        [
+            [-0.5, 0.1, 0.0],
+            [0.1, -0.4, 0.05],
+            [0.0, 0.05, -0.3],
+        ]
+    )
+    recovered = matrix_log(torch.linalg.matrix_exp(generator))
+    assert torch.allclose(recovered, generator, atol=1e-5)
 
 
 @pytest.fixture
@@ -101,17 +131,129 @@ def test_inverse_advance_round_trip_controlled() -> None:
     assert torch.allclose(recovered, z, atol=1e-3, rtol=1e-4)
 
 
+def test_zero_control_matches_uncontrolled_for_nonsymmetric_generator() -> None:
+    """Van Loan with B=0 must match uncontrolled advance for nonsymmetric L."""
+    torch.manual_seed(0)
+    L = torch.tensor(
+        [
+            [0.0, 2.0, -0.5],
+            [-0.5, 0.0, 1.0],
+            [0.3, -1.0, -0.2],
+        ]
+    )
+    delta_t = 0.2
+    z = torch.randn(5, 3)
+
+    uncontrolled = ContinuousKoopmanOperator(
+        3,
+        parameterization="dense",
+        init_mode="identity",
+    )
+    uncontrolled.set_dense_matrix(L)
+
+    controlled = ContinuousKoopmanOperator(
+        3,
+        control_dim=2,
+        parameterization="dense",
+        init_mode="identity",
+    )
+    controlled.set_dense_matrix(L, control_matrix=torch.zeros(2, 3))
+
+    z_unc = uncontrolled.advance(z, delta_t)
+    z_ctrl = controlled.advance(z, delta_t, control=torch.zeros(2))
+    assert torch.allclose(z_unc, z_ctrl, atol=1e-5)
+
+    # Phi11 must equal exp(L Δt) so z @ Phi11.T matches uncontrolled.
+    phi11, _ = van_loan_factors(L, torch.zeros(2, 3), delta_t)
+    assert torch.allclose(phi11, torch.linalg.matrix_exp(L * delta_t), atol=1e-5)
+
+
+def test_controlled_inverse_advance_nonsymmetric_generator() -> None:
+    """Controlled inverse must round-trip for strongly nonsymmetric L."""
+    torch.manual_seed(1)
+    L = torch.tensor(
+        [
+            [0.0, 2.0, 0.0, 0.0],
+            [-0.5, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.3, 0.4],
+            [0.0, 0.0, -0.2, -0.25],
+        ]
+    )
+    B = torch.zeros(1, 4)
+    B[0, 0] = 1.0
+    op = ContinuousKoopmanOperator(
+        4,
+        control_dim=1,
+        parameterization="dense",
+        init_mode="identity",
+    )
+    op.set_dense_matrix(L, control_matrix=B)
+    z = torch.randn(3, 4)
+    control = torch.tensor([0.4])
+    delta_t = 0.2
+    z_next = op.advance(z, delta_t, control=control)
+    recovered = op.inverse_advance(z_next, delta_t, control=control)
+    assert torch.allclose(recovered, z, atol=1e-4)
+
+
+def test_van_loan_round_trip_recovers_nonsymmetric_generator() -> None:
+    """Discrete↔generator Van Loan recovery must preserve nonsymmetric L."""
+    torch.manual_seed(2)
+    L = torch.randn(3, 3) * 0.15
+    B = torch.randn(2, 3) * 0.1
+    delta_t = 0.25
+    phi11, phi12 = van_loan_factors(L, B, delta_t)
+    L_rec, B_rec = van_loan_generator_from_discrete(phi11, phi12.T, delta_t)
+    assert torch.allclose(L_rec, L, atol=1e-5)
+    assert torch.allclose(B_rec, B, atol=1e-5)
+
+
 @pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
-def test_continuous_structured_max_real_part_non_positive(
+def test_continuous_structured_max_real_part_strictly_negative(
     parameterization: str,
 ) -> None:
-    """Verify structured generators report non-positive max real-part bounds."""
+    """Verify structured generators are strictly Hurwitz (max Re(λ) < 0)."""
     op = ContinuousKoopmanOperator(
         4,
         parameterization=parameterization,  # type: ignore[arg-type]
         init_mode="identity",
     )
-    assert op.max_real_part().item() <= 0
+    assert op.bound_metric().item() < 0
+    assert op.max_real_part().item() < 0
+    assert torch.allclose(
+        op.max_real_part(),
+        torch.linalg.eigvals(op.L).real.max(),
+    )
+
+
+def test_negative_strict_diagonal_stays_strict_at_raw_zero() -> None:
+    """Verify raw=0 maps into (-bound, 0), not onto the imaginary axis."""
+    raw = torch.zeros(3)
+    values = _negative_strict_diagonal_values(raw, max_real_eigenvalue=1.0)
+    bound = 1.0 - STABILITY_EPS_MARGIN
+    assert torch.all(values < 0)
+    assert torch.all(values > -bound)
+    assert torch.allclose(values, torch.full_like(values, -STABILITY_EPS_MARGIN))
+
+
+def test_continuous_odo_bound_metric_vs_true_spectrum() -> None:
+    """Verify continuous ODO bound_metric is a factor bound, not max Re(λ)."""
+    torch.manual_seed(42)
+    op = ContinuousKoopmanOperator(8, parameterization="odo", max_real_eigenvalue=1.0)
+    found_unstable = False
+    for _ in range(40):
+        with torch.no_grad():
+            op.cayley_O1.copy_(torch.randn_like(op.cayley_O1) * 8.0)
+            op.cayley_O2.copy_(torch.randn_like(op.cayley_O2) * 8.0)
+            op.diag_raw.copy_(torch.randn_like(op.diag_raw) * 2.0 + 3.0)
+        factor = op.bound_metric()
+        true_max_re = op.max_real_part()
+        assert torch.allclose(true_max_re, torch.linalg.eigvals(op.L).real.max())
+        if factor.item() < 0 and true_max_re.item() > 0:
+            found_unstable = True
+            break
+    assert found_unstable
+    assert op.stability_certificate() is None
 
 
 @pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
@@ -126,30 +268,54 @@ def test_continuous_structured_stability_certificate_positive_margin(
     )
     certificate = op.stability_certificate()
     assert certificate is not None
-    assert certificate["margin"].item() > 0
+    assert certificate.margin.item() > 0
     if parameterization == "lyapunov":
-        assert "lyapunov_matrix" in certificate
+        assert certificate.lyapunov_matrix is not None
+    else:
+        assert certificate.lyapunov_matrix is None
 
 
-def test_controlled_van_loan_matches_manual_integral() -> None:
-    """Verify controlled advance matches a small-system manual integral."""
-    latent_dim = 2
-    control_dim = 1
-    op = ContinuousKoopmanOperator(
-        latent_dim,
-        parameterization="dense",
-        control_dim=control_dim,
-        init_mode="identity_noise",
-        init_scale=1e-2,
-    )
+def test_continuous_lyapunov_stability_certificate() -> None:
+    """Verify continuous Lyapunov certificate satisfies LᵀP + PL ≺ 0."""
+    op = ContinuousKoopmanOperator(4, parameterization="lyapunov", init_mode="identity")
+    certificate = op.stability_certificate()
+    assert certificate is not None
+    assert certificate.lyapunov_matrix is not None
+    assert certificate.margin.item() > 0
+    p = certificate.lyapunov_matrix
+    residual = op.L.T @ p + p @ op.L
+    eigenvalues = torch.linalg.eigvalsh(residual)
+    assert eigenvalues.max().item() < -1e-5
+
+
+def test_controlled_van_loan_matches_analytic_diagonal_integral() -> None:
+    """Verify Φ12 against ∫₀^Δt exp(L s) Bᵀ ds for a diagonal generator."""
+    dtype = torch.float64
     delta_t = 0.25
-    z = torch.tensor([[1.0, 0.5]])
-    u = torch.tensor([0.3])
+    diag = torch.tensor([-0.5, -1.25, 0.0], dtype=dtype)
+    generator = torch.diag(diag)
+    control_matrix = torch.tensor(
+        [[0.4, -0.1, 0.2], [0.0, 0.3, -0.5]],
+        dtype=dtype,
+    )
+    phi11, phi12 = van_loan_factors(generator, control_matrix, delta_t)
 
-    phi11, phi12 = op._van_loan_factors(torch.tensor(delta_t))
-    expected = z @ phi11.T + u @ phi12.T
-    actual = op.advance(z, delta_t, control=u)
-    assert torch.allclose(actual, expected, atol=1e-5)
+    expected_phi11 = torch.diag(torch.exp(diag * delta_t))
+    scales = torch.where(
+        diag.abs() < 1e-12,
+        torch.full_like(diag, delta_t),
+        (torch.exp(diag * delta_t) - 1.0) / diag,
+    )
+    expected_phi12 = torch.diag(scales) @ control_matrix.T
+
+    assert torch.allclose(phi11, expected_phi11, atol=1e-10)
+    assert torch.allclose(phi12, expected_phi12, atol=1e-10)
+
+    z = torch.tensor([[1.0, -0.5, 0.25]], dtype=dtype)
+    u = torch.tensor([[0.3, -0.2]], dtype=dtype)
+    expected_advance = z @ expected_phi11.T + u @ expected_phi12.T
+    actual_advance = z @ phi11.T + u @ phi12.T
+    assert torch.allclose(actual_advance, expected_advance, atol=1e-10)
 
 
 def test_timestamps_validation_rejects_non_monotone() -> None:
@@ -215,6 +381,57 @@ def test_discrete_predict_at_rejects_irregular_increments(
     )
     with pytest.raises(ValueError, match="uniform increments"):
         model.predict_at(synthetic_graph, step_deltas=[0.1, 0.2])
+
+
+def test_predict_at_matches_matrix_exp_propagation(
+    synthetic_graph: Data,
+) -> None:
+    """predict_at must match encode → exp(L·t) → decode composition."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4, num_layers=2)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3, num_layers=2)
+    operator = ContinuousKoopmanOperator(
+        4,
+        parameterization="dense",
+        init_mode="identity_noise",
+    )
+    with torch.no_grad():
+        operator.L.copy_(
+            torch.tensor(
+                [
+                    [-0.5, 0.2, 0.0, 0.0],
+                    [-0.2, -0.5, 0.0, 0.0],
+                    [0.0, 0.0, -0.3, 0.1],
+                    [0.0, 0.0, -0.1, -0.3],
+                ]
+            )
+        )
+    model = GraphKoopmanModel(
+        encoder,
+        decoder,
+        latent_dim=4,
+        time_step=0.1,
+        dynamics_mode="continuous",
+        koopman=operator,
+    )
+    model.eval()
+    query_times = [0.1, 0.25, 0.4]
+    with torch.no_grad():
+        predictions = model.predict_at(synthetic_graph, query_times=query_times)
+        z0 = model.encode(synthetic_graph)
+        for prediction, absolute_time in zip(predictions, query_times, strict=True):
+            expected_z = operator.advance(z0, absolute_time)
+            expected_x = model.decoder(
+                expected_z,
+                synthetic_graph.edge_index,
+            )
+            assert torch.allclose(prediction.x, expected_x, atol=1e-5)
+
+        by_deltas = model.predict_at(
+            synthetic_graph,
+            step_deltas=[0.1, 0.15, 0.15],
+        )
+        for query_pred, delta_pred in zip(predictions, by_deltas, strict=True):
+            assert torch.allclose(query_pred.x, delta_pred.x, atol=1e-5)
 
 
 def test_irregular_timestamp_training_recovers_generator(
@@ -299,6 +516,44 @@ def test_generator_spectrum_and_discrete_conversion() -> None:
     )
 
 
+def test_compute_generator_spectrum_known_rotation_decay() -> None:
+    """Generator spectrum should match analytic Re/Im for a 2x2 rotation block."""
+    omega = 2.0 * torch.pi * 0.25  # 0.25 cycles per unit time
+    decay = -0.5
+    generator = torch.tensor(
+        [
+            [decay, -omega],
+            [omega, decay],
+        ],
+        dtype=torch.float64,
+    )
+    spectrum = compute_generator_spectrum(generator)
+    assert spectrum.time_step == 1.0
+    assert torch.allclose(
+        spectrum.growth_rates,
+        torch.full((2,), decay, dtype=torch.float64),
+        atol=1e-8,
+    )
+    assert torch.allclose(
+        spectrum.frequencies.abs(),
+        torch.full((2,), 0.25, dtype=torch.float64),
+        atol=1e-8,
+    )
+
+    delta_t = 0.5
+    discrete = discrete_spectrum_at_delta_t(generator, delta_t)
+    assert torch.allclose(
+        discrete.growth_rates,
+        spectrum.growth_rates,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        discrete.frequencies.abs(),
+        spectrum.frequencies.abs(),
+        atol=1e-6,
+    )
+
+
 def test_continuous_model_serialization_round_trip(
     tiny_continuous_model: GraphKoopmanModel,
     synthetic_graph: Data,
@@ -339,7 +594,10 @@ def test_continuous_eigenvalue_regularization_resolves_parameters(
         latent_dim=6,
         parameterization=parameterization,  # type: ignore[arg-type]
     )
-    penalty = EigenvalueRegularizationLoss()(operator)
+    penalty = EigenvalueRegularizationLoss()(
+        operator,
+        dynamics_mode="continuous",
+    )
     assert penalty.ndim == 0
     assert torch.isfinite(penalty)
 
@@ -456,3 +714,126 @@ def test_unmasked_sequence_matches_prior_one_step_loss(
     loss = one_step_loss(model, sequence[0], sequence[1])
     full = torch.nn.functional.mse_loss(model(sequence[0]), sequence[1].x)
     assert torch.allclose(loss, full)
+
+
+def test_continuous_operator_satisfies_contract() -> None:
+    """Verify continuous operators implement KoopmanOperatorContract."""
+    from koopman_graph.operators import (
+        GeneratorParameterization,
+        KoopmanOperatorContract,
+        Parameterization,
+    )
+
+    assert GeneratorParameterization is Parameterization
+    op = ContinuousKoopmanOperator(4, parameterization="dense", init_mode="identity")
+    assert isinstance(op, KoopmanOperatorContract)
+    z = torch.randn(3, 4)
+    delta_t = 0.25
+    assert torch.allclose(op.matrix, op.L)
+    assert torch.allclose(op.bound_metric(), op.max_real_part())
+    advanced = op.advance(z, delta_t)
+    recovered = op.inverse_advance(advanced, delta_t)
+    assert torch.allclose(recovered, z, atol=1e-4)
+
+
+def test_continuous_advance_requires_delta_t() -> None:
+    """Verify continuous advance rejects a missing integration interval."""
+    op = ContinuousKoopmanOperator(3, parameterization="dense")
+    z = torch.randn(2, 3)
+    with pytest.raises(ValueError, match="delta_t is required"):
+        op.advance(z)
+
+
+def test_continuous_delta_t_policy_aligned_across_call_sites() -> None:
+    """Verify model, training, losses, and env share resolve_delta_t policy."""
+    torch.manual_seed(0)
+    time_step = 0.25
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    snapshots = [Data(x=torch.randn(2, 2), edge_index=edge_index) for _ in range(4)]
+    controls = torch.randn(4, 1)
+    sequence = GraphSnapshotSequence(snapshots, control_inputs=controls)
+
+    encoder = GNNEncoder(in_channels=2, hidden_channels=8, latent_dim=4, num_layers=1)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder,
+        decoder,
+        latent_dim=4,
+        time_step=time_step,
+        dynamics_mode="continuous",
+        control_dim=1,
+        koopman_parameterization="dissipative",
+    )
+
+    assert model.resolve_delta_t(None) == time_step
+    assert model.resolve_delta_t(0.5) == 0.5
+
+    from koopman_graph.graph_utils import resolve_delta_t as resolve_helper
+    from koopman_graph.losses import ForwardConsistencyLoss
+    from koopman_graph.training import one_step_loss
+    from koopman_graph.training.objectives import _model_default_delta_t
+
+    assert resolve_helper(None) == 1.0
+    assert _model_default_delta_t(model) == pytest.approx(time_step)
+    assert resolve_pair_delta_t(
+        sequence,
+        0,
+        default_time_step=_model_default_delta_t(model),
+    ) == pytest.approx(time_step)
+
+    control0 = sequence.control_at(0)
+    with torch.no_grad():
+        pred = model(sequence[0], control=control0)
+        z = model.encode(sequence[0])
+        expected_z = model.koopman.advance(z, time_step, control=control0)
+        expected = model.decoder(expected_z, sequence[0].edge_index)
+        assert torch.allclose(pred, expected)
+
+        wrong_z = model.koopman.advance(z, 1.0, control=control0)
+        wrong = model.decoder(wrong_z, sequence[0].edge_index)
+        assert not torch.allclose(pred, wrong, atol=1e-3)
+
+        z_t1 = model.encode(sequence[1])
+        loss_fn = ForwardConsistencyLoss()
+        loss = loss_fn(
+            z,
+            z_t1,
+            model.koopman,
+            control=control0,
+            delta_t=None,
+            default_delta_t=model.resolve_delta_t(None),
+        )
+        expected_loss = torch.nn.functional.mse_loss(expected_z, z_t1)
+        assert torch.allclose(loss, expected_loss)
+
+        step_loss = one_step_loss(
+            model,
+            sequence[0],
+            sequence[1],
+            control=control0,
+            delta_t=model.resolve_delta_t(None),
+        )
+        assert torch.allclose(
+            step_loss,
+            torch.nn.functional.mse_loss(pred, sequence[1].x),
+        )
+
+    from koopman_graph import GraphKoopmanEnv
+    from koopman_graph.env import flatten_latent
+
+    env = GraphKoopmanEnv(
+        model,
+        sequence,
+        lambda _s, _i: 0.0,
+        random_start=False,
+        start_index=0,
+    )
+    assert env._delta_t is None
+    action = control0.detach().cpu().numpy().astype(np.float32)
+    env.reset(seed=0)
+    with torch.no_grad():
+        z0 = model.encode(sequence[0])
+        z_env = model.koopman.advance(z0, time_step, control=control0)
+        expected_obs = flatten_latent(z_env)
+    next_obs, *_ = env.step(action)
+    np.testing.assert_allclose(next_obs, expected_obs, rtol=1e-5, atol=1e-5)

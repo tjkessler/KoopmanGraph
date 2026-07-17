@@ -2,20 +2,176 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import torch
 from torch import Tensor, nn
 
-from koopman_graph.operator import (
+from koopman_graph.operators.contract import (
     DISSIPATIVE_MIN_EIGENVALUE,
+    STABILITY_EPS_MARGIN,
     InitMode,
+    Parameterization,
     StabilityCertificate,
-    _cayley_orthogonal,
-    _strict_spectral_bound,
+    cayley_orthogonal,
+    strict_spectral_bound,
 )
 
-GeneratorParameterization = Literal["dense", "odo", "schur", "dissipative", "lyapunov"]
+# Thin alias for older call sites / docs that used the continuous-specific name.
+GeneratorParameterization = Parameterization
+
+# Default absolute tolerance for Van Loan discrete↔generator round-trips in tests
+# and documented adaptation fidelity checks (float32 matrix-exp / logm residual).
+VAN_LOAN_WRITEBACK_ATOL = 1e-5
+
+
+def matrix_log(matrix: Tensor) -> Tensor:
+    """Return the principal matrix logarithm via complex eigendecomposition.
+
+    For diagonalizable ``M = V \\operatorname{diag}(\\lambda) V^{-1}``,
+
+    .. math::
+
+        \\log M = V \\operatorname{diag}(\\log \\lambda_i) V^{-1}
+
+    with the principal branch of the scalar logarithm. Real inputs return
+    ``result.real`` (callers should keep spectra away from the negative-real
+    branch cut when a real logarithm is required).
+
+    Limitations
+    -----------
+    - Non-diagonalizable matrices are not handled (Jordan blocks need a
+      different formula).
+    - Eigenvalues on or near the negative real axis can make the principal
+      log complex; discarding the imaginary part is then approximate.
+    - Used by Van Loan inversion and continuous RLS write-back; prefer
+      well-conditioned generators with moderate ``Δt``.
+
+    Parameters
+    ----------
+    matrix : Tensor
+        Square matrix with shape ``(d, d)``.
+
+    Returns
+    -------
+    Tensor
+        Matrix logarithm. Real for real ``matrix`` when the imaginary part
+        of the eigendecomposition path is negligible.
+    """
+    eigenvalues, eigenvectors = torch.linalg.eig(matrix)
+    log_eigenvalues = torch.log(eigenvalues)
+    result = eigenvectors @ torch.diag(log_eigenvalues) @ torch.linalg.inv(eigenvectors)
+    if matrix.is_complex():
+        return result
+    return result.real
+
+
+def van_loan_factors(
+    generator: Tensor,
+    control_matrix: Tensor,
+    delta_t: float | Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Return Van Loan factors ``Phi11`` and ``Phi12`` for interval ``Δt``.
+
+    Matches uncontrolled advance ``z @ exp(L · Δt).T`` and the discrete
+    row convention ``z @ K.T + u @ B``. Column form is
+    ``ẋ = L x + B^T u`` with Van Loan block::
+
+        block = [[L, B.T], [0, 0]]
+        exp(block · Δt) = [[Phi11, Phi12], [0, I]]
+
+    so ``Phi11 = exp(L · Δt)`` and
+    ``z_{t+Δt} = z @ Phi11.T + u @ Phi12.T``.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Continuous generator ``L`` with shape ``(latent_dim, latent_dim)``.
+    control_matrix : Tensor
+        Continuous control matrix ``B`` with shape
+        ``(control_dim, latent_dim)``.
+    delta_t : float or Tensor
+        Integration interval.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        ``(Phi11, Phi12)`` with shapes ``(latent_dim, latent_dim)`` and
+        ``(latent_dim, control_dim)``.
+    """
+    latent_dim = generator.shape[0]
+    control_dim = control_matrix.shape[0]
+    delta = torch.as_tensor(delta_t, dtype=generator.dtype, device=generator.device)
+    block = torch.zeros(
+        (latent_dim + control_dim, latent_dim + control_dim),
+        dtype=generator.dtype,
+        device=generator.device,
+    )
+    block[:latent_dim, :latent_dim] = generator
+    block[:latent_dim, latent_dim:] = control_matrix.T
+    exponential = torch.linalg.matrix_exp(block * delta)
+    phi11 = exponential[:latent_dim, :latent_dim]
+    phi12 = exponential[:latent_dim, latent_dim:]
+    return phi11, phi12
+
+
+def van_loan_generator_from_discrete(
+    discrete_k: Tensor,
+    discrete_b: Tensor,
+    delta_t: float | Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Recover continuous ``(L, B)`` from discrete Van Loan propagator blocks.
+
+    Inverts::
+
+        [[K, Phi12], [0, I]] = exp([[L, B.T], [0, 0]] · Δt)
+
+    where ``K = Phi11 = exp(L · Δt)`` and ``B_disc = Phi12.T`` (library row
+    convention ``z @ K.T + u @ B_disc``).
+
+    Parameters
+    ----------
+    discrete_k : Tensor
+        Discrete state propagator ``K(Δt)`` with shape
+        ``(latent_dim, latent_dim)``.
+    discrete_b : Tensor
+        Discrete control matrix with shape ``(control_dim, latent_dim)``.
+    delta_t : float or Tensor
+        Integration interval used to form the discrete blocks.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        Continuous generator ``L`` and control ``B``.
+
+    Notes
+    -----
+    Round-trip fidelity is typically within :data:`VAN_LOAN_WRITEBACK_ATOL`
+    for moderate ``Δt`` when ``K(Δt)`` stays away from matrix-logarithm branch
+    cuts. Large or highly oscillatory intervals can degrade recovery.
+    """
+    latent_dim = discrete_k.shape[0]
+    control_dim = discrete_b.shape[0]
+    delta = float(torch.as_tensor(delta_t).item())
+    if delta <= 0.0:
+        msg = f"delta_t must be positive, got {delta}"
+        raise ValueError(msg)
+
+    identity = torch.eye(
+        control_dim,
+        dtype=discrete_k.dtype,
+        device=discrete_k.device,
+    )
+    block = torch.zeros(
+        (latent_dim + control_dim, latent_dim + control_dim),
+        dtype=discrete_k.dtype,
+        device=discrete_k.device,
+    )
+    block[:latent_dim, :latent_dim] = discrete_k
+    block[:latent_dim, latent_dim:] = discrete_b.T
+    block[latent_dim:, latent_dim:] = identity
+    generator_block = matrix_log(block) / delta
+    generator = generator_block[:latent_dim, :latent_dim]
+    control_matrix = generator_block[:latent_dim, latent_dim:].T
+    return generator, control_matrix
 
 
 def _negative_strict_diagonal_values(
@@ -34,10 +190,15 @@ def _negative_strict_diagonal_values(
     Returns
     -------
     Tensor
-        Negative diagonal eigenvalues in ``(-bound, 0)``.
+        Strictly negative diagonal eigenvalues in ``(-bound, 0)``. A floor of
+        :data:`~koopman_graph.operators.STABILITY_EPS_MARGIN` (capped at half
+        the bound) keeps ``raw = 0`` strictly left of the imaginary axis, so
+        structural ``schur`` / ``lyapunov`` generators remain Hurwitz even at
+        the origin of parameter space.
     """
-    bound = _strict_spectral_bound(max_real_eigenvalue)
-    return -torch.tanh(raw).abs() * bound
+    bound = strict_spectral_bound(max_real_eigenvalue)
+    eps = min(STABILITY_EPS_MARGIN, 0.5 * bound)
+    return -eps - torch.tanh(raw).abs() * (bound - eps)
 
 
 class ContinuousKoopmanOperator(nn.Module):
@@ -47,12 +208,15 @@ class ContinuousKoopmanOperator(nn.Module):
 
         K(Δt) = exp(L · Δt),    z(t+Δt) = z(t) @ K(Δt).T + control_integral
 
-    When :attr:`control_dim` is positive, the controlled generator dynamics are
-    ``ż = z L + u B̃`` (row-vector convention). Piecewise-constant controls over
-    ``[0, Δt]`` are integrated exactly via a Van Loan block-matrix exponential.
+    This matches the discrete row convention and the column ODE
+    ``ẋ = L x + B^{\\top} u`` (equivalently ``ż = z L^{\\top} + u B``).
+    Piecewise-constant controls over ``[0, Δt]`` are integrated exactly via a
+    Van Loan block-matrix exponential with ``Phi11 = exp(L · Δt)``, so
+    zero-control advance agrees with the uncontrolled path for nonsymmetric
+    ``L``.
 
     Opt-in Hurwitz-stable parameterizations mirror the discrete structural modes
-    from :class:`~koopman_graph.operator.KoopmanOperator` but enforce
+    from :class:`~koopman_graph.operators.KoopmanOperator` but enforce
     ``Re(λ) < 0`` for generator eigenvalues rather than ``|λ| < 1`` for
     discrete steps.
 
@@ -63,14 +227,20 @@ class ContinuousKoopmanOperator(nn.Module):
     - ``"dense"`` — unconstrained learnable generator. Pair with eigenvalue
       regularization during training for empirical Hurwitz penalization.
     - ``"odo"`` — ODO factorization on the generator. Bounds diagonal factors
-      only; assembled ``L`` is **not** guaranteed Hurwitz-stable.
-      :meth:`max_real_part` reports a diagonal-factor bound, not the true
-      maximum real eigenvalue of ``L``.
+      only; assembled ``L`` is **not** guaranteed Hurwitz-stable (unlike
+      discrete ODO, where orthogonal factors imply an operator-norm bound on
+      ``\\rho(K)``). :meth:`bound_metric` reports the diagonal-factor bound;
+      :meth:`max_real_part` always returns the true maximum real eigenvalue of
+      ``L`` via ``eigvals``. Pair with
+      :class:`~koopman_graph.losses.EigenvalueRegularizationLoss` (true-spectrum
+      path) for empirical Hurwitz penalization.
 
     **Structural (generator eigenvalues forced into the left half-plane):**
 
     - ``"schur"``, ``"dissipative"``, ``"lyapunov"`` — same philosophy as the
-      discrete structural modes; certified via :meth:`stability_certificate`.
+      discrete structural modes (Schur uses a real upper-triangular factor,
+      forcing real generator eigenvalues); certified via
+      :meth:`stability_certificate`.
 
     Attributes
     ----------
@@ -94,7 +264,7 @@ class ContinuousKoopmanOperator(nn.Module):
         *,
         init_mode: InitMode = "identity_noise",
         init_scale: float = 1e-2,
-        parameterization: GeneratorParameterization = "dense",
+        parameterization: Parameterization = "dense",
         max_real_eigenvalue: float = 1.0,
         control_dim: int = 0,
     ) -> None:
@@ -239,6 +409,9 @@ class ContinuousKoopmanOperator(nn.Module):
     def L(self) -> Tensor:
         """Assembled generator matrix with shape ``(latent_dim, latent_dim)``.
 
+        Prefer :attr:`matrix` when writing code against
+        :class:`~koopman_graph.operators.KoopmanOperatorContract`.
+
         Returns
         -------
         Tensor
@@ -250,6 +423,17 @@ class ContinuousKoopmanOperator(nn.Module):
                 raise AttributeError("L")
             return dense_l
         return self._assemble_generator()
+
+    @property
+    def matrix(self) -> Tensor:
+        """Assembled generator matrix (alias of :attr:`L`).
+
+        Returns
+        -------
+        Tensor
+            Current continuous-time generator ``L``.
+        """
+        return self.L
 
     def transition_matrix(self, delta_t: float | Tensor) -> Tensor:
         """Return the discrete propagator ``K(Δt) = exp(L · Δt)``.
@@ -270,7 +454,7 @@ class ContinuousKoopmanOperator(nn.Module):
     def advance(
         self,
         z: Tensor,
-        delta_t: float | Tensor,
+        delta_t: float | Tensor | None = None,
         *,
         control: Tensor | None = None,
     ) -> Tensor:
@@ -280,8 +464,9 @@ class ContinuousKoopmanOperator(nn.Module):
         ----------
         z : Tensor
             Latent states with shape ``(..., latent_dim)``.
-        delta_t : float or Tensor
-            Integration interval. ``0`` returns ``z`` unchanged.
+        delta_t : float, Tensor, or None
+            Integration interval. ``0`` returns ``z`` unchanged. Required
+            (must not be ``None``) for continuous operators.
         control : Tensor or None, optional
             Piecewise-constant control over ``[0, Δt]``.
 
@@ -289,7 +474,16 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         Tensor
             Advanced latent states with the same shape as ``z``.
+
+        Raises
+        ------
+        ValueError
+            If ``delta_t`` is ``None``, the trailing dimension of ``z`` does
+            not match ``latent_dim``, or controls are invalid.
         """
+        if delta_t is None:
+            msg = "delta_t is required for ContinuousKoopmanOperator.advance"
+            raise ValueError(msg)
         if z.shape[-1] != self.latent_dim:
             msg = (
                 f"Expected trailing dimension {self.latent_dim}, "
@@ -355,38 +549,102 @@ class ContinuousKoopmanOperator(nn.Module):
         tuple[Tensor, Tensor]
             State and control transition factors.
         """
-        latent_dim = self.latent_dim
-        control_dim = self.control_dim
-        generator = self.L
-        dtype = generator.dtype
-        device = generator.device
+        return van_loan_factors(self.L, self.B, delta_t)
 
-        block = torch.zeros(
-            (latent_dim + control_dim, latent_dim + control_dim),
-            dtype=dtype,
-            device=device,
-        )
-        block[:latent_dim, :latent_dim] = generator.T
-        block[:latent_dim, latent_dim:] = self.B.T
-        exponential = torch.linalg.matrix_exp(block * delta_t)
-        phi11 = exponential[:latent_dim, :latent_dim]
-        phi12 = exponential[:latent_dim, latent_dim:]
-        return phi11, phi12
+    def set_dense_matrix(
+        self,
+        matrix: Tensor,
+        *,
+        control_matrix: Tensor | None = None,
+    ) -> None:
+        """Write dense generator parameters in place.
+
+        Parameters
+        ----------
+        matrix : Tensor
+            Dense generator ``L`` with shape ``(latent_dim, latent_dim)``.
+        control_matrix : Tensor or None, optional
+            Dense control matrix ``B`` with shape
+            ``(control_dim, latent_dim)``. Required when ``control_dim > 0``.
+
+        Raises
+        ------
+        ValueError
+            If the operator is not densely parameterized or control shapes
+            are invalid.
+        """
+        if self.parameterization != "dense":
+            msg = (
+                "set_dense_matrix requires parameterization='dense', "
+                f"got {self.parameterization!r}"
+            )
+            raise ValueError(msg)
+        if matrix.shape != (self.latent_dim, self.latent_dim):
+            msg = (
+                f"Expected generator shape ({self.latent_dim}, {self.latent_dim}), "
+                f"got {tuple(matrix.shape)}"
+            )
+            raise ValueError(msg)
+
+        dense_l = self._parameters.get("L")
+        if dense_l is None:
+            raise AttributeError("L")
+        with torch.no_grad():
+            dense_l.copy_(matrix.to(device=dense_l.device, dtype=dense_l.dtype))
+            if self.control_dim > 0:
+                if control_matrix is None:
+                    msg = "control_matrix is required when control_dim > 0"
+                    raise ValueError(msg)
+                expected = (self.control_dim, self.latent_dim)
+                if control_matrix.shape != expected:
+                    msg = (
+                        f"Expected control_matrix shape {expected}, "
+                        f"got {tuple(control_matrix.shape)}"
+                    )
+                    raise ValueError(msg)
+                self.B.copy_(
+                    control_matrix.to(device=self.B.device, dtype=self.B.dtype)
+                )
+            elif control_matrix is not None:
+                msg = "control_matrix provided to an uncontrolled operator"
+                raise ValueError(msg)
 
     def inverse_advance(
         self,
         z: Tensor,
-        delta_t: float | Tensor,
+        delta_t: float | Tensor | None = None,
         *,
         control: Tensor | None = None,
+        inverse_matrix: Tensor | None = None,
     ) -> Tensor:
         """Recover the previous latent state before advancing over ``Δt``.
+
+        Parameters
+        ----------
+        z : Tensor
+            Latent states after advancing over ``Δt``.
+        delta_t : float, Tensor, or None
+            Integration interval. Required (must not be ``None``).
+        control : Tensor or None, optional
+            Control applied during the forward interval.
+        inverse_matrix : Tensor or None, optional
+            Accepted for :class:`~koopman_graph.operators.KoopmanOperatorContract`
+            symmetry with discrete operators; ignored for continuous dynamics.
 
         Returns
         -------
         Tensor
             Recovered latent states.
+
+        Raises
+        ------
+        ValueError
+            If ``delta_t`` is ``None`` or controls are missing when required.
         """
+        _ = inverse_matrix
+        if delta_t is None:
+            msg = "delta_t is required for ContinuousKoopmanOperator.inverse_advance"
+            raise ValueError(msg)
         if self.control_dim > 0 and control is None:
             msg = "control input is required when control_dim > 0"
             raise ValueError(msg)
@@ -420,7 +678,13 @@ class ContinuousKoopmanOperator(nn.Module):
         *,
         delta_t: float | Tensor = 1.0,
     ) -> Tensor:
-        """Advance latent states by ``delta_t`` (defaults to ``1.0``).
+        """Advance latent states by ``delta_t``.
+
+        Standalone soft default is ``1.0`` when callers omit an interval.
+        Prefer :meth:`advance` with an explicit ``delta_t``, or model-backed
+        paths that resolve missing intervals to
+        :attr:`~koopman_graph.model.GraphKoopmanModel.time_step` via
+        :meth:`~koopman_graph.model.GraphKoopmanModel.resolve_delta_t`.
 
         Returns
         -------
@@ -472,7 +736,7 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         float
         """
-        bound = _strict_spectral_bound(self.max_real_eigenvalue)
+        bound = strict_spectral_bound(self.max_real_eigenvalue)
         target = -bound * 1e-2
         ratio = abs(target) / bound
         return float(torch.atanh(torch.tensor(ratio)).item())
@@ -585,7 +849,7 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         Tensor
         """
-        o1, o2 = _cayley_orthogonal(self.cayley_O1), _cayley_orthogonal(self.cayley_O2)
+        o1, o2 = cayley_orthogonal(self.cayley_O1), cayley_orthogonal(self.cayley_O2)
         return o1 @ self._odo_diagonal() @ o2.T
 
     def _schur_triangular(self) -> Tensor:
@@ -609,7 +873,7 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         Tensor
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         return q @ self._schur_triangular() @ q.T
 
     def _dissipative_factor(self) -> Tensor:
@@ -663,7 +927,7 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         Tensor
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         p = torch.nn.functional.softplus(self.lyap_p_raw) + 1e-6
         return q @ torch.diag(p) @ q.T
 
@@ -674,7 +938,7 @@ class ContinuousKoopmanOperator(nn.Module):
         -------
         Tensor
         """
-        q = _cayley_orthogonal(self.cayley_Q)
+        q = cayley_orthogonal(self.cayley_Q)
         return q @ torch.diag(self._lyapunov_diagonal()) @ q.T
 
     def _assemble_generator(self) -> Tensor:
@@ -692,19 +956,21 @@ class ContinuousKoopmanOperator(nn.Module):
         }
         return assemblers[self.parameterization]()
 
-    def max_real_part(self) -> Tensor:
-        """Return an upper bound on the generator's maximum real eigenvalue.
+    def bound_metric(self) -> Tensor:
+        """Return the cheap soft/structural monitoring bound.
 
-        For structurally stable modes, this is a certified bound on
-        ``\\max \\operatorname{Re}(\\lambda_i(L))``. For ``"odo"``, the
-        returned value is a diagonal-factor bound only — **not** the true
-        maximum real eigenvalue of assembled ``L``.
+        For ``"odo"``, this is a diagonal-factor bound — **not** the true
+        maximum real eigenvalue of assembled ``L``. For structurally stable
+        modes, this is a closed-form certified upper bound on
+        ``\\max \\operatorname{Re}(\\lambda_i(L))``. For ``"dense"``, this
+        equals :meth:`max_real_part`. Prefer :meth:`bound_metric` when writing
+        code against :class:`~koopman_graph.operators.KoopmanOperatorContract`;
+        use :meth:`max_real_part` for the true spectrum via ``eigvals``.
 
         Returns
         -------
         Tensor
-            Scalar upper bound on the maximum real eigenvalue (or diagonal
-            factor bound for ``"odo"``).
+            Scalar bound metric for the active parameterization.
         """
         if self.parameterization in {"odo", "schur", "lyapunov"}:
             if self.parameterization == "odo":
@@ -718,28 +984,46 @@ class ContinuousKoopmanOperator(nn.Module):
         if self.parameterization == "dissipative":
             generator = self._dissipative_generator()
             return torch.linalg.eigvalsh(generator).max()
+        return self.max_real_part()
+
+    def max_real_part(self) -> Tensor:
+        """Return the true max real eigenvalue of assembled ``L``.
+
+        Always computed from the assembled generator via ``eigvals``. For the
+        cheap soft/structural monitoring bound (diagonal-factor bound for
+        ``"odo"``, closed-form certificates for structural modes), use
+        :meth:`bound_metric`.
+
+        Returns
+        -------
+        Tensor
+            Scalar tensor ``\\max_i \\operatorname{Re}(\\lambda_i(L))``.
+        """
         eigenvalues = torch.linalg.eigvals(self.L)
         return eigenvalues.real.max()
 
     def stability_certificate(self) -> StabilityCertificate | None:
         """Return a Hurwitz stability certificate when available.
 
+        For ``"lyapunov"``, returns the Lyapunov matrix ``P`` and a positive
+        margin. For ``"schur"`` and ``"dissipative"``, returns the margin from
+        :meth:`bound_metric`. Returns ``None`` for ``"dense"`` and ``"odo"``
+        (soft modes have no structural certificate).
+
         Returns
         -------
         StabilityCertificate or None
-            Certificate dictionary when available.
+            Frozen certificate with ``margin`` and optional ``lyapunov_matrix``.
         """
         if self.parameterization == "lyapunov":
             diagonal = self._lyapunov_diagonal()
             margin = -diagonal.max()
-            return {
-                "lyapunov_matrix": self._lyapunov_matrix(),
-                "margin": margin,
-            }
-        if self.parameterization in {"schur", "odo"}:
-            margin = -self.max_real_part()
-            return {"margin": margin}
+            return StabilityCertificate(
+                margin=margin,
+                lyapunov_matrix=self._lyapunov_matrix(),
+            )
+        if self.parameterization == "schur":
+            return StabilityCertificate(margin=-self.bound_metric())
         if self.parameterization == "dissipative":
-            margin = -self.max_real_part()
-            return {"margin": margin}
+            return StabilityCertificate(margin=-self.bound_metric())
         return None

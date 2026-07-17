@@ -10,6 +10,9 @@ from koopman_graph.metrics import (
     evaluate_forecast,
     mae,
     mape,
+    masked_mae,
+    masked_mape,
+    masked_rmse,
     rmse,
 )
 
@@ -49,6 +52,39 @@ def test_mape_matches_hand_computed() -> None:
     target = torch.tensor([2.0, 2.0, 8.0])
     expected = torch.mean(torch.abs((prediction - target) / target.abs()))
     assert torch.allclose(mape(prediction, target), expected)
+
+
+def test_masked_metrics_match_hand_computed_multi_feature() -> None:
+    """Masked MAE/RMSE/MAPE average per-node feature means over observed nodes."""
+    prediction = torch.tensor(
+        [
+            [1.0, 2.0],
+            [4.0, 6.0],
+            [0.0, 0.0],
+        ]
+    )
+    target = torch.tensor(
+        [
+            [1.0, 2.0],
+            [2.0, 2.0],
+            [1.0, 1.0],
+        ]
+    )
+    mask = torch.tensor([False, True, True])
+    # Node 1: abs err mean = (|2|+|4|)/2 = 3; mape mean = (1+2)/2 = 1.5
+    # Node 2: abs err mean = (1+1)/2 = 1; mape mean = (1+1)/2 = 1
+    # Masked MAE = (3+1)/2 = 2
+    # Masked MSE = ((4+16)+(1+1))/4 = 22/4 = 5.5 → RMSE = sqrt(5.5)
+    # Masked MAPE = (1.5+1)/2 = 1.25
+    assert masked_mae(prediction, target, mask).item() == pytest.approx(2.0)
+    assert masked_rmse(prediction, target, mask).item() == pytest.approx(
+        (5.5) ** 0.5,
+        abs=1e-6,
+    )
+    assert masked_mape(prediction, target, mask, eps=0.0).item() == pytest.approx(
+        1.25,
+        abs=1e-6,
+    )
 
 
 def test_evaluate_forecast_reports_per_horizon_metrics(

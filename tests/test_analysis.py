@@ -11,15 +11,19 @@ from koopman_graph import (
     GNNDecoder,
     GNNEncoder,
     GraphKoopmanModel,
+    GraphSnapshotSequence,
     KoopmanSpectrum,
-    calibrate_anomaly_threshold,
     compute_spectrum,
+)
+from koopman_graph.analysis import (
+    calibrate_anomaly_threshold,
     decode_mode_shapes,
     detect_anomaly,
     dynamical_similarity,
     koopman_std,
     spectrum_distance,
 )
+from koopman_graph.baselines import DMDBaseline
 
 
 @pytest.fixture
@@ -173,6 +177,64 @@ def test_decode_mode_shapes_contract_and_mode_restoration(
     assert shapes.grad_fn is None
     assert torch.isfinite(shapes).all()
     assert graph_koopman_model.training
+
+
+def test_decode_mode_shapes_matches_linear_decoder_jacobian(
+    synthetic_graph: Data,
+) -> None:
+    """Centered FD mode shapes match the exact Jacobian of a linear decoder."""
+    latent_dim = 3
+    out_channels = 2
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(3, 8, latent_dim),
+        decoder=GNNDecoder(latent_dim, 8, out_channels),
+        latent_dim=latent_dim,
+        time_step=0.25,
+        koopman_init_mode="identity",
+    )
+    weight = torch.tensor(
+        [[1.0, -0.5], [0.25, 2.0], [-1.0, 0.5]],
+        dtype=torch.float32,
+    )
+
+    class _LinearDecoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.latent_dim = latent_dim
+            self.out_channels = out_channels
+            self.weight = torch.nn.Parameter(weight.clone())
+
+        def forward(
+            self,
+            latent: torch.Tensor,
+            edge_index: torch.Tensor,
+            edge_weight: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            del edge_index, edge_weight
+            return latent @ self.weight
+
+    model.decoder = _LinearDecoder()
+    with torch.no_grad():
+        model.koopman.K.copy_(torch.diag(torch.tensor([0.5, 0.8, 1.0])))
+
+    shapes = decode_mode_shapes(
+        model,
+        synthetic_graph,
+        mode_indices=[0, 1],
+        perturbation=1e-3,
+    )
+    spectrum = model.spectrum()
+    for shape_index, mode_index in enumerate([0, 1]):
+        direction = spectrum.eigenvectors[:, mode_index]
+        direction = direction / direction.norm()
+        expected = torch.complex(
+            direction.real.to(weight.dtype) @ weight,
+            direction.imag.to(weight.dtype) @ weight,
+        )
+        # Same latent direction is applied at every node for the FD probe.
+        expected_nodes = expected.unsqueeze(0).expand(synthetic_graph.num_nodes, -1)
+        # float32 centered FD has O(eps_mach / perturbation) cancellation noise.
+        assert torch.allclose(shapes[shape_index], expected_nodes, atol=1e-4)
 
 
 def test_decode_mode_shapes_accepts_tensor_input(
@@ -330,6 +392,86 @@ def test_dynamical_similarity_between_models(
     assert distance.item() > 0.0
 
 
+def test_dynamical_similarity_accepts_precomputed_spectra(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Precomputed spectra match spectrum_distance and model-provider calls."""
+    other = GraphKoopmanModel(
+        encoder=GNNEncoder(3, 8, 3),
+        decoder=GNNDecoder(3, 8, 3),
+        latent_dim=3,
+        time_step=0.25,
+        koopman_init_mode="identity",
+    )
+    with torch.no_grad():
+        other.koopman.K.copy_(torch.diag(torch.tensor([0.4, 0.6, 0.9])))
+
+    spectrum_a = graph_koopman_model.spectrum()
+    spectrum_b = other.spectrum()
+    expected = spectrum_distance(spectrum_a, spectrum_b, "wasserstein")
+
+    assert dynamical_similarity(spectrum_a, spectrum_b).item() == pytest.approx(
+        expected.item()
+    )
+    mixed = dynamical_similarity(graph_koopman_model, spectrum_b)
+    assert mixed.item() == pytest.approx(expected.item())
+
+
+def test_dynamical_similarity_baseline_and_model_peers(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """Baselines compare to each other and to GraphKoopmanModel via spectra."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    operator_a = torch.diag(torch.tensor([0.5, 0.8], dtype=torch.float64))
+    operator_b = torch.diag(torch.tensor([0.3, 0.6], dtype=torch.float64))
+    sequence_a = GraphSnapshotSequence(
+        [
+            Data(x=state.reshape(2, 1), edge_index=edge_index)
+            for state in _linear_flattened_states(
+                operator_a,
+                torch.tensor([1.0, -0.5], dtype=torch.float64),
+            )
+        ]
+    )
+    sequence_b = GraphSnapshotSequence(
+        [
+            Data(x=state.reshape(2, 1), edge_index=edge_index)
+            for state in _linear_flattened_states(
+                operator_b,
+                torch.tensor([1.0, -0.5], dtype=torch.float64),
+            )
+        ]
+    )
+    dmd_a = DMDBaseline(time_step=0.25).fit(sequence_a)
+    dmd_b = DMDBaseline(time_step=0.25).fit(sequence_b)
+
+    baseline_distance = dynamical_similarity(dmd_a, dmd_b, "wasserstein")
+    expected = spectrum_distance(dmd_a.spectrum(), dmd_b.spectrum(), "wasserstein")
+    assert baseline_distance.item() == pytest.approx(expected.item())
+    assert baseline_distance.item() > 0.0
+
+    # delta_t must not break baselines that reject spectrum kwargs.
+    mixed = dynamical_similarity(dmd_a, graph_koopman_model, delta_t=0.1)
+    assert mixed.item() >= 0.0
+
+
+def test_resolve_spectrum_rejects_unknown_source() -> None:
+    """Reject objects that are neither spectra nor spectrum providers."""
+    with pytest.raises(TypeError, match="KoopmanSpectrum or SpectrumProvider"):
+        analysis.resolve_spectrum(object())  # type: ignore[arg-type]
+
+
+def _linear_flattened_states(
+    operator: torch.Tensor,
+    initial_state: torch.Tensor,
+) -> list[torch.Tensor]:
+    """Generate flattened states following ``x_next = x @ K.T``."""
+    states = [initial_state]
+    for _ in range(5):
+        states.append(states[-1] @ operator.T)
+    return states
+
+
 def test_detect_anomaly_flags_shifted_eigenvalues() -> None:
     """Injected eigenvalue shift is flagged above a tight threshold."""
     references = [_make_spectrum([0.9, 0.7]), _make_spectrum([0.88, 0.72])]
@@ -343,6 +485,15 @@ def test_detect_anomaly_flags_shifted_eigenvalues() -> None:
     assert shifted_result.is_anomaly
     assert shifted_result.distance > normal_result.distance
     assert shifted_result.reference_mean_distance >= 0.0
+
+
+def test_detect_anomaly_identical_references_mean_distance_is_zero() -> None:
+    """Identical references must report finite zero pairwise mean distance."""
+    spectrum = _make_spectrum([0.9, 0.7])
+    result = detect_anomaly([spectrum, spectrum], spectrum, threshold=0.1)
+    assert result.reference_mean_distance == pytest.approx(0.0)
+    assert result.distance == pytest.approx(0.0)
+    assert not result.is_anomaly
 
 
 def test_detect_anomaly_requires_nonempty_references() -> None:

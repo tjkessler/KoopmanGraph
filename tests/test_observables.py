@@ -11,15 +11,18 @@ from torch_geometric.data import Data
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence, temporal_split
 from koopman_graph.datasets import AnisotropicAdvectionGridBenchmark
+from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
 from koopman_graph.observables import (
     PHYSICS_PRESETS,
     concatenate_observables,
     graph_laplacian_features,
     resolve_physics_lifting_fn,
+    resolve_physics_position,
 )
 from koopman_graph.serialization import (
     build_model_config,
     load_checkpoint,
+    reconstruct_model,
 )
 
 
@@ -75,6 +78,21 @@ def test_graph_laplacian_features_shape(small_snapshot: Data) -> None:
     """Laplacian features should match node and channel counts."""
     physics = graph_laplacian_features(small_snapshot)
     assert physics.shape == (3, 3)
+
+
+def test_graph_laplacian_features_matches_dense_normalized_laplacian(
+    small_snapshot: Data,
+) -> None:
+    """Physics lifting should equal (I - D^{-1/2} A D^{-1/2}) x."""
+    physics = graph_laplacian_features(small_snapshot)
+    adjacency = dense_symmetric_normalized_adjacency(
+        small_snapshot.edge_index,
+        num_nodes=small_snapshot.x.shape[0],
+        edge_weight=small_snapshot.edge_weight,
+        dtype=small_snapshot.x.dtype,
+    )
+    expected = small_snapshot.x - adjacency @ small_snapshot.x
+    assert torch.allclose(physics, expected, atol=1e-6)
 
 
 def test_concatenate_observables_prepends_physics() -> None:
@@ -147,10 +165,17 @@ def test_encode_concatenates_physics_and_gnn(small_snapshot: Data) -> None:
 
 
 def test_encode_latent_matches_encode(small_snapshot: Data) -> None:
-    """encode_latent should delegate to encode."""
+    """encode_latent should warn and delegate to encode."""
+    import warnings
+
     model = _hybrid_model()
     encoded = model.encode(small_snapshot)
-    assert torch.allclose(model.encode_latent(small_snapshot), encoded)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        aliased = model.encode_latent(small_snapshot)
+    assert torch.allclose(aliased, encoded)
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+    assert any("encode()" in str(w.message) for w in caught)
 
 
 def test_encode_supports_gradients(small_snapshot: Data) -> None:
@@ -189,6 +214,44 @@ def test_build_model_config_stores_physics_metadata() -> None:
     }
 
 
+def test_resolve_physics_position_defaults_and_rejects_unknown() -> None:
+    """Position resolver should default to prepend and reject unsupported values."""
+    assert resolve_physics_position(None) == "prepend"
+    assert resolve_physics_position("prepend") == "prepend"
+    with pytest.raises(ValueError, match="Unsupported physics position"):
+        resolve_physics_position("append")
+
+
+def test_reconstruct_model_round_trips_physics_position() -> None:
+    """reconstruct_model should restore physics.position from config."""
+    model = _hybrid_model()
+    config = build_model_config(model)
+    restored = reconstruct_model(config)
+    assert restored.physics_position == "prepend"
+    assert restored.physics_dim == model.physics_dim
+    assert restored.physics_preset == model.physics_preset
+
+
+def test_reconstruct_model_rejects_unsupported_physics_position() -> None:
+    """Invalid physics.position in a hybrid checkpoint should raise on load."""
+    model = _hybrid_model()
+    config = build_model_config(model)
+    assert config["physics"] is not None
+    config["physics"]["position"] = "append"
+    with pytest.raises(ValueError, match="Unsupported physics position"):
+        reconstruct_model(config)
+
+
+def test_reconstruct_model_defaults_missing_physics_position() -> None:
+    """Older hybrid configs without position should default to prepend."""
+    model = _hybrid_model()
+    config = build_model_config(model)
+    assert config["physics"] is not None
+    del config["physics"]["position"]
+    restored = reconstruct_model(config)
+    assert restored.physics_position == "prepend"
+
+
 def test_checkpoint_round_trip_with_preset(
     scaling_sequence: GraphSnapshotSequence,
     tmp_path: Path,
@@ -204,6 +267,7 @@ def test_checkpoint_round_trip_with_preset(
 
     assert loaded.physics_dim == 3
     assert loaded.physics_preset == "graph_laplacian"
+    assert loaded.physics_position == "prepend"
     assert loaded.latent_dim == model.latent_dim
 
     initial = scaling_sequence[0]

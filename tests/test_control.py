@@ -17,7 +17,7 @@ from koopman_graph import (
 )
 from koopman_graph.data import temporal_split
 from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
-from koopman_graph.operator import KoopmanOperator
+from koopman_graph.operators import KoopmanOperator
 from koopman_graph.serialization import (
     build_model_config,
     load_checkpoint,

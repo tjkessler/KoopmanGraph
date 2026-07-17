@@ -1,4 +1,18 @@
-"""Gymnasium environment wrapper for latent-space graph control."""
+"""Gymnasium environment wrapper for latent-space graph control.
+
+Optional dependency convention
+------------------------------
+Gymnasium is an optional ``[rl]`` extra. This module soft-imports it at load
+time so ``import koopman_graph`` and ``from koopman_graph import GraphKoopmanEnv``
+succeed without Gymnasium installed. Construction fails at call time via
+:func:`_require_gymnasium` with install guidance. Soft import is required here
+because :class:`GraphKoopmanEnv` subclasses ``gymnasium.Env`` when available.
+
+For optional dependencies that are not base classes (e.g. ``h5py`` in METR-LA
+loaders), prefer a call-site ``import`` that raises ``ImportError`` with the
+same install-guidance style. Never fail the core package import for an optional
+extra.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +24,12 @@ import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence, _snapshot_edge_weight
+from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.graph_utils import (
+    advance_and_decode,
+    snapshot_edge_weight,
+    snapshot_to_device,
+)
 
 if TYPE_CHECKING:
     from koopman_graph.model import GraphKoopmanModel
@@ -18,7 +37,7 @@ if TYPE_CHECKING:
 try:
     import gymnasium as gym
     from gymnasium import spaces
-except ImportError:  # pragma: no cover - exercised via import guard test
+except ImportError:  # pragma: no cover - exercised in test_env_requires_gymnasium
     gym = None  # type: ignore[assignment,misc]
     spaces = None  # type: ignore[assignment,misc]
 
@@ -41,7 +60,7 @@ def _require_gymnasium() -> tuple[Any, Any]:
     Raises
     ------
     ImportError
-        If Gymnasium is not installed.
+        If Gymnasium is not installed (``pip install koopman-graph[rl]``).
     """
     if gym is None or spaces is None:
         raise ImportError(_GYMNASIUM_IMPORT_ERROR)
@@ -97,6 +116,10 @@ def unflatten_latent(
 class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[misc]
     """Gymnasium environment for closed-loop control in Koopman latent space.
 
+    Requires the optional ``[rl]`` extra (``pip install koopman-graph[rl]``).
+    Importing this class succeeds without Gymnasium; constructing an instance
+    raises ``ImportError`` until the extra is installed.
+
     The environment exposes flattened latent node states as observations and
     global control vectors as actions. Each ``step`` applies the learned Koopman
     operator in latent space, decodes to physical node features, and evaluates
@@ -112,9 +135,11 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     **Limitations.** Rewards see decoded states that depend on a frozen
     encoder/decoder trained offline. Global controls with shape
     ``(control_dim,)`` are supported; per-node action spaces are not. Topology
-    is held fixed from the reset snapshot for the episode. Discrete models
-    advance by one ``K``-step per ``step`` call; only continuous models honor
-    a custom ``delta_t`` integration interval.
+    is held fixed from the reset snapshot for the episode; sequences with
+    :attr:`~koopman_graph.data.GraphSnapshotSequence.is_dynamic_topology`
+    ``True`` are rejected at construction. Discrete models advance by one
+    ``K``-step per ``step`` call; only continuous models honor a custom
+    ``delta_t`` integration interval.
 
     Parameters
     ----------
@@ -122,6 +147,7 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         Trained controlled model with ``control_dim > 0``.
     reference_sequence : GraphSnapshotSequence
         Sequence supplying reset snapshots and fixed episode topology.
+        Must have ``is_dynamic_topology=False``.
     reward_fn : callable
         ``reward_fn(decoded_snapshot, step_index) -> float`` where
         ``decoded_snapshot`` is a PyG ``Data`` object with physical node
@@ -139,12 +165,12 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         Sample a random reference snapshot on each ``reset``. Default is
         ``True``.
     delta_t : float or None, optional
-        Integration interval passed to
-        :meth:`~koopman_graph.model.GraphKoopmanModel._advance_latent` on each
-        ``step``. When ``None`` (default), uses ``model.time_step``. For
-        continuous models this enables closed-loop control at a horizon other
-        than the training ``time_step``. For discrete models, ``delta_t`` must
-        be ``None`` or equal to ``model.time_step`` (strict check); irregular
+        Integration interval for continuous latent advance on each ``step``.
+        When ``None`` (default), uses ``model.time_step`` via
+        :meth:`~koopman_graph.model.GraphKoopmanModel.resolve_delta_t`. For continuous
+        models this enables closed-loop control at a horizon other than the
+        training ``time_step``. For discrete models, ``delta_t`` must be
+        ``None`` or equal to ``model.time_step`` (strict check); irregular
         stepping is not supported in discrete mode.
     device : torch.device or str or None, optional
         Device for model inference. Defaults to the model's current parameter
@@ -176,7 +202,8 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         TypeError
             If ``model`` is not a :class:`~koopman_graph.model.GraphKoopmanModel`.
         ValueError
-            If ``control_dim`` is zero or arguments are invalid.
+            If ``control_dim`` is zero, ``reference_sequence`` has dynamic
+            topology, or arguments are invalid.
         ImportError
             If Gymnasium is not installed.
         """
@@ -191,6 +218,13 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
             raise ValueError(msg)
         if reference_sequence.num_timesteps < 1:
             msg = "reference_sequence must contain at least one snapshot"
+            raise ValueError(msg)
+        if reference_sequence.is_dynamic_topology:
+            msg = (
+                "GraphKoopmanEnv requires a fixed graph topology; "
+                "reference_sequence.is_dynamic_topology must be False "
+                "(topology is held from the reset snapshot for the episode)"
+            )
             raise ValueError(msg)
         if max_episode_steps < 1:
             msg = f"max_episode_steps must be >= 1, got {max_episode_steps}"
@@ -356,12 +390,12 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
 
         snapshot = self.reference_sequence[start_index]
         self._edge_index = snapshot.edge_index.to(self._device)
-        self._edge_weight = _snapshot_edge_weight(snapshot)
+        self._edge_weight = snapshot_edge_weight(snapshot)
         if self._edge_weight is not None:
             self._edge_weight = self._edge_weight.to(self._device)
 
         with torch.no_grad():
-            snapshot_device = self.model._snapshot_to_device(snapshot, self._device)
+            snapshot_device = snapshot_to_device(snapshot, self._device)
             self._latent = self.model.encode(snapshot_device)
 
         self._step_count = 0
@@ -409,13 +443,18 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         )
 
         with torch.no_grad():
-            self._latent = self.model._advance_latent(
+            self._latent, prediction = advance_and_decode(
+                self.model.koopman,
+                self.model.decoder,
                 self._latent,
+                self._edge_index,
+                self._edge_weight,
                 control=control,
-                delta_t=self._delta_t,
+                delta_t=self.model.resolve_delta_t(self._delta_t),
+                default_delta_t=self.model.time_step,
             )
 
-        decoded = self._decode_current()
+        decoded = self._package_decoded(prediction)
         reward = float(self.reward_fn(decoded, self._step_count))
         self._step_count += 1
 
@@ -441,6 +480,22 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
                 self._edge_index,
                 self._edge_weight,
             )
+        return self._package_decoded(prediction)
+
+    def _package_decoded(self, prediction: Tensor) -> Data:
+        """Package decoded node features into a CPU graph snapshot.
+
+        Parameters
+        ----------
+        prediction : Tensor
+            Decoded physical node features.
+
+        Returns
+        -------
+        Data
+            Snapshot with CPU tensors and the environment topology.
+        """
+        assert self._edge_index is not None
         fields: dict[str, Tensor] = {
             "x": prediction.detach().cpu(),
             "edge_index": self._edge_index.detach().cpu(),

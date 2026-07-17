@@ -14,6 +14,7 @@ import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.datasets.topology import TopologyPayload
 
 DCRNN_SENSOR_GRAPH_BASE = (
     "https://raw.githubusercontent.com/liyaguang/DCRNN/master/data/sensor_graph"
@@ -30,7 +31,10 @@ DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "metr_la"
 TRAFFIC_FILENAME = "traffic.pt"
 NUM_SENSORS = 207
 IN_CHANNELS = 1
-DEFAULT_NUM_TIMESTEPS = 60
+# One weekday of 5-minute samples from a high-contrast congestion day
+# (HDF5 row offset ``DEFAULT_TIMESTEP_OFFSET``).
+DEFAULT_NUM_TIMESTEPS = 288
+DEFAULT_TIMESTEP_OFFSET = 6048
 
 
 def _default_traffic_path(cache_dir: Path | None = None) -> Path:
@@ -136,6 +140,12 @@ def build_adjacency_matrix(
 def adjacency_to_edge_index(adj_mx: np.ndarray) -> Tensor:
     """Convert an adjacency matrix to a bidirectional PyG ``edge_index``.
 
+    Each nonzero entry ``A[i, j]`` emits the directed edge ``(i → j)``. When the
+    reverse entry ``A[j, i]`` is absent (``<= 0``), the reverse edge
+    ``(j → i)`` is added with the same weight so one-sided distance links become
+    undirected for GNN message passing. When both directions are already
+    present, each is emitted once (no double-counting).
+
     Parameters
     ----------
     adj_mx : ndarray
@@ -152,13 +162,20 @@ def adjacency_to_edge_index(adj_mx: np.ndarray) -> Tensor:
     for row in range(num_nodes):
         for col in range(num_nodes):
             if adj_mx[row, col] > 0.0:
-                src.extend([row, col])
-                dst.extend([col, row])
+                src.append(row)
+                dst.append(col)
+                if adj_mx[col, row] <= 0.0:
+                    src.append(col)
+                    dst.append(row)
     return torch.tensor([src, dst], dtype=torch.long)
 
 
 def adjacency_to_edge_weight(adj_mx: np.ndarray) -> Tensor:
     """Extract scalar edge weights aligned with :func:`adjacency_to_edge_index`.
+
+    Mirrors one-sided nonzero entries with the forward weight so reverse edges
+    are never assigned a zero weight. Two-sided nonzero pairs contribute each
+    direction once.
 
     Parameters
     ----------
@@ -175,8 +192,10 @@ def adjacency_to_edge_weight(adj_mx: np.ndarray) -> Tensor:
     for row in range(num_nodes):
         for col in range(num_nodes):
             if adj_mx[row, col] > 0.0:
-                weights.append(float(adj_mx[row, col]))
-                weights.append(float(adj_mx[col, row]))
+                weight = float(adj_mx[row, col])
+                weights.append(weight)
+                if adj_mx[col, row] <= 0.0:
+                    weights.append(weight)
     return torch.tensor(weights, dtype=torch.float32)
 
 
@@ -370,7 +389,7 @@ def ensure_traffic_cache(
     force: bool = False,
     h5_path: Path | None = None,
     num_timesteps: int = DEFAULT_NUM_TIMESTEPS,
-    offset: int = 0,
+    offset: int = DEFAULT_TIMESTEP_OFFSET,
     normalized_k: float = 0.1,
 ) -> Path:
     """Download graph metadata and build the METR-LA traffic cache if needed.
@@ -385,9 +404,12 @@ def ensure_traffic_cache(
         Local ``metr-la.h5`` file used to refresh speed readings. When omitted
         and ``force=True``, an existing cache is reused without fetching HDF5.
     num_timesteps : int, optional
-        Number of timesteps stored in the cache. Default is ``60``.
+        Number of timesteps stored in the cache. Default is
+        ``DEFAULT_NUM_TIMESTEPS`` (one weekday of 5-minute samples).
     offset : int, optional
-        Starting row in the HDF5 speed table. Default is ``0``.
+        Starting row in the HDF5 speed table. Default is
+        ``DEFAULT_TIMESTEP_OFFSET`` (high-contrast congestion day used by the
+        tutorial cache).
     normalized_k : float, optional
         Adjacency sparsity threshold. Default is ``0.1``.
 
@@ -489,8 +511,13 @@ class MetrLaTrafficBenchmark:
     """METR-LA traffic-speed benchmark built from the DCRNN sensor graph.
 
     Node features are per-sensor traffic speeds (mph), z-score normalized over
-    the cached time window. The road-network adjacency follows the standard
-    DCRNN Gaussian kernel on pairwise distances.
+    the cached time window. The default tutorial cache stores one weekday of
+    5-minute samples (``DEFAULT_NUM_TIMESTEPS``) from a high-contrast congestion
+    day (``DEFAULT_TIMESTEP_OFFSET``). The road-network adjacency follows the
+    standard DCRNN Gaussian kernel on pairwise distances.
+
+    Public entry points are the classmethods ``load_topology`` and
+    ``load_sequence`` (real telemetry; there is no ``generate``).
 
     Full speed history is distributed with the
     `DCRNN release <https://github.com/liyaguang/DCRNN>`_ (Google Drive /
@@ -513,7 +540,7 @@ class MetrLaTrafficBenchmark:
         cache_dir: Path | None = None,
         *,
         dtype: torch.dtype = torch.float32,
-    ) -> dict[str, Any]:
+    ) -> TopologyPayload:
         """Load cached METR-LA graph topology and metadata.
 
         Parameters
@@ -526,19 +553,20 @@ class MetrLaTrafficBenchmark:
 
         Returns
         -------
-        dict
-            Metadata with keys ``sensor_ids``, ``edge_index``, ``edge_weight``,
-            ``num_nodes``, ``source_h5_url``, and ``normalized_k``.
+        TopologyPayload
+            Frozen topology with ``sensor_ids``, ``edge_index``, ``edge_weight``,
+            ``num_nodes``, ``source_h5_url``, and ``normalized_k`` (also supports
+            mapping-style ``payload["edge_index"]`` access).
         """
         payload = load_traffic_cache(cache_dir, dtype=dtype)
-        return {
-            "sensor_ids": payload["sensor_ids"],
-            "edge_index": payload["edge_index"],
-            "edge_weight": payload["edge_weight"],
-            "num_nodes": payload["num_nodes"],
-            "source_h5_url": payload["source_h5_url"],
-            "normalized_k": payload["normalized_k"],
-        }
+        return TopologyPayload(
+            sensor_ids=list(payload["sensor_ids"]),
+            edge_index=payload["edge_index"],
+            edge_weight=payload["edge_weight"],
+            num_nodes=int(payload["num_nodes"]),
+            source_h5_url=payload["source_h5_url"],
+            normalized_k=float(payload["normalized_k"]),
+        )
 
     @classmethod
     def load_sequence(

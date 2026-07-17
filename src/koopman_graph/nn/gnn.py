@@ -1,4 +1,16 @@
-"""Graph Neural Network encoders for topology-aware latent lifting."""
+"""Shared GNN message-passing primitives (power-user layer).
+
+Encoder and decoder are peer components. Shared activation typing, node-feature
+validation, constructor validators, convolution builders, and
+:class:`BaseGNNModule` live here so neither peer owns the other. Importable as
+``koopman_graph.nn.gnn`` but **not** part of the stable public façade (not
+listed in ``koopman_graph.__all__``).
+
+Prefer :class:`~koopman_graph.nn.encoder.GNNEncoder` /
+:class:`~koopman_graph.nn.encoder.GATEncoder` and
+:class:`~koopman_graph.nn.decoder.GNNDecoder` /
+:class:`~koopman_graph.nn.decoder.GATDecoder` for application code.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +20,52 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 from torch_geometric.nn import GATConv, GCNConv
 
-from koopman_graph.data import _snapshot_edge_weight
+from koopman_graph.graph_utils import resolve_graph_inputs
 
 ActivationName = Literal["relu", "sigmoid", "tanh"]
+
+
+def validate_positive_dims(**dims: int) -> None:
+    """Require each named constructor dimension to be a positive integer.
+
+    Parameters
+    ----------
+    **dims
+        Mapping of parameter name to integer value (for example
+        ``in_channels=3``, ``num_layers=2``).
+
+    Raises
+    ------
+    ValueError
+        If any value is less than ``1``.
+    """
+    for name, value in dims.items():
+        if value < 1:
+            msg = f"{name} must be positive, got {value}"
+            raise ValueError(msg)
+
+
+def validate_gat_attention(*, heads: int, dropout: float) -> None:
+    """Validate GAT attention hyperparameters.
+
+    Parameters
+    ----------
+    heads : int
+        Number of attention heads per GAT layer.
+    dropout : float
+        Dropout probability inside GAT attention.
+
+    Raises
+    ------
+    ValueError
+        If ``heads < 1`` or ``dropout`` is outside ``[0, 1]``.
+    """
+    if heads < 1:
+        msg = f"heads must be positive, got {heads}"
+        raise ValueError(msg)
+    if not 0.0 <= dropout <= 1.0:
+        msg = f"dropout must be in [0, 1], got {dropout}"
+        raise ValueError(msg)
 
 
 def _resolve_activation(name: ActivationName) -> nn.Module:
@@ -39,45 +94,6 @@ def _resolve_activation(name: ActivationName) -> nn.Module:
         return nn.Tanh()
     msg = f"Unknown activation: {name!r}"
     raise ValueError(msg)
-
-
-def _resolve_graph_inputs(
-    x_or_data: Tensor | Data,
-    edge_index: Tensor | None,
-    edge_weight: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor | None]:
-    """Extract node features, edge index, and optional weights from input.
-
-    Parameters
-    ----------
-    x_or_data : Tensor or Data
-        Either a PyG ``Data`` object or node features ``x``.
-    edge_index : Tensor or None
-        Edge index required when ``x_or_data`` is a tensor.
-    edge_weight : Tensor or None, optional
-        Edge weights required when ``x_or_data`` is a tensor and weights are
-        used. Ignored for ``Data`` input.
-
-    Returns
-    -------
-    tuple of (Tensor, Tensor, Tensor or None)
-        Node features, edge index, and optional edge weights.
-
-    Raises
-    ------
-    ValueError
-        If ``x_or_data`` is a tensor and ``edge_index`` is ``None``.
-    """
-    if isinstance(x_or_data, Data):
-        return (
-            x_or_data.x,
-            x_or_data.edge_index,
-            _snapshot_edge_weight(x_or_data),
-        )
-    if edge_index is None:
-        msg = "edge_index is required when x_or_data is a tensor"
-        raise ValueError(msg)
-    return x_or_data, edge_index, edge_weight
 
 
 def _validate_node_features(
@@ -113,7 +129,7 @@ def _validate_node_features(
         raise ValueError(msg)
 
 
-def _build_gcn_convs(
+def build_gcn_convs(
     in_channels: int,
     hidden_channels: int,
     out_channels: int,
@@ -148,7 +164,7 @@ def _build_gcn_convs(
     return nn.ModuleList(convs)
 
 
-def _build_gat_convs(
+def build_gat_convs(
     in_channels: int,
     hidden_channels: int,
     out_channels: int,
@@ -297,7 +313,7 @@ class BaseGNNModule(nn.Module):
         Tensor
             Transformed node features with shape ``(num_nodes, out_channels)``.
         """
-        x, edge_index, edge_weight = _resolve_graph_inputs(
+        x, edge_index, edge_weight = resolve_graph_inputs(
             x_or_data,
             edge_index,
             edge_weight,
@@ -312,182 +328,3 @@ class BaseGNNModule(nn.Module):
             if layer_idx < len(self.convs) - 1:
                 x = self.activation(x)
         return x
-
-
-class GNNEncoder(BaseGNNModule):
-    """GCN encoder that lifts node features into a latent space.
-
-    Applies stacked Graph Convolutional Network layers with configurable hidden
-    activation. The final layer maps directly to ``latent_dim`` without an
-    activation, producing per-node latent vectors suitable for Koopman propagation.
-
-    Attributes
-    ----------
-    in_channels : int
-        Input node feature dimension.
-    hidden_channels : int
-        Hidden GCN channel width.
-    latent_dim : int
-        Output latent dimension per node.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        latent_dim: int,
-        *,
-        num_layers: int = 2,
-        activation: ActivationName = "relu",
-    ) -> None:
-        """Initialize the GCN encoder stack.
-
-        Parameters
-        ----------
-        in_channels : int
-            Input node feature dimension.
-        hidden_channels : int
-            Hidden GCN channel width for intermediate layers.
-        latent_dim : int
-            Output latent dimension per node.
-        num_layers : int, optional
-            Number of GCN layers. Default is ``2``.
-        activation : {"relu", "sigmoid", "tanh"}, optional
-            Hidden-layer activation. Default is ``"relu"``.
-
-        Raises
-        ------
-        ValueError
-            If any dimension argument is not positive.
-        """
-        if in_channels < 1:
-            msg = f"in_channels must be positive, got {in_channels}"
-            raise ValueError(msg)
-        if hidden_channels < 1:
-            msg = f"hidden_channels must be positive, got {hidden_channels}"
-            raise ValueError(msg)
-        if latent_dim < 1:
-            msg = f"latent_dim must be positive, got {latent_dim}"
-            raise ValueError(msg)
-        if num_layers < 1:
-            msg = f"num_layers must be positive, got {num_layers}"
-            raise ValueError(msg)
-
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.latent_dim = latent_dim
-
-        super().__init__(
-            input_channels=in_channels,
-            input_dim_name="in_channels",
-            num_layers=num_layers,
-            activation=activation,
-            convs=_build_gcn_convs(
-                in_channels,
-                hidden_channels,
-                latent_dim,
-                num_layers,
-            ),
-        )
-
-
-class GATEncoder(BaseGNNModule):
-    """GAT encoder that lifts node features into a latent space.
-
-    Applies stacked Graph Attention Network layers with configurable hidden
-    activation. The final layer maps directly to ``latent_dim`` without an
-    activation, producing per-node latent vectors suitable for Koopman propagation.
-
-    Scalar ``edge_weight`` arguments are accepted for API symmetry with
-    :class:`~koopman_graph.encoder.GNNEncoder` but are ignored because
-    :class:`~torch_geometric.nn.GATConv` does not consume scalar edge weights.
-
-    Attributes
-    ----------
-    in_channels : int
-        Input node feature dimension.
-    hidden_channels : int
-        Hidden GAT channel width.
-    latent_dim : int
-        Output latent dimension per node.
-    heads : int
-        Number of attention heads per GAT layer.
-    dropout : float
-        Dropout probability inside GAT attention.
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        hidden_channels: int,
-        latent_dim: int,
-        *,
-        num_layers: int = 2,
-        activation: ActivationName = "relu",
-        heads: int = 1,
-        dropout: float = 0.0,
-    ) -> None:
-        """Initialize the GAT encoder stack.
-
-        Parameters
-        ----------
-        in_channels : int
-            Input node feature dimension.
-        hidden_channels : int
-            Hidden GAT channel width for intermediate layers.
-        latent_dim : int
-            Output latent dimension per node.
-        num_layers : int, optional
-            Number of GAT layers. Default is ``2``.
-        activation : {"relu", "sigmoid", "tanh"}, optional
-            Hidden-layer activation. Default is ``"relu"``.
-        heads : int, optional
-            Number of attention heads per GAT layer. Default is ``1``.
-        dropout : float, optional
-            Dropout probability inside GAT attention. Default is ``0.0``.
-
-        Raises
-        ------
-        ValueError
-            If any dimension argument is not positive, ``heads < 1``, or
-            ``dropout`` is outside ``[0, 1]``.
-        """
-        if in_channels < 1:
-            msg = f"in_channels must be positive, got {in_channels}"
-            raise ValueError(msg)
-        if hidden_channels < 1:
-            msg = f"hidden_channels must be positive, got {hidden_channels}"
-            raise ValueError(msg)
-        if latent_dim < 1:
-            msg = f"latent_dim must be positive, got {latent_dim}"
-            raise ValueError(msg)
-        if num_layers < 1:
-            msg = f"num_layers must be positive, got {num_layers}"
-            raise ValueError(msg)
-        if heads < 1:
-            msg = f"heads must be positive, got {heads}"
-            raise ValueError(msg)
-        if not 0.0 <= dropout <= 1.0:
-            msg = f"dropout must be in [0, 1], got {dropout}"
-            raise ValueError(msg)
-
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.latent_dim = latent_dim
-        self.heads = heads
-        self.dropout = dropout
-
-        super().__init__(
-            input_channels=in_channels,
-            input_dim_name="in_channels",
-            num_layers=num_layers,
-            activation=activation,
-            convs=_build_gat_convs(
-                in_channels,
-                hidden_channels,
-                latent_dim,
-                num_layers,
-                heads=heads,
-                dropout=dropout,
-            ),
-        )

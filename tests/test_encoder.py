@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph.encoder import GATEncoder, GNNEncoder
+from koopman_graph.nn import GATEncoder, GNNEncoder
 
 
 def test_forward_with_data_object(synthetic_graph: Data) -> None:
@@ -135,7 +135,7 @@ def test_invalid_input_rank_raises(synthetic_graph: Data) -> None:
 
 def test_resolve_activation_unknown_raises() -> None:
     """Verify unknown activation names raise ``ValueError``."""
-    from koopman_graph.encoder import _resolve_activation
+    from koopman_graph.nn.gnn import _resolve_activation
 
     with pytest.raises(ValueError, match="Unknown activation"):
         _resolve_activation("leaky_relu")  # type: ignore[arg-type]

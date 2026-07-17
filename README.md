@@ -50,30 +50,31 @@ KoopmanGraph bridges that gap:
 
 | Feature | Description |
 | --- | --- |
-| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, and `evaluate` |
+| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, `evaluate`, and preferred `encode` (deprecated `encode_latent` alias) |
 | **GNNEncoder / GATEncoder** | Topology-aware latent lifting with GCN or multi-head attention |
+| **GNNDecoder / GATDecoder** | Symmetric GCN or GAT reconstruction paired with the matching encoder |
 | **KoopmanOperator** | Learnable linear propagator; soft modes (`dense`, `odo` + eigenloss) or structural guarantees (`schur`, `dissipative`, `lyapunov`) |
-| **Spectral analysis** | `KoopmanSpectrum`, `compute_spectrum`, and `decode_mode_shapes` for eigenvalues, modes, and continuous-time frequencies |
-| **Dynamical similarity** | `spectrum_distance`, `koopman_std`, `dynamical_similarity`, `detect_anomaly`, and `calibrate_anomaly_threshold` for comparing spectra across regimes |
+| **Spectral analysis** | Root: `KoopmanSpectrum`, `compute_spectrum`. Mode decoding and continuous helpers via `koopman_graph.analysis` |
+| **Dynamical similarity** | `spectrum_distance`, `koopman_std`, `dynamical_similarity`, `detect_anomaly`, and `calibrate_anomaly_threshold` via `koopman_graph.analysis` |
 | **Model persistence** | `save` / `load` checkpoints with architecture config; optional best-epoch restoration in `fit` |
-| **Evaluation metrics** | Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via `evaluate_forecast` |
+| **Evaluation metrics** | Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via root `evaluate_forecast`; low-level `mae`/`rmse`/`mape` via `koopman_graph.metrics` |
 | **Consistency losses** | Forward and backward latent linearity constraints plus optional eigenvalue stability regularization |
 | **Classical baselines** | `DMDBaseline`, `EDMDBaseline`, and `DMDcBaseline` for topology-agnostic comparison |
 | **Control inputs** | Koopman-with-control dynamics (`z_{t+1} = K z_t + B u_t`) for driven systems |
 | **Dynamic topology** | Per-snapshot `edge_index` support for rewiring contact networks |
 | **Edge weights** | End-to-end `edge_weight` propagation through GCN encoder/decoder and METR-LA benchmark |
-| **Advanced training** | LR schedulers, per-term loss history, multi-trajectory `fit`, and windowed mini-batching |
+| **Advanced training** | LR schedulers, per-term loss history, explicit root `MultiTrajectory` fit (`as_multi_trajectory` via `koopman_graph.data`), and windowed mini-batching |
 | **Structural stability** | Guaranteed-stable parameterizations (`schur`, `dissipative`, `lyapunov`) for 200+ step rollouts — distinct from soft `odo`/eigenloss regularization |
 | **Continuous-time dynamics** | `ContinuousKoopmanOperator` with `dynamics_mode="continuous"`, irregular timestamps, and `predict_at` |
 | **Online adaptation** | `RecursiveKoopmanAdapter` and `adapt_step` for RLS updates to a frozen encoder |
-| **Physics-informed observables** | Hybrid `graph_laplacian_features` concatenated with GNN latents before linear propagation |
+| **Physics-informed observables** | Hybrid `koopman_graph.observables.graph_laplacian_features` concatenated with GNN latents before linear propagation |
 | **RL environment** | `GraphKoopmanEnv` and `to_latent_env` for Gymnasium / Stable-Baselines3 closed-loop control |
 | **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
 | **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks |
 | **Jupyter tutorials** | Sixteen end-to-end notebooks with real networked datasets |
-| **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs |
+| **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs (see [architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) for public vs power-user API layers, shared rollout, optional `koopman=` injection, and `ForecastModel` call-site contracts) |
 
-**Stability mode selection:** use `dense` or `odo` with optional eigenvalue loss when you want flexible training and can tolerate occasional long-horizon drift; choose `schur`, `dissipative`, or `lyapunov` when you need eigenvalues mathematically forced inside the unit disk (see [`11_long_horizon_stability.ipynb`](examples/11_long_horizon_stability.ipynb) vs [`08_loss_stability.ipynb`](examples/08_loss_stability.ipynb)).
+**Stability mode selection:** use `dense` or `odo` when you want a soft prior (`odo` bounds `ρ(K)` via the operator 2-norm but lacks a strict ε-interior certificate; continuous `odo` needs eigenvalue loss on the true spectrum); choose `schur`, `dissipative`, or `lyapunov` when you need eigenvalues mathematically forced inside the unit disk (see [`11_long_horizon_stability.ipynb`](examples/11_long_horizon_stability.ipynb) vs [`08_loss_stability.ipynb`](examples/08_loss_stability.ipynb)).
 
 
 
@@ -167,7 +168,7 @@ Final loss: <float>
 Predicted 5 snapshots, shape: torch.Size([20, 3])
 ```
 
-More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) · [API reference](https://koopmangraph.readthedocs.io/en/latest/api.html)
+More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) · [API reference](https://koopmangraph.readthedocs.io/en/latest/api.html)
 
 ## Built-in Datasets
 
@@ -190,11 +191,11 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 | Notebook | Topic |
 | --- | --- |
 | [`01_synthetic_graph.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) | End-to-end synthetic graph dynamics |
-| [`02_ieee118_bus.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/02_ieee118_bus.ipynb) | IEEE 118-bus power network |
-| [`03_traffic_network.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) | METR-LA traffic forecasting |
+| [`02_ieee118_bus.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/02_ieee118_bus.ipynb) | IEEE 118-bus Vm forecasting (chronological split; held-out RMSE scale + bus ranking; honest DMDc comparison) |
+| [`03_traffic_network.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) | METR-LA weekday cache: chronological split, trained graph vs DMD/EDMD (multi-origin RMSE) |
 | [`04_grid_attention.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/04_grid_attention.ipynb) | GAT encoder on grid graphs |
 | [`05_custom_data.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/05_custom_data.ipynb) | Bring your own graph sequences |
-| [`06_epidemic_ring.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) | Epidemic spread on ring topologies |
+| [`06_epidemic_ring.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) | SIR ring wave showcase with Schur-stable spectrum (truth vs forecast) |
 | [`07_koopman_spectrum.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb) | Koopman eigenvalue analysis |
 | [`08_loss_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb) | Loss weighting and training stability |
 | [`09_topology_ablation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb) | Topology ablation study |
@@ -202,8 +203,8 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 | [`11_long_horizon_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb) | Structural stability parameterizations, 200-step IEEE 118 rollout |
 | [`12_irregular_sampling_continuous_time.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/12_irregular_sampling_continuous_time.ipynb) | Synthetic continuous-time demo: generator recovery, irregular Δt comparison, `predict_at` (METR-LA forecasting → notebook 03) |
 | [`13_online_adaptation_traffic_drift.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_traffic_drift.ipynb) | Recursive least-squares online Koopman adaptation |
-| [`14_physics_informed_diffusion.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_diffusion.ipynb) | Hybrid physics-informed observables |
-| [`15_closed_loop_voltage_control_rl.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb) | Latent-space PPO voltage control on IEEE 118 |
+| [`14_physics_informed_diffusion.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_diffusion.ipynb) | Hybrid physics observables API (cautionary matched-capacity RMSE; custom `physics_lifting_fn` save/load) |
+| [`15_closed_loop_voltage_control_rl.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb) | Latent PPO regulates IEEE 118 Vm surrogate near 1.0 p.u. |
 | [`16_spectral_similarity_anomalies.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb) | Spectral distance clustering and anomaly detection on IEEE 118 |
 
 

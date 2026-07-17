@@ -3,7 +3,41 @@
 import pytest
 import torch
 
-from koopman_graph.operator import KoopmanOperator
+from koopman_graph.operators import (
+    ContinuousKoopmanOperator,
+    KoopmanOperator,
+    cayley_orthogonal,
+    resolve_factory_stability_bound,
+)
+
+
+def test_cayley_orthogonal_produces_orthogonal_matrix() -> None:
+    """Cayley map of a random matrix should yield Q with Q^T Q = I."""
+    torch.manual_seed(0)
+    skew_params = torch.randn(5, 5)
+    orthogonal = cayley_orthogonal(skew_params)
+    identity = torch.eye(5)
+    assert torch.allclose(orthogonal.T @ orthogonal, identity, atol=1e-5)
+    assert torch.allclose(orthogonal @ orthogonal.T, identity, atol=1e-5)
+    assert torch.isclose(torch.det(orthogonal).abs(), torch.tensor(1.0), atol=1e-5)
+
+
+def test_resolve_factory_stability_bound_maps_operator_fields() -> None:
+    """Verify factory bound helper reads discrete/continuous attribute names."""
+    discrete = KoopmanOperator(4, max_spectral_radius=0.85)
+    continuous = ContinuousKoopmanOperator(4, max_real_eigenvalue=0.7)
+    assert resolve_factory_stability_bound(
+        discrete, dynamics_mode="discrete"
+    ) == pytest.approx(0.85)
+    assert resolve_factory_stability_bound(
+        continuous, dynamics_mode="continuous"
+    ) == pytest.approx(0.7)
+    with pytest.raises(TypeError, match="max_spectral_radius"):
+        resolve_factory_stability_bound(continuous, dynamics_mode="discrete")
+    with pytest.raises(TypeError, match="max_real_eigenvalue"):
+        resolve_factory_stability_bound(discrete, dynamics_mode="continuous")
+    with pytest.raises(TypeError, match="dynamics_mode must be"):
+        resolve_factory_stability_bound(discrete, dynamics_mode="bogus")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("init_mode", ["identity", "identity_noise", "xavier"])
@@ -97,13 +131,32 @@ def test_odo_parameterization_constructs() -> None:
     assert torch.isfinite(op.K).all()
 
 
-def test_odo_spectral_radius_bounded() -> None:
-    """Verify ODO spectral radius stays within the configured bound."""
+def test_odo_bound_metric_is_diagonal_factor() -> None:
+    """Verify ODO bound_metric is the diagonal-factor bound (upper-bounds ρ).
+
+    Orthogonal Cayley factors imply ``ρ(K) ≤ ‖K‖₂ = max|dᵢ| = bound_metric``.
+    """
+    torch.manual_seed(0)
     op = KoopmanOperator(6, parameterization="odo", max_spectral_radius=0.9)
-    op.diag_raw.data.fill_(3.0)
-    assert op.spectral_radius().item() <= 0.9 + 1e-6
-    eigenvalues = torch.linalg.eigvals(op.K)
-    assert eigenvalues.abs().max().item() <= 0.9 + 1e-5
+    with torch.no_grad():
+        op.diag_raw.copy_(torch.tensor([5.0, -5.0, 2.0, -2.0, 0.0, 1.0]))
+        op.cayley_O1.copy_(torch.randn_like(op.cayley_O1) * 5.0)
+        op.cayley_O2.copy_(torch.randn_like(op.cayley_O2) * 5.0)
+    factor_bound = op.bound_metric()
+    expected = torch.tanh(op.diag_raw).abs().max() * op.max_spectral_radius
+    assert torch.allclose(factor_bound, expected)
+    true_radius = op.spectral_radius()
+    eig_radius = torch.linalg.eigvals(op.K).abs().max()
+    assert torch.allclose(true_radius, eig_radius)
+    assert true_radius.item() <= factor_bound.item() + 1e-5
+    assert true_radius.item() < factor_bound.item() - 1e-3
+    assert factor_bound.item() <= op.max_spectral_radius + 1e-5
+
+
+def test_odo_stability_certificate_is_none() -> None:
+    """Verify soft ODO mode exposes no structural stability certificate."""
+    op = KoopmanOperator(4, parameterization="odo")
+    assert op.stability_certificate() is None
 
 
 def test_odo_inverse_recovers_forward_step() -> None:
@@ -113,6 +166,37 @@ def test_odo_inverse_recovers_forward_step() -> None:
     z_next = op(z)
     recovered = op.inverse_step(z_next)
     assert torch.allclose(recovered, z, atol=1e-5)
+
+
+def test_odo_inverse_recovers_with_negative_diagonal() -> None:
+    """ODO inverse must handle negative diagonal factors (not clamp_min)."""
+    op = KoopmanOperator(4, parameterization="odo", max_spectral_radius=1.0)
+    with torch.no_grad():
+        target = torch.tensor([-0.5, -0.3, 0.4, 0.2])
+        op.diag_raw.copy_(torch.atanh(target))
+        op.cayley_O1.zero_()
+        op.cayley_O2.zero_()
+    z = torch.randn(6, 4)
+    z_next = op(z)
+    recovered = op.inverse_step(z_next)
+    assert torch.allclose(recovered, z, atol=1e-5)
+    # Assembled spectrum includes the negative factors.
+    assert (torch.linalg.eigvals(op.K).real < 0).any()
+
+
+def test_lyapunov_inverse_recovers_with_negative_diagonal() -> None:
+    """Lyapunov inverse must handle mixed-sign diagonal eigenvalues."""
+    op = KoopmanOperator(4, parameterization="lyapunov", max_spectral_radius=1.0)
+    bound = 1.0 - 1e-4
+    with torch.no_grad():
+        target = torch.tensor([-0.5, -0.3, 0.4, 0.2]) * bound
+        op.lyap_diag_raw.copy_(torch.atanh(target / bound))
+        op.cayley_Q.zero_()
+    z = torch.randn(6, 4)
+    z_next = op(z)
+    recovered = op.inverse_step(z_next)
+    assert torch.allclose(recovered, z, atol=1e-5)
+    assert (op._lyapunov_diagonal() < 0).any()
 
 
 def test_odo_gradient_flow() -> None:
@@ -257,15 +341,18 @@ def test_structural_parameterizations_construct(parameterization: str) -> None:
     assert op.K.shape == (4, 4)
     assert torch.isfinite(op.K).all()
     assert op.spectral_radius().item() < 1.0
+    assert op.bound_metric().item() < 1.0
 
 
 @pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
 def test_structural_spectral_radius_bounded(parameterization: str) -> None:
     """Verify structural modes keep eigenvalues strictly inside the unit disk."""
     op = KoopmanOperator(5, parameterization=parameterization, init_mode="xavier")  # type: ignore[arg-type]
-    assert op.spectral_radius().item() <= 1.0 - 1e-4 + 1e-5
+    assert op.bound_metric().item() <= 1.0 - 1e-4 + 1e-5
+    assert op.spectral_radius().item() < 1.0
     eigenvalues = torch.linalg.eigvals(op.K)
     assert eigenvalues.abs().max().item() < 1.0
+    assert torch.allclose(op.spectral_radius(), eigenvalues.abs().max())
 
 
 @pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
@@ -300,15 +387,16 @@ def test_structural_gradient_flow(parameterization: str) -> None:
     )
 
 
-def test_schur_spectral_radius_uses_diagonal_without_eigvals() -> None:
-    """Verify Schur spectral radius matches the triangular diagonal bound."""
+def test_schur_bound_metric_uses_diagonal_without_eigvals() -> None:
+    """Verify Schur bound_metric matches the triangular diagonal bound."""
     op = KoopmanOperator(4, parameterization="schur", init_mode="identity")
     with torch.no_grad():
         op.schur_off_raw.copy_(torch.randn_like(op.schur_off_raw))
         op.schur_off_raw.copy_(torch.triu(op.schur_off_raw, diagonal=1))
-    radius = op.spectral_radius()
+    bound = op.bound_metric()
     diag_vals = torch.tanh(op.schur_diag_raw).abs() * (1.0 - 1e-4)
-    assert torch.allclose(radius, diag_vals.max())
+    assert torch.allclose(bound, diag_vals.max())
+    assert torch.allclose(op.spectral_radius(), torch.linalg.eigvals(op.K).abs().max())
 
 
 def test_lyapunov_stability_certificate() -> None:
@@ -316,9 +404,9 @@ def test_lyapunov_stability_certificate() -> None:
     op = KoopmanOperator(4, parameterization="lyapunov", init_mode="identity")
     certificate = op.stability_certificate()
     assert certificate is not None
-    assert "lyapunov_matrix" in certificate
-    assert certificate["margin"].item() > 0
-    p = certificate["lyapunov_matrix"]
+    assert certificate.lyapunov_matrix is not None
+    assert certificate.margin.item() > 0
+    p = certificate.lyapunov_matrix
     residual = op.K.T @ p @ op.K - p
     eigenvalues = torch.linalg.eigvalsh(residual)
     assert eigenvalues.max().item() < 1e-5
@@ -329,16 +417,64 @@ def test_dissipative_stability_certificate() -> None:
     op = KoopmanOperator(3, parameterization="dissipative", init_mode="identity")
     certificate = op.stability_certificate()
     assert certificate is not None
-    assert certificate["margin"].item() > 0
+    assert certificate.lyapunov_matrix is None
+    assert certificate.margin.item() > 0
 
 
 def test_schur_stability_certificate() -> None:
-    """Verify Schur mode reports a positive spectral margin inside unit circle."""
+    """Verify Schur mode reports a positive unit-disk spectral margin."""
     op = KoopmanOperator(4, parameterization="schur", init_mode="identity")
     certificate = op.stability_certificate()
     assert certificate is not None
-    assert certificate["margin"].item() > 0
+    assert certificate.lyapunov_matrix is None
+    assert certificate.margin.item() > 0
+    assert torch.isclose(certificate.margin, 1.0 - op.bound_metric())
+    assert op.bound_metric().item() < op.max_spectral_radius
     assert op.spectral_radius().item() < op.max_spectral_radius
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "dissipative", "lyapunov"])
+def test_structural_rejects_max_spectral_radius_above_one(
+    parameterization: str,
+) -> None:
+    """Structural modes must reject max_spectral_radius > 1 for unit-disk guarantees."""
+    with pytest.raises(ValueError, match="max_spectral_radius <= 1"):
+        KoopmanOperator(
+            4,
+            parameterization=parameterization,  # type: ignore[arg-type]
+            max_spectral_radius=1.5,
+        )
+
+
+def test_odo_allows_max_spectral_radius_above_one() -> None:
+    """Soft ODO mode may use max_spectral_radius > 1 as an operator-norm bound."""
+    op = KoopmanOperator(3, parameterization="odo", max_spectral_radius=1.5)
+    assert op.max_spectral_radius == 1.5
+    assert op.bound_metric().item() <= 1.5 + 1e-5
+
+
+@pytest.mark.parametrize("parameterization", ["schur", "lyapunov"])
+def test_structural_certificate_valid_at_subunitary_bound(
+    parameterization: str,
+) -> None:
+    """Schur/Lyapunov certificates stay valid when max_spectral_radius < 1."""
+    op = KoopmanOperator(
+        4,
+        parameterization=parameterization,  # type: ignore[arg-type]
+        max_spectral_radius=0.5,
+        init_mode="xavier",
+    )
+    assert op.spectral_radius().item() < 0.5
+    certificate = op.stability_certificate()
+    assert certificate is not None
+    assert certificate.margin.item() > 0.5
+    assert torch.isclose(certificate.margin, 1.0 - op.bound_metric())
+    if parameterization == "lyapunov":
+        assert certificate.lyapunov_matrix is not None
+        residual = (
+            op.K.T @ certificate.lyapunov_matrix @ op.K - certificate.lyapunov_matrix
+        )
+        assert torch.linalg.eigvalsh(residual).max().item() < 1e-5
 
 
 def test_stability_certificate_none_for_dense() -> None:
@@ -351,9 +487,8 @@ def test_long_rollout_latent_norm_bounded_for_structural_modes(
     scaling_sequence,
 ) -> None:
     """Verify 200-step latent rollouts stay bounded for structural modes."""
-    from koopman_graph.decoder import GNNDecoder
-    from koopman_graph.encoder import GNNEncoder
     from koopman_graph.model import GraphKoopmanModel
+    from koopman_graph.nn import GNNDecoder, GNNEncoder
 
     def latent_rollout_norm(model, sequence, steps: int) -> float:
         model.eval()
@@ -393,3 +528,18 @@ def test_long_rollout_latent_norm_bounded_for_structural_modes(
     assert stable_norm < unstable_norm
     assert stable_norm < 1e3
     assert unstable_norm > 1e3
+
+
+def test_koopman_operator_satisfies_contract() -> None:
+    """Verify discrete operators implement KoopmanOperatorContract."""
+    from koopman_graph.graph_utils import KoopmanPropagator
+    from koopman_graph.operators import KoopmanOperatorContract
+
+    op = KoopmanOperator(4, init_mode="identity")
+    assert isinstance(op, KoopmanOperatorContract)
+    assert KoopmanPropagator is KoopmanOperatorContract
+    z = torch.randn(3, 4)
+    assert torch.allclose(op.matrix, op.K)
+    assert torch.allclose(op.bound_metric(), op.spectral_radius())
+    assert torch.allclose(op.advance(z), op(z))
+    assert torch.allclose(op.inverse_advance(op.advance(z)), z, atol=1e-5)

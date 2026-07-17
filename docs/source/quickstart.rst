@@ -45,6 +45,12 @@ Build the model
        time_step=0.1,
    )
 
+The constructor factory-builds a discrete :class:`~koopman_graph.operators.KoopmanOperator`
+from string-mode settings (``dynamics_mode``, ``koopman_parameterization``, …).
+To inject a pre-built or custom operator instead, pass ``koopman=...`` and leave
+those factory kwargs at their defaults. Custom operators are not checkpoint
+round-trippable; see the architecture page.
+
 Train
 -----
 
@@ -95,21 +101,29 @@ Advanced training options
 
 :meth:`~koopman_graph.model.GraphKoopmanModel.fit` also supports learning-rate
 schedulers, per-term loss history, multi-origin rollout loss, and multiple
-training trajectories:
+training trajectories. Prefer
+:class:`~koopman_graph.data.MultiTrajectory` (or
+:func:`~koopman_graph.data.as_multi_trajectory`) so multi-trajectory intent is
+explicit; a bare list of sequences remains accepted:
 
 .. code-block:: python
 
    from torch.optim.lr_scheduler import StepLR
+   from koopman_graph import MultiTrajectory
    from koopman_graph.training import constant_loss_weights
 
    history = model.fit(
-       [trajectory_a, trajectory_b],
+       MultiTrajectory((trajectory_a, trajectory_b)),
        epochs=50,
        lr_scheduler=lambda optim: StepLR(optim, step_size=10, gamma=0.5),
        rollout_start_indices="all",
        loss_weights=constant_loss_weights(reconstruction=1.0, rollout=0.5),
    )
    print(history.reconstruction_loss[-1], history.rollout_loss[-1])
+
+A plain ``list`` of ``Data`` snapshots is always one trajectory. Empty lists
+and mixed ``GraphSnapshotSequence`` / ``Data`` lists raise ``ValueError``.
+See :doc:`architecture` for the full discrimination rules.
 
 For longer trajectories, opt into fixed-length window mini-batches. By default,
 every valid window is shuffled and used once per epoch; set
@@ -149,7 +163,7 @@ into two categories:
      - Default. Maximum flexibility; add ``LossWeights(..., eigenvalue=...)`` for empirical stability.
    * - ``"odo"``
      - Soft
-     - Cayley ODO factorization; bounds diagonal factors only — assembled **K** is not structurally stable. Pair with eigenvalue loss for long rollouts.
+     - Cayley ODO factorization; orthogonal factors imply ``ρ(K) ≤ max|dᵢ| ≤ max_spectral_radius`` via the operator 2-norm, but without a strict ε-interior certificate. Prefer structural modes for long-horizon guarantees; continuous ODO still needs eigenvalue loss on the true spectrum.
    * - ``"schur"``, ``"dissipative"``, ``"lyapunov"``
      - Structural
      - Eigenvalues forced inside the unit disk by construction; use for 200+ step rollouts without retuning.
@@ -186,11 +200,15 @@ Structural guarantee example (certified stable **K**):
        koopman_parameterization="lyapunov",
    )
    cert = model.koopman.stability_certificate()
-   print(cert["margin"], model.koopman.spectral_radius())
+   print(cert.margin, model.koopman.bound_metric(), model.koopman.spectral_radius())
 
-For ``"odo"``, :meth:`~koopman_graph.operator.KoopmanOperator.spectral_radius`
-reports a diagonal-factor bound, not ``max |λᵢ(K)|``. See
-``examples/08_loss_stability.ipynb`` (soft modes) and
+For ``"odo"``, :meth:`~koopman_graph.operators.KoopmanOperator.bound_metric`
+(and continuous :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.bound_metric`)
+reports the **diagonal-factor** bound, not the true spectrum of assembled
+``K`` / ``L``. Use :meth:`~koopman_graph.operators.KoopmanOperator.spectral_radius`
+or :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.max_real_part`
+for ``\\max |\\lambda_i|`` / ``\\max \\operatorname{Re}(\\lambda_i)`` via
+``eigvals``. See ``examples/08_loss_stability.ipynb`` (soft modes) and
 ``examples/11_long_horizon_stability.ipynb`` (structural modes).
 
 Continuous-time dynamics
@@ -224,6 +242,13 @@ Discrete mode (the default) requires uniform :attr:`~koopman_graph.model.GraphKo
 increments; use continuous mode when sampling intervals vary. See
 ``examples/12_irregular_sampling_continuous_time.ipynb``.
 
+When ``delta_t`` is omitted on continuous model paths (``forward``, training
+pair losses without timestamps, and the Gymnasium env), the interval resolves
+to :attr:`~koopman_graph.model.GraphKoopmanModel.time_step` via
+:meth:`~koopman_graph.model.GraphKoopmanModel.resolve_delta_t`. Standalone
+:class:`~koopman_graph.operators.ContinuousKoopmanOperator` calls soft-default
+to ``1.0``; pass an explicit interval outside a model.
+
 Partial node observations
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -249,8 +274,9 @@ Physics-informed observables
 ----------------------------
 
 Prepend domain features to the GNN latent with ``physics_preset`` or a custom
-``physics_lifting_fn``. Custom callables are not serialized — re-supply them on
-:meth:`~koopman_graph.model.GraphKoopmanModel.load`. See
+``physics_lifting_fn`` (see :func:`~koopman_graph.observables.graph_laplacian_features`
+and :mod:`koopman_graph.observables`). Custom callables are not serialized —
+re-supply them on :meth:`~koopman_graph.model.GraphKoopmanModel.load`. See
 ``examples/14_physics_informed_diffusion.ipynb`` for Laplacian presets and a
 west/north directional custom function (absolute neighbor states) with save/load
 round-trip.
@@ -276,12 +302,17 @@ See ``examples/13_online_adaptation_traffic_drift.ipynb``.
 
 **Discrete vs. continuous RLS fidelity.** Discrete models (the default) adapt
 ``K`` directly and are exact for the fitted row convention. Continuous models
-fit a discrete propagator ``K(Δt)`` per interval and write back a generator via
-``L ≈ logm(K(Δt)) / Δt`` with control scaling ``B̃ ≈ B(Δt) / Δt``. These
-approximations differ from the Van Loan integration used in
-:meth:`~koopman_graph.continuous.ContinuousKoopmanOperator.advance` and degrade
-for large or varying ``Δt`` and for controlled dynamics. Use discrete RLS when
-sampling is uniform; treat continuous RLS as a local linearization only.
+fit a discrete propagator ``K(Δt)`` per interval and write back a generator
+aligned with
+:meth:`~koopman_graph.operators.ContinuousKoopmanOperator.advance`:
+``L = logm(K(Δt)) / Δt`` when uncontrolled, and a Van Loan block-matrix inverse
+when controlled. Prefer discrete RLS when sampling is uniform and a discrete
+operator is acceptable. Continuous write-back can still degrade for very large
+``Δt`` or when ``K(Δt)`` approaches a matrix-logarithm branch cut.
+
+Historical note: earlier releases used a first-order controlled approximation
+``B̃ ≈ B(Δt) / Δt`` that disagreed with Van Loan integration; that path was
+replaced in the Phase 8 fidelity update (TASK-704).
 
 Latent-space RL environment
 ---------------------------

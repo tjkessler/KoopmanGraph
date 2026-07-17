@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor, nn
@@ -19,60 +20,63 @@ from koopman_graph.analysis import (
     compute_spectrum,
     discrete_spectrum_at_delta_t,
 )
-from koopman_graph.continuous import (
-    ContinuousKoopmanOperator,
-    GeneratorParameterization,
-)
 from koopman_graph.data import (
     GraphSnapshotSequence,
-    WindowSampler,
-    _snapshot_edge_weight,
+    RolloutStartIndices,
     resolve_sequence,
 )
-from koopman_graph.decoder import GNNDecoder
-from koopman_graph.encoder import GATEncoder, GNNEncoder
+from koopman_graph.graph_utils import (
+    autoregressive_latent_rollout,
+    hold_last_topology_at,
+    propagate_latent,
+    resolve_delta_t,
+    resolve_edge_index,
+    resolve_edge_weight,
+)
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
+from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder, GNNEncoder
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
+    PhysicsPosition,
     concatenate_observables,
     resolve_physics_lifting_fn,
+    resolve_physics_position,
     validate_physics_output,
 )
-from koopman_graph.operator import InitMode, KoopmanOperator, Parameterization
-from koopman_graph.serialization import (
-    load_checkpoint,
-    save_checkpoint,
-    snapshot_state_dict,
+from koopman_graph.operators import (
+    ContinuousKoopmanOperator,
+    InitMode,
+    KoopmanOperator,
+    KoopmanOperatorContract,
+    Parameterization,
 )
+from koopman_graph.protocols import DynamicsMode
 from koopman_graph.training import (
     EarlyStoppingMonitor,
     FitHistory,
     LossWeights,
     LossWeightSchedule,
     LRSchedulerFactory,
-    RolloutStartIndices,
     TrainingInput,
     ValidationInput,
-    eval_one_epoch,
-    resolve_device,
     resolve_early_stopping_monitor,
-    resolve_loss_weights_for_epoch,
-    resolve_lr_scheduler,
-    resolve_rollout_start_indices,
     resolve_training_sequences,
     resolve_validation_sequences,
-    should_stop_early,
-    train_one_epoch,
-    train_windowed_epoch,
+    run_fit_loop,
 )
 
 if TYPE_CHECKING:
     from koopman_graph.env import GraphKoopmanEnv
 
 Encoder = GNNEncoder | GATEncoder
-DynamicsMode = Literal["discrete", "continuous"]
+Decoder = GNNDecoder | GATDecoder
 KoopmanModule = KoopmanOperator | ContinuousKoopmanOperator
+
+_DEFAULT_KOOPMAN_INIT_MODE: InitMode = "identity_noise"
+_DEFAULT_KOOPMAN_INIT_SCALE = 1e-2
+_DEFAULT_KOOPMAN_PARAMETERIZATION: Parameterization = "dense"
+_DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS = 1.0
 
 
 class GraphKoopmanModel(nn.Module):
@@ -81,11 +85,20 @@ class GraphKoopmanModel(nn.Module):
     Composes a GNN encoder (lifting), a finite-dimensional Koopman operator
     (linear latent evolution), and a symmetric GNN decoder (reconstruction).
 
+    Satisfies :class:`~koopman_graph.protocols.ForecastModel` and the narrower
+    :class:`~koopman_graph.protocols.UncontrolledForecastModel` peer set when
+    ``control_dim == 0`` and called as ``predict(data, steps)``. ``predict``
+    also accepts tensors, optional controls, and future topologies — those
+    kwargs are not portable to classical DMD/EDMD baselines. See the
+    architecture docs call-site matrix. Training and metrics duck-typing beyond
+    the forecasting façade uses
+    :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
+
     Attributes
     ----------
     encoder : GNNEncoder or GATEncoder
         Topology-aware encoder for latent lifting.
-    decoder : GNNDecoder
+    decoder : GNNDecoder or GATDecoder
         Symmetric GNN decoder for physical reconstruction.
     latent_dim : int
         Latent space dimension shared by encoder, operator, and decoder.
@@ -93,8 +106,10 @@ class GraphKoopmanModel(nn.Module):
         Physical time increment associated with one model step. Used by
         :meth:`spectrum` to convert discrete eigenvalues into continuous-time
         growth rates and frequencies.
-    koopman : KoopmanOperator or ContinuousKoopmanOperator
-        Learnable linear propagator in latent space.
+    koopman : KoopmanOperatorContract
+        Learnable linear propagator in latent space. Built-in discrete or
+        continuous operators by default; optionally an injected
+        :class:`~koopman_graph.operators.KoopmanOperatorContract` ``nn.Module``.
     dynamics_mode : {"discrete", "continuous"}
         Whether latent evolution uses a discrete step map or a continuous
         generator integrated with matrix exponentials.
@@ -103,21 +118,21 @@ class GraphKoopmanModel(nn.Module):
     def __init__(
         self,
         encoder: Encoder,
-        decoder: GNNDecoder,
+        decoder: Decoder,
         latent_dim: int,
         time_step: float,
         *,
         dynamics_mode: DynamicsMode = "discrete",
-        koopman_init_mode: InitMode = "identity_noise",
-        koopman_init_scale: float = 1e-2,
-        koopman_parameterization: (
-            Parameterization | GeneratorParameterization
-        ) = "dense",
-        koopman_max_spectral_radius: float = 1.0,
+        koopman: KoopmanOperatorContract | None = None,
+        koopman_init_mode: InitMode = _DEFAULT_KOOPMAN_INIT_MODE,
+        koopman_init_scale: float = _DEFAULT_KOOPMAN_INIT_SCALE,
+        koopman_parameterization: Parameterization = _DEFAULT_KOOPMAN_PARAMETERIZATION,
+        koopman_max_spectral_radius: float = _DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
         control_dim: int = 0,
         physics_lifting_fn: PhysicsLiftingFn | None = None,
         physics_preset: str | None = None,
         physics_dim: int = 0,
+        physics_position: PhysicsPosition = PHYSICS_POSITION,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
@@ -125,7 +140,7 @@ class GraphKoopmanModel(nn.Module):
         ----------
         encoder : GNNEncoder or GATEncoder
             Topology-aware encoder for latent lifting.
-        decoder : GNNDecoder
+        decoder : GNNDecoder or GATDecoder
             Symmetric GNN decoder for physical reconstruction.
         latent_dim : int
             Total latent space dimension per node. When physics-informed
@@ -137,10 +152,20 @@ class GraphKoopmanModel(nn.Module):
         dynamics_mode : {"discrete", "continuous"}, optional
             Latent evolution mode. ``"discrete"`` preserves the v0.2 behavior;
             ``"continuous"`` learns a generator integrated via matrix
-            exponentials. Default is ``"discrete"``.
+            exponentials. Default is ``"discrete"``. When injecting a built-in
+            operator, ``dynamics_mode`` must match its type.
+        koopman : KoopmanOperatorContract or None, optional
+            Optional pre-built operator module satisfying
+            :class:`~koopman_graph.operators.KoopmanOperatorContract`. When
+            provided, factory kwargs (``koopman_init_mode``,
+            ``koopman_init_scale``, ``koopman_parameterization``,
+            ``koopman_max_spectral_radius``) must remain at their defaults.
+            Omit to construct a built-in discrete or continuous operator from
+            string-mode settings (tutorial default).
         koopman_init_mode : {"identity", "identity_noise", "xavier"}, optional
             Initialization strategy for the Koopman matrix. Default is
-            ``"identity_noise"``.
+            ``"identity_noise"``. Ignored (and must stay default) when
+            ``koopman`` is injected.
         koopman_init_scale : float, optional
             Noise scale when ``koopman_init_mode="identity_noise"``.
             Default is ``1e-2``.
@@ -156,7 +181,8 @@ class GraphKoopmanModel(nn.Module):
             this value. Default is ``1.0``.
         control_dim : int, optional
             Dimension of exogenous control inputs. When ``0``, the model is
-            uncontrolled. Default is ``0``.
+            uncontrolled. Default is ``0``. Must match ``koopman.control_dim``
+            when an operator is injected.
         physics_lifting_fn : callable or None, optional
             Callable mapping a PyG ``Data`` snapshot to physics-informed node
             features with shape ``(num_nodes, physics_dim)``. When provided,
@@ -171,13 +197,21 @@ class GraphKoopmanModel(nn.Module):
             a physics lifting function or preset is supplied, and ``0`` otherwise.
             For ``physics_preset="graph_laplacian"``, set ``physics_dim`` equal to
             ``in_channels``.
+        physics_position : {"prepend"}, optional
+            Where physics features sit relative to GNN embeddings in the hybrid
+            latent. Only ``"prepend"`` is supported today. Round-tripped via
+            checkpoint ``physics.position``.
 
         Raises
         ------
         ValueError
             If ``latent_dim`` is not positive, ``time_step <= 0``,
-            ``control_dim < 0``, physics settings are inconsistent, or encoder/
-            decoder latent dimensions do not match the effective hybrid layout.
+            ``control_dim < 0``, physics settings are inconsistent, encoder/
+            decoder latent dimensions do not match the effective hybrid layout,
+            an injected operator conflicts with factory kwargs or dimensions, or
+            ``dynamics_mode`` disagrees with a built-in injected operator type.
+        TypeError
+            If ``koopman`` is provided but is not an ``nn.Module``.
         """
         super().__init__()
         if dynamics_mode not in {"discrete", "continuous"}:
@@ -235,16 +269,27 @@ class GraphKoopmanModel(nn.Module):
         self.physics_dim = physics_dim
         self.physics_preset = physics_preset
         self.physics_lifting_fn = resolved_physics_fn
-        self.physics_position = PHYSICS_POSITION
+        self.physics_position = resolve_physics_position(physics_position)
         self.time_step = time_step
         self.control_dim = control_dim
         self.dynamics_mode = dynamics_mode
-        if dynamics_mode == "continuous":
+        if koopman is not None:
+            self.koopman = self._resolve_injected_koopman(
+                koopman,
+                latent_dim=latent_dim,
+                control_dim=control_dim,
+                dynamics_mode=dynamics_mode,
+                koopman_init_mode=koopman_init_mode,
+                koopman_init_scale=koopman_init_scale,
+                koopman_parameterization=koopman_parameterization,
+                koopman_max_spectral_radius=koopman_max_spectral_radius,
+            )
+        elif dynamics_mode == "continuous":
             self.koopman = ContinuousKoopmanOperator(
                 latent_dim,
                 init_mode=koopman_init_mode,
                 init_scale=koopman_init_scale,
-                parameterization=koopman_parameterization,  # type: ignore[arg-type]
+                parameterization=koopman_parameterization,
                 max_real_eigenvalue=koopman_max_spectral_radius,
                 control_dim=control_dim,
             )
@@ -253,10 +298,108 @@ class GraphKoopmanModel(nn.Module):
                 latent_dim,
                 init_mode=koopman_init_mode,
                 init_scale=koopman_init_scale,
-                parameterization=koopman_parameterization,  # type: ignore[arg-type]
+                parameterization=koopman_parameterization,
                 max_spectral_radius=koopman_max_spectral_radius,
                 control_dim=control_dim,
             )
+
+    @staticmethod
+    def _resolve_injected_koopman(
+        koopman: KoopmanOperatorContract,
+        *,
+        latent_dim: int,
+        control_dim: int,
+        dynamics_mode: DynamicsMode,
+        koopman_init_mode: InitMode,
+        koopman_init_scale: float,
+        koopman_parameterization: Parameterization,
+        koopman_max_spectral_radius: float,
+    ) -> KoopmanOperatorContract:
+        """Validate and return an injected Koopman operator module.
+
+        Parameters
+        ----------
+        koopman : KoopmanOperatorContract
+            Caller-supplied operator.
+        latent_dim : int
+            Model latent dimension.
+        control_dim : int
+            Model control dimension.
+        dynamics_mode : {"discrete", "continuous"}
+            Requested dynamics mode.
+        koopman_init_mode : InitMode
+            Factory init mode (must be default when injecting).
+        koopman_init_scale : float
+            Factory init scale (must be default when injecting).
+        koopman_parameterization : Parameterization
+            Factory parameterization (must be default when injecting).
+        koopman_max_spectral_radius : float
+            Factory spectral bound (must be default when injecting).
+
+        Returns
+        -------
+        KoopmanOperatorContract
+            Validated operator module ready for assignment.
+
+        Raises
+        ------
+        TypeError
+            If ``koopman`` is not an ``nn.Module``.
+        ValueError
+            If factory kwargs conflict or dimensions / dynamics mode mismatch.
+        """
+        if not isinstance(koopman, nn.Module):
+            msg = (
+                "Injected koopman must be an nn.Module implementing "
+                "KoopmanOperatorContract, "
+                f"got {type(koopman).__name__}"
+            )
+            raise TypeError(msg)
+
+        conflicting: list[str] = []
+        if koopman_init_mode != _DEFAULT_KOOPMAN_INIT_MODE:
+            conflicting.append("koopman_init_mode")
+        if koopman_init_scale != _DEFAULT_KOOPMAN_INIT_SCALE:
+            conflicting.append("koopman_init_scale")
+        if koopman_parameterization != _DEFAULT_KOOPMAN_PARAMETERIZATION:
+            conflicting.append("koopman_parameterization")
+        if koopman_max_spectral_radius != _DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS:
+            conflicting.append("koopman_max_spectral_radius")
+        if conflicting:
+            names = ", ".join(conflicting)
+            msg = (
+                "Injected koopman is mutually exclusive with non-default "
+                f"factory kwargs ({names}); omit them or leave defaults when "
+                "passing koopman=..."
+            )
+            raise ValueError(msg)
+
+        if koopman.latent_dim != latent_dim:
+            msg = (
+                f"Injected koopman.latent_dim ({koopman.latent_dim}) must match "
+                f"latent_dim ({latent_dim})"
+            )
+            raise ValueError(msg)
+        if koopman.control_dim != control_dim:
+            msg = (
+                f"Injected koopman.control_dim ({koopman.control_dim}) must match "
+                f"control_dim ({control_dim})"
+            )
+            raise ValueError(msg)
+
+        if (
+            isinstance(koopman, ContinuousKoopmanOperator)
+            and dynamics_mode != "continuous"
+        ):
+            msg = (
+                "Injected ContinuousKoopmanOperator requires dynamics_mode='continuous'"
+            )
+            raise ValueError(msg)
+        if isinstance(koopman, KoopmanOperator) and dynamics_mode != "discrete":
+            msg = "Injected KoopmanOperator requires dynamics_mode='discrete'"
+            raise ValueError(msg)
+
+        return koopman
 
     @property
     def is_continuous(self) -> bool:
@@ -269,17 +412,29 @@ class GraphKoopmanModel(nn.Module):
         """
         return self.dynamics_mode == "continuous"
 
-    def _resolve_delta_t(self, delta_t: float | Tensor | None) -> float | Tensor:
-        """Return the integration interval for one propagation step.
+    def resolve_delta_t(
+        self,
+        delta_t: float | Tensor | None = None,
+    ) -> float | Tensor:
+        """Resolve the continuous integration interval for this model.
+
+        Missing ``delta_t`` falls back to :attr:`time_step`. Training, losses,
+        evaluation, and :class:`~koopman_graph.env.GraphKoopmanEnv` share this
+        policy for model-backed continuous paths. Standalone operators without
+        a model still default to ``1.0`` via
+        :func:`~koopman_graph.graph_utils.resolve_delta_t`.
+
+        Parameters
+        ----------
+        delta_t : float, Tensor, or None, optional
+            Explicit interval. When ``None``, returns :attr:`time_step`.
 
         Returns
         -------
         float or Tensor
             Resolved integration interval.
         """
-        if delta_t is not None:
-            return delta_t
-        return self.time_step
+        return resolve_delta_t(delta_t, default_delta_t=self.time_step)
 
     def _advance_latent(
         self,
@@ -295,19 +450,22 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Advanced latent states.
         """
-        if self.is_continuous:
-            return self.koopman.advance(
-                z,
-                self._resolve_delta_t(delta_t),
-                control=control,
-            )
-        return self.koopman(z, control=control)
+        return propagate_latent(
+            self.koopman,
+            z,
+            control=control,
+            delta_t=self.resolve_delta_t(delta_t),
+            default_delta_t=self.time_step,
+        )
 
     def spectrum(self, *, delta_t: float | None = None) -> KoopmanSpectrum:
         """Analyze the learned Koopman operator spectrum.
 
-        In continuous mode, returns the generator spectrum by default. Pass
-        ``delta_t`` to obtain the discrete-time spectrum of ``exp(L·Δt)``.
+        Uses :attr:`~koopman_graph.operators.KoopmanOperatorContract.matrix`
+        (not concrete ``K`` / ``L`` aliases). In continuous mode, returns the
+        generator spectrum by default. Pass ``delta_t`` to obtain the
+        discrete-time spectrum of ``exp(L·Δt)``. Classical DMD-family
+        baselines take no ``spectrum`` kwargs.
 
         Returns
         -------
@@ -316,24 +474,9 @@ class GraphKoopmanModel(nn.Module):
         """
         if self.is_continuous:
             if delta_t is None:
-                return compute_generator_spectrum(self.koopman.L)
-            return discrete_spectrum_at_delta_t(self.koopman.L, delta_t)
-        return compute_spectrum(self.koopman.K, self.time_step)
-
-    def encode_latent(self, snapshot: Data) -> Tensor:
-        """Encode a graph snapshot into latent node features.
-
-        Parameters
-        ----------
-        snapshot : Data
-            Graph snapshot with node features and topology.
-
-        Returns
-        -------
-        Tensor
-            Latent node features with shape ``(num_nodes, latent_dim)``.
-        """
-        return self.encode(snapshot)
+                return compute_generator_spectrum(self.koopman.matrix)
+            return discrete_spectrum_at_delta_t(self.koopman.matrix, delta_t)
+        return compute_spectrum(self.koopman.matrix, self.time_step)
 
     def encode(
         self,
@@ -343,8 +486,10 @@ class GraphKoopmanModel(nn.Module):
     ) -> Tensor:
         """Lift graph node features into the hybrid Koopman latent space.
 
-        When physics-informed observables are configured, returns
-        ``[z_physics || z_gnn]`` with shape ``(num_nodes, latent_dim)``.
+        This is the primary encode API. Prefer ``encode`` over the deprecated
+        :meth:`encode_latent` alias. When physics-informed observables are
+        configured, returns ``[z_physics || z_gnn]`` with shape
+        ``(num_nodes, latent_dim)``.
 
         Parameters
         ----------
@@ -360,8 +505,8 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Latent node features with shape ``(num_nodes, latent_dim)``.
         """
-        edge_index = self._resolve_edge_index(x_or_data, edge_index)
-        edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
+        edge_index = resolve_edge_index(x_or_data, edge_index)
+        edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         z_gnn = self.encoder(x_or_data, edge_index, edge_weight)
         if self.physics_lifting_fn is None:
             return z_gnn
@@ -378,6 +523,30 @@ class GraphKoopmanModel(nn.Module):
             z_gnn,
             position=self.physics_position,
         )
+
+    def encode_latent(self, snapshot: Data) -> Tensor:
+        """Encode a graph snapshot into latent node features.
+
+        .. deprecated:: 0.3.0
+            Use :meth:`encode` instead. ``encode_latent`` remains as a
+            compatibility alias and will be removed in a future release.
+
+        Parameters
+        ----------
+        snapshot : Data
+            Graph snapshot with node features and topology.
+
+        Returns
+        -------
+        Tensor
+            Latent node features with shape ``(num_nodes, latent_dim)``.
+        """
+        warnings.warn(
+            "encode_latent() is deprecated; use encode() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.encode(snapshot)
 
     @property
     def uses_physics_observables(self) -> bool:
@@ -431,9 +600,7 @@ class GraphKoopmanModel(nn.Module):
         for parameter in self.decoder.parameters():
             parameter.requires_grad_(False)
 
-        mode: Literal["discrete", "continuous"] = (
-            "continuous" if self.is_continuous else "discrete"
-        )
+        mode: DynamicsMode = "continuous" if self.is_continuous else "discrete"
         adapter = RecursiveKoopmanAdapter.from_operator(
             self.koopman,
             mode=mode,
@@ -490,12 +657,13 @@ class GraphKoopmanModel(nn.Module):
         Notes
         -----
         For ``dynamics_mode="continuous"``, RLS fits a discrete propagator per
-        interval and maps it to a generator via ``logm(K(Δt))/Δt`` with control
-        scaling ``B(Δt)/Δt``. This is a first-order approximation that does not
-        match the Van Loan integration used in forward propagation. Prefer
-        discrete adaptation for uniformly sampled sequences; see
+        interval and writes back a generator aligned with
+        :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.advance`
+        (matrix logarithm when uncontrolled; Van Loan block inverse when
+        controlled). Prefer discrete adaptation for uniformly sampled sequences
+        when a discrete operator is acceptable; see
         :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` for
-        breakdown conditions (large or varying ``delta_t``, controlled dynamics).
+        matrix-logarithm / large-``delta_t`` caveats.
 
         Raises
         ------
@@ -514,8 +682,8 @@ class GraphKoopmanModel(nn.Module):
             resolved_delta = self.time_step
 
         with torch.no_grad():
-            z_t = self.encode_latent(snapshot_t)
-            z_tp1 = self.encode_latent(snapshot_tp1)
+            z_t = self.encode(snapshot_t)
+            z_tp1 = self.encode(snapshot_tp1)
             result = adapter.update(
                 z_t,
                 z_tp1,
@@ -550,6 +718,8 @@ class GraphKoopmanModel(nn.Module):
             Destination checkpoint file (``.pt``). Parent directories are
             created when missing.
         """
+        from koopman_graph.serialization import save_checkpoint
+
         save_checkpoint(self, path)
 
     @classmethod
@@ -580,6 +750,8 @@ class GraphKoopmanModel(nn.Module):
         GraphKoopmanModel
             Ready-to-use model in evaluation mode.
         """
+        from koopman_graph.serialization import load_checkpoint
+
         return load_checkpoint(
             path,
             map_location=map_location,
@@ -622,8 +794,8 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Predicted node features of shape ``(num_nodes, out_channels)``.
         """
-        edge_index = self._resolve_edge_index(x_or_data, edge_index)
-        edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
+        edge_index = resolve_edge_index(x_or_data, edge_index)
+        edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         z = self.encode(x_or_data, edge_index, edge_weight)
         z_next = self._advance_latent(z, control=control, delta_t=delta_t)
         return self.decoder(z_next, edge_index, edge_weight)
@@ -683,27 +855,30 @@ class GraphKoopmanModel(nn.Module):
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)
 
-        edge_index = self._resolve_edge_index(x_or_data, edge_index)
-        edge_weight = self._resolve_edge_weight(x_or_data, edge_weight)
+        edge_index = resolve_edge_index(x_or_data, edge_index)
+        edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         self._validate_controls(controls, steps=steps)
         if step_deltas is not None and len(step_deltas) != steps:
             msg = f"expected {steps} step_deltas for rollout, got {len(step_deltas)}"
             raise ValueError(msg)
         z = self.encode(x_or_data, edge_index, edge_weight)
 
-        current_edge_index = edge_index
-        current_edge_weight = edge_weight
-        outputs: list[tuple[Tensor, Tensor, Tensor | None]] = []
-        for step in range(steps):
-            if future_topologies is not None and step < len(future_topologies):
-                current_edge_index = future_topologies[step].edge_index
-                current_edge_weight = _snapshot_edge_weight(future_topologies[step])
-            control = None if controls is None else controls[step]
-            delta_t = None if step_deltas is None else step_deltas[step]
-            z = self._advance_latent(z, control=control, delta_t=delta_t)
-            prediction = self.decoder(z, current_edge_index, current_edge_weight)
-            outputs.append((prediction, current_edge_index, current_edge_weight))
-        return outputs
+        control_at = None if controls is None else (lambda step: controls[step])
+        delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
+        return autoregressive_latent_rollout(
+            self.koopman,
+            self.decoder,
+            z,
+            steps=steps,
+            topology_at=hold_last_topology_at(
+                edge_index,
+                edge_weight,
+                future_topologies,
+            ),
+            control_at=control_at,
+            delta_t_at=delta_t_at,
+            default_delta_t=self.time_step,
+        )
 
     def predict(
         self,
@@ -720,6 +895,13 @@ class GraphKoopmanModel(nn.Module):
         Koopman operator for ``steps`` iterations, and decodes after each step.
         Runs in evaluation mode without gradient tracking.
 
+        The uncontrolled peer call site ``predict(data, steps)`` matches
+        :class:`~koopman_graph.baselines.DMDBaseline` /
+        :class:`~koopman_graph.baselines.EDMDBaseline`. Tensor inputs, optional
+        ``controls``, and ``future_topologies`` are GraphKoopman-only and are
+        **not** interchangeable with classical baselines (DMDc always requires
+        ``controls``).
+
         When ``future_topologies`` is omitted, each rollout step decodes with
         the **hold-last-known** topology: the initial graph topology is used
         for step 0, and each subsequent step reuses the most recently provided
@@ -730,7 +912,8 @@ class GraphKoopmanModel(nn.Module):
         ----------
         initial_graph : Tensor or Data
             Either a PyG ``Data`` object or node features ``x`` of shape
-            ``(num_nodes, in_channels)``.
+            ``(num_nodes, in_channels)``. Classical baselines accept ``Data``
+            only.
         steps : int
             Number of future snapshots to predict (must be >= 1).
         edge_index : Tensor, optional
@@ -742,7 +925,8 @@ class GraphKoopmanModel(nn.Module):
             ``Data`` input.
         controls : sequence of Tensor or None, optional
             Future control inputs for each rollout step. Required with length
-            ``steps`` when :attr:`control_dim` is positive.
+            ``steps`` when :attr:`control_dim` is positive; optional (default
+            ``None``) for uncontrolled models.
         future_topologies : sequence of Data or None, optional
             Known topologies for rollout decode steps. Shorter sequences hold
             the last provided topology for remaining steps.
@@ -979,31 +1163,44 @@ class GraphKoopmanModel(nn.Module):
     ) -> FitHistory:
         """Train encoder, Koopman operator, and decoder end-to-end.
 
-        Minimizes a weighted sum of one-step MSE and optional forward and
-        backward consistency terms::
+        Thin façade over :func:`~koopman_graph.training.run_fit_loop`: validates
+        inputs and control layouts, then delegates epoch orchestration,
+        device placement, early stopping, and history assembly.
+
+        Minimizes a weighted sum of one-step MSE plus optional forward /
+        backward consistency, multi-step rollout, and eigenvalue
+        regularization terms (MSE means are over tensor entries)::
 
             loss = w_r * recon_loss
-                 + w_f * ||K z_t - z_{t+1}||^2
-                 + w_b * ||z_t - z_{t+1} K^{\\dagger}||^2
+                 + w_f * mean((z_t K^T - z_{t+1})^2)
+                 + w_b * mean((z_t - z_{t+1} (K^{\\dagger})^T)^2)
+                 + w_rollout * rollout_loss
+                 + w_eig * eigenvalue_loss
 
-        where ``z_t`` and ``z_{t+1}`` are encoder outputs for consecutive
-        snapshots and weights ``(w_r, w_f, w_b)`` come from a
+        Row-convention propagation and inverses use ``z @ K.T`` /
+        ``z @ (K^{\\dagger}).T``; see
+        :class:`~koopman_graph.losses.ForwardConsistencyLoss` and
+        :class:`~koopman_graph.losses.BackwardConsistencyLoss`. Weights
+        ``(w_r, w_f, w_b, w_rollout, w_eig)`` come from a
         :class:`~koopman_graph.training.LossWeights` object or an optional
         per-epoch schedule.
 
-        When ``data_sequence`` is a list of
+        When ``data_sequence`` is a :class:`~koopman_graph.data.MultiTrajectory`
+        (preferred) or a list of
         :class:`~koopman_graph.data.GraphSnapshotSequence` objects, losses are
         averaged across trajectories before each optimizer step.
 
         Parameters
         ----------
-        data_sequence : GraphSnapshotSequence, sequence of Data, or sequence of \
-GraphSnapshotSequence
+        data_sequence : GraphSnapshotSequence, MultiTrajectory, sequence of \
+Data, or sequence of GraphSnapshotSequence
             One training trajectory or multiple trajectories of the same
-            system. A plain list of ``Data`` snapshots is treated as a single
-            trajectory; a list whose first element is a
-            :class:`~koopman_graph.data.GraphSnapshotSequence` is treated as
-            multiple trajectories.
+            system. Prefer :class:`~koopman_graph.data.MultiTrajectory` for
+            multi-trajectory input. A plain list of ``Data`` snapshots is
+            treated as a single trajectory; a list of
+            :class:`~koopman_graph.data.GraphSnapshotSequence` remains accepted
+            as a compatibility shim. Empty lists and mixed
+            ``GraphSnapshotSequence`` / ``Data`` lists raise ``ValueError``.
         epochs : int, optional
             Number of training epochs. Default is ``100``.
         lr : float, optional
@@ -1059,11 +1256,12 @@ GraphSnapshotSequence
             Loss used for early stopping and best-epoch tracking. ``"auto"``
             monitors validation loss when ``validation_sequence`` is provided,
             otherwise training loss. Default is ``"auto"``.
-        validation_sequence : GraphSnapshotSequence, sequence of Data, \
-sequence of GraphSnapshotSequence, or None, optional
+        validation_sequence : GraphSnapshotSequence, MultiTrajectory, sequence \
+of Data, sequence of GraphSnapshotSequence, or None, optional
             Optional held-out snapshots for per-epoch validation loss. A single
-            validation sequence is reused for all training trajectories; a list
-            of validation sequences must match the training trajectory count.
+            validation sequence is reused for all training trajectories; a
+            :class:`~koopman_graph.data.MultiTrajectory` or list of validation
+            sequences must match the training trajectory count.
         restore_best_weights : bool, optional
             When ``True``, reload in-memory weights from the lowest-loss epoch
             after training completes. Default is ``False``.
@@ -1077,6 +1275,9 @@ sequence of GraphSnapshotSequence, or None, optional
         -------
         :class:`~koopman_graph.training.FitHistory`
             Per-epoch training and validation losses and early-stop metadata.
+            Unlike classical baselines (``fit`` → ``self``), the neural model
+            returns history rather than ``self``; see the ``ForecastModel``
+            call-site matrix in :doc:`architecture`.
 
         Raises
         ------
@@ -1121,277 +1322,33 @@ sequence of GraphSnapshotSequence, or None, optional
             early_stopping_monitor,
             has_validation=val_sequences is not None,
         )
-
-        train_device = resolve_device(self, device)
-        self.to(train_device)
-        train_sequences = [
-            self._sequence_to_device(sequence, train_device)
-            for sequence in train_sequences
-        ]
-        if val_sequences is not None:
-            val_sequences = [
-                self._sequence_to_device(sequence, train_device)
-                for sequence in val_sequences
-            ]
-
-        optim = optimizer(self.parameters(), lr=lr, **optimizer_kwargs)
-        scheduler = resolve_lr_scheduler(lr_scheduler, optim)
-        window_sampler = (
-            None
-            if window_length is None
-            else WindowSampler(
-                train_sequences,
-                window_length=window_length,
-                batch_size=batch_size,
-                windows_per_epoch=windows_per_epoch,
-                seed=window_seed,
-            )
+        return run_fit_loop(
+            self,
+            train_sequences,
+            epochs=epochs,
+            lr=lr,
+            optimizer=optimizer,
+            device=device,
+            loss_weights=loss_weights,
+            loss_weight_schedule=loss_weight_schedule,
+            rollout_horizon=rollout_horizon,
+            rollout_start_indices=rollout_start_indices,
+            rollout_starts_per_epoch=rollout_starts_per_epoch,
+            rollout_start_seed=rollout_start_seed,
+            lr_scheduler=lr_scheduler,
+            window_length=window_length,
+            batch_size=batch_size,
+            windows_per_epoch=windows_per_epoch,
+            window_seed=window_seed,
+            max_grad_norm=max_grad_norm,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            early_stopping_monitor=monitor,
+            val_sequences=val_sequences,
+            restore_best_weights=restore_best_weights,
+            checkpoint_path=checkpoint_path,
+            **optimizer_kwargs,
         )
-        losses: list[float] = []
-        reconstruction_losses: list[float] = []
-        forward_losses: list[float] = []
-        backward_losses: list[float] = []
-        rollout_losses: list[float] = []
-        eigenvalue_losses: list[float] = []
-        val_losses: list[float] | None = [] if val_sequences is not None else None
-        val_reconstruction_losses: list[float] | None = (
-            [] if val_sequences is not None else None
-        )
-        val_forward_losses: list[float] | None = (
-            [] if val_sequences is not None else None
-        )
-        val_backward_losses: list[float] | None = (
-            [] if val_sequences is not None else None
-        )
-        val_rollout_losses: list[float] | None = (
-            [] if val_sequences is not None else None
-        )
-        val_eigenvalue_losses: list[float] | None = (
-            [] if val_sequences is not None else None
-        )
-        best_loss_for_stop = float("inf")
-        best_loss: float | None = None
-        best_epoch: int | None = None
-        best_state_dict: dict[str, Tensor] | None = None
-        track_best = restore_best_weights or checkpoint_path is not None
-        epochs_without_improvement = 0
-        stopped_early = False
-
-        for epoch in range(epochs):
-            epoch_weights = resolve_loss_weights_for_epoch(
-                epoch,
-                loss_weights=loss_weights,
-                loss_weight_schedule=loss_weight_schedule,
-            )
-            epoch_rollout_starts: list[int] | None = None
-            if window_sampler is None:
-                rollout_horizon_for_epoch = (
-                    train_sequences[0].num_timesteps - 1
-                    if rollout_horizon is None
-                    else rollout_horizon
-                )
-                epoch_rollout_starts = resolve_rollout_start_indices(
-                    train_sequences[0],
-                    horizon=rollout_horizon_for_epoch,
-                    rollout_start_indices=rollout_start_indices,
-                    rollout_starts_per_epoch=rollout_starts_per_epoch,
-                    rollout_start_seed=rollout_start_seed,
-                    epoch=epoch,
-                )
-                breakdown = train_one_epoch(
-                    self,
-                    train_sequences,
-                    optim,
-                    epoch_weights,
-                    max_grad_norm=max_grad_norm,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=epoch_rollout_starts,
-                )
-            else:
-                breakdown = train_windowed_epoch(
-                    self,
-                    window_sampler,
-                    optim,
-                    epoch_weights,
-                    epoch=epoch,
-                    max_grad_norm=max_grad_norm,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=rollout_start_indices,
-                    rollout_starts_per_epoch=rollout_starts_per_epoch,
-                    rollout_start_seed=rollout_start_seed,
-                )
-            if scheduler is not None:
-                scheduler.step()
-
-            term_values = breakdown.to_floats()
-            losses.append(term_values["total"])
-            reconstruction_losses.append(term_values["reconstruction"])
-            forward_losses.append(term_values["forward"])
-            backward_losses.append(term_values["backward"])
-            rollout_losses.append(term_values["rollout"])
-            eigenvalue_losses.append(term_values["eigenvalue"])
-
-            monitored_loss = term_values["total"]
-            if val_sequences is not None:
-                val_breakdown = eval_one_epoch(
-                    self,
-                    val_sequences,
-                    epoch_weights,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=epoch_rollout_starts,
-                )
-                val_terms = val_breakdown.to_floats()
-                assert val_losses is not None
-                assert val_reconstruction_losses is not None
-                assert val_forward_losses is not None
-                assert val_backward_losses is not None
-                assert val_rollout_losses is not None
-                assert val_eigenvalue_losses is not None
-                val_losses.append(val_terms["total"])
-                val_reconstruction_losses.append(val_terms["reconstruction"])
-                val_forward_losses.append(val_terms["forward"])
-                val_backward_losses.append(val_terms["backward"])
-                val_rollout_losses.append(val_terms["rollout"])
-                val_eigenvalue_losses.append(val_terms["eigenvalue"])
-                if monitor == "val":
-                    monitored_loss = val_terms["total"]
-
-            if track_best and (best_loss is None or monitored_loss < best_loss):
-                best_loss = monitored_loss
-                best_epoch = epoch
-                best_state_dict = snapshot_state_dict(self)
-
-            if early_stopping_patience is not None:
-                stop, best_loss_for_stop, epochs_without_improvement = (
-                    should_stop_early(
-                        epoch_loss=monitored_loss,
-                        best_loss=best_loss_for_stop,
-                        epochs_without_improvement=epochs_without_improvement,
-                        patience=early_stopping_patience,
-                        min_delta=early_stopping_min_delta,
-                    )
-                )
-                if stop:
-                    stopped_early = True
-                    break
-
-        if track_best and best_state_dict is not None:
-            last_state_dict: dict[str, Tensor] | None = None
-            if not restore_best_weights:
-                last_state_dict = snapshot_state_dict(self)
-            self.load_state_dict(best_state_dict)
-            if checkpoint_path is not None:
-                save_checkpoint(self, checkpoint_path)
-            if not restore_best_weights and last_state_dict is not None:
-                self.load_state_dict(last_state_dict)
-
-        return FitHistory(
-            loss=losses,
-            epochs=len(losses),
-            reconstruction_loss=reconstruction_losses,
-            forward_loss=forward_losses,
-            backward_loss=backward_losses,
-            rollout_loss=rollout_losses,
-            eigenvalue_loss=eigenvalue_losses,
-            val_loss=val_losses,
-            val_reconstruction_loss=val_reconstruction_losses,
-            val_forward_loss=val_forward_losses,
-            val_backward_loss=val_backward_losses,
-            val_rollout_loss=val_rollout_losses,
-            val_eigenvalue_loss=val_eigenvalue_losses,
-            stopped_early=stopped_early,
-            best_epoch=best_epoch,
-            best_loss=best_loss,
-        )
-
-    def _sequence_to_device(
-        self,
-        sequence: GraphSnapshotSequence,
-        train_device: torch.device,
-    ) -> GraphSnapshotSequence:
-        """Move a snapshot sequence and optional controls to ``train_device``.
-
-        Parameters
-        ----------
-        sequence : GraphSnapshotSequence
-            Sequence to move.
-        train_device : torch.device
-            Target device.
-
-        Returns
-        -------
-        GraphSnapshotSequence
-            Device-local copy of ``sequence``.
-        """
-        return GraphSnapshotSequence(
-            [self._snapshot_to_device(snapshot, train_device) for snapshot in sequence],
-            allow_dynamic_topology=sequence.allow_dynamic_topology,
-            control_inputs=(
-                None
-                if sequence.control_inputs is None
-                else sequence.control_inputs.to(train_device)
-            ),
-            timestamps=(
-                None
-                if sequence.timestamps is None
-                else sequence.timestamps.to(train_device)
-            ),
-        )
-
-    @staticmethod
-    def _resolve_edge_index(
-        x_or_data: Tensor | Data,
-        edge_index: Tensor | None,
-    ) -> Tensor:
-        """Extract or validate ``edge_index`` from input arguments.
-
-        Parameters
-        ----------
-        x_or_data : Tensor or Data
-            Graph input; when a ``Data`` object, its ``edge_index`` is returned.
-        edge_index : Tensor or None
-            Explicit edge index for tensor input.
-
-        Returns
-        -------
-        Tensor
-            Edge index with shape ``(2, num_edges)``.
-
-        Raises
-        ------
-        ValueError
-            If ``x_or_data`` is a tensor and ``edge_index`` is ``None``.
-        """
-        if isinstance(x_or_data, Data):
-            return x_or_data.edge_index
-        if edge_index is None:
-            msg = "edge_index is required when x_or_data is a tensor"
-            raise ValueError(msg)
-        return edge_index
-
-    @staticmethod
-    def _resolve_edge_weight(
-        x_or_data: Tensor | Data,
-        edge_weight: Tensor | None,
-    ) -> Tensor | None:
-        """Extract or validate optional ``edge_weight`` from input arguments.
-
-        Parameters
-        ----------
-        x_or_data : Tensor or Data
-            Graph input; when a ``Data`` object, its ``edge_weight`` is returned
-            when present.
-        edge_weight : Tensor or None
-            Explicit edge weights for tensor input.
-
-        Returns
-        -------
-        Tensor or None
-            Edge weights with shape ``(num_edges,)``, or ``None`` when unweighted.
-        """
-        if isinstance(x_or_data, Data):
-            return _snapshot_edge_weight(x_or_data)
-        return edge_weight
 
     @staticmethod
     def _as_data(
@@ -1485,31 +1442,6 @@ sequence of GraphSnapshotSequence, or None, optional
                 f"model control_dim ({self.control_dim})"
             )
             raise ValueError(msg)
-
-    @staticmethod
-    def _snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
-        """Move a graph snapshot to a target device, preserving edge weights.
-
-        Parameters
-        ----------
-        snapshot : Data
-            Graph snapshot to transfer.
-        device : torch.device
-            Destination device.
-
-        Returns
-        -------
-        Data
-            Snapshot with tensors moved to ``device``.
-        """
-        fields: dict[str, Tensor] = {
-            "x": snapshot.x.to(device),
-            "edge_index": snapshot.edge_index.to(device),
-        }
-        edge_weight = _snapshot_edge_weight(snapshot)
-        if edge_weight is not None:
-            fields["edge_weight"] = edge_weight.to(device)
-        return Data(**fields)
 
     def to_latent_env(
         self,

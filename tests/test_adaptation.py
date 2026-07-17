@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from torch_geometric.data import Data
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
-from koopman_graph.adaptation import RecursiveKoopmanAdapter
-from koopman_graph.continuous import ContinuousKoopmanOperator
-from koopman_graph.operator import KoopmanOperator
+from koopman_graph.adaptation import AdaptationStepResult, RecursiveKoopmanAdapter
+from koopman_graph.operators import (
+    VAN_LOAN_WRITEBACK_ATOL,
+    ContinuousKoopmanOperator,
+    KoopmanOperator,
+)
 from koopman_graph.serialization import snapshot_state_dict
 
 
@@ -179,6 +183,116 @@ def test_apply_to_writes_continuous_generator() -> None:
     assert torch.linalg.norm(operator.L - target_l) < 1e-5
 
 
+def test_continuous_uncontrolled_writeback_matches_advance() -> None:
+    """Uncontrolled continuous write-back should match matrix-exp advance."""
+    torch.manual_seed(3)
+    latent_dim = 3
+    delta_t = 0.2
+    true_l = torch.tensor(
+        [
+            [-0.4, 0.1, 0.0],
+            [0.05, -0.35, 0.08],
+            [0.0, 0.02, -0.3],
+        ]
+    )
+    source = ContinuousKoopmanOperator(latent_dim, parameterization="dense")
+    source.set_dense_matrix(true_l)
+
+    adapter = RecursiveKoopmanAdapter(
+        latent_dim,
+        mode="continuous",
+        forgetting_factor=1.0,
+        regularization=1.0,
+        initial_l=true_l,
+    )
+    # Exact discrete seed at the reference interval, then write back.
+    adapter._set_from_generator(true_l, None, delta_t=delta_t)
+    target = ContinuousKoopmanOperator(latent_dim, parameterization="dense")
+    adapter.apply_to(target)
+
+    assert torch.allclose(target.L, true_l, atol=VAN_LOAN_WRITEBACK_ATOL)
+    z = torch.randn(4, latent_dim)
+    assert torch.allclose(
+        source.advance(z, delta_t),
+        target.advance(z, delta_t),
+        atol=VAN_LOAN_WRITEBACK_ATOL,
+    )
+
+
+def test_continuous_controlled_writeback_matches_van_loan_advance() -> None:
+    """Controlled continuous write-back should match Van Loan advance."""
+    torch.manual_seed(4)
+    latent_dim = 3
+    control_dim = 2
+    delta_t = 0.25
+    true_l = torch.tensor(
+        [
+            [-0.5, 0.1, 0.0],
+            [0.05, -0.4, 0.08],
+            [0.0, 0.02, -0.35],
+        ]
+    )
+    true_b = torch.tensor(
+        [
+            [0.2, -0.1, 0.05],
+            [0.0, 0.15, -0.05],
+        ]
+    )
+    source = ContinuousKoopmanOperator(
+        latent_dim,
+        control_dim=control_dim,
+        parameterization="dense",
+    )
+    source.set_dense_matrix(true_l, control_matrix=true_b)
+
+    adapter = RecursiveKoopmanAdapter(
+        latent_dim,
+        control_dim=control_dim,
+        mode="continuous",
+        forgetting_factor=1.0,
+        regularization=1.0,
+        initial_l=true_l,
+        initial_b=true_b,
+    )
+    adapter._set_from_generator(true_l, true_b, delta_t=delta_t)
+    target = ContinuousKoopmanOperator(
+        latent_dim,
+        control_dim=control_dim,
+        parameterization="dense",
+    )
+    adapter.apply_to(target)
+
+    assert torch.allclose(target.L, true_l, atol=VAN_LOAN_WRITEBACK_ATOL)
+    assert torch.allclose(target.B, true_b, atol=VAN_LOAN_WRITEBACK_ATOL)
+
+    z = torch.randn(5, latent_dim)
+    control = torch.randn(5, control_dim)
+    assert torch.allclose(
+        source.advance(z, delta_t, control=control),
+        target.advance(z, delta_t, control=control),
+        atol=VAN_LOAN_WRITEBACK_ATOL,
+    )
+
+    # Fitted discrete blocks must reproduce the same one-step map.
+    z_disc = z @ adapter.discrete_matrix.T + control @ adapter.control_matrix
+    assert torch.allclose(
+        source.advance(z, delta_t, control=control),
+        z_disc,
+        atol=VAN_LOAN_WRITEBACK_ATOL,
+    )
+
+
+def test_set_dense_matrix_rejects_structured_parameterization() -> None:
+    """set_dense_matrix should require dense parameterization."""
+    operator = KoopmanOperator(3, parameterization="schur")
+    try:
+        operator.set_dense_matrix(torch.eye(3))
+    except ValueError as exc:
+        assert "dense" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for structured parameterization")
+
+
 def test_structured_parameterization_rejected() -> None:
     """Online adaptation should require dense Koopman parameterization."""
     operator = KoopmanOperator(3, parameterization="lyapunov")
@@ -196,6 +310,14 @@ def test_structured_parameterization_rejected() -> None:
 def _two_node_edge_index() -> torch.Tensor:
     """Return a minimal two-node bidirectional edge index."""
     return torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+
+
+def test_adaptation_step_result_is_frozen() -> None:
+    """Verify ``AdaptationStepResult`` is a frozen dataclass."""
+    result = AdaptationStepResult(operator_change_norm=torch.tensor(0.25))
+    assert float(result.operator_change_norm.item()) == pytest.approx(0.25)
+    with pytest.raises(AttributeError):
+        result.operator_change_norm = torch.tensor(1.0)  # type: ignore[misc]
 
 
 def test_model_adapt_step_preserves_encoder() -> None:
@@ -222,7 +344,11 @@ def test_model_adapt_step_preserves_encoder() -> None:
     assert all(not parameter.requires_grad for parameter in model.encoder.parameters())
     assert all(not parameter.requires_grad for parameter in model.decoder.parameters())
 
-    model.adapt_step(snapshots[0], snapshots[1])
+    step = model.adapt_step(snapshots[0], snapshots[1])
+    assert isinstance(step, AdaptationStepResult)
+    assert torch.isfinite(step.operator_change_norm).item()
+    with pytest.raises(AttributeError):
+        step.operator_change_norm = torch.tensor(0.0)  # type: ignore[misc]
 
     assert _state_dicts_equal(snapshot_state_dict(model.encoder), encoder_snapshot)
     assert _state_dicts_equal(snapshot_state_dict(model.decoder), decoder_snapshot)

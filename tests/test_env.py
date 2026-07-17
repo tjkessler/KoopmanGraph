@@ -62,6 +62,39 @@ def test_flatten_unflatten_round_trip() -> None:
     assert torch.allclose(recovered, z)
 
 
+def test_env_requires_gymnasium(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify constructing GraphKoopmanEnv fails when Gymnasium is missing."""
+    import koopman_graph.env as env_module
+
+    monkeypatch.setattr(env_module, "gym", None)
+    monkeypatch.setattr(env_module, "spaces", None)
+    model = _controlled_model()
+    sequence = _controlled_sequence(_two_node_edge_index())
+
+    with pytest.raises(ImportError, match=r"koopman-graph\[rl\]"):
+        GraphKoopmanEnv(model, sequence, lambda _s, _i: 0.0)
+
+
+def test_env_rejects_dynamic_topology() -> None:
+    """Verify GraphKoopmanEnv rejects dynamic-topology reference sequences."""
+    edge_a = _two_node_edge_index()
+    edge_b = torch.tensor([[0, 0], [1, 1]], dtype=torch.long)
+    snapshots = [
+        Data(x=torch.randn(2, 2), edge_index=edge_a if i % 2 == 0 else edge_b)
+        for i in range(4)
+    ]
+    controls = torch.randn(4, 1)
+    sequence = GraphSnapshotSequence(
+        snapshots,
+        control_inputs=controls,
+        allow_dynamic_topology=True,
+    )
+    assert sequence.is_dynamic_topology
+
+    with pytest.raises(ValueError, match="is_dynamic_topology"):
+        GraphKoopmanEnv(_controlled_model(), sequence, lambda _s, _i: 0.0)
+
+
 def test_env_requires_control_dim() -> None:
     """Verify uncontrolled models cannot build an environment."""
     encoder = GNNEncoder(2, 4, 4)
@@ -308,7 +341,7 @@ def test_discrete_env_rejects_mismatched_delta_t() -> None:
 
 
 def test_continuous_env_default_delta_t_uses_time_step() -> None:
-    """Verify omitted delta_t falls back to model.time_step via _advance_latent."""
+    """Verify omitted delta_t falls back to model.time_step via propagate_latent."""
     torch.manual_seed(2)
     model = _controlled_continuous_model(time_step=0.1)
     sequence = _controlled_sequence(_two_node_edge_index())

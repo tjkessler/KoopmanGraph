@@ -85,10 +85,12 @@ def test_constructor_rejects_non_positive_latent_dim() -> None:
 
 
 def test_resolve_edge_index_raises_for_tensor_without_edges() -> None:
-    """Verify ``_resolve_edge_index`` requires ``edge_index`` for tensor input."""
+    """Verify ``resolve_edge_index`` requires ``edge_index`` for tensor input."""
+    from koopman_graph.graph_utils import resolve_edge_index
+
     x = torch.randn(5, 3)
     with pytest.raises(ValueError, match="edge_index is required"):
-        GraphKoopmanModel._resolve_edge_index(x, None)
+        resolve_edge_index(x, None)
 
 
 def test_forward_with_data_object(
@@ -108,6 +110,42 @@ def test_forward_with_tensor_inputs(
     """Verify forward accepts separate tensor inputs."""
     out = graph_koopman_model(synthetic_graph.x, synthetic_graph.edge_index)
     assert out.shape == (5, 3)
+
+
+def test_forward_matches_decode_advance_encode(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Forward must equal decoder(K · encode(x)) for the discrete pipeline."""
+    graph_koopman_model.eval()
+    with torch.no_grad():
+        predicted = graph_koopman_model(synthetic_graph)
+        z = graph_koopman_model.encode(synthetic_graph)
+        z_next = graph_koopman_model.koopman.advance(z)
+        expected = graph_koopman_model.decoder(
+            z_next,
+            synthetic_graph.edge_index,
+        )
+    assert torch.allclose(predicted, expected, atol=1e-6)
+
+
+def test_predict_matches_repeated_operator_composition(
+    graph_koopman_model: GraphKoopmanModel,
+    synthetic_graph: Data,
+) -> None:
+    """Multi-step predict must match repeated latent advances then decode."""
+    graph_koopman_model.eval()
+    steps = 3
+    with torch.no_grad():
+        predictions = graph_koopman_model.predict(synthetic_graph, steps=steps)
+        z = graph_koopman_model.encode(synthetic_graph)
+        for prediction in predictions:
+            z = graph_koopman_model.koopman.advance(z)
+            expected = graph_koopman_model.decoder(
+                z,
+                synthetic_graph.edge_index,
+            )
+            assert torch.allclose(prediction.x, expected, atol=1e-6)
 
 
 def test_rollout_returns_correct_shapes(
@@ -398,3 +436,301 @@ def test_fit_moves_edge_weights_to_device(
         device="cpu",
     )
     assert history.epochs == 1
+
+
+class _MinimalDenseOperator(torch.nn.Module):
+    """Minimal discrete dense operator for injection smoke tests.
+
+    Implements :class:`~koopman_graph.operators.KoopmanOperatorContract` only
+    (no built-in ``dense_inverse_matrix``). Default ``fit`` evaluates backward
+    consistency via Protocol ``inverse_advance``.
+    """
+
+    def __init__(self, latent_dim: int, *, control_dim: int = 0) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.control_dim = control_dim
+        self.parameterization = "dense"
+        self._matrix = torch.nn.Parameter(torch.eye(latent_dim))
+        if control_dim > 0:
+            self.B = torch.nn.Parameter(torch.zeros(latent_dim, control_dim))
+        else:
+            self.register_parameter("B", None)
+
+    @property
+    def matrix(self) -> torch.Tensor:
+        return self._matrix
+
+    @property
+    def K(self) -> torch.Tensor:
+        return self._matrix
+
+    def advance(
+        self,
+        z: torch.Tensor,
+        delta_t: float | torch.Tensor | None = None,
+        *,
+        control: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del delta_t
+        advanced = z @ self._matrix.T
+        if control is not None and self.B is not None:
+            advanced = advanced + control @ self.B.T
+        return advanced
+
+    def inverse_advance(
+        self,
+        z: torch.Tensor,
+        delta_t: float | torch.Tensor | None = None,
+        *,
+        control: torch.Tensor | None = None,
+        inverse_matrix: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del delta_t
+        recovered = z
+        if control is not None and self.B is not None:
+            recovered = recovered - control @ self.B.T
+        inv = (
+            inverse_matrix
+            if inverse_matrix is not None
+            else torch.linalg.pinv(self._matrix)
+        )
+        return recovered @ inv.T
+
+    def bound_metric(self) -> torch.Tensor:
+        return torch.linalg.eigvals(self._matrix).abs().max()
+
+
+def test_inject_builtin_koopman_operator() -> None:
+    """Verify a pre-built ``KoopmanOperator`` can be injected."""
+    from koopman_graph.operators import KoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = KoopmanOperator(4, parameterization="odo")
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        koopman=operator,
+    )
+    assert model.koopman is operator
+    assert model.koopman.parameterization == "odo"
+
+
+def test_inject_custom_operator_train_predict_smoke(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify train/predict work with a minimal custom injected operator."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = _MinimalDenseOperator(4)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        koopman=operator,
+    )
+    assert model.koopman is operator
+
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    history = model.fit(sequence, epochs=1)
+    assert history.epochs == 1
+
+    future = model.predict(snapshots[0], steps=2)
+    assert len(future) == 2
+    assert future[0].x.shape == (5, 3)
+
+
+class _MinimalContinuousOperator(torch.nn.Module):
+    """Minimal continuous generator for injection smoke tests."""
+
+    def __init__(self, latent_dim: int) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.control_dim = 0
+        self.parameterization = "dense"
+        self._generator = torch.nn.Parameter(-0.5 * torch.eye(latent_dim))
+
+    @property
+    def matrix(self) -> torch.Tensor:
+        return self._generator
+
+    def advance(
+        self,
+        z: torch.Tensor,
+        delta_t: float | torch.Tensor | None = None,
+        *,
+        control: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if delta_t is None:
+            msg = "delta_t is required for continuous advance"
+            raise ValueError(msg)
+        del control
+        delta = torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
+        transition = torch.linalg.matrix_exp(self._generator * delta)
+        return z @ transition.T
+
+    def inverse_advance(
+        self,
+        z: torch.Tensor,
+        delta_t: float | torch.Tensor | None = None,
+        *,
+        control: torch.Tensor | None = None,
+        inverse_matrix: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del control, inverse_matrix
+        if delta_t is None:
+            msg = "delta_t is required for continuous inverse_advance"
+            raise ValueError(msg)
+        delta = torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
+        transition = torch.linalg.matrix_exp(self._generator * delta)
+        return z @ torch.linalg.inv(transition).T
+
+    def bound_metric(self) -> torch.Tensor:
+        return torch.linalg.eigvals(self._generator).real.max()
+
+
+def test_inject_custom_continuous_operator_train_predict_smoke(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Custom continuous contract modules route delta_t via unified advance."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = _MinimalContinuousOperator(4)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        dynamics_mode="continuous",
+        koopman=operator,
+    )
+    assert model.koopman is operator
+    assert model.is_continuous
+
+    spectrum = model.spectrum()
+    assert spectrum.eigenvalues.shape[0] == 4
+
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    history = model.fit(sequence, epochs=1)
+    assert history.epochs == 1
+
+    future = model.predict(snapshots[0], steps=2)
+    assert len(future) == 2
+    assert future[0].x.shape == (5, 3)
+
+
+def test_inject_rejects_non_default_factory_kwargs() -> None:
+    """Verify injection conflicts with non-default factory kwargs."""
+    from koopman_graph.operators import KoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = KoopmanOperator(4)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            koopman=operator,
+            koopman_parameterization="odo",
+        )
+
+
+def test_inject_rejects_latent_dim_mismatch() -> None:
+    """Verify injected operator latent_dim must match the model."""
+    from koopman_graph.operators import KoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = KoopmanOperator(8)
+    with pytest.raises(ValueError, match="koopman.latent_dim"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            koopman=operator,
+        )
+
+
+def test_inject_rejects_control_dim_mismatch() -> None:
+    """Verify injected operator control_dim must match the model."""
+    from koopman_graph.operators import KoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = KoopmanOperator(4, control_dim=2)
+    with pytest.raises(ValueError, match="koopman.control_dim"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            control_dim=0,
+            koopman=operator,
+        )
+
+
+def test_inject_rejects_dynamics_mode_mismatch_for_builtin() -> None:
+    """Verify built-in continuous operators require continuous dynamics_mode."""
+    from koopman_graph.operators import ContinuousKoopmanOperator
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    operator = ContinuousKoopmanOperator(4)
+    with pytest.raises(ValueError, match="dynamics_mode='continuous'"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            dynamics_mode="discrete",
+            koopman=operator,
+        )
+
+
+def test_inject_rejects_non_module_operator() -> None:
+    """Verify injected operators must be ``nn.Module`` instances."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+
+    class _NotAModule:
+        latent_dim = 4
+        control_dim = 0
+        parameterization = "dense"
+
+    with pytest.raises(TypeError, match="nn.Module"):
+        GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+            koopman=_NotAModule(),  # type: ignore[arg-type]
+        )
+
+
+def test_default_factory_path_unchanged() -> None:
+    """Verify omitting ``koopman`` still builds a dense discrete operator."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+    )
+    from koopman_graph.operators import KoopmanOperator
+
+    assert isinstance(model.koopman, KoopmanOperator)
+    assert model.koopman.parameterization == "dense"

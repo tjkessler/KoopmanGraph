@@ -9,7 +9,7 @@ from urllib.error import URLError
 import pytest
 import torch
 
-from koopman_graph.datasets import IEEE118DynamicBenchmark
+from koopman_graph.datasets import IEEE118DynamicBenchmark, TopologyPayload
 from koopman_graph.datasets.ieee118 import (
     NUM_BUSES,
     _build_edge_index,
@@ -113,9 +113,12 @@ def test_parse_matpower_case_empty_branch_rows_raises() -> None:
 def test_topology_from_matpower_text_builds_tensors() -> None:
     """Verify parsed MATPOWER text yields topology tensors."""
     topology = topology_from_matpower_text(MINIMAL_MATPOWER)
+    assert isinstance(topology, TopologyPayload)
+    assert topology.num_nodes == 2
     assert topology["num_nodes"] == 2
-    assert topology["edge_index"].shape[0] == 2
-    assert topology["initial_features"].shape == (2, 4)
+    assert topology.edge_index.shape[0] == 2
+    assert topology.initial_features is not None
+    assert topology.initial_features.shape == (2, 4)
 
 
 def test_build_edge_index_skips_inactive_branches() -> None:
@@ -184,9 +187,12 @@ def test_load_topology_casts_tensor_dtypes(tmp_path: Path) -> None:
     """Verify load_topology restores tensors with requested dtypes."""
     topology = topology_from_matpower_text(MINIMAL_MATPOWER, dtype=torch.float64)
     path = _default_topology_path(tmp_path)
-    torch.save(topology, path)
+    torch.save(topology.to_dict(), path)
     loaded = load_topology(tmp_path, dtype=torch.float64)
-    assert loaded["initial_features"].dtype == torch.float64
+    assert isinstance(loaded, TopologyPayload)
+    assert loaded.edge_index.dtype == torch.long
+    assert loaded.initial_features is not None
+    assert loaded.initial_features.dtype == torch.float64
     assert loaded["edge_index"].dtype == torch.long
 
 

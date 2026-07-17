@@ -1,77 +1,34 @@
-"""Physics-informed observable lifting for hybrid Koopman latents."""
+"""Physics-informed observable lifting for hybrid Koopman latents.
+
+The ``graph_laplacian`` preset applies a **sparse** ``L_sym @ x`` matvec using
+the shared normalization in :mod:`koopman_graph.graph_utils`. Benchmark
+diffusion in :mod:`koopman_graph.datasets.dynamics` uses the same ``L_sym``
+definition but a dense one-step operator for offline rollouts. Both paths
+accumulate duplicate edges.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, get_args
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.data import _snapshot_edge_weight
+from koopman_graph.graph_utils import (
+    snapshot_edge_weight,
+    symmetric_normalized_adjacency_matvec,
+)
 
 PhysicsLiftingFn = Callable[[Data], Tensor]
 PhysicsPosition = Literal["prepend"]
 PhysicsPresetName = Literal["graph_laplacian"]
 
 PHYSICS_POSITION: PhysicsPosition = "prepend"
+_ALLOWED_PHYSICS_POSITIONS = get_args(PhysicsPosition)
 
 PHYSICS_PRESETS: dict[str, PhysicsLiftingFn] = {}
-
-
-def _symmetric_normalized_adjacency_matvec(
-    edge_index: Tensor,
-    x: Tensor,
-    *,
-    edge_weight: Tensor | None = None,
-    num_nodes: int | None = None,
-) -> Tensor:
-    """Apply ``D^{-1/2} A D^{-1/2}`` to node features without forming a dense matrix.
-
-    Parameters
-    ----------
-    edge_index : Tensor
-        Edge index with shape ``(2, num_edges)``.
-    x : Tensor
-        Node features with shape ``(num_nodes, feature_dim)``.
-    edge_weight : Tensor or None, optional
-        Non-negative edge weights with shape ``(num_edges,)``. Defaults to ones.
-    num_nodes : int or None, optional
-        Number of nodes. Inferred from ``x`` when omitted.
-
-    Returns
-    -------
-    Tensor
-        Smoothed node features with the same shape as ``x``.
-    """
-    if x.dim() != 2:
-        msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
-        raise ValueError(msg)
-
-    node_count = num_nodes if num_nodes is not None else x.size(0)
-    row, col = edge_index
-    dtype = x.dtype
-    device = x.device
-
-    if edge_weight is None:
-        weights = torch.ones(row.size(0), dtype=dtype, device=device)
-    else:
-        weights = edge_weight.to(dtype=dtype, device=device)
-
-    deg = torch.zeros(node_count, dtype=dtype, device=device)
-    deg.index_add_(0, row, weights)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt = torch.where(
-        torch.isfinite(deg_inv_sqrt),
-        deg_inv_sqrt,
-        torch.zeros_like(deg_inv_sqrt),
-    )
-
-    norm_weights = deg_inv_sqrt[row] * weights * deg_inv_sqrt[col]
-    out = torch.zeros_like(x)
-    out.index_add_(0, row, x[col] * norm_weights.unsqueeze(-1))
-    return out
 
 
 def graph_laplacian_features(data: Data) -> Tensor:
@@ -83,9 +40,12 @@ def graph_laplacian_features(data: Data) -> Tensor:
 
         L_{\\text{norm}} = I - D^{-1/2} A D^{-1/2}
 
-    applied to node features ``x``. The output has shape
-    ``(num_nodes, in_channels)``, so ``physics_dim`` must equal ``data.x.size(-1)``
-    when this preset is used.
+    applied to node features ``x`` via a sparse matvec (see
+    :func:`~koopman_graph.graph_utils.symmetric_normalized_adjacency_matvec`).
+    Dense benchmark diffusion operators in
+    :mod:`koopman_graph.datasets.dynamics` share the same ``L_sym`` weights.
+    The output has shape ``(num_nodes, in_channels)``, so ``physics_dim`` must
+    equal ``data.x.size(-1)`` when this preset is used.
 
     Parameters
     ----------
@@ -103,10 +63,10 @@ def graph_laplacian_features(data: Data) -> Tensor:
         raise ValueError(msg)
 
     x = data.x
-    adj_x = _symmetric_normalized_adjacency_matvec(
+    adj_x = symmetric_normalized_adjacency_matvec(
         data.edge_index,
         x,
-        edge_weight=_snapshot_edge_weight(data),
+        edge_weight=snapshot_edge_weight(data),
         num_nodes=x.size(0),
     )
     return x - adj_x
@@ -154,6 +114,38 @@ def resolve_physics_lifting_fn(
     return PHYSICS_PRESETS[physics_preset]
 
 
+def resolve_physics_position(
+    position: str | None = None,
+) -> PhysicsPosition:
+    """Validate and normalize hybrid physics concatenation position.
+
+    Used by model construction and checkpoint reconstruct so save/load share
+    one allowed-value set. ``None`` resolves to :data:`PHYSICS_POSITION`
+    (``"prepend"``). Only ``"prepend"`` is supported today.
+
+    Parameters
+    ----------
+    position : str or None, optional
+        Checkpoint or constructor value. ``None`` uses the default.
+
+    Returns
+    -------
+    {"prepend"}
+        Validated concatenation position.
+
+    Raises
+    ------
+    ValueError
+        If ``position`` is not in the supported :data:`PhysicsPosition` set.
+    """
+    resolved = PHYSICS_POSITION if position is None else position
+    if resolved not in _ALLOWED_PHYSICS_POSITIONS:
+        allowed = ", ".join(repr(value) for value in _ALLOWED_PHYSICS_POSITIONS)
+        msg = f"Unsupported physics position {resolved!r}; expected one of: {allowed}"
+        raise ValueError(msg)
+    return resolved  # type: ignore[return-value]
+
+
 def concatenate_observables(
     physics_features: Tensor,
     gnn_features: Tensor,
@@ -176,9 +168,7 @@ def concatenate_observables(
     Tensor
         Combined latent features with shape ``(num_nodes, physics_dim + gnn_dim)``.
     """
-    if position != "prepend":
-        msg = f"Unsupported physics position {position!r}; expected 'prepend'"
-        raise ValueError(msg)
+    resolve_physics_position(position)
     if physics_features.size(0) != gnn_features.size(0):
         msg = (
             "physics and GNN features must share num_nodes, got "

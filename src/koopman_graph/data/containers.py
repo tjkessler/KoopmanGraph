@@ -1,4 +1,4 @@
-"""Utilities for spatiotemporal graph snapshot sequences."""
+"""Snapshot sequence containers and multi-trajectory helpers."""
 
 from __future__ import annotations
 
@@ -10,168 +10,9 @@ import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
+from koopman_graph.graph_utils import snapshot_edge_weight
+
 ArrayLike = Tensor | np.ndarray
-
-
-class WindowSampler:
-    """Sample fixed-length temporal windows from one or more trajectories.
-
-    Parameters
-    ----------
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-        Source trajectories. Each must contain at least ``window_length``
-        snapshots.
-    window_length : int
-        Number of snapshots per sampled window. Must be at least ``2``.
-    batch_size : int, optional
-        Number of windows yielded together. Default is ``8``.
-    windows_per_epoch : int or None, optional
-        Maximum number of windows sampled per epoch. ``None`` uses every valid
-        window. Values larger than the available window count are capped.
-    shuffle : bool, optional
-        Randomize window order each epoch. Default is ``True``.
-    seed : int or None, optional
-        Base seed for reproducible epoch-specific shuffling.
-    """
-
-    def __init__(
-        self,
-        sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
-        *,
-        window_length: int,
-        batch_size: int = 8,
-        windows_per_epoch: int | None = None,
-        shuffle: bool = True,
-        seed: int | None = None,
-    ) -> None:
-        """Initialize a fixed-length temporal window sampler.
-
-        Parameters
-        ----------
-        sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-            Source trajectories.
-        window_length : int
-            Number of snapshots per sampled window.
-        batch_size : int, optional
-            Number of windows yielded together. Default is ``8``.
-        windows_per_epoch : int or None, optional
-            Maximum sampled windows per epoch. ``None`` uses every window.
-        shuffle : bool, optional
-            Whether to randomize window order. Default is ``True``.
-        seed : int or None, optional
-            Base seed for reproducible epoch-specific shuffling.
-        """
-        if window_length < 2:
-            msg = f"window_length must be >= 2, got {window_length}"
-            raise ValueError(msg)
-        if batch_size < 1:
-            msg = f"batch_size must be >= 1, got {batch_size}"
-            raise ValueError(msg)
-        if windows_per_epoch is not None and windows_per_epoch < 1:
-            msg = f"windows_per_epoch must be >= 1 when set, got {windows_per_epoch}"
-            raise ValueError(msg)
-
-        if isinstance(sequences, GraphSnapshotSequence):
-            sequence_list = [sequences]
-        else:
-            sequence_list = list(sequences)
-        if not sequence_list:
-            msg = "sequences must contain at least one trajectory"
-            raise ValueError(msg)
-
-        short_lengths = [
-            sequence.num_timesteps
-            for sequence in sequence_list
-            if sequence.num_timesteps < window_length
-        ]
-        if short_lengths:
-            msg = (
-                f"every sequence must contain at least {window_length} snapshots; "
-                f"shortest has {min(short_lengths)}"
-            )
-            raise ValueError(msg)
-
-        self.sequences = sequence_list
-        self.window_length = window_length
-        self.batch_size = batch_size
-        self.windows_per_epoch = windows_per_epoch
-        self.shuffle = shuffle
-        self.seed = seed
-        self._origins = [
-            (sequence_index, start)
-            for sequence_index, sequence in enumerate(sequence_list)
-            for start in range(sequence.num_timesteps - window_length + 1)
-        ]
-
-    @property
-    def num_windows(self) -> int:
-        """Return the total number of valid windows.
-
-        Returns
-        -------
-        int
-            Number of valid windows across every source trajectory.
-        """
-        return len(self._origins)
-
-    def iter_epoch(
-        self,
-        epoch: int = 0,
-    ) -> Iterator[list[GraphSnapshotSequence]]:
-        """Yield batches of windows for one epoch.
-
-        Parameters
-        ----------
-        epoch : int, optional
-            Zero-based epoch index mixed into ``seed``. Default is ``0``.
-
-        Yields
-        ------
-        list of GraphSnapshotSequence
-            A batch containing at most ``batch_size`` temporal windows.
-        """
-        if epoch < 0:
-            msg = f"epoch must be >= 0, got {epoch}"
-            raise ValueError(msg)
-
-        indices = list(range(self.num_windows))
-        if self.shuffle:
-            generator = None
-            if self.seed is not None:
-                generator = torch.Generator()
-                generator.manual_seed(self.seed + epoch)
-            indices = torch.randperm(
-                self.num_windows,
-                generator=generator,
-            ).tolist()
-
-        limit = (
-            self.num_windows
-            if self.windows_per_epoch is None
-            else min(self.windows_per_epoch, self.num_windows)
-        )
-        selected = indices[:limit]
-        for offset in range(0, len(selected), self.batch_size):
-            batch = []
-            for origin_index in selected[offset : offset + self.batch_size]:
-                sequence_index, start = self._origins[origin_index]
-                batch.append(
-                    self.sequences[sequence_index].slice(
-                        start,
-                        start + self.window_length,
-                    )
-                )
-            yield batch
-
-    def __iter__(self) -> Iterator[list[GraphSnapshotSequence]]:
-        """Yield the epoch-zero batch sequence.
-
-        Yields
-        ------
-        list of GraphSnapshotSequence
-            A batch of fixed-length temporal windows.
-        """
-        return self.iter_epoch(0)
 
 
 def _as_tensor(value: ArrayLike, *, dtype: torch.dtype | None = None) -> Tensor:
@@ -195,25 +36,6 @@ def _as_tensor(value: ArrayLike, *, dtype: torch.dtype | None = None) -> Tensor:
             return value.to(dtype=dtype)
         return value
     return torch.as_tensor(value, dtype=dtype)
-
-
-def _snapshot_edge_weight(snapshot: Data) -> Tensor | None:
-    """Return optional scalar edge weights attached to a snapshot.
-
-    Parameters
-    ----------
-    snapshot : Data
-        Graph snapshot that may carry ``edge_weight``.
-
-    Returns
-    -------
-    Tensor or None
-        Edge weights with shape ``(num_edges,)``, or ``None`` when absent.
-    """
-    edge_weight = getattr(snapshot, "edge_weight", None)
-    if edge_weight is None:
-        return None
-    return edge_weight
 
 
 def _validate_timestamps(
@@ -439,13 +261,13 @@ def _validate_shared_topology(snapshots: Sequence[Data]) -> None:
 
     reference = snapshots[0]
     ref_edge_index = reference.edge_index
-    ref_edge_weight = _snapshot_edge_weight(reference)
+    ref_edge_weight = snapshot_edge_weight(reference)
 
     for idx, snapshot in enumerate(snapshots[1:], start=1):
         if not torch.equal(snapshot.edge_index, ref_edge_index):
             msg = f"Snapshot {idx} has a different edge_index than snapshot 0"
             raise ValueError(msg)
-        edge_weight = _snapshot_edge_weight(snapshot)
+        edge_weight = snapshot_edge_weight(snapshot)
         if (ref_edge_weight is None) != (edge_weight is None):
             msg = f"Snapshot {idx} edge_weight presence does not match snapshot 0"
             raise ValueError(msg)
@@ -458,175 +280,6 @@ def _validate_shared_topology(snapshots: Sequence[Data]) -> None:
             raise ValueError(msg)
 
 
-@dataclass(frozen=True)
-class TemporalSplit:
-    """Train, validation, and test snapshot sequences from a temporal split.
-
-    Attributes
-    ----------
-    train : GraphSnapshotSequence
-        Earliest contiguous snapshots used for training.
-    val : GraphSnapshotSequence
-        Middle contiguous snapshots used for validation.
-    test : GraphSnapshotSequence
-        Latest contiguous snapshots held out for evaluation.
-    """
-
-    train: GraphSnapshotSequence
-    val: GraphSnapshotSequence
-    test: GraphSnapshotSequence
-
-
-def temporal_split(
-    sequence: GraphSnapshotSequence,
-    *,
-    train_ratio: float = 0.7,
-    val_ratio: float = 0.1,
-    test_ratio: float = 0.2,
-    min_train_timesteps: int = 2,
-    min_val_timesteps: int = 2,
-    min_test_timesteps: int = 1,
-) -> TemporalSplit:
-    """Split a snapshot sequence into contiguous train, validation, and test sets.
-
-    Earlier snapshots are assigned to training, later snapshots to validation and
-    test. Ratios must sum to ``1.0``.
-
-    Parameters
-    ----------
-    sequence : GraphSnapshotSequence
-        Full time-ordered snapshot sequence to split.
-    train_ratio : float, optional
-        Fraction of timesteps assigned to training. Default is ``0.7``.
-    val_ratio : float, optional
-        Fraction assigned to validation. Default is ``0.1``.
-    test_ratio : float, optional
-        Fraction assigned to test. Default is ``0.2``.
-    min_train_timesteps : int, optional
-        Minimum training snapshots required. Default is ``2``.
-    min_val_timesteps : int, optional
-        Minimum validation snapshots required. Default is ``2``.
-    min_test_timesteps : int, optional
-        Minimum test snapshots required. Default is ``1``.
-
-    Returns
-    -------
-    TemporalSplit
-        Contiguous train, validation, and test sequences sharing topology.
-
-    Raises
-    ------
-    ValueError
-        If ratios do not sum to ``1.0``, any minimum is violated, or the
-        sequence is too short for the requested split.
-    """
-    ratio_sum = train_ratio + val_ratio + test_ratio
-    if abs(ratio_sum - 1.0) > 1e-6:
-        msg = f"train_ratio + val_ratio + test_ratio must equal 1.0, got {ratio_sum}"
-        raise ValueError(msg)
-    if min_train_timesteps < 2:
-        msg = f"min_train_timesteps must be >= 2, got {min_train_timesteps}"
-        raise ValueError(msg)
-    if min_val_timesteps < 1 or min_test_timesteps < 1:
-        msg = "min_val_timesteps and min_test_timesteps must be >= 1"
-        raise ValueError(msg)
-
-    num_timesteps = sequence.num_timesteps
-    min_required = min_train_timesteps + min_val_timesteps + min_test_timesteps
-    if num_timesteps < min_required:
-        msg = (
-            f"sequence has {num_timesteps} timesteps but needs at least "
-            f"{min_required} for the requested split"
-        )
-        raise ValueError(msg)
-
-    train_end = int(num_timesteps * train_ratio)
-    val_end = train_end + int(num_timesteps * val_ratio)
-    train_end = max(train_end, min_train_timesteps)
-    val_end = max(val_end, train_end + min_val_timesteps)
-    if num_timesteps - val_end < min_test_timesteps:
-        val_end = num_timesteps - min_test_timesteps
-
-    train_snapshots = sequence.snapshots[:train_end]
-    val_snapshots = sequence.snapshots[train_end:val_end]
-    test_snapshots = sequence.snapshots[val_end:]
-
-    if len(train_snapshots) < min_train_timesteps:  # pragma: no cover - defensive
-        msg = (
-            f"train split has {len(train_snapshots)} timesteps, "
-            f"expected at least {min_train_timesteps}"
-        )
-        raise ValueError(msg)
-    if len(val_snapshots) < min_val_timesteps:
-        msg = (
-            f"validation split has {len(val_snapshots)} timesteps, "
-            f"expected at least {min_val_timesteps}"
-        )
-        raise ValueError(msg)
-    if len(test_snapshots) < min_test_timesteps:  # pragma: no cover - defensive
-        msg = (
-            f"test split has {len(test_snapshots)} timesteps, "
-            f"expected at least {min_test_timesteps}"
-        )
-        raise ValueError(msg)
-
-    return TemporalSplit(
-        train=GraphSnapshotSequence(
-            train_snapshots,
-            allow_dynamic_topology=sequence.allow_dynamic_topology,
-            control_inputs=(
-                None
-                if sequence.control_inputs is None
-                else sequence.control_inputs[:train_end]
-            ),
-            timestamps=(
-                None if sequence.timestamps is None else sequence.timestamps[:train_end]
-            ),
-            observation_masks=(
-                None
-                if sequence.observation_masks is None
-                else sequence.observation_masks[:train_end]
-            ),
-        ),
-        val=GraphSnapshotSequence(
-            val_snapshots,
-            allow_dynamic_topology=sequence.allow_dynamic_topology,
-            control_inputs=(
-                None
-                if sequence.control_inputs is None
-                else sequence.control_inputs[train_end:val_end]
-            ),
-            timestamps=(
-                None
-                if sequence.timestamps is None
-                else sequence.timestamps[train_end:val_end]
-            ),
-            observation_masks=(
-                None
-                if sequence.observation_masks is None
-                else sequence.observation_masks[train_end:val_end]
-            ),
-        ),
-        test=GraphSnapshotSequence(
-            test_snapshots,
-            allow_dynamic_topology=sequence.allow_dynamic_topology,
-            control_inputs=(
-                None
-                if sequence.control_inputs is None
-                else sequence.control_inputs[val_end:]
-            ),
-            timestamps=(
-                None if sequence.timestamps is None else sequence.timestamps[val_end:]
-            ),
-            observation_masks=(
-                None
-                if sequence.observation_masks is None
-                else sequence.observation_masks[val_end:]
-            ),
-        ),
-    )
-
-
 class GraphSnapshotSequence:
     """Container for a time-ordered sequence of PyG ``Data`` graph snapshots.
 
@@ -635,7 +288,11 @@ class GraphSnapshotSequence:
     ``allow_dynamic_topology=True`` to permit per-snapshot ``edge_index`` while
     still requiring a fixed node count and feature dimension. Optional
     :attr:`control_inputs` store exogenous inputs ``u_t`` applied when
-    advancing from snapshot ``t`` to ``t+1``. Optional
+    advancing from snapshot ``t`` to ``t+1`` (global ``(T, C)`` or per-node
+    ``(T, N, C)``). Not every consumer supports both layouts: neural model /
+    adaptation preserve per-node rows; :class:`~koopman_graph.env.GraphKoopmanEnv`
+    and :class:`~koopman_graph.baselines.DMDcBaseline` are global-only (see
+    architecture control layout capability matrix). Optional
     :attr:`observation_masks` mark which nodes are measured at each timestep
     (``True`` = observed). When masks are present, training and evaluation
     losses average only over observed nodes; reconstruction at pair
@@ -643,6 +300,13 @@ class GraphSnapshotSequence:
     ``mask[t] & mask[t+1]``. Downstream training APIs should
     require at least two snapshots; construction here allows a single snapshot
     for inspection or prediction-only workflows.
+
+    The snapshot **collection** is logically immutable after construction:
+    :attr:`snapshots` returns a ``tuple`` that cannot be appended to or
+    replaced in place. Individual ``Data`` objects are **borrowed** (not
+    cloned): in-place mutation of node features or topology on a returned
+    ``Data`` is possible and is not prevented. Callers that need isolation
+    should clone snapshots explicitly.
 
     Notes
     -----
@@ -713,7 +377,8 @@ class GraphSnapshotSequence:
                 num_timesteps=len(snapshot_list),
                 num_nodes=int(snapshot_list[0].num_nodes),
             )
-        self._snapshots = snapshot_list
+        # Tuple freezes collection length/order; Data elements remain borrowed.
+        self._snapshots = tuple(snapshot_list)
         self._control_inputs = control_inputs
         self._timestamps = timestamps
         self._observation_masks = validated_masks
@@ -1208,13 +873,15 @@ class GraphSnapshotSequence:
         return [self.control_at(start + step) for step in range(steps)]
 
     @property
-    def snapshots(self) -> list[Data]:
-        """Return the underlying list of graph snapshots.
+    def snapshots(self) -> tuple[Data, ...]:
+        """Return the immutable sequence of graph snapshots.
 
         Returns
         -------
-        list of Data
-            Time-ordered PyG graph snapshots.
+        tuple of Data
+            Time-ordered PyG graph snapshots. The tuple itself cannot be
+            mutated; individual ``Data`` objects are borrowed references
+            (see class docstring).
         """
         return self._snapshots
 
@@ -1261,7 +928,7 @@ class GraphSnapshotSequence:
                 "use sequence[t].edge_weight"
             )
             raise ValueError(msg)
-        return _snapshot_edge_weight(self._snapshots[0])
+        return snapshot_edge_weight(self._snapshots[0])
 
     @property
     def num_nodes(self) -> int:
@@ -1375,6 +1042,113 @@ class GraphSnapshotSequence:
             Graph snapshot at each timestep.
         """
         return iter(self._snapshots)
+
+
+@dataclass(frozen=True)
+class MultiTrajectory:
+    """Explicit multi-trajectory container for training and validation input.
+
+    Prefer this over a bare ``list[GraphSnapshotSequence]`` when calling
+    :meth:`~koopman_graph.model.GraphKoopmanModel.fit` so multi-trajectory
+    intent cannot be confused with a single trajectory of ``Data`` snapshots.
+    A plain list of :class:`GraphSnapshotSequence` remains accepted as a
+    compatibility shim.
+
+    Attributes
+    ----------
+    sequences : tuple of GraphSnapshotSequence
+        Non-empty trajectories of the same system.
+    """
+
+    sequences: tuple[GraphSnapshotSequence, ...]
+
+    def __post_init__(self) -> None:
+        """Validate that ``sequences`` is a non-empty trajectory tuple.
+
+        Raises
+        ------
+        ValueError
+            If ``sequences`` is empty.
+        TypeError
+            If any element is not a :class:`GraphSnapshotSequence`.
+        """
+        if not self.sequences:
+            msg = "MultiTrajectory requires at least one GraphSnapshotSequence"
+            raise ValueError(msg)
+        for index, sequence in enumerate(self.sequences):
+            if not isinstance(sequence, GraphSnapshotSequence):
+                msg = (
+                    "MultiTrajectory sequences must be GraphSnapshotSequence "
+                    f"instances; index {index} has type {type(sequence).__name__}"
+                )
+                raise TypeError(msg)
+
+    def __len__(self) -> int:
+        """Return the number of trajectories.
+
+        Returns
+        -------
+        int
+            Length of :attr:`sequences`.
+        """
+        return len(self.sequences)
+
+    def __iter__(self) -> Iterator[GraphSnapshotSequence]:
+        """Iterate over trajectories.
+
+        Yields
+        ------
+        GraphSnapshotSequence
+            Each trajectory in order.
+        """
+        return iter(self.sequences)
+
+    def __getitem__(self, index: int) -> GraphSnapshotSequence:
+        """Return the trajectory at ``index``.
+
+        Parameters
+        ----------
+        index : int
+            Trajectory index.
+
+        Returns
+        -------
+        GraphSnapshotSequence
+            Trajectory at the requested index.
+        """
+        return self.sequences[index]
+
+
+def as_multi_trajectory(
+    *trajectories: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+) -> MultiTrajectory:
+    """Build a :class:`MultiTrajectory` from sequences or a sequence of sequences.
+
+    Parameters
+    ----------
+    *trajectories
+        Either one iterable of :class:`GraphSnapshotSequence`, or individual
+        sequences passed as separate arguments.
+
+    Returns
+    -------
+    MultiTrajectory
+        Validated multi-trajectory container.
+
+    Raises
+    ------
+    TypeError
+        If arguments are not snapshot sequences.
+    ValueError
+        If no trajectories are provided.
+    """
+    if len(trajectories) == 1 and not isinstance(
+        trajectories[0], GraphSnapshotSequence
+    ):
+        sequence_list = list(trajectories[0])
+    else:
+        sequence_list = list(trajectories)
+    return MultiTrajectory(tuple(sequence_list))
 
 
 def resolve_sequence(

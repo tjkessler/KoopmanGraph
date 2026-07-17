@@ -9,9 +9,8 @@ import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence
-from koopman_graph.losses import masked_mse_loss
-from koopman_graph.training import resolve_rollout_start_indices
+from koopman_graph.data import GraphSnapshotSequence, resolve_rollout_start_indices
+from koopman_graph.protocols import TrainableKoopmanModel
 
 _EPS = 1e-8
 
@@ -103,8 +102,37 @@ def _masked_node_average(
     return (values.abs() * node_mask).sum() / denom
 
 
+def _masked_mse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Compute mean squared error over observed nodes.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features with shape ``(num_nodes, feature_dim)``.
+    target : Tensor
+        Ground-truth node features with the same shape as ``prediction``.
+    mask : Tensor
+        Boolean node mask with shape ``(num_nodes,)``.
+
+    Returns
+    -------
+    Tensor
+        Scalar masked mean squared error.
+    """
+    node_mask = mask.to(device=prediction.device, dtype=prediction.dtype)
+    expanded = node_mask.unsqueeze(-1)
+    diff_sq = (prediction - target) ** 2
+    denom = expanded.sum() * prediction.shape[-1]
+    if denom <= 0:
+        return torch.zeros((), device=prediction.device, dtype=prediction.dtype)
+    return (diff_sq * expanded).sum() / denom
+
+
 def masked_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     """Compute mean absolute error over observed nodes.
+
+    Averages absolute error over the feature dimension per node, then averages
+    those per-node values over masked (observed) nodes.
 
     Parameters
     ----------
@@ -140,7 +168,7 @@ def masked_rmse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     Tensor
         Scalar masked root mean squared error.
     """
-    return torch.sqrt(masked_mse_loss(prediction, target, mask))
+    return torch.sqrt(_masked_mse(prediction, target, mask))
 
 
 def masked_mape(
@@ -220,7 +248,7 @@ class EvaluationResult:
 
 
 def evaluate_forecast(
-    model: nn.Module,
+    model: TrainableKoopmanModel,
     sequence: GraphSnapshotSequence,
     *,
     horizons: Sequence[int] = (3, 6, 12),
@@ -233,8 +261,10 @@ def evaluate_forecast(
 
     Parameters
     ----------
-    model : nn.Module
-        Model implementing :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
+    model : TrainableKoopmanModel
+        Trainable model implementing
+        :meth:`~koopman_graph.protocols.TrainableKoopmanModel.predict` and the
+        Module train/eval façade.
     sequence : GraphSnapshotSequence
         Evaluation snapshots with shared topology.
     horizons : sequence of int, optional
@@ -281,7 +311,7 @@ def evaluate_forecast(
             for start in origins:
                 initial_graph: Data = sequence[start]
                 controls = None
-                if getattr(model, "control_dim", 0) > 0:
+                if model.control_dim > 0:
                     controls = sequence.rollout_controls(start, max_horizon)
                 future_topologies = None
                 if sequence.is_dynamic_topology:

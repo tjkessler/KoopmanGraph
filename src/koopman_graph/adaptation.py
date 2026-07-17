@@ -3,42 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import torch
 from torch import Tensor
 
-from koopman_graph.continuous import ContinuousKoopmanOperator
-from koopman_graph.operator import KoopmanOperator
+from koopman_graph.graph_utils import KoopmanPropagator
+from koopman_graph.operators import (
+    ContinuousKoopmanOperator,
+    KoopmanOperator,
+    matrix_log,
+    van_loan_factors,
+    van_loan_generator_from_discrete,
+)
+from koopman_graph.protocols import DynamicsMode
 
-AdaptationMode = Literal["discrete", "continuous"]
-KoopmanPropagator = KoopmanOperator | ContinuousKoopmanOperator
-
-
-def _matrix_log(matrix: Tensor) -> Tensor:
-    """Return the matrix logarithm via complex eigendecomposition.
-
-    Parameters
-    ----------
-    matrix : Tensor
-        Square matrix with shape ``(d, d)``.
-
-    Returns
-    -------
-    Tensor
-        Real matrix logarithm when the imaginary part is negligible.
-    """
-    eigenvalues, eigenvectors = torch.linalg.eig(matrix)
-    log_eigenvalues = torch.log(eigenvalues)
-    result = eigenvectors @ torch.diag(log_eigenvalues) @ torch.linalg.inv(eigenvectors)
-    if matrix.is_complex():
-        return result
-    return result.real
+#: Alias of :data:`~koopman_graph.protocols.DynamicsMode` for the RLS API.
+AdaptationMode = DynamicsMode
 
 
-@dataclass
+@dataclass(frozen=True)
 class AdaptationStepResult:
     """Diagnostics returned by one online adaptation step.
+
+    Public result types in this package are frozen dataclasses with attribute
+    access (not mapping/dict styles).
 
     Attributes
     ----------
@@ -58,37 +46,57 @@ class RecursiveKoopmanAdapter:
         z_{t+1} = z_t @ K.T + u_t @ B
 
     In continuous mode the adapter tracks the effective propagator
-    ``K(Δt)`` for the observed interval and maps it to a dense generator
-    ``L = logm(K(Δt)) / Δt``. Control blocks use a first-order
-    ``B̃ ≈ B(Δt) / Δt`` approximation when writing back to
-    :class:`~koopman_graph.continuous.ContinuousKoopmanOperator`.
+    ``K(Δt)`` for the observed interval and writes back a dense generator
+    that matches
+    :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.advance`:
+
+    - Uncontrolled: ``L = logm(K(Δt)) / Δt`` (exact for
+      ``K(Δt) = exp(L · Δt)``).
+    - Controlled: recover ``(L, B)`` by inverting the Van Loan block-matrix
+      exponential used in forward integration.
 
     Only ``parameterization="dense"`` operators are supported for write-back.
+
+    Control layouts match the neural operator: global ``(control_dim,)``
+    broadcasts to every latent row; per-node ``(num_nodes, control_dim)``
+    keeps one control row per latent sample. Classical
+    :class:`~koopman_graph.baselines.DMDcBaseline` rejects 3-D sequence
+    controls (see architecture control layout capability matrix).
+
+    **Built-in operators only.** ``from_operator`` / ``apply_to`` accept
+    :class:`~koopman_graph.operators.KoopmanOperator` and
+    :class:`~koopman_graph.operators.ContinuousKoopmanOperator`. Custom
+    ``koopman=`` injections that only satisfy
+    :class:`~koopman_graph.operators.KoopmanOperatorContract` are supported
+    for train/predict/spectrum paths, but **not** for RLS seed or write-back
+    (no portable dense-parameter setter on the Protocol).
 
     Notes
     -----
     **Discrete mode** (``mode="discrete"``) is exact for the fitted row
     convention: RLS directly estimates ``K`` (and ``B`` when controlled).
 
-    **Continuous mode** is an approximation. RLS still fits a *discrete*
-    propagator ``K(Δt)`` for each observed interval; write-back maps it to a
-    generator via ``L ≈ logm(K(Δt)) / Δt`` and control via
-    ``B̃ ≈ B(Δt) / Δt``. This differs from the exact Van Loan block-matrix
-    integration used by
-    :meth:`~koopman_graph.continuous.ContinuousKoopmanOperator.advance` for
-    controlled dynamics.
+    **Continuous mode** fits a *discrete* propagator ``K(Δt)`` (and discrete
+    control block when controlled) per observed interval, then maps to
+    continuous parameters aligned with Van Loan / matrix-exponential forward
+    dynamics. Write-back fidelity is typically within
+    :data:`~koopman_graph.operators.VAN_LOAN_WRITEBACK_ATOL` for moderate
+    ``Δt``.
 
-    Approximation quality degrades when:
+    Recovery can still degrade when:
 
-    - ``Δt`` is large (first-order control scaling and matrix-log sensitivity),
+    - ``Δt`` is large or ``K(Δt)`` lies near a matrix-logarithm branch cut,
     - ``Δt`` varies across adaptation steps (each update overwrites a single
-      reference interval),
-    - the true generator and control do not commute,
-    - ``K(Δt)`` lies near a branch cut of the matrix logarithm.
+      reference interval).
 
-    Prefer ``mode="discrete"`` for uniformly sampled data. Use continuous mode
-    only when ``Δt`` is small and reasonably consistent, and treat recovered
-    ``L`` as a local linearization rather than an exact generator.
+    Prefer ``mode="discrete"`` for uniformly sampled data when a discrete
+    operator is acceptable. Continuous mode is appropriate when the model uses
+    ``dynamics_mode="continuous"`` and adapted parameters must match
+    continuous forward propagation.
+
+    Historical note: prior to TASK-704, continuous write-back used the
+    first-order approximations ``L ≈ logm(K)/Δt`` with ``B̃ ≈ B(Δt)/Δt``
+    for controlled systems, which disagreed with Van Loan integration.
 
     Attributes
     ----------
@@ -241,8 +249,10 @@ class RecursiveKoopmanAdapter:
                 initial_b=initial_b,
             )
         msg = (
-            "koopman must be KoopmanOperator or ContinuousKoopmanOperator, "
-            f"got {type(koopman).__name__}"
+            "Online adaptation seed/write-back supports built-in "
+            "KoopmanOperator and ContinuousKoopmanOperator only "
+            f"(got {type(koopman).__name__}). Custom koopman= injections "
+            "are Protocol-capable for train/predict/spectrum but not RLS."
         )
         raise TypeError(msg)
 
@@ -310,10 +320,17 @@ class RecursiveKoopmanAdapter:
             Default is ``1.0``.
         """
         generator = generator.detach().cpu()
-        propagator = torch.linalg.matrix_exp(generator * delta_t)
-        discrete_control = None
-        if b_matrix is not None:
-            discrete_control = b_matrix.detach().cpu() * delta_t
+        if self.control_dim == 0 or b_matrix is None:
+            propagator = torch.linalg.matrix_exp(generator * delta_t)
+            discrete_control = None
+        else:
+            phi11, phi12 = van_loan_factors(
+                generator,
+                b_matrix.detach().cpu(),
+                delta_t,
+            )
+            propagator = phi11
+            discrete_control = phi12.T
         self._reference_delta_t = delta_t
         self._set_from_discrete(propagator, discrete_control)
 
@@ -330,7 +347,7 @@ class RecursiveKoopmanAdapter:
 
     @property
     def control_matrix(self) -> Tensor | None:
-        """Current control matrix ``B``.
+        """Current discrete control matrix ``B``.
 
         Returns
         -------
@@ -350,7 +367,43 @@ class RecursiveKoopmanAdapter:
         Tensor
             Matrix with shape ``(latent_dim, latent_dim)``.
         """
-        return _matrix_log(self.discrete_matrix) / self._reference_delta_t
+        generator, _ = self._continuous_parameters()
+        return generator
+
+    @property
+    def generator_control_matrix(self) -> Tensor | None:
+        """Current continuous control matrix ``B`` for continuous mode.
+
+        Returns
+        -------
+        Tensor or None
+            Matrix with shape ``(control_dim, latent_dim)`` when controlled.
+        """
+        if self.control_dim == 0:
+            return None
+        _, control = self._continuous_parameters()
+        return control
+
+    def _continuous_parameters(self) -> tuple[Tensor, Tensor | None]:
+        """Map the current discrete RLS estimate to continuous ``(L, B)``.
+
+        Returns
+        -------
+        tuple[Tensor, Tensor or None]
+            Generator and optional continuous control matrix.
+        """
+        if self.control_dim == 0:
+            return (
+                matrix_log(self.discrete_matrix) / self._reference_delta_t,
+                None,
+            )
+        control = self.control_matrix
+        assert control is not None
+        return van_loan_generator_from_discrete(
+            self.discrete_matrix,
+            control,
+            self._reference_delta_t,
+        )
 
     def update(
         self,
@@ -383,8 +436,8 @@ class RecursiveKoopmanAdapter:
         Notes
         -----
         In continuous mode, each update fits a discrete propagator for the
-        supplied ``delta_t``; see the class docstring for ``logm`` and control
-        write-back limitations.
+        supplied ``delta_t``; write-back via :meth:`apply_to` recovers a
+        Van Loan-aligned generator (and control matrix when controlled).
 
         Raises
         ------
@@ -438,11 +491,11 @@ class RecursiveKoopmanAdapter:
 
         Notes
         -----
-        For :class:`~koopman_graph.continuous.ContinuousKoopmanOperator`,
-        generator and control parameters are written via ``logm(K(Δt))/Δt`` and
-        ``B(Δt)/Δt`` approximations. These are not guaranteed to match Van
-        Loan integration in
-        :meth:`~koopman_graph.continuous.ContinuousKoopmanOperator.advance`.
+        For :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
+        generator and control parameters are recovered so that
+        :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.advance`
+        matches the fitted discrete propagator (Van Loan-aligned when
+        controlled). Writes go through :meth:`set_dense_matrix`.
 
         Raises
         ------
@@ -452,42 +505,24 @@ class RecursiveKoopmanAdapter:
             If ``koopman`` is not a supported operator type.
         """
         self._validate_dense_parameterization(koopman)
-        with torch.no_grad():
-            if isinstance(koopman, KoopmanOperator):
-                koopman._parameters["K"].copy_(
-                    self.discrete_matrix.to(
-                        device=koopman.K.device,
-                        dtype=koopman.K.dtype,
-                    )
-                )
-                if koopman.control_dim > 0:
-                    control = self.control_matrix
-                    assert control is not None
-                    koopman.B.copy_(
-                        control.to(device=koopman.B.device, dtype=koopman.B.dtype)
-                    )
-                return
+        if isinstance(koopman, KoopmanOperator):
+            control = self.control_matrix
+            koopman.set_dense_matrix(
+                self.discrete_matrix,
+                control_matrix=control,
+            )
+            return
 
-            if isinstance(koopman, ContinuousKoopmanOperator):
-                generator = self.generator_matrix
-                koopman._parameters["L"].copy_(
-                    generator.to(device=koopman.L.device, dtype=koopman.L.dtype)
-                )
-                if koopman.control_dim > 0:
-                    control = self.control_matrix
-                    assert control is not None
-                    generator_control = control / self._reference_delta_t
-                    koopman.B.copy_(
-                        generator_control.to(
-                            device=koopman.B.device,
-                            dtype=koopman.B.dtype,
-                        )
-                    )
-                return
+        if isinstance(koopman, ContinuousKoopmanOperator):
+            generator, control = self._continuous_parameters()
+            koopman.set_dense_matrix(generator, control_matrix=control)
+            return
 
         msg = (
-            "koopman must be KoopmanOperator or ContinuousKoopmanOperator, "
-            f"got {type(koopman).__name__}"
+            "Online adaptation seed/write-back supports built-in "
+            "KoopmanOperator and ContinuousKoopmanOperator only "
+            f"(got {type(koopman).__name__}). Custom koopman= injections "
+            "are Protocol-capable for train/predict/spectrum but not RLS."
         )
         raise TypeError(msg)
 

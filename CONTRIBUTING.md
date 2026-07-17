@@ -204,6 +204,24 @@ Update documentation when your change affects:
 Sphinx source lives in `docs/source/`. Rebuild locally with `make html` in
 `docs/` after installing `[docs]` extras.
 
+Before changing package layout, `__all__` exports, shared helpers, or device
+handling, read the maintainer architecture guide:
+
+- Sphinx: [`docs/source/architecture.rst`](docs/source/architecture.rst)
+  (built page: *Architecture and API layers* on Read the Docs)
+- It defines the public façade vs power-user modules vs private (`_`-prefixed)
+  helpers (**thin root `__all__`**: keep core workflow symbols; demote
+  specialized helpers to `metrics` / `analysis` / `data` / `adaptation` /
+  `observables` — TASK-747–750), device/tensor conventions across `fit`, the
+  RL env, online adaptation, and classical baselines/datasets, plus
+  **optional-dependency** (fail-at-call / `[rl]` soft-import) and **frozen
+  dataclass result-type** conventions.
+- **Package layout** (same page): when to nest into one-level capability
+  packages vs stay flat; keep `model.py` at the package root; no deep trees;
+  three-layer API preserved under any folder move; compatibility contract for
+  root `__all__` vs power-user deep imports (same-named packages or in-repo
+  migration — no long-lived root shim modules after TASK-746).
+
 ## Releasing
 
 KoopmanGraph follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
@@ -231,13 +249,18 @@ Model checkpoints include a ``format_version`` field (see
 | Version | Introduced | Notes |
 | --- | --- | --- |
 | 1 | v0.2.x | Discrete dynamics; config omits continuous-time, physics, and control fields |
-| 2 | v0.3.0 | Full config for continuous mode, hybrid physics observables, and control |
+| 2 | v0.3.0 | Full config for continuous mode, hybrid physics observables, control, and encoder/decoder ``type`` (``"gcn"`` / ``"gat"``; missing decoder ``type`` defaults to ``"gcn"``) |
 
 ``GraphKoopmanModel.load`` accepts both v1 and v2 checkpoints. v1 payloads are
 migrated in memory by filling missing optional fields with defaults
 (``dynamics_mode="discrete"``, no physics observables, ``control_dim=0``,
-``koopman_parameterization="dense"``). New saves always use the current
-``FORMAT_VERSION`` (2 as of v0.3.0).
+``koopman_parameterization="dense"``). Phase 8 architectural consistency
+(symmetric ``GATDecoder``, preferred ``encode``, shared operator contracts,
+shared rollout primitives, optional ``koopman=`` injection, frozen result
+types, baseline / ``ForecastModel`` call-site clarity) did **not** require a
+new ``format_version``; new saves still use ``FORMAT_VERSION`` 2. Custom
+injected operators are rejected on ``save`` and are therefore outside the
+checkpoint migration path.
 
 ### Maintainer release checklist
 
@@ -331,9 +354,11 @@ work—particularly useful when using AI coding agents:
   acceptance criteria, dependencies, and agent logs.
 
 Agents working from the blueprint should read one task at a time, present a
-plan for user approval, and update the blueprint status upon completion. Human
-contributors may use the blueprint as a roadmap but are not required to follow
-it.
+plan for user approval, and update the blueprint status upon completion. During
+the plan gate, consult
+[`docs/source/architecture.rst`](docs/source/architecture.rst) whenever a task
+touches exports, internal helpers, or device placement. Human contributors may
+use the blueprint as a roadmap but are not required to follow it.
 
 ## License
 

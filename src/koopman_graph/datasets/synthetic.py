@@ -126,7 +126,7 @@ class SyntheticDynamicGraphBenchmark:
         Standard deviation of additive Gaussian noise. Default is ``0.0``.
     seed : int, optional
         Random seed for the initial state and noise. ``None`` uses unseeded
-        randomness.
+        randomness; tutorials should pass an explicit seed (e.g. ``42``).
     initial_state : {"random", "ones"}, optional
         Initial node feature pattern. Default is ``"random"``.
     dtype : torch.dtype, optional
@@ -168,7 +168,8 @@ class SyntheticDynamicGraphBenchmark:
             Standard deviation of additive Gaussian noise. Default is ``0.0``.
         seed : int, optional
             Random seed for the initial state and noise. ``None`` uses
-            unseeded randomness.
+            unseeded randomness; tutorials should pass an explicit seed
+            (e.g. ``42``).
         initial_state : {"random", "ones"}, optional
             Initial node feature pattern. Default is ``"random"``.
         dtype : torch.dtype, optional
