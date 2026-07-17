@@ -27,7 +27,7 @@ jobs:
     name: Compile paper draft
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build draft PDF
         # Pin to commit on master (2024-07-17) for supply-chain safety.
