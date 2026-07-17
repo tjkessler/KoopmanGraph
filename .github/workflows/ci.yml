@@ -11,16 +11,10 @@ on:
       - "docs/**"
       - ".github/workflows/**"
       - "pyproject.toml"
+  # Always run on PRs so required status checks on main can be satisfied
+  # for docs-only / config-only changes as well as code changes.
   pull_request:
     branches: [main]
-    paths:
-      - "src/koopman_graph/**"
-      - "scripts/**"
-      - "tests/**"
-      - "examples/**"
-      - "docs/**"
-      - ".github/workflows/**"
-      - "pyproject.toml"
 
 jobs:
   test:
