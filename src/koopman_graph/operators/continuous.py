@@ -14,6 +14,14 @@ from koopman_graph.operators.contract import (
     cayley_orthogonal,
     strict_spectral_bound,
 )
+from koopman_graph.operators.control import (
+    ControlMode,
+    allocate_bilinear_parameters,
+    bilinear_coupling_tensor,
+    effective_bilinear_matrix,
+    reset_bilinear_parameters,
+    validate_control_mode,
+)
 
 # Thin alias for older call sites / docs that used the continuous-specific name.
 GeneratorParameterization = Parameterization
@@ -210,10 +218,12 @@ class ContinuousKoopmanOperator(nn.Module):
 
     This matches the discrete row convention and the column ODE
     ``ẋ = L x + B^{\\top} u`` (equivalently ``ż = z L^{\\top} + u B``).
-    Piecewise-constant controls over ``[0, Δt]`` are integrated exactly via a
-    Van Loan block-matrix exponential with ``Phi11 = exp(L · Δt)``, so
-    zero-control advance agrees with the uncontrolled path for nonsymmetric
-    ``L``.
+    With ``control_mode="bilinear"``, piecewise-constant controls make the
+    state map linear time-invariant over ``[0, Δt]`` with effective generator
+    ``L_eff = L + sum_i u_i N_i``, which is integrated exactly via Van Loan
+    (same additive ``B`` integral). This is exact for fixed ``u`` over the
+    step; it is not a closed-form bilinear matrix exponential for
+    time-varying ``u(t)``.
 
     Opt-in Hurwitz-stable parameterizations mirror the discrete structural modes
     from :class:`~koopman_graph.operators.KoopmanOperator` but enforce
@@ -248,6 +258,10 @@ class ContinuousKoopmanOperator(nn.Module):
         Dimension of the latent space.
     control_dim : int
         Dimension of exogenous control inputs. Zero disables control.
+    control_mode : {"additive", "bilinear"}
+        Additive ``B`` only, or bilinear state–control couplings ``N_i``.
+    bilinear_rank : int or None
+        Optional low-rank size for bilinear factors.
     init_mode : str
         Weight initialization strategy for ``L``.
     init_scale : float
@@ -267,6 +281,8 @@ class ContinuousKoopmanOperator(nn.Module):
         parameterization: Parameterization = "dense",
         max_real_eigenvalue: float = 1.0,
         control_dim: int = 0,
+        control_mode: ControlMode = "additive",
+        bilinear_rank: int | None = None,
     ) -> None:
         """Initialize the continuous-time Koopman generator.
 
@@ -290,6 +306,10 @@ class ContinuousKoopmanOperator(nn.Module):
             Default is ``1.0``.
         control_dim : int, optional
             Control input dimension. Default is ``0``.
+        control_mode : {"additive", "bilinear"}, optional
+            Control coupling mode. Default is ``"additive"``.
+        bilinear_rank : int or None, optional
+            Low-rank bilinear size when ``control_mode="bilinear"``.
         """
         super().__init__()
         if latent_dim < 1:
@@ -304,6 +324,12 @@ class ContinuousKoopmanOperator(nn.Module):
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
             raise ValueError(msg)
+        validate_control_mode(
+            control_dim=control_dim,
+            control_mode=control_mode,
+            bilinear_rank=bilinear_rank,
+            latent_dim=latent_dim,
+        )
 
         self.latent_dim = latent_dim
         self.init_mode = init_mode
@@ -311,6 +337,8 @@ class ContinuousKoopmanOperator(nn.Module):
         self.parameterization = parameterization
         self.max_real_eigenvalue = max_real_eigenvalue
         self.control_dim = control_dim
+        self.control_mode = control_mode
+        self.bilinear_rank = bilinear_rank
 
         if parameterization == "dense":
             self.register_parameter(
@@ -338,10 +366,17 @@ class ContinuousKoopmanOperator(nn.Module):
 
         if control_dim > 0:
             self.B = nn.Parameter(torch.empty(control_dim, latent_dim))
+            if control_mode == "bilinear":
+                allocate_bilinear_parameters(
+                    self,
+                    control_dim=control_dim,
+                    latent_dim=latent_dim,
+                    bilinear_rank=bilinear_rank,
+                )
             self.reset_control_parameters()
 
     def reset_control_parameters(self) -> None:
-        """Reinitialize the continuous control input matrix ``B``.
+        """Reinitialize the continuous control input matrix ``B`` (and bilinear).
 
         Returns
         -------
@@ -350,6 +385,21 @@ class ContinuousKoopmanOperator(nn.Module):
         if self.control_dim <= 0:
             return
         nn.init.zeros_(self.B)
+        if self.control_mode == "bilinear":
+            reset_bilinear_parameters(self)
+
+    def bilinear_matrices(self) -> Tensor:
+        """Return assembled bilinear couplings ``N`` with shape ``(C, D, D)``.
+
+        Returns
+        -------
+        Tensor
+            Full-rank or low-rank-assembled ``N_i`` stack.
+        """
+        if self.control_mode != "bilinear":
+            msg = "bilinear_matrices requires control_mode='bilinear'"
+            raise ValueError(msg)
+        return bilinear_coupling_tensor(self)
 
     def control_term(self, u: Tensor, *, num_nodes: int | None = None) -> Tensor:
         """Map control inputs to a latent-space offset ``u @ B``.
@@ -457,6 +507,8 @@ class ContinuousKoopmanOperator(nn.Module):
         delta_t: float | Tensor | None = None,
         *,
         control: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Advance latent states over a continuous-time interval ``Δt``.
 
@@ -469,6 +521,10 @@ class ContinuousKoopmanOperator(nn.Module):
             (must not be ``None``) for continuous operators.
         control : Tensor or None, optional
             Piecewise-constant control over ``[0, Δt]``.
+        edge_index : Tensor or None, optional
+            Ignored (per-node continuous operator).
+        edge_weight : Tensor or None, optional
+            Ignored (per-node continuous operator).
 
         Returns
         -------
@@ -481,6 +537,7 @@ class ContinuousKoopmanOperator(nn.Module):
             If ``delta_t`` is ``None``, the trailing dimension of ``z`` does
             not match ``latent_dim``, or controls are invalid.
         """
+        _ = edge_index, edge_weight
         if delta_t is None:
             msg = "delta_t is required for ContinuousKoopmanOperator.advance"
             raise ValueError(msg)
@@ -519,22 +576,76 @@ class ContinuousKoopmanOperator(nn.Module):
     ) -> Tensor:
         """Advance with Van Loan block-matrix exponential integration.
 
+        For bilinear mode, uses ``L_eff = L + sum_i u_i N_i`` (global) or a
+        per-node ``L_eff`` when ``control`` is per-node.
+
         Returns
         -------
         Tensor
             Controlled advanced latent states.
         """
+        if self.control_mode == "additive":
+            return self._advance_van_loan(z, delta_t, control, generator=self.L)
+
+        coupling = self.bilinear_matrices()
         if control.ndim == 1:
-            phi11, phi12 = self._van_loan_factors(delta_t)
+            l_eff = effective_bilinear_matrix(self.L, control, coupling)
+            return self._advance_van_loan(z, delta_t, control, generator=l_eff)
+
+        if control.ndim == 2:
+            if z.ndim < 2 or z.shape[-2] != control.shape[0]:
+                msg = (
+                    "per-node bilinear control requires z with a matching "
+                    f"node axis, got z={tuple(z.shape)}, u={tuple(control.shape)}"
+                )
+                raise ValueError(msg)
+            advanced = torch.empty_like(z)
+            for node_idx in range(control.shape[0]):
+                l_eff = effective_bilinear_matrix(
+                    self.L,
+                    control[node_idx],
+                    coupling,
+                )
+                node_z = z[..., node_idx : node_idx + 1, :]
+                node_u = control[node_idx]
+                node_next = self._advance_van_loan(
+                    node_z,
+                    delta_t,
+                    node_u,
+                    generator=l_eff,
+                )
+                advanced[..., node_idx : node_idx + 1, :] = node_next
+            return advanced
+
+        msg = (
+            "control input must have shape (control_dim,) or "
+            f"(num_nodes, control_dim), got {tuple(control.shape)}"
+        )
+        raise ValueError(msg)
+
+    def _advance_van_loan(
+        self,
+        z: Tensor,
+        delta_t: Tensor,
+        control: Tensor,
+        *,
+        generator: Tensor,
+    ) -> Tensor:
+        """Van Loan advance for a fixed generator over ``Δt``.
+
+        Returns
+        -------
+        Tensor
+            Advanced latents.
+        """
+        phi11, phi12 = van_loan_factors(generator, self.B, delta_t)
+        if control.ndim == 1:
             offset = control @ phi12.T
             if z.ndim > 1:
                 offset = self._broadcast_control_term(z, offset)
             return z @ phi11.T + offset
-
         if control.ndim == 2:
-            phi11, phi12 = self._van_loan_factors(delta_t)
             return z @ phi11.T + control @ phi12.T
-
         msg = (
             "control input must have shape (control_dim,) or "
             f"(num_nodes, control_dim), got {tuple(control.shape)}"
@@ -556,6 +667,7 @@ class ContinuousKoopmanOperator(nn.Module):
         matrix: Tensor,
         *,
         control_matrix: Tensor | None = None,
+        bilinear_matrices: Tensor | None = None,
     ) -> None:
         """Write dense generator parameters in place.
 
@@ -566,6 +678,9 @@ class ContinuousKoopmanOperator(nn.Module):
         control_matrix : Tensor or None, optional
             Dense control matrix ``B`` with shape
             ``(control_dim, latent_dim)``. Required when ``control_dim > 0``.
+        bilinear_matrices : Tensor or None, optional
+            Full-rank bilinear stack when ``control_mode="bilinear"`` and
+            ``bilinear_rank is None``.
 
         Raises
         ------
@@ -605,7 +720,36 @@ class ContinuousKoopmanOperator(nn.Module):
                 self.B.copy_(
                     control_matrix.to(device=self.B.device, dtype=self.B.dtype)
                 )
-            elif control_matrix is not None:
+                if self.control_mode == "bilinear":
+                    if self.bilinear_rank is not None:
+                        msg = (
+                            "set_dense_matrix bilinear_matrices writeback "
+                            "requires bilinear_rank=None (full-rank N)"
+                        )
+                        raise ValueError(msg)
+                    if bilinear_matrices is None:
+                        msg = (
+                            "bilinear_matrices is required when control_mode='bilinear'"
+                        )
+                        raise ValueError(msg)
+                    expected_n = (
+                        self.control_dim,
+                        self.latent_dim,
+                        self.latent_dim,
+                    )
+                    if bilinear_matrices.shape != expected_n:
+                        msg = (
+                            f"Expected bilinear_matrices shape {expected_n}, "
+                            f"got {tuple(bilinear_matrices.shape)}"
+                        )
+                        raise ValueError(msg)
+                    self.N.copy_(
+                        bilinear_matrices.to(device=self.N.device, dtype=self.N.dtype)
+                    )
+                elif bilinear_matrices is not None:
+                    msg = "bilinear_matrices provided to an additive-control operator"
+                    raise ValueError(msg)
+            elif control_matrix is not None or bilinear_matrices is not None:
                 msg = "control_matrix provided to an uncontrolled operator"
                 raise ValueError(msg)
 
@@ -616,6 +760,8 @@ class ContinuousKoopmanOperator(nn.Module):
         *,
         control: Tensor | None = None,
         inverse_matrix: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Recover the previous latent state before advancing over ``Δt``.
 
@@ -630,6 +776,10 @@ class ContinuousKoopmanOperator(nn.Module):
         inverse_matrix : Tensor or None, optional
             Accepted for :class:`~koopman_graph.operators.KoopmanOperatorContract`
             symmetry with discrete operators; ignored for continuous dynamics.
+        edge_index : Tensor or None, optional
+            Ignored (per-node continuous operator).
+        edge_weight : Tensor or None, optional
+            Ignored (per-node continuous operator).
 
         Returns
         -------
@@ -641,7 +791,7 @@ class ContinuousKoopmanOperator(nn.Module):
         ValueError
             If ``delta_t`` is ``None`` or controls are missing when required.
         """
-        _ = inverse_matrix
+        _ = inverse_matrix, edge_index, edge_weight
         if delta_t is None:
             msg = "delta_t is required for ContinuousKoopmanOperator.inverse_advance"
             raise ValueError(msg)
@@ -650,26 +800,101 @@ class ContinuousKoopmanOperator(nn.Module):
             raise ValueError(msg)
 
         adjusted = z
+        delta = torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
         if self.control_dim > 0:
             assert control is not None
+            if self.control_mode == "bilinear":
+                return self._inverse_advance_bilinear(z, delta, control)
+
             if control.ndim == 1:
-                _, phi12 = self._van_loan_factors(
-                    torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
-                )
+                _, phi12 = self._van_loan_factors(delta)
                 offset = control @ phi12.T
                 if z.ndim > 1:
                     offset = self._broadcast_control_term(z, offset)
                 adjusted = z - offset
             else:
-                _, phi12 = self._van_loan_factors(
-                    torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
-                )
+                _, phi12 = self._van_loan_factors(delta)
                 adjusted = z - control @ phi12.T
 
-        inverse_transition = self.transition_matrix(
-            -torch.as_tensor(delta_t, dtype=self.L.dtype, device=self.L.device)
-        )
+        inverse_transition = self.transition_matrix(-delta)
         return adjusted @ inverse_transition.T
+
+    def _inverse_advance_bilinear(
+        self,
+        z: Tensor,
+        delta_t: Tensor,
+        control: Tensor,
+    ) -> Tensor:
+        """Invert a bilinear continuous step under piecewise-constant ``u``.
+
+        Returns
+        -------
+        Tensor
+            Recovered latents.
+        """
+        coupling = self.bilinear_matrices()
+
+        def _invert_one(state: Tensor, u: Tensor, generator: Tensor) -> Tensor:
+            """Invert one Van Loan step for a fixed effective generator.
+
+            Parameters
+            ----------
+            state : Tensor
+                Latents after the forward interval.
+            u : Tensor
+                Control applied during the interval.
+            generator : Tensor
+                Effective generator ``L_eff``.
+
+            Returns
+            -------
+            Tensor
+                Recovered latents before the interval.
+            """
+            phi11, phi12 = van_loan_factors(generator, self.B, delta_t)
+            if u.ndim == 1:
+                offset = u @ phi12.T
+                if state.ndim > 1:
+                    offset = self._broadcast_control_term(state, offset)
+                adjusted = state - offset
+            else:
+                adjusted = state - u @ phi12.T
+            try:
+                inverse_phi = torch.linalg.inv(phi11)
+            except RuntimeError:
+                inverse_phi = torch.linalg.pinv(phi11)
+            return adjusted @ inverse_phi.T
+
+        if control.ndim == 1:
+            l_eff = effective_bilinear_matrix(self.L, control, coupling)
+            return _invert_one(z, control, l_eff)
+
+        if control.ndim == 2:
+            if z.ndim < 2 or z.shape[-2] != control.shape[0]:
+                msg = (
+                    "per-node bilinear inverse requires matching node axes, "
+                    f"got z={tuple(z.shape)}, u={tuple(control.shape)}"
+                )
+                raise ValueError(msg)
+            recovered = torch.empty_like(z)
+            for node_idx in range(control.shape[0]):
+                l_eff = effective_bilinear_matrix(
+                    self.L,
+                    control[node_idx],
+                    coupling,
+                )
+                recovered[..., node_idx : node_idx + 1, :] = _invert_one(
+                    z[..., node_idx : node_idx + 1, :],
+                    control[node_idx],
+                    l_eff,
+                )
+            return recovered
+
+        msg = (
+            "control input must have shape (control_dim,) or "
+            f"(num_nodes, control_dim), got {tuple(control.shape)}"
+        )
+        raise ValueError(msg)
 
     def forward(
         self,

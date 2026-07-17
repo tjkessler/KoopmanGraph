@@ -6,12 +6,16 @@ Public API
     End-to-end encode → Koopman advance → decode model.
 ``GNNEncoder``, ``GATEncoder``
     GNN encoders for latent lifting.
+``DelayEmbeddingEncoder``
+    Hankel / delay-coordinate wrapper around a sized base encoder.
 ``GNNDecoder``, ``GATDecoder``
     GNN decoders for physical reconstruction.
 ``KoopmanOperator``
     Learnable finite-dimensional Koopman matrix.
 ``ContinuousKoopmanOperator``
     Continuous-time Koopman generator integrated via matrix exponentials.
+``GraphKoopmanOperator``
+    Discrete networked Koopman step with self/neighbor coupling via ``edge_index``.
 ``KoopmanSpectrum``, ``compute_spectrum``
     Primary spectral analysis entrypoints. Specialized helpers
     (``compute_generator_spectrum``, ``discrete_spectrum_at_delta_t``,
@@ -41,7 +45,8 @@ Public API
     Training history and loss-weight schedule for ``fit``.
 ``RecursiveKoopmanAdapter``
     Recursive least-squares online Koopman operator adaptation.
-    ``AdaptationStepResult`` lives in :mod:`koopman_graph.adaptation`.
+    ``AdaptationStepResult``, ``KoopmanObserver``, and ``FilterResult`` live in
+    :mod:`koopman_graph.adaptation`.
 ``GraphKoopmanEnv``
     Gymnasium environment for latent-space closed-loop control.
 ``__version__``
@@ -74,17 +79,29 @@ from koopman_graph.losses import (
 )
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
 from koopman_graph.model import GraphKoopmanModel
-from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder, GNNEncoder
-from koopman_graph.operators import ContinuousKoopmanOperator, KoopmanOperator
+from koopman_graph.nn import (
+    DelayEmbeddingEncoder,
+    GATDecoder,
+    GATEncoder,
+    GNNDecoder,
+    GNNEncoder,
+)
+from koopman_graph.operators import (
+    ContinuousKoopmanOperator,
+    GraphKoopmanOperator,
+    KoopmanOperator,
+)
 from koopman_graph.training import FitHistory, LossWeights
 
 __all__ = [
     "BackwardConsistencyLoss",
-    "EigenvalueRegularizationLoss",
-    "EvaluationResult",
+    "ContinuousKoopmanOperator",
+    "DelayEmbeddingEncoder",
     "DMDBaseline",
     "DMDcBaseline",
     "EDMDBaseline",
+    "EigenvalueRegularizationLoss",
+    "EvaluationResult",
     "FitHistory",
     "ForwardConsistencyLoss",
     "GATDecoder",
@@ -93,18 +110,18 @@ __all__ = [
     "GNNEncoder",
     "GraphKoopmanEnv",
     "GraphKoopmanModel",
+    "GraphKoopmanOperator",
     "GraphSnapshotSequence",
     "KoopmanOperator",
     "KoopmanSpectrum",
+    "LossWeights",
     "MultiTrajectory",
     "RecursiveKoopmanAdapter",
-    "LossWeights",
     "TemporalSplit",
     "WindowSampler",
     "__version__",
-    "ContinuousKoopmanOperator",
     "compute_spectrum",
     "evaluate_forecast",
     "temporal_split",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"

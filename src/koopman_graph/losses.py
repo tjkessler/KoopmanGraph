@@ -87,6 +87,8 @@ class ForwardConsistencyLoss(nn.Module):
         delta_t: float | Tensor | None = None,
         default_delta_t: float | Tensor = 1.0,
         mask: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Compute forward consistency loss between consecutive latent states.
 
@@ -110,6 +112,10 @@ class ForwardConsistencyLoss(nn.Module):
         mask : Tensor or None, optional
             Optional boolean node mask with shape ``(num_nodes,)``. When set,
             MSE is averaged over observed nodes only.
+        edge_index : Tensor or None, optional
+            Topology for networked operators (ignored by per-node operators).
+        edge_weight : Tensor or None, optional
+            Optional edge weights for networked operators.
 
         Returns
         -------
@@ -122,6 +128,8 @@ class ForwardConsistencyLoss(nn.Module):
             control=control,
             delta_t=delta_t,
             default_delta_t=default_delta_t,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
         )
         if mask is None:
             return nn.functional.mse_loss(z_pred, z_t1)
@@ -176,6 +184,8 @@ class BackwardConsistencyLoss(nn.Module):
         delta_t: float | Tensor | None = None,
         default_delta_t: float | Tensor = 1.0,
         mask: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Compute backward consistency loss between consecutive latent states.
 
@@ -203,6 +213,10 @@ class BackwardConsistencyLoss(nn.Module):
         mask : Tensor or None, optional
             Optional boolean node mask with shape ``(num_nodes,)``. When set,
             MSE is averaged over observed nodes only.
+        edge_index : Tensor or None, optional
+            Topology for networked operators (ignored by per-node operators).
+        edge_weight : Tensor or None, optional
+            Optional edge weights for networked operators.
 
         Returns
         -------
@@ -217,6 +231,8 @@ class BackwardConsistencyLoss(nn.Module):
             inverse_matrix=inverse_matrix,
             delta_t=delta_t,
             default_delta_t=default_delta_t,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
         )
         if mask is None:
             return nn.functional.mse_loss(z_recovered, z_t)
@@ -371,7 +387,8 @@ def rollout_sequence_loss(
         raise ValueError(msg)
 
     initial = sequence[start]
-    z = model.encode(initial)
+    encode_at = getattr(model, "encode_at", None)
+    z = encode_at(sequence, start) if callable(encode_at) else model.encode(initial)
 
     time_step = float(model.resolve_delta_t(None))
     targets = [sequence[start + step] for step in range(1, horizon + 1)]

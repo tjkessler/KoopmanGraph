@@ -92,3 +92,56 @@ def test_source_definitions_have_numpy_docstrings() -> None:
                 elif not _has_numpy_style(doc):
                     missing.append(f"{label}: not NumPy-style")
     assert not missing, "Docstring issues:\n" + "\n".join(missing)
+
+
+# Headline JOSS features with direct literature precedents (TASK-900 / design-doc #13).
+_REQUIRED_PAPER_BIB_KEYS = (
+    "Azencot2020",
+    "Bruder2021",
+    "Li2017EDMD",
+    "Li2018DCRNN",
+    "Li2020CompositionalKoopman",
+    "Korda2018",
+    "Mukherjee2022",
+    "Nandanoori2022",
+    "Proctor2016DMDc",
+    "Williams2015",
+    "Wu2019WaveNet",
+    "Yu2018STGCN",
+)
+_REQUIRED_PAPER_MD_CITES = (
+    "Azencot2020",
+    "Bruder2021",
+    "Li2017EDMD",
+    "Li2018DCRNN",
+    "Li2020CompositionalKoopman",
+    "Korda2018",
+    "Mukherjee2022",
+    "Nandanoori2022",
+    "Proctor2016DMDc",
+    "Williams2015",
+    "Wu2019WaveNet",
+    "Yu2018STGCN",
+)
+
+
+def test_literature_precedent_citations_in_paper_sources() -> None:
+    """Require bib entries and paper.md cites for headline literature precedents."""
+    bib_text = (_PROJECT_ROOT / "paper.bib").read_text()
+    paper_text = (_PROJECT_ROOT / "paper.md").read_text()
+    readme = (_PROJECT_ROOT / "README.md").read_text()
+    missing_bib = [
+        key
+        for key in _REQUIRED_PAPER_BIB_KEYS
+        if not re.search(rf"@\w+\{{{re.escape(key)}\s*,", bib_text)
+    ]
+    missing_cites = [
+        key for key in _REQUIRED_PAPER_MD_CITES if f"@{key}" not in paper_text
+    ]
+    assert not missing_bib, f"paper.bib missing keys: {missing_bib}"
+    assert not missing_cites, f"paper.md missing citations: {missing_cites}"
+    assert "not claimed as a new theoretical contribution" in readme
+    assert (
+        "consistent Koopman autoencoder lineage" in readme
+        or "consistent-autoencoder" in readme
+    )

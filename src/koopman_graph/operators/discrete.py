@@ -16,6 +16,15 @@ from koopman_graph.operators.contract import (
     cayley_orthogonal,
     strict_spectral_bound,
 )
+from koopman_graph.operators.control import (
+    ControlMode,
+    allocate_bilinear_parameters,
+    bilinear_coupling_tensor,
+    bilinear_state_control_term,
+    effective_bilinear_matrix,
+    reset_bilinear_parameters,
+    validate_control_mode,
+)
 
 
 class KoopmanOperator(nn.Module):
@@ -26,15 +35,23 @@ class KoopmanOperator(nn.Module):
 
         z_next = z @ K.T
 
-    When :attr:`control_dim` is positive, exogenous inputs drive the transition::
+    When :attr:`control_dim` is positive, exogenous inputs drive the transition.
+    With default ``control_mode="additive"``::
 
         z_next = z @ K.T + u @ B
 
-    where ``K`` has shape ``(latent_dim, latent_dim)`` and ``B`` has shape
-    ``(control_dim, latent_dim)``. Global controls ``u`` with shape
-    ``(control_dim,)`` are broadcast to every node; per-node controls use shape
-    ``(num_nodes, control_dim)``. Arbitrary leading dimensions are supported
-    (e.g. ``(num_nodes, latent_dim)`` or ``(batch, num_nodes, latent_dim)``).
+    With ``control_mode="bilinear"`` (control-affine / bilinear Koopman)::
+
+        z_next = z @ K.T + u @ B + sum_i u[..., i] * (z @ N_i.T)
+
+    where ``K`` has shape ``(latent_dim, latent_dim)``, ``B`` has shape
+    ``(control_dim, latent_dim)``, and each ``N_i`` is either a full
+    ``(latent_dim, latent_dim)`` matrix or a low-rank factor
+    ``N_i = P_i Q_i^T`` when ``bilinear_rank`` is set. Global controls ``u``
+    with shape ``(control_dim,)`` are broadcast to every node; per-node
+    controls use shape ``(num_nodes, control_dim)``. Arbitrary leading
+    dimensions are supported (e.g. ``(num_nodes, latent_dim)`` or
+    ``(batch, num_nodes, latent_dim)``).
 
     Beyond unconstrained ``"dense"`` storage, KoopmanGraph offers **soft**
     regularization and **structural** stability parameterizations. See
@@ -83,6 +100,12 @@ class KoopmanOperator(nn.Module):
         Dimension of the latent space.
     control_dim : int
         Dimension of exogenous control inputs. Zero disables control.
+    control_mode : {"additive", "bilinear"}
+        How controls enter the latent map. ``"additive"`` uses ``u @ B`` only;
+        ``"bilinear"`` adds state–control couplings ``N_i``.
+    bilinear_rank : int or None
+        When ``control_mode="bilinear"``, optional low-rank size for
+        ``N_i = P_i Q_i^T``. ``None`` stores full-rank ``N_i``.
     init_mode : str
         Weight initialization strategy for ``K``.
     init_scale : float
@@ -105,6 +128,8 @@ class KoopmanOperator(nn.Module):
         parameterization: Parameterization = "dense",
         max_spectral_radius: float = 1.0,
         control_dim: int = 0,
+        control_mode: ControlMode = "additive",
+        bilinear_rank: int | None = None,
     ) -> None:
         """Initialize the Koopman operator matrix.
 
@@ -144,13 +169,20 @@ class KoopmanOperator(nn.Module):
             is uncontrolled. When positive, a learnable input matrix ``B``
             with shape ``(control_dim, latent_dim)`` is added. Default is
             ``0``.
+        control_mode : {"additive", "bilinear"}, optional
+            Control coupling. ``"additive"`` (default) uses ``u @ B`` only.
+            ``"bilinear"`` adds state–control terms for control-affine systems.
+        bilinear_rank : int or None, optional
+            Low-rank size for bilinear factors when ``control_mode="bilinear"``.
+            ``None`` (default) stores full-rank ``N_i``.
 
         Raises
         ------
         ValueError
             If ``latent_dim < 1``, ``init_scale < 0``,
             ``max_spectral_radius <= 0``, structural modes receive
-            ``max_spectral_radius > 1``, or ``control_dim < 0``.
+            ``max_spectral_radius > 1``, ``control_dim < 0``, or control-mode
+            settings are invalid.
         """
         super().__init__()
         if latent_dim < 1:
@@ -174,6 +206,12 @@ class KoopmanOperator(nn.Module):
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
             raise ValueError(msg)
+        validate_control_mode(
+            control_dim=control_dim,
+            control_mode=control_mode,
+            bilinear_rank=bilinear_rank,
+            latent_dim=latent_dim,
+        )
 
         self.latent_dim = latent_dim
         self.init_mode = init_mode
@@ -181,6 +219,8 @@ class KoopmanOperator(nn.Module):
         self.parameterization = parameterization
         self.max_spectral_radius = max_spectral_radius
         self.control_dim = control_dim
+        self.control_mode = control_mode
+        self.bilinear_rank = bilinear_rank
 
         if parameterization == "dense":
             self.register_parameter(
@@ -209,10 +249,17 @@ class KoopmanOperator(nn.Module):
 
         if control_dim > 0:
             self.B = nn.Parameter(torch.empty(control_dim, latent_dim))
+            if control_mode == "bilinear":
+                allocate_bilinear_parameters(
+                    self,
+                    control_dim=control_dim,
+                    latent_dim=latent_dim,
+                    bilinear_rank=bilinear_rank,
+                )
             self.reset_control_parameters()
 
     def reset_control_parameters(self) -> None:
-        """Reinitialize the control input matrix ``B``.
+        """Reinitialize the control input matrix ``B`` (and bilinear factors).
 
         Returns
         -------
@@ -221,6 +268,43 @@ class KoopmanOperator(nn.Module):
         if self.control_dim <= 0:
             return
         nn.init.zeros_(self.B)
+        if self.control_mode == "bilinear":
+            reset_bilinear_parameters(self)
+
+    def bilinear_matrices(self) -> Tensor:
+        """Return assembled bilinear couplings ``N`` with shape ``(C, D, D)``.
+
+        Returns
+        -------
+        Tensor
+            Full-rank or low-rank-assembled ``N_i`` stack.
+
+        Raises
+        ------
+        ValueError
+            If ``control_mode`` is not ``"bilinear"``.
+        """
+        if self.control_mode != "bilinear":
+            msg = "bilinear_matrices requires control_mode='bilinear'"
+            raise ValueError(msg)
+        return bilinear_coupling_tensor(self)
+
+    def effective_state_matrix(self, control: Tensor) -> Tensor:
+        """Return ``K + sum_i u_i N_i`` for a global bilinear control.
+
+        Parameters
+        ----------
+        control : Tensor
+            Global control with shape ``(control_dim,)``.
+
+        Returns
+        -------
+        Tensor
+            Effective discrete map with shape ``(latent_dim, latent_dim)``.
+        """
+        if self.control_mode != "bilinear":
+            return self.K
+        return effective_bilinear_matrix(self.K, control, self.bilinear_matrices())
 
     def control_term(self, u: Tensor, *, num_nodes: int | None = None) -> Tensor:
         """Map control inputs to a latent-space offset ``u @ B``.
@@ -329,6 +413,7 @@ class KoopmanOperator(nn.Module):
         matrix: Tensor,
         *,
         control_matrix: Tensor | None = None,
+        bilinear_matrices: Tensor | None = None,
     ) -> None:
         """Write dense Koopman parameters in place.
 
@@ -339,6 +424,10 @@ class KoopmanOperator(nn.Module):
         control_matrix : Tensor or None, optional
             Dense control matrix ``B`` with shape
             ``(control_dim, latent_dim)``. Required when ``control_dim > 0``.
+        bilinear_matrices : Tensor or None, optional
+            Full-rank bilinear stack ``N`` with shape
+            ``(control_dim, latent_dim, latent_dim)``. Required when
+            ``control_mode="bilinear"`` and ``bilinear_rank is None``.
 
         Raises
         ------
@@ -378,7 +467,36 @@ class KoopmanOperator(nn.Module):
                 self.B.copy_(
                     control_matrix.to(device=self.B.device, dtype=self.B.dtype)
                 )
-            elif control_matrix is not None:
+                if self.control_mode == "bilinear":
+                    if self.bilinear_rank is not None:
+                        msg = (
+                            "set_dense_matrix bilinear_matrices writeback "
+                            "requires bilinear_rank=None (full-rank N)"
+                        )
+                        raise ValueError(msg)
+                    if bilinear_matrices is None:
+                        msg = (
+                            "bilinear_matrices is required when control_mode='bilinear'"
+                        )
+                        raise ValueError(msg)
+                    expected_n = (
+                        self.control_dim,
+                        self.latent_dim,
+                        self.latent_dim,
+                    )
+                    if bilinear_matrices.shape != expected_n:
+                        msg = (
+                            f"Expected bilinear_matrices shape {expected_n}, "
+                            f"got {tuple(bilinear_matrices.shape)}"
+                        )
+                        raise ValueError(msg)
+                    self.N.copy_(
+                        bilinear_matrices.to(device=self.N.device, dtype=self.N.dtype)
+                    )
+                elif bilinear_matrices is not None:
+                    msg = "bilinear_matrices provided to an additive-control operator"
+                    raise ValueError(msg)
+            elif control_matrix is not None or bilinear_matrices is not None:
                 msg = "control_matrix provided to an uncontrolled operator"
                 raise ValueError(msg)
 
@@ -787,13 +905,16 @@ class KoopmanOperator(nn.Module):
     def forward(self, z: Tensor, control: Tensor | None = None) -> Tensor:
         """Advance latent states by one linear Koopman step.
 
-        When :attr:`control_dim` is positive, the controlled update is::
+        When :attr:`control_dim` is positive and ``control_mode="additive"``::
 
-            z_next = z @ K.T + control_effect
+            z_next = z @ K.T + u @ B
 
-        where ``control_effect`` is ``u @ B`` broadcast for global control
-        ``u`` with shape ``(control_dim,)`` or applied per node when ``u`` has
-        shape ``(num_nodes, control_dim)``.
+        When ``control_mode="bilinear"``::
+
+            z_next = z @ K.T + u @ B + sum_i u[..., i] * (z @ N_i.T)
+
+        Global control ``u`` has shape ``(control_dim,)``; per-node control
+        has shape ``(num_nodes, control_dim)``.
 
         Parameters
         ----------
@@ -836,7 +957,14 @@ class KoopmanOperator(nn.Module):
         )
         if control.ndim == 1:
             offset = self._broadcast_control_term(z, offset)
-        return z_next + offset
+        z_next = z_next + offset
+        if self.control_mode == "bilinear":
+            z_next = z_next + bilinear_state_control_term(
+                z,
+                control,
+                self.bilinear_matrices(),
+            )
+        return z_next
 
     def inverse_step(
         self,
@@ -847,9 +975,11 @@ class KoopmanOperator(nn.Module):
     ) -> Tensor:
         """Apply one inverse Koopman step to recover the previous latent state.
 
-        For forward dynamics ``z_{t+1} = z_t @ K.T + u_t @ B``, this returns
+        For additive control ``z_{t+1} = z_t @ K.T + u_t @ B``, this returns
         an estimate of ``z_t`` from ``z_{t+1}`` and the control ``u_t`` that
-        drove the transition.
+        drove the transition. For bilinear control with **global** ``u``, the
+        effective map ``K_eff = K + sum_i u_i N_i`` is inverted. Per-node
+        bilinear inverse applies a distinct ``K_eff`` per node.
 
         Parameters
         ----------
@@ -859,8 +989,9 @@ class KoopmanOperator(nn.Module):
             Control input that drove the forward transition. Required when
             :attr:`control_dim` is positive.
         inverse_matrix : Tensor or None, optional
-            Precomputed ``K^{-1}`` for dense parameterization. When omitted, the
-            inverse is computed on demand.
+            Precomputed ``K^{-1}`` for dense additive parameterization. When
+            omitted, the inverse is computed on demand. Ignored for bilinear
+            mode (effective ``K_eff`` is inverted instead).
 
         Returns
         -------
@@ -879,8 +1010,64 @@ class KoopmanOperator(nn.Module):
             if control.ndim == 1:
                 offset = self._broadcast_control_term(z, offset)
             adjusted = z - offset
+
+            if self.control_mode == "bilinear":
+                return self._inverse_bilinear(adjusted, control)
+
         inverse_k = self._inverse_matrix(inverse_matrix=inverse_matrix)
         return adjusted @ inverse_k.T
+
+    def _inverse_bilinear(self, adjusted: Tensor, control: Tensor) -> Tensor:
+        """Invert a bilinear step after subtracting the additive ``u @ B`` term.
+
+        Parameters
+        ----------
+        adjusted : Tensor
+            ``z_next - u @ B`` with shape ``(..., latent_dim)``.
+        control : Tensor
+            Control that drove the forward step.
+
+        Returns
+        -------
+        Tensor
+            Recovered ``z_t``.
+        """
+        coupling = self.bilinear_matrices()
+        if control.ndim == 1:
+            k_eff = effective_bilinear_matrix(self.K, control, coupling)
+            try:
+                inverse_k = torch.linalg.inv(k_eff)
+            except RuntimeError:
+                inverse_k = torch.linalg.pinv(k_eff)
+            return adjusted @ inverse_k.T
+
+        if control.ndim == 2:
+            # Per-node: z_n @ (K + sum_i u_{n,i} N_i).T
+            if adjusted.ndim < 2 or adjusted.shape[-2] != control.shape[0]:
+                msg = (
+                    "per-node bilinear inverse requires adjusted latents with "
+                    f"node axis matching control rows, got {tuple(adjusted.shape)}"
+                )
+                raise ValueError(msg)
+            recovered = torch.empty_like(adjusted)
+            for node_idx in range(control.shape[0]):
+                k_eff = effective_bilinear_matrix(
+                    self.K,
+                    control[node_idx],
+                    coupling,
+                )
+                try:
+                    inverse_k = torch.linalg.inv(k_eff)
+                except RuntimeError:
+                    inverse_k = torch.linalg.pinv(k_eff)
+                recovered[..., node_idx, :] = adjusted[..., node_idx, :] @ inverse_k.T
+            return recovered
+
+        msg = (
+            "control input must have shape (control_dim,) or "
+            f"(num_nodes, control_dim), got {tuple(control.shape)}"
+        )
+        raise ValueError(msg)
 
     def advance(
         self,
@@ -888,11 +1075,14 @@ class KoopmanOperator(nn.Module):
         delta_t: float | Tensor | None = None,
         *,
         control: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Advance latent states by one discrete Koopman step.
 
         Implements :class:`KoopmanOperatorContract`. ``delta_t`` is accepted for
-        API symmetry with continuous operators and is ignored.
+        API symmetry with continuous operators and is ignored. Topology kwargs
+        are accepted for API symmetry with networked operators and ignored.
 
         Parameters
         ----------
@@ -903,13 +1093,17 @@ class KoopmanOperator(nn.Module):
         control : Tensor or None, optional
             Exogenous control input. Required when :attr:`control_dim` is
             positive.
+        edge_index : Tensor or None, optional
+            Ignored for per-node operators.
+        edge_weight : Tensor or None, optional
+            Ignored for per-node operators.
 
         Returns
         -------
         Tensor
             Advanced latent states with the same shape as ``z``.
         """
-        _ = delta_t
+        _ = delta_t, edge_index, edge_weight
         return self.forward(z, control=control)
 
     def inverse_advance(
@@ -919,6 +1113,8 @@ class KoopmanOperator(nn.Module):
         *,
         control: Tensor | None = None,
         inverse_matrix: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Recover the previous latent state (contract alias of :meth:`inverse_step`).
 
@@ -932,13 +1128,17 @@ class KoopmanOperator(nn.Module):
             Control that drove the forward transition.
         inverse_matrix : Tensor or None, optional
             Optional precomputed ``K^{-1}``.
+        edge_index : Tensor or None, optional
+            Ignored for per-node operators.
+        edge_weight : Tensor or None, optional
+            Ignored for per-node operators.
 
         Returns
         -------
         Tensor
             Recovered latent states at time ``t``.
         """
-        _ = delta_t
+        _ = delta_t, edge_index, edge_weight
         return self.inverse_step(
             z,
             control=control,

@@ -293,12 +293,26 @@ def evaluate_forecast(
                     future_topologies = [
                         sequence[start + step] for step in range(1, max_horizon + 1)
                     ]
-                predictions = model.predict(
-                    initial_graph,
-                    steps=max_horizon,
-                    controls=controls,
-                    future_topologies=future_topologies,
-                )
+                history = None
+                n_delays = int(getattr(model, "n_delays", 1))
+                if n_delays > 1:
+                    history = [
+                        sequence[t] for t in range(max(0, start - n_delays + 1), start)
+                    ]
+                    predictions = model.predict(
+                        initial_graph,
+                        steps=max_horizon,
+                        controls=controls,
+                        future_topologies=future_topologies,
+                        history=history,
+                    )
+                else:
+                    predictions = model.predict(
+                        initial_graph,
+                        steps=max_horizon,
+                        controls=controls,
+                        future_topologies=future_topologies,
+                    )
                 for horizon in sorted_horizons:
                     pred = predictions[horizon - 1].x
                     target = sequence[start + horizon].x

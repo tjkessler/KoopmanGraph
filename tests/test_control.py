@@ -303,3 +303,178 @@ def test_ieee118_exposes_load_ramp_controls() -> None:
     assert sequence.control_dim == 1
     assert sequence.control_inputs is not None
     assert sequence.control_inputs.shape == (8, 1)
+
+
+def test_bilinear_operator_forward_inverse_and_gradients() -> None:
+    """Verify bilinear forward/inverse consistency and gradient flow."""
+    operator = KoopmanOperator(
+        3,
+        control_dim=2,
+        control_mode="bilinear",
+        init_mode="identity",
+    )
+    k = torch.diag(torch.tensor([0.8, 0.9, 1.0]))
+    b = torch.tensor([[0.1, -0.05, 0.0], [0.0, 0.2, -0.1]])
+    n = torch.zeros(2, 3, 3)
+    n[0] = torch.tensor([[0.0, 0.2, 0.0], [0.0, 0.0, 0.1], [0.05, 0.0, 0.0]])
+    n[1] = torch.tensor([[0.1, 0.0, 0.0], [0.0, -0.1, 0.0], [0.0, 0.0, 0.05]])
+    operator.set_dense_matrix(k, control_matrix=b, bilinear_matrices=n)
+
+    z = torch.randn(5, 3, requires_grad=True)
+    control = torch.tensor([0.4, -0.2])
+    z_next = operator(z, control=control)
+    expected = z @ k.T + control @ b
+    expected = expected + control[0] * (z @ n[0].T) + control[1] * (z @ n[1].T)
+    assert torch.allclose(z_next, expected, atol=1e-6)
+
+    recovered = operator.inverse_step(z_next.detach(), control=control)
+    assert torch.allclose(recovered, z.detach(), atol=1e-5)
+
+    loss = z_next.square().sum()
+    loss.backward()
+    assert z.grad is not None
+    assert operator.N.grad is not None
+    assert operator.B.grad is not None
+
+
+def test_bilinear_low_rank_factors_match_full_coupling() -> None:
+    """Verify low-rank P/Q assemble to an equivalent full N."""
+    operator = KoopmanOperator(
+        4,
+        control_dim=1,
+        control_mode="bilinear",
+        bilinear_rank=2,
+        init_mode="identity",
+    )
+    with torch.no_grad():
+        operator.B.copy_(torch.zeros(1, 4))
+        p_factors = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [0.5, 0.0], [0.0, 0.25]]])
+        q_factors = torch.tensor([[[0.0, 1.0], [1.0, 0.0], [0.0, 0.5], [0.25, 0.0]]])
+        operator.P.copy_(p_factors)
+        operator.Q.copy_(q_factors)
+
+    coupling = operator.bilinear_matrices()
+    expected = operator.P[0] @ operator.Q[0].T
+    assert coupling.shape == (1, 4, 4)
+    assert torch.allclose(coupling[0], expected)
+
+    z = torch.randn(3, 4)
+    control = torch.tensor([0.7])
+    z_next = operator(z, control=control)
+    manual = z @ operator.K.T + control[0] * (z @ expected.T)
+    assert torch.allclose(z_next, manual, atol=1e-6)
+
+
+def test_bilinear_recovers_synthetic_system_additive_underfits() -> None:
+    """Bilinear mode fits a pure state–control coupling; additive cannot."""
+    torch.manual_seed(0)
+    true_k = torch.diag(torch.tensor([0.85, 0.9]))
+    true_n = torch.tensor([[[0.0, 0.8], [-0.7, 0.0]]])
+    true_b = torch.zeros(1, 2)
+
+    z0 = torch.tensor([1.0, -0.5])
+    controls = torch.linspace(-1.0, 1.0, 40)
+    states = [z0]
+    z = z0.clone()
+    for value in controls[:-1]:
+        u = torch.tensor([float(value)])
+        z = z @ true_k.T + u @ true_b + u[0] * (z @ true_n[0].T)
+        states.append(z.clone())
+
+    def _fit_mode(mode: str) -> float:
+        operator = KoopmanOperator(
+            2,
+            control_dim=1,
+            control_mode=mode,  # type: ignore[arg-type]
+            init_mode="identity",
+        )
+        with torch.no_grad():
+            operator.set_dense_matrix(
+                true_k,
+                control_matrix=torch.zeros(1, 2),
+                **(
+                    {"bilinear_matrices": torch.zeros_like(true_n)}
+                    if mode == "bilinear"
+                    else {}
+                ),
+            )
+        # Keep K fixed at the true free dynamics; only fit control factors.
+        operator._parameters["K"].requires_grad_(False)
+        opt = torch.optim.Adam(
+            [p for p in operator.parameters() if p.requires_grad],
+            lr=5e-2,
+        )
+        final_loss = torch.tensor(0.0)
+        for _ in range(600):
+            opt.zero_grad()
+            loss = torch.zeros(())
+            for t, value in enumerate(controls[:-1]):
+                u = torch.tensor([float(value)])
+                pred = operator(states[t], control=u)
+                loss = loss + (pred - states[t + 1]).square().mean()
+            loss.backward()
+            opt.step()
+            final_loss = loss.detach()
+        return float(final_loss)
+
+    additive_loss = _fit_mode("additive")
+    bilinear_loss = _fit_mode("bilinear")
+    assert bilinear_loss < 1e-3
+    assert additive_loss > 5e-2
+    assert bilinear_loss < 0.1 * additive_loss
+
+
+def test_bilinear_continuous_step_matches_effective_generator() -> None:
+    """Continuous bilinear advance matches Van Loan on L_eff."""
+    from koopman_graph.operators import ContinuousKoopmanOperator, van_loan_factors
+
+    operator = ContinuousKoopmanOperator(
+        2,
+        control_dim=1,
+        control_mode="bilinear",
+        init_mode="identity",
+    )
+    l_mat = torch.tensor([[-0.5, 0.1], [0.0, -0.4]])
+    b = torch.tensor([[0.2, -0.1]])
+    n = torch.tensor([[[0.0, 0.3], [-0.2, 0.0]]])
+    operator.set_dense_matrix(l_mat, control_matrix=b, bilinear_matrices=n)
+
+    z = torch.tensor([[1.0, -0.5], [0.25, 0.75]])
+    control = torch.tensor([0.5])
+    delta = torch.tensor(0.2)
+    got = operator.advance(z, delta, control=control)
+
+    l_eff = l_mat + control[0] * n[0]
+    phi11, phi12 = van_loan_factors(l_eff, b, delta)
+    expected = z @ phi11.T + control @ phi12.T
+    assert torch.allclose(got, expected, atol=1e-5)
+
+
+def test_bilinear_model_serialization_round_trip(tmp_path: Path) -> None:
+    """Verify control_mode and bilinear factors survive save/load."""
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=1, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=1),
+        latent_dim=4,
+        time_step=0.1,
+        control_dim=1,
+        control_mode="bilinear",
+        bilinear_rank=2,
+    )
+    with torch.no_grad():
+        model.koopman.B.fill_(0.1)
+        model.koopman.P.fill_(0.05)
+        model.koopman.Q.fill_(-0.02)
+
+    checkpoint = tmp_path / "bilinear.pt"
+    model.save(checkpoint)
+    config = build_model_config(model)
+    assert config["control_mode"] == "bilinear"
+    assert config["bilinear_rank"] == 2
+
+    restored = load_checkpoint(checkpoint)
+    assert restored.control_mode == "bilinear"
+    assert restored.bilinear_rank == 2
+    assert torch.allclose(restored.koopman.P, model.koopman.P)
+    assert torch.allclose(restored.koopman.Q, model.koopman.Q)
+    assert torch.allclose(restored.koopman.B, model.koopman.B)

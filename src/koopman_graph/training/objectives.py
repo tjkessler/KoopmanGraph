@@ -16,6 +16,7 @@ from koopman_graph.data import (
     GraphSnapshotSequence,
     resolve_pair_delta_t,
 )
+from koopman_graph.graph_utils import propagate_latent
 from koopman_graph.losses import (
     BackwardConsistencyLoss,
     EigenvalueRegularizationLoss,
@@ -24,6 +25,7 @@ from koopman_graph.losses import (
     rollout_multi_start_loss,
     rollout_sequence_loss,
 )
+from koopman_graph.operators import GraphKoopmanOperator
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.history import LossWeights, TrainingLossBreakdown
 
@@ -53,22 +55,31 @@ def _model_default_delta_t(model: TrainableKoopmanModel) -> float:
     return float(model.resolve_delta_t(None))
 
 
-def _encode_snapshot(model: TrainableKoopmanModel, snapshot: Data) -> Tensor:
-    """Encode a snapshot via the model's primary ``encode`` API.
+def _encode_at(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    index: int,
+) -> Tensor:
+    """Encode with delay history when the model exposes ``encode_at``.
 
     Parameters
     ----------
     model : TrainableKoopmanModel
-        Model exposing :meth:`~koopman_graph.protocols.TrainableKoopmanModel.encode`.
-    snapshot : Data
-        Graph snapshot to encode.
+        Trainable model; may implement ``encode_at(sequence, index)``.
+    sequence : GraphSnapshotSequence
+        Source trajectory.
+    index : int
+        Timestep to encode (window end).
 
     Returns
     -------
     Tensor
         Latent node features.
     """
-    return model.encode(snapshot)
+    encode_at = getattr(model, "encode_at", None)
+    if callable(encode_at):
+        return encode_at(sequence, index)
+    return model.encode(sequence[index])
 
 
 def one_step_loss(
@@ -151,10 +162,9 @@ def _forward_consistency_pair(
     Tensor
         Scalar forward consistency loss for the pair.
     """
-    snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
-    z_t = _encode_snapshot(model, snapshot_t)
-    z_t1 = _encode_snapshot(model, snapshot_t1)
+    z_t = _encode_at(model, sequence, timestep)
+    z_t1 = _encode_at(model, sequence, timestep + 1)
     default_delta_t = _model_default_delta_t(model)
     delta_t = resolve_pair_delta_t(
         sequence,
@@ -167,6 +177,9 @@ def _forward_consistency_pair(
         if sequence.has_observation_masks
         else None
     )
+    # Align with rollout decode policy: advance under the target snapshot topology.
+    edge_index = snapshot_t1.edge_index
+    edge_weight = getattr(snapshot_t1, "edge_weight", None)
     return _FORWARD_CONSISTENCY_LOSS(
         z_t,
         z_t1,
@@ -175,6 +188,8 @@ def _forward_consistency_pair(
         delta_t=delta_t,
         default_delta_t=default_delta_t,
         mask=pair_mask,
+        edge_index=edge_index,
+        edge_weight=edge_weight,
     )
 
 
@@ -203,10 +218,9 @@ def _backward_consistency_pair(
     Tensor
         Scalar backward consistency loss for the pair.
     """
-    snapshot_t = sequence[timestep]
     snapshot_t1 = sequence[timestep + 1]
-    z_t = _encode_snapshot(model, snapshot_t)
-    z_t1 = _encode_snapshot(model, snapshot_t1)
+    z_t = _encode_at(model, sequence, timestep)
+    z_t1 = _encode_at(model, sequence, timestep + 1)
     default_delta_t = _model_default_delta_t(model)
     delta_t = resolve_pair_delta_t(
         sequence,
@@ -219,6 +233,8 @@ def _backward_consistency_pair(
         if sequence.has_observation_masks
         else None
     )
+    edge_index = snapshot_t1.edge_index
+    edge_weight = getattr(snapshot_t1, "edge_weight", None)
     return _BACKWARD_CONSISTENCY_LOSS(
         z_t,
         z_t1,
@@ -228,6 +244,8 @@ def _backward_consistency_pair(
         delta_t=delta_t,
         default_delta_t=default_delta_t,
         mask=pair_mask,
+        edge_index=edge_index,
+        edge_weight=edge_weight,
     )
 
 
@@ -292,6 +310,37 @@ def _one_step_pair(
     target_mask = None
     if sequence.has_observation_masks:
         target_mask = sequence.observation_mask_at(timestep + 1)
+
+    n_delays = int(getattr(model, "n_delays", 1))
+    if n_delays > 1 and callable(getattr(model, "encode_at", None)):
+        snapshot_t = sequence[timestep]
+        snapshot_t1 = sequence[timestep + 1]
+        z = _encode_at(model, sequence, timestep)
+        default_delta_t = _model_default_delta_t(model)
+        delta_t = resolve_pair_delta_t(
+            sequence,
+            timestep,
+            default_time_step=default_delta_t,
+        )
+        z_next = propagate_latent(
+            model.koopman,
+            z,
+            control=_pair_control(sequence, timestep),
+            delta_t=delta_t,
+            default_delta_t=default_delta_t,
+            edge_index=snapshot_t1.edge_index,
+            edge_weight=getattr(snapshot_t1, "edge_weight", None),
+        )
+        prediction = model.decoder(
+            z_next,
+            snapshot_t.edge_index,
+            getattr(snapshot_t, "edge_weight", None),
+        )
+        target = snapshot_t1.x
+        if target_mask is None:
+            return nn.functional.mse_loss(prediction, target)
+        return masked_mse_loss(prediction, target, target_mask)
+
     return one_step_loss(
         model,
         sequence[timestep],
@@ -390,10 +439,14 @@ def compute_backward_consistency_sequence_loss(
         raise ValueError(msg)
 
     # Optional built-in optimization: precompute ``K^{-1}`` once per sequence when
-    # the operator exposes ``dense_inverse_matrix``. Protocol-complete operators
-    # without that helper still work via ``inverse_advance`` (``inverse_matrix=None``).
+    # the operator exposes ``dense_inverse_matrix`` and does not need topology
+    # (networked operators invert the effective ``N·d`` map per pair instead).
     inverse_matrix = None
-    if model.dynamics_mode == "discrete" and model.koopman.parameterization == "dense":
+    if (
+        model.dynamics_mode == "discrete"
+        and model.koopman.parameterization == "dense"
+        and not isinstance(model.koopman, GraphKoopmanOperator)
+    ):
         dense_inverse = getattr(model.koopman, "dense_inverse_matrix", None)
         if callable(dense_inverse):
             inverse_matrix = dense_inverse()

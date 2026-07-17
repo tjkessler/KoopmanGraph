@@ -36,13 +36,20 @@ class ForecastModel(Protocol):
     Structural contract for classical baselines
     (:class:`~koopman_graph.baselines.DMDBaseline`,
     :class:`~koopman_graph.baselines.DMDcBaseline`,
-    :class:`~koopman_graph.baselines.EDMDBaseline`) and
+    :class:`~koopman_graph.baselines.EDMDBaseline`),
+    spatiotemporal GNN forecaster baselines
+    (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
+    :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
+    :class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`), and
     :class:`~koopman_graph.model.GraphKoopmanModel`.
 
     **Not drop-in interchangeable at call sites.** Implementer signatures diverge
     (DMDc ``predict`` requires ``controls``; classical baselines accept ``Data``
-    only; ``GraphKoopmanModel.predict`` also accepts tensors, optional topology /
-    control kwargs; continuous ``spectrum`` may take ``delta_t``).
+    only; GNN forecasters accept optional ``controls`` /
+    ``future_topologies`` kwargs but reject non-``None`` values;
+    ``GraphKoopmanModel.predict`` also accepts tensors, optional topology /
+    control kwargs; continuous ``spectrum`` may take ``delta_t``; GNN
+    ``spectrum`` raises ``RuntimeError``).
     ``fit`` return types also diverge: baselines return ``self``;
     ``GraphKoopmanModel.fit`` returns ``FitHistory``.
     ``@runtime_checkable`` verifies method presence only, not call signatures.

@@ -112,6 +112,8 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
     """Data/adaptation/observables helpers live in capability modules, not root."""
     demoted = {
         "AdaptationStepResult",
+        "FilterResult",
+        "KoopmanObserver",
         "as_multi_trajectory",
         "graph_laplacian_features",
     }
@@ -122,11 +124,17 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
     assert "MultiTrajectory" in exported
     assert "GraphKoopmanEnv" in exported
 
-    from koopman_graph.adaptation import AdaptationStepResult
+    from koopman_graph.adaptation import (
+        AdaptationStepResult,
+        FilterResult,
+        KoopmanObserver,
+    )
     from koopman_graph.data import as_multi_trajectory
     from koopman_graph.observables import graph_laplacian_features
 
     assert AdaptationStepResult is not None
+    assert FilterResult is not None
+    assert KoopmanObserver is not None
     assert callable(as_multi_trajectory)
     assert callable(graph_laplacian_features)
 
@@ -138,6 +146,7 @@ def test_root_all_matches_thin_facade_keep_inventory() -> None:
         "ContinuousKoopmanOperator",
         "DMDBaseline",
         "DMDcBaseline",
+        "DelayEmbeddingEncoder",
         "EDMDBaseline",
         "EigenvalueRegularizationLoss",
         "EvaluationResult",
@@ -149,6 +158,7 @@ def test_root_all_matches_thin_facade_keep_inventory() -> None:
         "GNNEncoder",
         "GraphKoopmanEnv",
         "GraphKoopmanModel",
+        "GraphKoopmanOperator",
         "GraphSnapshotSequence",
         "KoopmanOperator",
         "KoopmanSpectrum",

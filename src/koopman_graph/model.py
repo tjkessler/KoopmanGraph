@@ -33,7 +33,18 @@ from koopman_graph.graph_utils import (
     resolve_edge_weight,
 )
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
-from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder, GNNEncoder
+from koopman_graph.nn import (
+    DelayEmbeddingEncoder,
+    GATDecoder,
+    GATEncoder,
+    GNNDecoder,
+    GNNEncoder,
+)
+from koopman_graph.nn.delay import (
+    history_from_snapshots,
+    resolve_delay_encoder,
+    stack_delay_features,
+)
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
@@ -45,11 +56,14 @@ from koopman_graph.observables import (
 )
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
+    GraphKoopmanOperator,
     InitMode,
+    KoopmanKind,
     KoopmanOperator,
     KoopmanOperatorContract,
     Parameterization,
 )
+from koopman_graph.operators.control import ControlMode
 from koopman_graph.protocols import DynamicsMode
 from koopman_graph.training import (
     EarlyStoppingMonitor,
@@ -68,14 +82,17 @@ from koopman_graph.training import (
 if TYPE_CHECKING:
     from koopman_graph.env import GraphKoopmanEnv
 
-Encoder = GNNEncoder | GATEncoder
+Encoder = GNNEncoder | GATEncoder | DelayEmbeddingEncoder
 Decoder = GNNDecoder | GATDecoder
-KoopmanModule = KoopmanOperator | ContinuousKoopmanOperator
+KoopmanModule = KoopmanOperator | ContinuousKoopmanOperator | GraphKoopmanOperator
+KoopmanArg = KoopmanOperatorContract | KoopmanKind | None
 
 _DEFAULT_KOOPMAN_INIT_MODE: InitMode = "identity_noise"
 _DEFAULT_KOOPMAN_INIT_SCALE = 1e-2
 _DEFAULT_KOOPMAN_PARAMETERIZATION: Parameterization = "dense"
 _DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS = 1.0
+_DEFAULT_CONTROL_MODE: ControlMode = "additive"
+_DEFAULT_BILINEAR_RANK: int | None = None
 
 
 class GraphKoopmanModel(nn.Module):
@@ -106,9 +123,12 @@ class GraphKoopmanModel(nn.Module):
         :meth:`spectrum` to convert discrete eigenvalues into continuous-time
         growth rates and frequencies.
     koopman : KoopmanOperatorContract
-        Learnable linear propagator in latent space. Built-in discrete or
-        continuous operators by default; optionally an injected
+        Learnable linear propagator in latent space. Built-in discrete,
+        continuous, or networked operators by default; optionally an injected
         :class:`~koopman_graph.operators.KoopmanOperatorContract` ``nn.Module``.
+    koopman_kind : {"pernode", "graph"}
+        Factory kind used when constructing a built-in discrete operator
+        (``"graph"`` selects :class:`~koopman_graph.operators.GraphKoopmanOperator`).
     dynamics_mode : {"discrete", "continuous"}
         Whether latent evolution uses a discrete step map or a continuous
         generator integrated with matrix exponentials.
@@ -122,23 +142,30 @@ class GraphKoopmanModel(nn.Module):
         time_step: float,
         *,
         dynamics_mode: DynamicsMode = "discrete",
-        koopman: KoopmanOperatorContract | None = None,
+        koopman: KoopmanArg = None,
         koopman_init_mode: InitMode = _DEFAULT_KOOPMAN_INIT_MODE,
         koopman_init_scale: float = _DEFAULT_KOOPMAN_INIT_SCALE,
         koopman_parameterization: Parameterization = _DEFAULT_KOOPMAN_PARAMETERIZATION,
         koopman_max_spectral_radius: float = _DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
         control_dim: int = 0,
+        control_mode: ControlMode = _DEFAULT_CONTROL_MODE,
+        bilinear_rank: int | None = _DEFAULT_BILINEAR_RANK,
         physics_lifting_fn: PhysicsLiftingFn | None = None,
         physics_preset: str | None = None,
         physics_dim: int = 0,
         physics_position: PhysicsPosition = PHYSICS_POSITION,
+        n_delays: int = 1,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
         Parameters
         ----------
-        encoder : GNNEncoder or GATEncoder
-            Topology-aware encoder for latent lifting.
+        encoder : GNNEncoder, GATEncoder, or DelayEmbeddingEncoder
+            Topology-aware encoder for latent lifting. When ``n_delays > 1``,
+            pass a base encoder already sized with
+            ``in_channels = n_delays * feature_dim`` (composition; layers are
+            not rebuilt) or an existing
+            :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`.
         decoder : GNNDecoder or GATDecoder
             Symmetric GNN decoder for physical reconstruction.
         latent_dim : int
@@ -152,19 +179,18 @@ class GraphKoopmanModel(nn.Module):
             Latent evolution mode. ``"discrete"`` preserves the v0.2 behavior;
             ``"continuous"`` learns a generator integrated via matrix
             exponentials. Default is ``"discrete"``. When injecting a built-in
-            operator, ``dynamics_mode`` must match its type.
-        koopman : KoopmanOperatorContract or None, optional
-            Optional pre-built operator module satisfying
-            :class:`~koopman_graph.operators.KoopmanOperatorContract`. When
-            provided, factory kwargs (``koopman_init_mode``,
-            ``koopman_init_scale``, ``koopman_parameterization``,
-            ``koopman_max_spectral_radius``) must remain at their defaults.
-            Omit to construct a built-in discrete or continuous operator from
-            string-mode settings (tutorial default).
+            operator, ``dynamics_mode`` must match its type. Networked
+            ``koopman="graph"`` requires ``dynamics_mode="discrete"``.
+        koopman : KoopmanOperatorContract, {"pernode", "graph"}, or None, optional
+            Operator selection. Pass ``"pernode"`` (default) or ``"graph"`` to
+            construct a built-in discrete operator, or inject a pre-built
+            :class:`~koopman_graph.operators.KoopmanOperatorContract`
+            ``nn.Module``. When injecting, factory kwargs must remain at their
+            defaults. Continuous models ignore ``"graph"`` (raises).
         koopman_init_mode : {"identity", "identity_noise", "xavier"}, optional
             Initialization strategy for the Koopman matrix. Default is
             ``"identity_noise"``. Ignored (and must stay default) when
-            ``koopman`` is injected.
+            ``koopman`` is an injected module.
         koopman_init_scale : float, optional
             Noise scale when ``koopman_init_mode="identity_noise"``.
             Default is ``1e-2``.
@@ -182,6 +208,14 @@ class GraphKoopmanModel(nn.Module):
             Dimension of exogenous control inputs. When ``0``, the model is
             uncontrolled. Default is ``0``. Must match ``koopman.control_dim``
             when an operator is injected.
+        control_mode : {"additive", "bilinear"}, optional
+            How controls enter the latent map. ``"additive"`` (default) uses
+            ``z @ K.T + u @ B``. ``"bilinear"`` adds state–control couplings
+            for control-affine systems. Must match an injected operator's
+            ``control_mode`` when present.
+        bilinear_rank : int or None, optional
+            Optional low-rank size for bilinear ``N_i = P_i Q_i^T``. ``None``
+            stores full-rank ``N_i``. Only valid with ``control_mode="bilinear"``.
         physics_lifting_fn : callable or None, optional
             Callable mapping a PyG ``Data`` snapshot to physics-informed node
             features with shape ``(num_nodes, physics_dim)``. When provided,
@@ -200,17 +234,30 @@ class GraphKoopmanModel(nn.Module):
             Where physics features sit relative to GNN embeddings in the hybrid
             latent. Only ``"prepend"`` is supported today. Round-tripped via
             checkpoint ``physics.position``.
+        n_delays : int, optional
+            Hankel / delay-embedding window length at the encoder boundary.
+            ``1`` preserves single-snapshot encoding (default). When ``> 1``,
+            a bare :class:`~koopman_graph.nn.encoder.GNNEncoder` /
+            :class:`~koopman_graph.nn.encoder.GATEncoder` is wrapped in
+            :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` without
+            rebuilding layers — size ``encoder.in_channels = n_delays *
+            feature_dim`` yourself. Autoregressive ``predict`` encodes the
+            provided observation history **once**, then advances in latent
+            space (decoded rollouts are **not** fed back as delay coordinates
+            by default).
 
         Raises
         ------
         ValueError
             If ``latent_dim`` is not positive, ``time_step <= 0``,
-            ``control_dim < 0``, physics settings are inconsistent, encoder/
-            decoder latent dimensions do not match the effective hybrid layout,
-            an injected operator conflicts with factory kwargs or dimensions, or
-            ``dynamics_mode`` disagrees with a built-in injected operator type.
+            ``control_dim < 0``, ``n_delays < 1``, physics settings are
+            inconsistent, encoder/decoder latent dimensions do not match the
+            effective hybrid layout, an injected operator conflicts with
+            factory kwargs or dimensions, ``dynamics_mode`` disagrees with a
+            built-in injected operator type, or ``koopman="graph"`` is
+            requested in continuous mode.
         TypeError
-            If ``koopman`` is provided but is not an ``nn.Module``.
+            If ``koopman`` is provided but is not a string kind or ``nn.Module``.
         """
         super().__init__()
         if dynamics_mode not in {"discrete", "continuous"}:
@@ -231,6 +278,11 @@ class GraphKoopmanModel(nn.Module):
         if physics_dim < 0:
             msg = f"physics_dim must be non-negative, got {physics_dim}"
             raise ValueError(msg)
+        if n_delays < 1:
+            msg = f"n_delays must be >= 1, got {n_delays}"
+            raise ValueError(msg)
+
+        encoder, resolved_n_delays = resolve_delay_encoder(encoder, n_delays)
 
         resolved_physics_fn = resolve_physics_lifting_fn(
             physics_preset=physics_preset,
@@ -271,19 +323,35 @@ class GraphKoopmanModel(nn.Module):
         self.physics_position = resolve_physics_position(physics_position)
         self.time_step = time_step
         self.control_dim = control_dim
+        self.control_mode = control_mode
+        self.bilinear_rank = bilinear_rank
         self.dynamics_mode = dynamics_mode
-        if koopman is not None:
+        self.n_delays = resolved_n_delays
+
+        kind, injected = self._parse_koopman_arg(koopman)
+        if injected is not None:
             self.koopman = self._resolve_injected_koopman(
-                koopman,
+                injected,
                 latent_dim=latent_dim,
                 control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
                 dynamics_mode=dynamics_mode,
                 koopman_init_mode=koopman_init_mode,
                 koopman_init_scale=koopman_init_scale,
                 koopman_parameterization=koopman_parameterization,
                 koopman_max_spectral_radius=koopman_max_spectral_radius,
             )
+            self.koopman_kind = (
+                "graph" if isinstance(self.koopman, GraphKoopmanOperator) else "pernode"
+            )
         elif dynamics_mode == "continuous":
+            if kind == "graph":
+                msg = (
+                    "koopman='graph' requires dynamics_mode='discrete'; "
+                    "networked continuous operators are not implemented"
+                )
+                raise ValueError(msg)
             self.koopman = ContinuousKoopmanOperator(
                 latent_dim,
                 init_mode=koopman_init_mode,
@@ -291,7 +359,22 @@ class GraphKoopmanModel(nn.Module):
                 parameterization=koopman_parameterization,
                 max_real_eigenvalue=koopman_max_spectral_radius,
                 control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
             )
+            self.koopman_kind = "pernode"
+        elif kind == "graph":
+            self.koopman = GraphKoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+            )
+            self.koopman_kind = "graph"
         else:
             self.koopman = KoopmanOperator(
                 latent_dim,
@@ -300,7 +383,44 @@ class GraphKoopmanModel(nn.Module):
                 parameterization=koopman_parameterization,
                 max_spectral_radius=koopman_max_spectral_radius,
                 control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
             )
+            self.koopman_kind = "pernode"
+
+    @staticmethod
+    def _parse_koopman_arg(
+        koopman: KoopmanArg,
+    ) -> tuple[KoopmanKind, KoopmanOperatorContract | None]:
+        """Split string factory kinds from injected operator modules.
+
+        Parameters
+        ----------
+        koopman : KoopmanOperatorContract, {"pernode", "graph"}, or None
+            Constructor argument.
+
+        Returns
+        -------
+        tuple[KoopmanKind, KoopmanOperatorContract or None]
+            Resolved factory kind and optional injected module.
+
+        Raises
+        ------
+        TypeError
+            If ``koopman`` is neither a known string nor a contract module.
+        ValueError
+            If ``koopman`` is an unknown string kind.
+        """
+        if koopman is None:
+            return "pernode", None
+        if isinstance(koopman, str):
+            if koopman not in {"pernode", "graph"}:
+                msg = (
+                    f"koopman string kind must be 'pernode' or 'graph', got {koopman!r}"
+                )
+                raise ValueError(msg)
+            return koopman, None
+        return "pernode", koopman
 
     @staticmethod
     def _resolve_injected_koopman(
@@ -308,6 +428,8 @@ class GraphKoopmanModel(nn.Module):
         *,
         latent_dim: int,
         control_dim: int,
+        control_mode: ControlMode,
+        bilinear_rank: int | None,
         dynamics_mode: DynamicsMode,
         koopman_init_mode: InitMode,
         koopman_init_scale: float,
@@ -324,6 +446,10 @@ class GraphKoopmanModel(nn.Module):
             Model latent dimension.
         control_dim : int
             Model control dimension.
+        control_mode : {"additive", "bilinear"}
+            Model control mode (must match injected operator when set).
+        bilinear_rank : int or None
+            Model bilinear rank (must match injected operator when set).
         dynamics_mode : {"discrete", "continuous"}
             Requested dynamics mode.
         koopman_init_mode : InitMode
@@ -386,6 +512,21 @@ class GraphKoopmanModel(nn.Module):
             )
             raise ValueError(msg)
 
+        injected_mode = getattr(koopman, "control_mode", _DEFAULT_CONTROL_MODE)
+        injected_rank = getattr(koopman, "bilinear_rank", _DEFAULT_BILINEAR_RANK)
+        if injected_mode != control_mode:
+            msg = (
+                f"Injected koopman.control_mode ({injected_mode!r}) must match "
+                f"control_mode ({control_mode!r})"
+            )
+            raise ValueError(msg)
+        if injected_rank != bilinear_rank:
+            msg = (
+                f"Injected koopman.bilinear_rank ({injected_rank!r}) must match "
+                f"bilinear_rank ({bilinear_rank!r})"
+            )
+            raise ValueError(msg)
+
         if (
             isinstance(koopman, ContinuousKoopmanOperator)
             and dynamics_mode != "continuous"
@@ -397,8 +538,23 @@ class GraphKoopmanModel(nn.Module):
         if isinstance(koopman, KoopmanOperator) and dynamics_mode != "discrete":
             msg = "Injected KoopmanOperator requires dynamics_mode='discrete'"
             raise ValueError(msg)
+        if isinstance(koopman, GraphKoopmanOperator) and dynamics_mode != "discrete":
+            msg = "Injected GraphKoopmanOperator requires dynamics_mode='discrete'"
+            raise ValueError(msg)
 
         return koopman
+
+    @property
+    def uses_graph_koopman(self) -> bool:
+        """Return whether latent advance uses the networked graph operator.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`koopman` is a
+            :class:`~koopman_graph.operators.GraphKoopmanOperator`.
+        """
+        return isinstance(self.koopman, GraphKoopmanOperator)
 
     @property
     def is_continuous(self) -> bool:
@@ -441,6 +597,8 @@ class GraphKoopmanModel(nn.Module):
         *,
         control: Tensor | None = None,
         delta_t: float | Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Advance latent states with the active Koopman operator.
 
@@ -455,6 +613,8 @@ class GraphKoopmanModel(nn.Module):
             control=control,
             delta_t=self.resolve_delta_t(delta_t),
             default_delta_t=self.time_step,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
         )
 
     def spectrum(self, *, delta_t: float | None = None) -> KoopmanSpectrum:
@@ -488,10 +648,17 @@ class GraphKoopmanModel(nn.Module):
         When physics-informed observables are configured, returns
         ``[z_physics || z_gnn]`` with shape ``(num_nodes, latent_dim)``.
 
+        For ``n_delays > 1``, ``x_or_data`` may be a delay window
+        ``(n_delays, num_nodes, F)``, stacked features
+        ``(num_nodes, n_delays * F)``, or a ``Data`` whose ``x`` is already
+        stacked. Prefer :meth:`encode_at` when lifting from a
+        :class:`~koopman_graph.data.GraphSnapshotSequence` so teacher-forced
+        history is assembled correctly.
+
         Parameters
         ----------
         x_or_data : Tensor or Data
-            Node features or a PyG ``Data`` snapshot.
+            Node features, delay window, or a PyG ``Data`` snapshot.
         edge_index : Tensor or None, optional
             Edge index required when ``x_or_data`` is a tensor.
         edge_weight : Tensor or None, optional
@@ -502,6 +669,19 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Latent node features with shape ``(num_nodes, latent_dim)``.
         """
+        if isinstance(x_or_data, Tensor) and x_or_data.ndim == 3:
+            if edge_index is None:
+                msg = "edge_index is required for delay-window tensor input"
+                raise ValueError(msg)
+            z_gnn = self.encoder(x_or_data, edge_index, edge_weight)
+            if self.physics_lifting_fn is None:
+                return z_gnn
+            msg = (
+                "physics-informed observables with raw delay-window tensors are "
+                "unsupported; pass a Data snapshot or use encode_at"
+            )
+            raise ValueError(msg)
+
         edge_index = resolve_edge_index(x_or_data, edge_index)
         edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         z_gnn = self.encoder(x_or_data, edge_index, edge_weight)
@@ -509,6 +689,82 @@ class GraphKoopmanModel(nn.Module):
             return z_gnn
 
         snapshot = self._as_data(x_or_data, edge_index, edge_weight)
+        physics_features = self.physics_lifting_fn(snapshot)
+        validate_physics_output(
+            physics_features,
+            physics_dim=self.physics_dim,
+            num_nodes=z_gnn.size(0),
+        )
+        return concatenate_observables(
+            physics_features,
+            z_gnn,
+            position=self.physics_position,
+        )
+
+    def encode_at(
+        self,
+        sequence: GraphSnapshotSequence,
+        index: int,
+        *,
+        pad: bool = True,
+        zero_unobserved: bool = True,
+    ) -> Tensor:
+        """Encode the delay window of ``sequence`` ending at ``index``.
+
+        When ``n_delays == 1``, this is equivalent to ``encode(sequence[index])``
+        (optionally zeroing unobserved rows). When ``n_delays > 1``, builds a
+        teacher-forced Hankel window from observed history — not from decoded
+        rollouts.
+
+        Parameters
+        ----------
+        sequence : GraphSnapshotSequence
+            Source trajectory.
+        index : int
+            Inclusive end index of the delay window.
+        pad : bool, optional
+            Zero-pad missing history before the sequence start. Default is
+            ``True``.
+        zero_unobserved : bool, optional
+            Zero unobserved node features inside the window when masks are
+            present. Default is ``True``.
+
+        Returns
+        -------
+        Tensor
+            Latent node features with shape ``(num_nodes, latent_dim)``.
+        """
+        if self.n_delays == 1:
+            snapshot = sequence[index]
+            x = snapshot.x
+            if zero_unobserved and sequence.has_observation_masks:
+                from koopman_graph.nn.delay import apply_observation_mask_to_features
+
+                x = apply_observation_mask_to_features(
+                    x,
+                    sequence.observation_mask_at(index),
+                )
+                snapshot = Data(
+                    x=x,
+                    edge_index=snapshot.edge_index,
+                    edge_weight=getattr(snapshot, "edge_weight", None),
+                )
+            return self.encode(snapshot)
+
+        x_window, edge_index, edge_weight, _history_mask = stack_delay_features(
+            sequence,
+            index,
+            self.n_delays,
+            pad=pad,
+            zero_unobserved=zero_unobserved,
+        )
+        z_gnn = self.encoder(x_window, edge_index, edge_weight)
+        if self.physics_lifting_fn is None:
+            return z_gnn
+
+        # Physics lifting uses the newest snapshot's topology/features (not the
+        # full delay stack) to stay consistent with single-snapshot physics.
+        snapshot = sequence[index]
         physics_features = self.physics_lifting_fn(snapshot)
         validate_physics_output(
             physics_features,
@@ -770,7 +1026,13 @@ class GraphKoopmanModel(nn.Module):
         edge_index = resolve_edge_index(x_or_data, edge_index)
         edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         z = self.encode(x_or_data, edge_index, edge_weight)
-        z_next = self._advance_latent(z, control=control, delta_t=delta_t)
+        z_next = self._advance_latent(
+            z,
+            control=control,
+            delta_t=delta_t,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+        )
         return self.decoder(z_next, edge_index, edge_weight)
 
     def _rollout(
@@ -782,11 +1044,14 @@ class GraphKoopmanModel(nn.Module):
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | None = None,
         step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
+        history: Sequence[Data] | None = None,
     ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
         """Autoregressively advance latent state and decode for multiple steps.
 
-        Encodes the initial graph once, then applies the Koopman operator
-        repeatedly in latent space, decoding after each step.
+        Encodes the initial graph once (optionally using a delay-history
+        window), then applies the Koopman operator repeatedly in latent space,
+        decoding after each step. Decoded predictions are **not** appended to
+        the delay buffer.
 
         Parameters
         ----------
@@ -811,6 +1076,10 @@ class GraphKoopmanModel(nn.Module):
         step_deltas : sequence of float or Tensor or None, optional
             Integration interval for each rollout step. When omitted, each step
             uses :attr:`time_step`.
+        history : sequence of Data or None, optional
+            Past snapshots (oldest → newest) used with ``x_or_data`` to form a
+            delay window when ``n_delays > 1``. When omitted, missing history
+            is zero-padded.
 
         Returns
         -------
@@ -828,13 +1097,23 @@ class GraphKoopmanModel(nn.Module):
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)
 
-        edge_index = resolve_edge_index(x_or_data, edge_index)
-        edge_weight = resolve_edge_weight(x_or_data, edge_weight)
         self._validate_controls(controls, steps=steps)
         if step_deltas is not None and len(step_deltas) != steps:
             msg = f"expected {steps} step_deltas for rollout, got {len(step_deltas)}"
             raise ValueError(msg)
-        z = self.encode(x_or_data, edge_index, edge_weight)
+
+        if self.n_delays > 1 and isinstance(x_or_data, Data):
+            past = list(history) if history is not None else []
+            x_window, edge_index, edge_weight, _ = history_from_snapshots(
+                [*past, x_or_data],
+                self.n_delays,
+                pad=True,
+            )
+            z = self.encode(x_window, edge_index, edge_weight)
+        else:
+            edge_index = resolve_edge_index(x_or_data, edge_index)
+            edge_weight = resolve_edge_weight(x_or_data, edge_weight)
+            z = self.encode(x_or_data, edge_index, edge_weight)
 
         control_at = None if controls is None else (lambda step: controls[step])
         delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
@@ -861,12 +1140,18 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | None = None,
+        history: Sequence[Data] | None = None,
     ) -> list[Data]:
         """Autoregressively predict future graph snapshots.
 
         Encodes the initial graph once, advances the latent state with the
         Koopman operator for ``steps`` iterations, and decodes after each step.
         Runs in evaluation mode without gradient tracking.
+
+        When ``n_delays > 1``, pass prior observations via ``history``
+        (oldest → newest, excluding ``initial_graph``). Missing history is
+        zero-padded. Decoded forecasts are **not** recycled into the delay
+        buffer.
 
         The uncontrolled peer call site ``predict(data, steps)`` matches
         :class:`~koopman_graph.baselines.DMDBaseline` /
@@ -903,6 +1188,9 @@ class GraphKoopmanModel(nn.Module):
         future_topologies : sequence of Data or None, optional
             Known topologies for rollout decode steps. Shorter sequences hold
             the last provided topology for remaining steps.
+        history : sequence of Data or None, optional
+            Prior observations (oldest → newest, excluding ``initial_graph``)
+            for delay embedding when ``n_delays > 1``.
 
         Returns
         -------
@@ -928,6 +1216,7 @@ class GraphKoopmanModel(nn.Module):
                     edge_weight,
                     controls=controls,
                     future_topologies=future_topologies,
+                    history=history,
                 )
         finally:
             self.train(was_training)

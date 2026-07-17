@@ -65,6 +65,12 @@ Convert a flat module into a capability package when **any** of these hold:
 
 Phase 8 capability packages: ``training/``, ``data/``, ``operators/``,
 ``nn/``, ``analysis/``, and ``baselines/`` (all landed).
+``adaptation/`` is also a capability package (RLS + Kalman observer).
+
+``koopman_graph.adaptation`` package layout:
+
+* ``rls`` — ``RecursiveKoopmanAdapter``, ``AdaptationStepResult``
+* ``observer`` — ``KoopmanObserver``, ``FilterResult``
 
 ``koopman_graph.training`` package layout:
 
@@ -85,13 +91,16 @@ Phase 8 capability packages: ``training/``, ``data/``, ``operators/``,
 * ``splits`` — ``TemporalSplit``, ``temporal_split``
 * ``rollout`` — ``resolve_rollout_start_indices`` and related type aliases
 
-``koopman_graph.operators`` package layout (peer discrete/continuous pair):
+``koopman_graph.operators`` package layout (peer discrete/continuous/networked):
 
 * ``contract`` — ``KoopmanOperatorContract``, ``Parameterization``,
-  ``DynamicsMode``, ``StabilityCertificate``, shared structural helpers
+  ``DynamicsMode``, ``KoopmanKind``, ``StabilityCertificate``, shared structural
+  helpers
 * ``discrete`` — :class:`~koopman_graph.operators.discrete.KoopmanOperator`
 * ``continuous`` — :class:`~koopman_graph.operators.continuous.ContinuousKoopmanOperator`
   and Van Loan helpers
+* ``graph`` — :class:`~koopman_graph.operators.graph.GraphKoopmanOperator`
+  (discrete networked self/neighbor coupling; select via ``koopman="graph"``)
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
@@ -106,6 +115,10 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   :class:`~koopman_graph.nn.encoder.GATEncoder`
 * ``decoder`` — :class:`~koopman_graph.nn.decoder.GNNDecoder` /
   :class:`~koopman_graph.nn.decoder.GATDecoder`
+* ``delay`` — :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`
+  delay-coordinate wrapper (compose with a base encoder sized as
+  ``in_channels = n_delays * feature_dim``; optional
+  ``GraphKoopmanModel(n_delays=...)`` wraps without rebuilding layers)
 
 Prefer ``from koopman_graph.nn import …`` (or the root façade for public
 classes). Former root modules ``koopman_graph.encoder``,
@@ -131,13 +144,19 @@ plotting):
 package root for the public API.
 
 ``koopman_graph.baselines`` package layout (peer DMD-family methods behind
-:class:`~koopman_graph.baselines.ClassicalBaseline`):
+:class:`~koopman_graph.baselines.ClassicalBaseline`, plus GNN forecasters):
 
 * ``base`` — :class:`~koopman_graph.baselines.ClassicalBaseline` and shared
   flattening / least-squares / topology-control guard helpers
 * ``dmd`` — :class:`~koopman_graph.baselines.DMDBaseline`
 * ``dmdc`` — :class:`~koopman_graph.baselines.DMDcBaseline`
 * ``edmd`` — :class:`~koopman_graph.baselines.EDMDBaseline`
+* ``gnn`` — spatiotemporal GNN forecaster baselines
+  (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
+  :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
+  :class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`);
+  lightweight in-repo references for ``evaluate_forecast`` comparisons;
+  ``spectrum()`` raises ``RuntimeError``
 
 Deep imports continue to use ``from koopman_graph.training import …``,
 ``from koopman_graph.data import …``, ``from koopman_graph.analysis import …``,
@@ -150,7 +169,7 @@ When to stay flat
 Keep a single module (or leave an existing small package alone) when:
 
 * The module is **small and single-purpose** (for example ``metrics``,
-  ``losses``, ``env``, ``adaptation``, ``observables``, ``serialization``,
+  ``losses``, ``env``, ``observables``, ``serialization``,
   ``protocols``, ``graph_utils``, ``spectrum_types``).
 * :mod:`koopman_graph.datasets` is already the correct benchmark/load
   subpackage — do **not** merge it into ``data/`` (data structures vs
@@ -158,8 +177,12 @@ Keep a single module (or leave an existing small package alone) when:
 * Nesting would only rename a path without clarifying capability boundaries.
 
 Explicit non-goals unless a later audit shows multi-peer growth: nesting
-``env``, ``adaptation``, ``observables``, ``metrics``, ``serialization``,
+``env``, ``observables``, ``metrics``, ``serialization``,
 ``protocols``, or ``graph_utils``.
+
+:mod:`koopman_graph.adaptation` became a capability package in TASK-906 once
+RLS adaptation and the Kalman observer were peer concerns
+(``adaptation/rls.py``, ``adaptation/observer.py``).
 
 ``model.py`` stays at the package root
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -275,7 +298,8 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
   ``detect_anomaly``, ``calibrate_anomaly_threshold``,
   ``AnomalyDetectionResult``
 * :mod:`koopman_graph.data` — ``as_multi_trajectory``
-* :mod:`koopman_graph.adaptation` — ``AdaptationStepResult``
+* :mod:`koopman_graph.adaptation` — ``AdaptationStepResult``,
+  ``KoopmanObserver``, ``FilterResult``
 * :mod:`koopman_graph.observables` — ``graph_laplacian_features``
 
 .. code-block:: python
@@ -491,7 +515,11 @@ Control layout capability matrix
 
 :class:`~koopman_graph.data.GraphSnapshotSequence` stores either global
 ``(T, control_dim)`` or per-node ``(T, N, control_dim)`` controls. Consumers
-must not assume the same physics for both layouts:
+must not assume the same physics for both layouts. Operator construction
+defaults to additive control ``z @ K.T + u @ B``; set
+``control_mode="bilinear"`` (optional ``bilinear_rank``) for control-affine
+state–control couplings ``sum_i u_i N_i z`` on discrete and continuous
+operators (and networked self-terms).
 
 .. list-table::
    :header-rows: 1
@@ -607,6 +635,8 @@ Factory and dimension rules:
   ``koopman_parameterization``, ``koopman_max_spectral_radius``) must stay at
   their defaults when injecting.
 * ``latent_dim`` / ``control_dim`` must match the injected operator.
+* When set, ``control_mode`` / ``bilinear_rank`` must match the injected
+  operator (defaults remain ``"additive"`` / ``None``).
 * Built-in :class:`~koopman_graph.operators.KoopmanOperator` requires
   ``dynamics_mode="discrete"``;
   :class:`~koopman_graph.operators.ContinuousKoopmanOperator` requires
@@ -754,13 +784,30 @@ Façade vs functional training ownership
   stopping, best-weight tracking, optional checkpoint writes, and history
   assembly. Prefer extending that helper over growing the model class.
 
-Online adaptation
-~~~~~~~~~~~~~~~~~
+Online adaptation and state estimation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` keeps RLS regression
 state on **CPU**. Operator matrices are detached and copied to CPU when the
 adapter is constructed from a live operator. :meth:`~koopman_graph.adaptation.RecursiveKoopmanAdapter.apply_to`
 copies adapted weights back onto the target operator's device and dtype.
+
+:class:`~koopman_graph.adaptation.KoopmanObserver` runs a latent-space Kalman
+filter / RTS smoother for imputation under ``observation_masks``. The process
+model is exactly linear in the Koopman latent for fixed dense ``K`` (library
+row convention ``z ← z Kᵀ``; flattened ``A = I ⊗ K``). Observation
+handling is **not** an exact KF in feature space:
+
+* ``observation_model="latent_encode"`` (default) — heuristic: encode
+  mask-prepared features and keep **selected** rows of ``H = I`` for observed
+  node blocks (selection matrix ``H_t = S_t``; fast; suitable for CI /
+  notebooks).
+* ``observation_model="decoder_jacobian"`` — EKF-style ``H = ∂decode/∂z``
+  with unobserved rows dropped (design-faithful; costly and only locally
+  valid for nonlinear GNN decoders).
+
+Import the observer from :mod:`koopman_graph.adaptation` (power-user; not on
+the root façade). See ``examples/25_kalman_koopman_state_estimation.ipynb``.
 
 Classical baselines and datasets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -976,6 +1023,21 @@ v0.3.0 cut:
   ``"data"`` (capability-module import only).
 * Enforced pytest coverage gate of **90%** (``fail_under`` / CI
   ``--cov-fail-under``); branch-aware suite remains well above the floor.
+
+v0.4.0 literature-gap features
+------------------------------
+
+v0.4.0 keeps ``FORMAT_VERSION`` 2 and adds:
+
+* Networked :class:`~koopman_graph.operators.GraphKoopmanOperator`
+  (``koopman="graph"``) so dynamic topology participates in the linear step
+* :class:`~koopman_graph.nn.DelayEmbeddingEncoder` / ``n_delays`` for
+  Hankel / Takens-style partial observability
+* Bilinear / control-affine terms (``control_mode="bilinear"``)
+* :class:`~koopman_graph.adaptation.KoopmanObserver` for latent Kalman
+  filtering and imputation under observation masks
+* Nonlinear / chaotic graph benchmarks and STGCN / DCRNN / Graph WaveNet
+  reference forecasters under ``koopman_graph.baselines.gnn``
 
 Related documentation
 ---------------------

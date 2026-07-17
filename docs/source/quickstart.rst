@@ -47,9 +47,12 @@ Build the model
 
 The constructor factory-builds a discrete :class:`~koopman_graph.operators.KoopmanOperator`
 from string-mode settings (``dynamics_mode``, ``koopman_parameterization``, …).
-To inject a pre-built or custom operator instead, pass ``koopman=...`` and leave
-those factory kwargs at their defaults. Custom operators are not checkpoint
-round-trippable; see the architecture page.
+Pass ``koopman="graph"`` for a networked
+:class:`~koopman_graph.operators.GraphKoopmanOperator` (discrete only) so
+``edge_index`` enters the linear step. To inject a pre-built or custom operator
+instead, pass ``koopman=...`` (module) and leave those factory kwargs at their
+defaults. Custom operators are not checkpoint round-trippable; see the
+architecture page.
 
 Train
 -----
@@ -261,6 +264,14 @@ still returns full-graph predictions; use sequence masks with
 :meth:`~koopman_graph.model.GraphKoopmanModel.evaluate` for masked scoring.
 This path is validated for static topology only.
 
+For **imputation** of masked sensors (not just masked loss), use
+:class:`~koopman_graph.adaptation.KoopmanObserver` — a latent-space Kalman
+filter / smoother. Default ``observation_model="latent_encode"`` uses a
+selection of identity blocks on observed nodes (heuristic, fast);
+``"decoder_jacobian"`` is an EKF-style local linearization with documented
+cost and validity limits. See
+``examples/25_kalman_koopman_state_estimation.ipynb``.
+
 .. code-block:: python
 
    masks = torch.ones(num_timesteps, num_nodes, dtype=torch.bool)
@@ -269,6 +280,39 @@ This path is validated for static topology only.
        snapshots,
        timestamps=timestamps,
        observation_masks=masks,
+   )
+
+Delay embeddings
+~~~~~~~~~~~~~~~~
+
+For partially observed systems, stack the last ``n_delays`` snapshots into the
+encoder channels (delay-coordinate / Takens-style lifting; related Hankel
+constructions appear in HAVOK and Hankel-DMD). Size the base encoder yourself as
+``in_channels = n_delays * feature_dim`` (composition; layers are not rebuilt),
+then pass ``n_delays`` to the model. Training uses teacher-forced history;
+``predict`` encodes the provided observation window once and advances in latent
+space (decoded forecasts are not recycled into the delay buffer by default).
+See ``examples/17_delay_embedding_partial_observability.ipynb``.
+
+.. code-block:: python
+
+   n_delays = 5
+   feature_dim = 4
+   encoder = GNNEncoder(n_delays * feature_dim, 64, 32)
+   decoder = GNNDecoder(32, 64, feature_dim)
+   model = GraphKoopmanModel(
+       encoder=encoder,
+       decoder=decoder,
+       latent_dim=32,
+       time_step=1.0,
+       n_delays=n_delays,
+   )
+   history = model.fit(sequence, epochs=50)
+   # Optional prior observations (oldest → newest), excluding initial_graph:
+   future = model.predict(
+       sequence[10],
+       steps=5,
+       history=list(sequence[6:10]),
    )
 
 Physics-informed observables
@@ -314,6 +358,29 @@ operator is acceptable. Continuous write-back can still degrade for very large
 Historical note: earlier releases used a first-order controlled approximation
 ``B̃ ≈ B(Δt) / Δt`` that disagreed with Van Loan integration; that path was
 replaced in the Phase 8 fidelity update.
+
+Bilinear / control-affine control
+---------------------------------
+
+Default Koopman-with-control is additive (``z @ K.T + u @ B``), matching DMDc-style
+linear predictors. For control-affine systems, set ``control_mode="bilinear"`` to
+add state–control couplings ``sum_i u_i N_i z`` (optional low-rank
+``bilinear_rank``). Continuous operators integrate piecewise-constant ``u`` with
+an effective generator ``L_eff = L + sum_i u_i N_i`` via Van Loan. See
+``examples/19_bilinear_control_koopman.ipynb`` (synthetic recovery plus networked
+SIR contact-reduction with ``EpidemicNetworkBenchmark.expose_intervention_control``).
+
+.. code-block:: python
+
+   model = GraphKoopmanModel(
+       encoder=encoder,
+       decoder=decoder,
+       latent_dim=32,
+       time_step=1.0,
+       control_dim=1,
+       control_mode="bilinear",
+       bilinear_rank=4,
+   )
 
 Latent-space RL environment
 ---------------------------
