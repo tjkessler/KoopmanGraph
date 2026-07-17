@@ -113,7 +113,8 @@ classes). Former root modules ``koopman_graph.encoder``,
 (TASK-746). Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
-``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly):
+``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
+plotting):
 
 * ``spectrum`` — ``compute_spectrum``, ``compute_generator_spectrum``,
   ``discrete_spectrum_at_delta_t``, ``decode_mode_shapes``
@@ -121,6 +122,8 @@ neither imports the other.
   ``dynamical_similarity``
 * ``anomaly`` — ``AnomalyDetectionResult``, ``calibrate_anomaly_threshold``,
   ``detect_anomaly``
+* ``plotting`` — ``plot_spectrum`` (discrete unit-disk / data-zoom complex-plane
+  figures; Matplotlib call-site import)
 
 :mod:`koopman_graph.spectrum_types` remains a **top-level neutral leaf** so
 :mod:`koopman_graph.protocols` never imports heavy analysis code.

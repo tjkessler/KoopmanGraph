@@ -95,9 +95,11 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``discrete_spectrum_at_delta_t``, ``decode_mode_shapes``,
 ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
 ``detect_anomaly``, ``calibrate_anomaly_threshold``,
-``AnomalyDetectionResult``) are imported from
-:mod:`koopman_graph.analysis` only (TASK-749). The helpers live in the
-``spectrum`` / ``similarity`` / ``anomaly`` submodules.
+``AnomalyDetectionResult``, ``plot_spectrum``) are imported from
+:mod:`koopman_graph.analysis` only (TASK-749 / TASK-751). The helpers live in
+the ``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` submodules.
+``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
+``[dev]`` extra).
 
 .. automodule:: koopman_graph.spectrum_types
    :members:

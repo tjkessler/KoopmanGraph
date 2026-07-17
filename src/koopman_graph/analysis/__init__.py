@@ -11,6 +11,9 @@ Capability layout
     :func:`~koopman_graph.analysis.dynamical_similarity`.
 ``anomaly``
     Threshold calibration and anomaly detection over reference spectra.
+``plotting``
+    Discrete complex-plane spectrum figures
+    (:func:`~koopman_graph.analysis.plot_spectrum`).
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` stays in the neutral
 top-level :mod:`koopman_graph.spectrum_types` module (TASK-725 dependency
@@ -23,6 +26,7 @@ from koopman_graph.analysis.anomaly import (
     calibrate_anomaly_threshold,
     detect_anomaly,
 )
+from koopman_graph.analysis.plotting import SpectrumLimits, plot_spectrum
 from koopman_graph.analysis.similarity import (
     SpectrumDistanceMethod,
     SpectrumSource,
@@ -44,6 +48,7 @@ __all__ = [
     "AnomalyThresholdMethod",
     "KoopmanSpectrum",
     "SpectrumDistanceMethod",
+    "SpectrumLimits",
     "SpectrumSource",
     "calibrate_anomaly_threshold",
     "compute_generator_spectrum",
@@ -53,6 +58,7 @@ __all__ = [
     "discrete_spectrum_at_delta_t",
     "dynamical_similarity",
     "koopman_std",
+    "plot_spectrum",
     "resolve_spectrum",
     "spectrum_distance",
 ]

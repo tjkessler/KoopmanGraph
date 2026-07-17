@@ -75,6 +75,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         "discrete_spectrum_at_delta_t",
         "dynamical_similarity",
         "koopman_std",
+        "plot_spectrum",
         "spectrum_distance",
     }
     exported = set(koopman_graph.__all__)
@@ -91,6 +92,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         discrete_spectrum_at_delta_t,
         dynamical_similarity,
         koopman_std,
+        plot_spectrum,
         spectrum_distance,
     )
 
@@ -102,6 +104,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
     assert callable(discrete_spectrum_at_delta_t)
     assert callable(dynamical_similarity)
     assert callable(koopman_std)
+    assert callable(plot_spectrum)
     assert callable(spectrum_distance)
 
 
