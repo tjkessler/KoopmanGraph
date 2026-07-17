@@ -50,7 +50,7 @@ jobs:
           ruff format --check src/ tests/
 
       - name: Run tests
-        run: pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-report=xml --cov-fail-under=80
+        run: pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-report=xml --cov-fail-under=95
 
       - name: Upload coverage reports to Codecov
         if: matrix.python-version == '3.12'

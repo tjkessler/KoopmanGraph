@@ -107,7 +107,7 @@ ruff check src/ tests/
 ruff format --check src/ tests/
 
 # Tests with coverage gate
-pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=80
+pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=95
 ```
 
 To auto-fix lint issues and apply formatting:
@@ -130,18 +130,18 @@ All contributions that change behavior must include appropriate tests in the
 
 ### Coverage threshold
 
-The project enforces a minimum of **80% line coverage** on `koopman_graph`:
+The project enforces a minimum of **95% line coverage** on `koopman_graph`:
 
-- Configuration: `[tool.coverage.report]` in `pyproject.toml` (`fail_under = 80`)
-- CI: `--cov-fail-under=80` in `.github/workflows/ci.yml`
+- Configuration: `[tool.coverage.report]` in `pyproject.toml` (`fail_under = 95`)
+- CI: `--cov-fail-under=95` in `.github/workflows/ci.yml`
 
 Generate a local coverage report:
 
 ```bash
-pytest tests/ --cov=koopman_graph --cov-report=term-missing --cov-fail-under=80
+pytest tests/ --cov=koopman_graph --cov-report=term-missing --cov-fail-under=95
 ```
 
-Pull requests that drop coverage below 80% will fail CI.
+Pull requests that drop coverage below 95% will fail CI.
 
 ## Code style
 
@@ -184,7 +184,7 @@ The following checks from [`ci.yml`](.github/workflows/ci.yml) should be marked
 as **required** before merge:
 
 - `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest, Ruff lint/format, and the
-  80% coverage gate across supported Python versions
+  95% coverage gate across supported Python versions
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))

@@ -72,7 +72,7 @@ KoopmanGraph bridges that gap:
 | **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
 | **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, and METR-LA traffic benchmarks |
 | **Jupyter tutorials** | Sixteen end-to-end notebooks with real networked datasets |
-| **Tested & documented** | ≥80% coverage enforced in CI, Sphinx docs on Read the Docs (see [architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) for public vs power-user API layers, shared rollout, optional `koopman=` injection, and `ForecastModel` call-site contracts) |
+| **Tested & documented** | ≥95% coverage enforced in CI, Sphinx docs on Read the Docs (see [architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) for public vs power-user API layers, shared rollout, optional `koopman=` injection, and `ForecastModel` call-site contracts) |
 
 **Stability mode selection:** use `dense` or `odo` when you want a soft prior (`odo` bounds `ρ(K)` via the operator 2-norm but lacks a strict ε-interior certificate; continuous `odo` needs eigenvalue loss on the true spectrum); choose `schur`, `dissipative`, or `lyapunov` when you need eigenvalues mathematically forced inside the unit disk (see [`11_long_horizon_stability.ipynb`](examples/11_long_horizon_stability.ipynb) vs [`08_loss_stability.ipynb`](examples/08_loss_stability.ipynb)).
 
@@ -215,7 +215,7 @@ Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph
 Run the test suite and coverage check locally:
 
 ```bash
-pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=80
+pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=95
 ```
 
 Lint and format:
