@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence, resolve_rollout_start_indices
+from koopman_graph.losses import masked_mse_loss
 from koopman_graph.protocols import TrainableKoopmanModel
 
 _EPS = 1e-8
@@ -102,32 +103,6 @@ def _masked_node_average(
     return (values.abs() * node_mask).sum() / denom
 
 
-def _masked_mse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
-    """Compute mean squared error over observed nodes.
-
-    Parameters
-    ----------
-    prediction : Tensor
-        Predicted node features with shape ``(num_nodes, feature_dim)``.
-    target : Tensor
-        Ground-truth node features with the same shape as ``prediction``.
-    mask : Tensor
-        Boolean node mask with shape ``(num_nodes,)``.
-
-    Returns
-    -------
-    Tensor
-        Scalar masked mean squared error.
-    """
-    node_mask = mask.to(device=prediction.device, dtype=prediction.dtype)
-    expanded = node_mask.unsqueeze(-1)
-    diff_sq = (prediction - target) ** 2
-    denom = expanded.sum() * prediction.shape[-1]
-    if denom <= 0:
-        return torch.zeros((), device=prediction.device, dtype=prediction.dtype)
-    return (diff_sq * expanded).sum() / denom
-
-
 def masked_mae(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     """Compute mean absolute error over observed nodes.
 
@@ -168,7 +143,7 @@ def masked_rmse(prediction: Tensor, target: Tensor, mask: Tensor) -> Tensor:
     Tensor
         Scalar masked root mean squared error.
     """
-    return torch.sqrt(_masked_mse(prediction, target, mask))
+    return torch.sqrt(masked_mse_loss(prediction, target, mask))
 
 
 def masked_mape(

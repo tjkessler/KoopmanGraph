@@ -293,7 +293,10 @@ def _classify_trajectory_items(
     *,
     empty_message: str,
 ) -> list[GraphSnapshotSequence]:
-    """Classify a non-wrapper sequence as multi- or single-trajectory input.
+    """Normalize a bare list/tuple into a single-trajectory snapshot sequence.
+
+    Multi-trajectory input must use :class:`~koopman_graph.data.MultiTrajectory`.
+    A bare list of :class:`~koopman_graph.data.GraphSnapshotSequence` is rejected.
 
     Parameters
     ----------
@@ -305,12 +308,13 @@ def _classify_trajectory_items(
     Returns
     -------
     list of GraphSnapshotSequence
-        One or more validated trajectories.
+        A single-element list wrapping the ``Data`` snapshots.
 
     Raises
     ------
     ValueError
-        If ``items`` is empty or mixes ``GraphSnapshotSequence`` with ``Data``.
+        If ``items`` is empty, mixes ``GraphSnapshotSequence`` with ``Data``,
+        or is a bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
     TypeError
         If any element is neither a snapshot sequence nor a ``Data`` graph.
     """
@@ -324,14 +328,19 @@ def _classify_trajectory_items(
     ]
     data_indices = [index for index, item in enumerate(items) if isinstance(item, Data)]
     if len(sequence_indices) == len(items):
-        return [resolve_sequence(item) for item in items]
+        msg = (
+            "a bare list of GraphSnapshotSequence is not accepted; "
+            "wrap multi-trajectory input in MultiTrajectory(...) "
+            "(or as_multi_trajectory(...))"
+        )
+        raise TypeError(msg)
     if len(data_indices) == len(items):
         return [resolve_sequence(items)]  # type: ignore[arg-type]
     if sequence_indices and data_indices:
         msg = (
             "cannot mix GraphSnapshotSequence and Data in the same fit input; "
-            "use MultiTrajectory([...]) or a list of GraphSnapshotSequence for "
-            "multiple trajectories, or a list of Data for one trajectory"
+            "use MultiTrajectory([...]) for multiple trajectories, or a list "
+            "of Data for one trajectory"
         )
         raise ValueError(msg)
     bad_index = next(
@@ -346,52 +355,19 @@ def _classify_trajectory_items(
     raise TypeError(msg)
 
 
-def is_sequence_of_sequences(
-    data: TrainingInput | ValidationInput,
-) -> bool:
-    """Return whether ``data`` is multi-trajectory training input.
-
-    Prefer :class:`~koopman_graph.data.MultiTrajectory` for new call sites.
-    This helper remains for compatibility and inspects *all* elements of a bare
-    sequence (not only the first) so mixed lists are not misclassified.
-
-    Parameters
-    ----------
-    data : TrainingInput or ValidationInput
-        Training or validation input passed to :meth:`fit`.
-
-    Returns
-    -------
-    bool
-        ``True`` for :class:`~koopman_graph.data.MultiTrajectory` or a non-empty
-        sequence whose every element is a :class:`GraphSnapshotSequence`.
-    """
-    if data is None or isinstance(data, GraphSnapshotSequence):
-        return False
-    if isinstance(data, MultiTrajectory):
-        return True
-    if not isinstance(data, Sequence) or isinstance(data, (Data, str, bytes)):
-        return False
-    if len(data) == 0:
-        return False
-    return all(isinstance(item, GraphSnapshotSequence) for item in data)
-
-
 def resolve_training_sequences(
     data_sequence: TrainingInput,
 ) -> list[GraphSnapshotSequence]:
     """Normalize training input into one or more snapshot sequences.
 
-    Preferred multi-trajectory form is
-    :class:`~koopman_graph.data.MultiTrajectory`. A bare list of
-    :class:`~koopman_graph.data.GraphSnapshotSequence` remains accepted. A bare
-    list of ``Data`` snapshots is always a single trajectory.
+    Multi-trajectory input must be a
+    :class:`~koopman_graph.data.MultiTrajectory`. A bare list of ``Data``
+    snapshots is always a single trajectory.
 
     Parameters
     ----------
     data_sequence : TrainingInput
-        Single sequence, list of ``Data`` snapshots, ``MultiTrajectory``, or
-        list of sequences.
+        Single sequence, list of ``Data`` snapshots, or ``MultiTrajectory``.
 
     Returns
     -------
@@ -404,7 +380,8 @@ def resolve_training_sequences(
         If multi-trajectory input is empty or mixes sequence and ``Data``
         elements.
     TypeError
-        If a bare sequence contains unsupported element types.
+        If a bare sequence contains unsupported element types, including a
+        bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
     """
     if isinstance(data_sequence, MultiTrajectory):
         return list(data_sequence.sequences)
@@ -418,8 +395,7 @@ def resolve_training_sequences(
         list(data_sequence),
         empty_message=(
             "data_sequence must be non-empty; pass a GraphSnapshotSequence, "
-            "a non-empty list of Data, MultiTrajectory(...), or a non-empty "
-            "list of GraphSnapshotSequence"
+            "a non-empty list of Data, or MultiTrajectory(...)"
         ),
     )
 
@@ -432,9 +408,8 @@ def resolve_validation_sequences(
     """Normalize validation input for :meth:`fit`.
 
     A single validation sequence (or list of ``Data``) is reused for all
-    training trajectories. A :class:`~koopman_graph.data.MultiTrajectory` or
-    list of :class:`~koopman_graph.data.GraphSnapshotSequence` must match the
-    training trajectory count.
+    training trajectories. A :class:`~koopman_graph.data.MultiTrajectory` must
+    match the training trajectory count.
 
     Parameters
     ----------
@@ -454,7 +429,8 @@ def resolve_validation_sequences(
         If a multi-trajectory validation length does not match
         ``num_training_sequences``, or if input is empty or mixed.
     TypeError
-        If a bare sequence contains unsupported element types.
+        If a bare sequence contains unsupported element types, including a
+        bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
     """
     if validation_sequence is None:
         return None
@@ -475,25 +451,14 @@ def resolve_validation_sequences(
     ):
         return [resolve_sequence(validation_sequence)]  # type: ignore[arg-type]
 
-    items = list(validation_sequence)
-    sequences = _classify_trajectory_items(
-        items,
+    return _classify_trajectory_items(
+        list(validation_sequence),
         empty_message=(
             "validation_sequence must be non-empty when provided as a list; "
             "pass None, a GraphSnapshotSequence, a non-empty list of Data, "
-            "MultiTrajectory(...), or a non-empty list of GraphSnapshotSequence"
+            "or MultiTrajectory(...)"
         ),
     )
-    # Multi-trajectory form (all GraphSnapshotSequence) must match train count;
-    # a single-trajectory list of Data yields len == 1 and is reused.
-    if is_sequence_of_sequences(items) and len(sequences) != num_training_sequences:
-        msg = (
-            "validation_sequence list length must match the number of "
-            f"training trajectories ({num_training_sequences}), "
-            f"got {len(sequences)}"
-        )
-        raise ValueError(msg)
-    return sequences
 
 
 def resolve_lr_scheduler(

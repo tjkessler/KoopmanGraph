@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -486,10 +485,8 @@ class GraphKoopmanModel(nn.Module):
     ) -> Tensor:
         """Lift graph node features into the hybrid Koopman latent space.
 
-        This is the primary encode API. Prefer ``encode`` over the deprecated
-        :meth:`encode_latent` alias. When physics-informed observables are
-        configured, returns ``[z_physics || z_gnn]`` with shape
-        ``(num_nodes, latent_dim)``.
+        When physics-informed observables are configured, returns
+        ``[z_physics || z_gnn]`` with shape ``(num_nodes, latent_dim)``.
 
         Parameters
         ----------
@@ -523,30 +520,6 @@ class GraphKoopmanModel(nn.Module):
             z_gnn,
             position=self.physics_position,
         )
-
-    def encode_latent(self, snapshot: Data) -> Tensor:
-        """Encode a graph snapshot into latent node features.
-
-        .. deprecated:: 0.3.0
-            Use :meth:`encode` instead. ``encode_latent`` remains as a
-            compatibility alias and will be removed in a future release.
-
-        Parameters
-        ----------
-        snapshot : Data
-            Graph snapshot with node features and topology.
-
-        Returns
-        -------
-        Tensor
-            Latent node features with shape ``(num_nodes, latent_dim)``.
-        """
-        warnings.warn(
-            "encode_latent() is deprecated; use encode() instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.encode(snapshot)
 
     @property
     def uses_physics_observables(self) -> bool:
@@ -1185,21 +1158,20 @@ class GraphKoopmanModel(nn.Module):
         :class:`~koopman_graph.training.LossWeights` object or an optional
         per-epoch schedule.
 
-        When ``data_sequence`` is a :class:`~koopman_graph.data.MultiTrajectory`
-        (preferred) or a list of
-        :class:`~koopman_graph.data.GraphSnapshotSequence` objects, losses are
-        averaged across trajectories before each optimizer step.
+        When ``data_sequence`` is a :class:`~koopman_graph.data.MultiTrajectory`,
+        losses are averaged across trajectories before each optimizer step.
 
         Parameters
         ----------
-        data_sequence : GraphSnapshotSequence, MultiTrajectory, sequence of \
-Data, or sequence of GraphSnapshotSequence
-            One training trajectory or multiple trajectories of the same
-            system. Prefer :class:`~koopman_graph.data.MultiTrajectory` for
-            multi-trajectory input. A plain list of ``Data`` snapshots is
-            treated as a single trajectory; a list of
-            :class:`~koopman_graph.data.GraphSnapshotSequence` remains accepted
-            as a compatibility shim. Empty lists and mixed
+        data_sequence : GraphSnapshotSequence, MultiTrajectory, or sequence of \
+Data
+            One training trajectory, or multiple trajectories via
+            :class:`~koopman_graph.data.MultiTrajectory`. A plain list of
+            ``Data`` snapshots is treated as a single trajectory. Use
+            :class:`~koopman_graph.data.MultiTrajectory` (or
+            :func:`~koopman_graph.data.as_multi_trajectory`) for multi-trajectory
+            input; a bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`
+            is rejected. Empty lists and mixed
             ``GraphSnapshotSequence`` / ``Data`` lists raise ``ValueError``.
         epochs : int, optional
             Number of training epochs. Default is ``100``.

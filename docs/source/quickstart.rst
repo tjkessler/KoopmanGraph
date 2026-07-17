@@ -101,10 +101,9 @@ Advanced training options
 
 :meth:`~koopman_graph.model.GraphKoopmanModel.fit` also supports learning-rate
 schedulers, per-term loss history, multi-origin rollout loss, and multiple
-training trajectories. Prefer
+training trajectories. Multi-trajectory input must use
 :class:`~koopman_graph.data.MultiTrajectory` (or
-:func:`~koopman_graph.data.as_multi_trajectory`) so multi-trajectory intent is
-explicit; a bare list of sequences remains accepted:
+:func:`~koopman_graph.data.as_multi_trajectory`):
 
 .. code-block:: python
 
@@ -121,9 +120,11 @@ explicit; a bare list of sequences remains accepted:
    )
    print(history.reconstruction_loss[-1], history.rollout_loss[-1])
 
-A plain ``list`` of ``Data`` snapshots is always one trajectory. Empty lists
-and mixed ``GraphSnapshotSequence`` / ``Data`` lists raise ``ValueError``.
-See :doc:`architecture` for the full discrimination rules.
+A plain ``list`` of ``Data`` snapshots is always one trajectory. A bare list of
+:class:`~koopman_graph.data.GraphSnapshotSequence` is rejected (wrap it in
+``MultiTrajectory``). Empty lists and mixed ``GraphSnapshotSequence`` /
+``Data`` lists raise ``ValueError``. See :doc:`architecture` for the full
+discrimination rules.
 
 For longer trajectories, opt into fixed-length window mini-batches. By default,
 every valid window is shuffled and used once per epoch; set

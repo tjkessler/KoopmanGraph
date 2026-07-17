@@ -34,7 +34,6 @@ from koopman_graph.training.history import (
 )
 from koopman_graph.training.loop import (
     eval_one_epoch,
-    is_sequence_of_sequences,
     resolve_early_stopping_monitor,
     resolve_lr_scheduler,
     resolve_training_sequences,
@@ -76,7 +75,6 @@ __all__ = [
     "compute_training_loss",
     "constant_loss_weights",
     "eval_one_epoch",
-    "is_sequence_of_sequences",
     "linear_ramp_loss_weights",
     "mean_training_loss_breakdown",
     "one_step_loss",

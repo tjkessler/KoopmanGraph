@@ -20,7 +20,6 @@ from koopman_graph.training import (
     compute_training_loss,
     constant_loss_weights,
     eval_one_epoch,
-    is_sequence_of_sequences,
     linear_ramp_loss_weights,
     mean_training_loss_breakdown,
     one_step_loss,
@@ -741,7 +740,7 @@ def test_fit_accepts_multiple_training_sequences(
     scaling_sequence: GraphSnapshotSequence,
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify fit accepts a list of trajectories and trains successfully."""
+    """Verify fit accepts MultiTrajectory and trains successfully."""
     second = GraphSnapshotSequence(
         [
             Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
@@ -749,7 +748,7 @@ def test_fit_accepts_multiple_training_sequences(
         ]
     )
     history = trainable_model.fit(
-        [scaling_sequence, second],
+        MultiTrajectory((scaling_sequence, second)),
         epochs=3,
         lr=1e-2,
     )
@@ -761,7 +760,7 @@ def test_fit_rejects_mismatched_validation_sequence_list(
     scaling_sequence: GraphSnapshotSequence,
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify validation list length must match training trajectories."""
+    """Verify validation MultiTrajectory length must match training."""
     second = GraphSnapshotSequence(
         [
             Data(x=torch.ones(5, 3) * (1.1**t), edge_index=synthetic_edge_index)
@@ -770,8 +769,8 @@ def test_fit_rejects_mismatched_validation_sequence_list(
     )
     with pytest.raises(ValueError, match="validation_sequence list length"):
         trainable_model.fit(
-            [scaling_sequence, second],
-            validation_sequence=[scaling_sequence],
+            MultiTrajectory((scaling_sequence, second)),
+            validation_sequence=MultiTrajectory((scaling_sequence,)),
             epochs=1,
         )
 
@@ -833,7 +832,7 @@ def test_windowed_fit_accepts_multiple_sequences(
 ) -> None:
     """Verify window sampling pools multiple training trajectories."""
     history = trainable_model.fit(
-        [scaling_sequence, scaling_sequence],
+        MultiTrajectory((scaling_sequence, scaling_sequence)),
         epochs=2,
         window_length=3,
         batch_size=4,
@@ -968,26 +967,11 @@ def test_eval_one_epoch_accepts_bare_sequence(
     assert not breakdown.total.requires_grad
 
 
-def test_is_sequence_of_sequences_edge_cases(
-    synthetic_graph: Data,
-    scaling_sequence: GraphSnapshotSequence,
-) -> None:
-    """Verify sequence-of-sequences detection for edge case inputs."""
-    assert not is_sequence_of_sequences(None)
-    assert not is_sequence_of_sequences(scaling_sequence)
-    assert not is_sequence_of_sequences(synthetic_graph)
-    assert not is_sequence_of_sequences([])
-    assert not is_sequence_of_sequences([synthetic_graph])
-    assert is_sequence_of_sequences([scaling_sequence])
-    assert is_sequence_of_sequences(MultiTrajectory((scaling_sequence,)))
-    assert not is_sequence_of_sequences([scaling_sequence, synthetic_graph])
-
-
 def test_resolve_training_sequences_discriminates_input_kinds(
     synthetic_graph: Data,
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
-    """Verify empty, list[Data], MultiTrajectory, and mixed list behavior."""
+    """Verify empty, list[Data], MultiTrajectory, and bare-list rejection."""
     with pytest.raises(ValueError, match="non-empty"):
         resolve_training_sequences([])
     single_from_data = resolve_training_sequences([synthetic_graph, synthetic_graph])
@@ -1000,23 +984,22 @@ def test_resolve_training_sequences_discriminates_input_kinds(
     assert len(multi) == 2
     assert multi[0] is scaling_sequence
 
-    compat = resolve_training_sequences([scaling_sequence, scaling_sequence])
-    assert len(compat) == 2
+    with pytest.raises(TypeError, match="MultiTrajectory"):
+        resolve_training_sequences([scaling_sequence, scaling_sequence])
 
     with pytest.raises(ValueError, match="cannot mix"):
         resolve_training_sequences([scaling_sequence, synthetic_graph])
 
 
-def test_resolve_validation_sequences_accepts_matching_list(
+def test_resolve_validation_sequences_requires_multi_trajectory(
     scaling_sequence: GraphSnapshotSequence,
 ) -> None:
-    """Verify a validation list matching the training count is accepted."""
-    resolved = resolve_validation_sequences(
-        [scaling_sequence, scaling_sequence],
-        num_training_sequences=2,
-    )
-    assert resolved is not None
-    assert len(resolved) == 2
+    """Verify multi-trajectory validation must use MultiTrajectory."""
+    with pytest.raises(TypeError, match="MultiTrajectory"):
+        resolve_validation_sequences(
+            [scaling_sequence, scaling_sequence],
+            num_training_sequences=2,
+        )
     multi = resolve_validation_sequences(
         MultiTrajectory((scaling_sequence, scaling_sequence)),
         num_training_sequences=2,

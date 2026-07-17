@@ -165,9 +165,8 @@ Shared Graph Utilities (power-user)
 
 Documented internal helpers for graph-input resolution and latent propagation.
 Importable, but **not** part of the stable public façade (not in
-``koopman_graph.__all__``). Prefer :meth:`~koopman_graph.model.GraphKoopmanModel.encode`
-over the deprecated ``encode_latent`` alias when lifting snapshots. See
-:doc:`architecture`.
+``koopman_graph.__all__``). Use :meth:`~koopman_graph.model.GraphKoopmanModel.encode`
+when lifting snapshots. See :doc:`architecture`.
 
 .. automodule:: koopman_graph.graph_utils
    :members:

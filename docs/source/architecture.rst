@@ -368,8 +368,8 @@ omitted from ``__all__``.
 * :func:`~koopman_graph.data.resolve_rollout_start_indices` lives next to
   :class:`~koopman_graph.data.GraphSnapshotSequence` and is shared by
   :mod:`koopman_graph.training` and :mod:`koopman_graph.metrics`.
-* Forecast metrics use metrics-local masked reductions; they do not import
-  :mod:`koopman_graph.losses` for MSE helpers used only in evaluation.
+* Forecast metrics reuse :func:`~koopman_graph.losses.masked_mse_loss` for
+  masked RMSE so training and evaluation share one masked-MSE reduction.
 
 Encode API
 ~~~~~~~~~~
@@ -377,9 +377,8 @@ Encode API
 Prefer :meth:`~koopman_graph.model.GraphKoopmanModel.encode` for latent lifting.
 It accepts a ``Data`` snapshot or explicit ``(x, edge_index, edge_weight)``
 tensors and applies hybrid physics observables when configured.
-:meth:`~koopman_graph.model.GraphKoopmanModel.encode_latent` is a deprecated
-``Data``-only alias kept for compatibility. Training helpers require ``encode``
-via :class:`~koopman_graph.protocols.TrainableKoopmanModel` (no encoder-only
+Training helpers require ``encode`` via
+:class:`~koopman_graph.protocols.TrainableKoopmanModel` (no encoder-only
 fallback).
 
 Private helpers
@@ -710,12 +709,12 @@ several trajectories of the same system. Prefer the explicit wrapper:
 Discrimination rules (used by
 :func:`~koopman_graph.training.resolve_training_sequences`):
 
-* :class:`~koopman_graph.data.MultiTrajectory` — multi-trajectory (preferred)
+* :class:`~koopman_graph.data.MultiTrajectory` — multi-trajectory (required)
 * :class:`~koopman_graph.data.GraphSnapshotSequence` — single trajectory
-* non-empty ``list`` / ``tuple`` of only ``GraphSnapshotSequence`` — multi
-  (compatibility shim for existing call sites)
 * non-empty ``list`` / ``tuple`` of only ``Data`` — single trajectory of
   snapshots
+* bare ``list`` / ``tuple`` of :class:`~koopman_graph.data.GraphSnapshotSequence`
+  — ``TypeError`` (wrap in ``MultiTrajectory``)
 * empty list or mixed ``GraphSnapshotSequence`` / ``Data`` — ``ValueError``
 
 Validation input follows the same rules; a multi-trajectory validation

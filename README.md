@@ -50,7 +50,7 @@ KoopmanGraph bridges that gap:
 
 | Feature | Description |
 | --- | --- |
-| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, `evaluate`, and preferred `encode` (deprecated `encode_latent` alias) |
+| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, `evaluate`, and `encode` |
 | **GNNEncoder / GATEncoder** | Topology-aware latent lifting with GCN or multi-head attention |
 | **GNNDecoder / GATDecoder** | Symmetric GCN or GAT reconstruction paired with the matching encoder |
 | **KoopmanOperator** | Learnable linear propagator; soft modes (`dense`, `odo` + eigenloss) or structural guarantees (`schur`, `dissipative`, `lyapunov`) |
@@ -63,7 +63,7 @@ KoopmanGraph bridges that gap:
 | **Control inputs** | Koopman-with-control dynamics (`z_{t+1} = K z_t + B u_t`) for driven systems |
 | **Dynamic topology** | Per-snapshot `edge_index` support for rewiring contact networks |
 | **Edge weights** | End-to-end `edge_weight` propagation through GCN encoder/decoder and METR-LA benchmark |
-| **Advanced training** | LR schedulers, per-term loss history, explicit root `MultiTrajectory` fit (`as_multi_trajectory` via `koopman_graph.data`), and windowed mini-batching |
+| **Advanced training** | LR schedulers, per-term loss history, explicit `MultiTrajectory` fit (`as_multi_trajectory` via `koopman_graph.data`), and windowed mini-batching |
 | **Structural stability** | Guaranteed-stable parameterizations (`schur`, `dissipative`, `lyapunov`) for 200+ step rollouts — distinct from soft `odo`/eigenloss regularization |
 | **Continuous-time dynamics** | `ContinuousKoopmanOperator` with `dynamics_mode="continuous"`, irregular timestamps, and `predict_at` |
 | **Online adaptation** | `RecursiveKoopmanAdapter` and `adapt_step` for RLS updates to a frozen encoder |

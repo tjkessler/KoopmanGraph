@@ -3,9 +3,7 @@
 Public API
 ----------
 ``GraphKoopmanModel``
-    End-to-end encode → Koopman advance → decode model. Prefer
-    :meth:`~koopman_graph.model.GraphKoopmanModel.encode` for latent lifting
-    (``encode_latent`` is a deprecated alias).
+    End-to-end encode → Koopman advance → decode model.
 ``GNNEncoder``, ``GATEncoder``
     GNN encoders for latent lifting.
 ``GNNDecoder``, ``GATDecoder``

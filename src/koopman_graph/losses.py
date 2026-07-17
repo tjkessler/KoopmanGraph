@@ -48,8 +48,6 @@ def masked_mse_loss(
         Scalar masked mean squared error.
     """
     node_mask = mask.to(device=prediction.device, dtype=prediction.dtype)
-    if node_mask.dtype != prediction.dtype:
-        node_mask = node_mask.to(dtype=prediction.dtype)
     expanded = node_mask.unsqueeze(-1)
     diff_sq = (prediction - target) ** 2
     denom = expanded.sum() * prediction.shape[-1]

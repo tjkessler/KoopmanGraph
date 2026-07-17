@@ -1048,11 +1048,9 @@ class GraphSnapshotSequence:
 class MultiTrajectory:
     """Explicit multi-trajectory container for training and validation input.
 
-    Prefer this over a bare ``list[GraphSnapshotSequence]`` when calling
+    Required for multi-trajectory
     :meth:`~koopman_graph.model.GraphKoopmanModel.fit` so multi-trajectory
     intent cannot be confused with a single trajectory of ``Data`` snapshots.
-    A plain list of :class:`GraphSnapshotSequence` remains accepted as a
-    compatibility shim.
 
     Attributes
     ----------

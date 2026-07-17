@@ -164,18 +164,11 @@ def test_encode_concatenates_physics_and_gnn(small_snapshot: Data) -> None:
     assert torch.allclose(latent, expected)
 
 
-def test_encode_latent_matches_encode(small_snapshot: Data) -> None:
-    """encode_latent should warn and delegate to encode."""
-    import warnings
-
+def test_encode_removed_encode_latent_alias(small_snapshot: Data) -> None:
+    """encode_latent was removed; encode remains the only lifting API."""
     model = _hybrid_model()
-    encoded = model.encode(small_snapshot)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        aliased = model.encode_latent(small_snapshot)
-    assert torch.allclose(aliased, encoded)
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-    assert any("encode()" in str(w.message) for w in caught)
+    assert not hasattr(model, "encode_latent")
+    assert model.encode(small_snapshot).ndim == 2
 
 
 def test_encode_supports_gradients(small_snapshot: Data) -> None:

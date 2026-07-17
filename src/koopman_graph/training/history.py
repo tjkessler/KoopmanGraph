@@ -43,19 +43,8 @@ class LossWeights:
 LossWeightSchedule = Callable[[int], LossWeights]
 EarlyStoppingMonitor = Literal["auto", "train", "val"]
 LRSchedulerFactory = Callable[[Optimizer], LRScheduler]
-TrainingInput = (
-    GraphSnapshotSequence
-    | MultiTrajectory
-    | Sequence[Data]
-    | Sequence[GraphSnapshotSequence]
-)
-ValidationInput = (
-    GraphSnapshotSequence
-    | MultiTrajectory
-    | Sequence[Data]
-    | Sequence[GraphSnapshotSequence]
-    | None
-)
+TrainingInput = GraphSnapshotSequence | MultiTrajectory | Sequence[Data]
+ValidationInput = GraphSnapshotSequence | MultiTrajectory | Sequence[Data] | None
 
 
 @dataclass(frozen=True)

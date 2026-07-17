@@ -633,7 +633,7 @@ def test_observables_and_losses_gaps() -> None:
     target = torch.randn(3, 2)
     empty = masked_mse_loss(pred, target, torch.zeros(3, dtype=torch.bool))
     assert float(empty.item()) == 0.0
-    # Force the dtype-cast branch with a bool mask already matching float path twice.
+    # Force float64 mask cast path (mask is converted to prediction dtype).
     _ = masked_mse_loss(pred, target, torch.ones(3, dtype=torch.float64))
 
     koopman = KoopmanOperator(3, init_mode="identity")
@@ -774,6 +774,8 @@ def test_analysis_metrics_protocol_and_training_gaps() -> None:
             [seq, Data(x=torch.randn(2, 2), edge_index=_edge_index())],
             empty_message="empty",
         )
+    with pytest.raises(TypeError, match="MultiTrajectory"):
+        _classify_trajectory_items([seq, seq], empty_message="empty")
     with pytest.raises(TypeError, match="must be GraphSnapshotSequence or Data"):
         _classify_trajectory_items([seq, "bad"], empty_message="empty")  # type: ignore[list-item]
     with pytest.raises(ValueError, match="validation_sequence list length"):
