@@ -21,7 +21,9 @@
 **[Documentation](https://koopmangraph.readthedocs.io/)** |
 **[Quickstart](#quickstart)** |
 **[Examples](https://github.com/tjkessler/KoopmanGraph/tree/main/examples)** |
-**[Contributing](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md)**
+**[Contributing](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md)** |
+**[Support](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#support)** |
+**[Code of Conduct](https://github.com/tjkessler/KoopmanGraph/blob/main/CODE_OF_CONDUCT.md)**
 
 </div>
 
@@ -125,7 +127,7 @@ pip install -e ".[docs]"
 cd docs && make html
 ```
 
-See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for platform-specific PyTorch/PyG wheels and verification steps. Release workflow and version policy are documented in [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
+See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for platform-specific PyTorch/PyG wheels and verification steps. Release history is in [CHANGELOG.md](CHANGELOG.md); release workflow and version policy are documented in [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
 
 ## Quickstart
 
@@ -225,7 +227,7 @@ ruff check src/ tests/
 ruff format --check src/ tests/
 ```
 
-See [CONTRIBUTING.md](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md) for the full development workflow, pre-commit hooks, and pull request guidelines.
+See [CONTRIBUTING.md](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md) for the full development workflow, pre-commit hooks, and pull request guidelines. For usage questions, see [Support](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#support) (GitHub Discussions). Community standards are in the [Code of Conduct](CODE_OF_CONDUCT.md). User-facing release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## Citation
 
