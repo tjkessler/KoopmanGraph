@@ -13,15 +13,20 @@ Checkpoint format versions
     ``"gcn"`` for backward compatibility. Hybrid ``physics`` blocks own
     ``dim``, ``preset``, and ``position``; ``position`` is round-tripped and
     validated on load (currently only ``"prepend"``). Missing ``position``
-    defaults to ``"prepend"``.
+    defaults to ``"prepend"``. Optional ``n_delays`` (default ``1``) records
+    Hankel delay embedding; the stored encoder block is always the base
+    GCN/GAT config with ``in_channels = n_delays * feature_dim``.
+    v0.4.0 keeps this format: ``koopman_kind``, ``control_mode``, and
+    ``bilinear_rank`` are additive optional fields with safe defaults.
 
 Loaders accept both versions. v1 checkpoints are migrated in memory by filling
 missing optional fields with defaults (``dynamics_mode="discrete"``, no physics,
 ``control_dim=0``, ``koopman_parameterization="dense"``).
 
 Custom injected operators (anything other than
-:class:`~koopman_graph.operators.KoopmanOperator` or
-:class:`~koopman_graph.operators.ContinuousKoopmanOperator`) are **not**
+:class:`~koopman_graph.operators.KoopmanOperator`,
+:class:`~koopman_graph.operators.ContinuousKoopmanOperator`, or
+:class:`~koopman_graph.operators.GraphKoopmanOperator`) are **not**
 round-trippable: :func:`build_model_config` / :meth:`GraphKoopmanModel.save`
 raise rather than silently writing incomplete factory metadata.
 """
@@ -36,7 +41,13 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch import nn
 
-from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder, GNNEncoder
+from koopman_graph.nn import (
+    DelayEmbeddingEncoder,
+    GATDecoder,
+    GATEncoder,
+    GNNDecoder,
+    GNNEncoder,
+)
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
@@ -46,6 +57,7 @@ from koopman_graph.observables import (
 )
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
+    GraphKoopmanOperator,
     KoopmanOperator,
     resolve_factory_stability_bound,
 )
@@ -57,7 +69,11 @@ FORMAT_VERSION = 2
 SUPPORTED_FORMAT_VERSIONS = frozenset({1, 2})
 
 Decoder = GNNDecoder | GATDecoder
-_SERIALIZABLE_KOOPMAN_TYPES = (KoopmanOperator, ContinuousKoopmanOperator)
+_SERIALIZABLE_KOOPMAN_TYPES = (
+    KoopmanOperator,
+    ContinuousKoopmanOperator,
+    GraphKoopmanOperator,
+)
 
 
 def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str, Any]:
@@ -84,6 +100,7 @@ def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str,
     migrated.setdefault("koopman_max_spectral_radius", 1.0)
     migrated.setdefault("control_dim", 0)
     migrated.setdefault("physics", None)
+    migrated.setdefault("n_delays", 1)
     return migrated
 
 
@@ -140,6 +157,38 @@ def _encoder_type(encoder: GNNEncoder | GATEncoder) -> str:
     raise TypeError(msg)
 
 
+def _unwrap_base_encoder(
+    encoder: nn.Module,
+) -> tuple[GNNEncoder | GATEncoder, int]:
+    """Return the serializable base encoder and delay count.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder, possibly wrapped in :class:`DelayEmbeddingEncoder`.
+
+    Returns
+    -------
+    base_encoder : GNNEncoder or GATEncoder
+        Checkpoint-rebuildable encoder.
+    n_delays : int
+        Delay window length (``1`` when unwrapped).
+    """
+    if isinstance(encoder, DelayEmbeddingEncoder):
+        base = encoder.base_encoder
+        if not isinstance(base, (GNNEncoder, GATEncoder)):
+            msg = (
+                "DelayEmbeddingEncoder.base_encoder must be GNNEncoder or "
+                f"GATEncoder for checkpoints; got {type(base).__name__}"
+            )
+            raise TypeError(msg)
+        return base, encoder.n_delays
+    if isinstance(encoder, (GNNEncoder, GATEncoder)):
+        return encoder, 1
+    msg = f"Unsupported encoder type: {type(encoder).__name__}"
+    raise TypeError(msg)
+
+
 def _decoder_type(decoder: Decoder) -> str:
     """Return the checkpoint decoder type string for a decoder instance.
 
@@ -183,10 +232,11 @@ def _require_serializable_koopman(model: GraphKoopmanModel) -> None:
     if isinstance(model.koopman, _SERIALIZABLE_KOOPMAN_TYPES):
         return
     msg = (
-        "Checkpoint serialization supports only built-in KoopmanOperator and "
-        "ContinuousKoopmanOperator instances. Custom injected operators are "
-        "not round-trippable; save the operator state separately or reconstruct "
-        f"the model with koopman=... after load. Got {type(model.koopman).__name__}."
+        "Checkpoint serialization supports only built-in KoopmanOperator, "
+        "ContinuousKoopmanOperator, and GraphKoopmanOperator instances. "
+        "Custom injected operators are not round-trippable; save the operator "
+        "state separately or reconstruct the model with koopman=... after load. "
+        f"Got {type(model.koopman).__name__}."
     )
     raise TypeError(msg)
 
@@ -212,7 +262,7 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         :class:`~koopman_graph.operators.ContinuousKoopmanOperator`).
     """
     _require_serializable_koopman(model)
-    encoder = model.encoder
+    encoder, n_delays = _unwrap_base_encoder(model.encoder)
     decoder = model.decoder
     encoder_config: dict[str, Any] = {
         "type": _encoder_type(encoder),
@@ -250,6 +300,7 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
         "dynamics_mode": model.dynamics_mode,
+        "koopman_kind": getattr(model, "koopman_kind", "pernode"),
         "koopman_init_mode": model.koopman.init_mode,
         "koopman_init_scale": model.koopman.init_scale,
         "koopman_parameterization": model.koopman.parameterization,
@@ -258,6 +309,9 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
             dynamics_mode=model.dynamics_mode,
         ),
         "control_dim": model.control_dim,
+        "control_mode": getattr(model, "control_mode", "additive"),
+        "bilinear_rank": getattr(model, "bilinear_rank", None),
+        "n_delays": n_delays,
         "physics": physics_config,
         "encoder": encoder_config,
         "decoder": decoder_config,
@@ -405,15 +459,19 @@ def reconstruct_model(
         latent_dim=config["latent_dim"],
         time_step=config["time_step"],
         dynamics_mode=config.get("dynamics_mode", "discrete"),
+        koopman=config.get("koopman_kind", "pernode"),
         koopman_init_mode=config["koopman_init_mode"],
         koopman_init_scale=config["koopman_init_scale"],
         koopman_parameterization=config.get("koopman_parameterization", "dense"),
         koopman_max_spectral_radius=config.get("koopman_max_spectral_radius", 1.0),
         control_dim=config.get("control_dim", 0),
+        control_mode=config.get("control_mode", "additive"),
+        bilinear_rank=config.get("bilinear_rank"),
         physics_lifting_fn=resolved_physics_fn,
         physics_preset=physics_preset,
         physics_dim=physics_dim,
         physics_position=physics_position,
+        n_delays=int(config.get("n_delays", 1)),
     )
 
 

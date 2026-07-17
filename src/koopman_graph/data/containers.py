@@ -1033,6 +1033,104 @@ class GraphSnapshotSequence:
             ),
         )
 
+    def windowed(
+        self,
+        n_delays: int,
+        *,
+        stride: int = 1,
+        pad: bool = True,
+        zero_unobserved: bool = True,
+    ) -> GraphSnapshotSequence:
+        """Return a sequence whose features are Hankel-stacked delay windows.
+
+        Each output snapshot at position ``i`` stores node features
+        ``(num_nodes, n_delays * F)`` built from the source window ending at
+        source index ``start + i * stride`` (with optional left zero-padding).
+        Topology, controls, timestamps, and observation masks are taken from
+        the **end** of each window. Topology changes inside a window raise
+        unless :attr:`allow_dynamic_topology` is ``True``.
+
+        Parameters
+        ----------
+        n_delays : int
+            Delay window length (must be >= 1). ``1`` returns a feature-cloned
+            copy of the (possibly strided) source sequence.
+        stride : int, optional
+            Step between successive window ends. Default is ``1``.
+        pad : bool, optional
+            Zero-pad missing history at the sequence start. When ``False``,
+            the first window end is ``n_delays - 1``. Default is ``True``.
+        zero_unobserved : bool, optional
+            Zero unobserved node rows inside each delay slot when observation
+            masks are present. Default is ``True``.
+
+        Returns
+        -------
+        GraphSnapshotSequence
+            Windowed trajectory with stacked channel features.
+
+        Raises
+        ------
+        ValueError
+            If ``n_delays < 1``, ``stride < 1``, the sequence is too short when
+            ``pad=False``, or a window spans a topology change on a static
+            sequence.
+        """
+        from koopman_graph.nn.delay import flatten_delay_window, stack_delay_features
+
+        if n_delays < 1:
+            msg = f"n_delays must be >= 1, got {n_delays}"
+            raise ValueError(msg)
+        if stride < 1:
+            msg = f"stride must be >= 1, got {stride}"
+            raise ValueError(msg)
+
+        first_end = 0 if pad else n_delays - 1
+        if first_end >= self.num_timesteps:
+            msg = (
+                f"sequence too short for n_delays={n_delays} with pad={pad} "
+                f"(num_timesteps={self.num_timesteps})"
+            )
+            raise ValueError(msg)
+
+        ends = list(range(first_end, self.num_timesteps, stride))
+        stacked_snapshots: list[Data] = []
+        for end in ends:
+            x_window, edge_index, edge_weight, _history_mask = stack_delay_features(
+                self,
+                end,
+                n_delays,
+                pad=pad,
+                zero_unobserved=zero_unobserved,
+            )
+            payload: dict[str, object] = {
+                "x": flatten_delay_window(x_window),
+                "edge_index": edge_index,
+            }
+            if edge_weight is not None:
+                payload["edge_weight"] = edge_weight
+            stacked_snapshots.append(Data(**payload))
+
+        control_inputs = None
+        if self.control_inputs is not None:
+            control_inputs = self.control_inputs[ends]
+
+        timestamps = None
+        if self.timestamps is not None:
+            timestamps = self.timestamps[ends]
+
+        observation_masks = None
+        if self.observation_masks is not None:
+            observation_masks = self.observation_masks[ends]
+
+        return GraphSnapshotSequence(
+            stacked_snapshots,
+            allow_dynamic_topology=self.allow_dynamic_topology,
+            control_inputs=control_inputs,
+            timestamps=timestamps,
+            observation_masks=observation_masks,
+        )
+
     def __iter__(self) -> Iterator[Data]:
         """Iterate over graph snapshots in temporal order.
 

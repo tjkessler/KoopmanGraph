@@ -6,7 +6,12 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
+from koopman_graph import (
+    GNNDecoder,
+    GNNEncoder,
+    GraphKoopmanModel,
+    GraphSnapshotSequence,
+)
 from koopman_graph.adaptation import AdaptationStepResult, RecursiveKoopmanAdapter
 from koopman_graph.operators import (
     VAN_LOAN_WRITEBACK_ATOL,
@@ -380,3 +385,269 @@ def test_model_enable_online_adaptation_rejects_structured_operator() -> None:
         assert "dense" in str(exc)
     else:
         raise AssertionError("expected ValueError for structured parameterization")
+
+
+def _identity_encode(model, x_or_data, edge_index=None, edge_weight=None):
+    """Treat node features as latent states (synthetic linear identity lifting)."""
+    from koopman_graph.graph_utils import resolve_edge_index
+
+    _ = edge_weight
+    _ = resolve_edge_index(x_or_data, edge_index)
+    if isinstance(x_or_data, Data):
+        return x_or_data.x
+    return x_or_data
+
+
+def _identity_decode(z, edge_index, edge_weight=None):
+    """Identity decoder for synthetic linear tests.
+
+    Assigned to ``module.forward`` (instance attribute); PyTorch ``__call__``
+    invokes it without re-binding ``self``.
+    """
+    _ = edge_index
+    _ = edge_weight
+    return z
+
+
+def _patch_identity_io(model: GraphKoopmanModel) -> None:
+    """Make encode/decode identity maps for synthetic linear KF tests."""
+    model.encode = (  # type: ignore[method-assign]
+        lambda *args, **kwargs: _identity_encode(model, *args, **kwargs)
+    )
+    model.decoder.forward = _identity_decode  # type: ignore[method-assign]
+
+
+def _linear_latent_sequence(
+    true_k: torch.Tensor,
+    *,
+    num_nodes: int = 2,
+    steps: int = 12,
+    process_std: float = 0.0,
+    seed: int = 0,
+) -> tuple[GraphSnapshotSequence, torch.Tensor]:
+    """Simulate z_{t+1}=z_t @ K.T with features equal to latents."""
+    torch.manual_seed(seed)
+    d = true_k.shape[0]
+    edge_index = (
+        _two_node_edge_index()
+        if num_nodes == 2
+        else torch.tensor(
+            [
+                [i % num_nodes for i in range(num_nodes)],
+                [(i + 1) % num_nodes for i in range(num_nodes)],
+            ],
+            dtype=torch.long,
+        )
+    )
+    z = torch.randn(num_nodes, d)
+    latents = [z.clone()]
+    for _ in range(steps - 1):
+        z = z @ true_k.T
+        if process_std > 0:
+            z = z + process_std * torch.randn_like(z)
+        latents.append(z.clone())
+    snapshots = [Data(x=z_t.clone(), edge_index=edge_index) for z_t in latents]
+    stacked = torch.stack(latents, dim=0)
+    return GraphSnapshotSequence(snapshots), stacked
+
+
+def test_koopman_observer_matches_reference_kf_fully_observed() -> None:
+    """Fully observed linear latent system should match a textbook KF."""
+    from koopman_graph.adaptation import KoopmanObserver
+    from koopman_graph.adaptation.observer import reference_kalman_filter
+
+    true_k = torch.diag(torch.tensor([0.9, 0.8]))
+    sequence, true_latents = _linear_latent_sequence(true_k, steps=10, seed=3)
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+
+    process_noise = 1e-4
+    observation_noise = 1e-3
+    observer = KoopmanObserver(
+        model,
+        process_noise=process_noise,
+        observation_noise=observation_noise,
+        observation_model="latent_encode",
+        initial_covariance=1.0,
+    )
+    result = observer.filter(sequence)
+
+    n_nodes, d = 2, 2
+    state_dim = n_nodes * d
+    a_mat = torch.kron(torch.eye(n_nodes), true_k)
+    h_mat = torch.eye(state_dim)
+    q_mat = process_noise * torch.eye(state_dim)
+    r_mat = observation_noise * torch.eye(state_dim)
+    measurements = true_latents.reshape(len(sequence), -1)
+    x0 = measurements[0]
+    p0 = torch.eye(state_dim)
+    ref_means, _, _, _ = reference_kalman_filter(
+        transition=a_mat,
+        process_cov=q_mat,
+        observation=h_mat,
+        observation_cov=r_mat,
+        measurements=measurements,
+        x0=x0,
+        p0=p0,
+    )
+    assert torch.allclose(
+        result.latents.reshape(len(sequence), -1), ref_means, atol=1e-5
+    )
+
+
+def test_koopman_observer_decoder_jacobian_linear_identity() -> None:
+    """Decoder-Jacobian mode with identity decode recovers H = I on a tiny graph."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.85, 0.75]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=6, seed=5)
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+
+    observer = KoopmanObserver(
+        model,
+        process_noise=1e-4,
+        observation_noise=1e-3,
+        observation_model="decoder_jacobian",
+    )
+    filtered = observer.filter(sequence)
+    assert filtered.latents.shape == (6, 2, 2)
+    assert torch.isfinite(filtered.latents).all()
+
+
+def test_imputation_rmse_soft_monotonic_in_drop_fraction() -> None:
+    """Imputation RMSE should not improve as more nodes are dropped (soft)."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.9, 0.85, 0.8]))
+    sequence, true_latents = _linear_latent_sequence(
+        true_k,
+        num_nodes=3,
+        steps=16,
+        seed=7,
+    )
+    # Rebuild edge index for 3 nodes inside helper already.
+    encoder = GNNEncoder(in_channels=3, hidden_channels=4, latent_dim=3, num_layers=1)
+    decoder = GNNDecoder(latent_dim=3, hidden_channels=4, out_channels=3, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=3,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+    observer = KoopmanObserver(model, process_noise=1e-4, observation_noise=1e-2)
+
+    def masked_rmse(drop_fraction: float, seed: int) -> float:
+        torch.manual_seed(seed)
+        masks = torch.rand(len(sequence), sequence.num_nodes) > drop_fraction
+        # Ensure at least one observed node per timestep.
+        masks[:, 0] = True
+        from koopman_graph import GraphSnapshotSequence
+
+        masked = GraphSnapshotSequence(
+            list(sequence),
+            observation_masks=masks,
+        )
+        imputed = observer.impute(masked, use_smoother=True)
+        errs = []
+        for t in range(len(sequence)):
+            miss = ~masks[t]
+            if not bool(miss.any()):
+                continue
+            pred = imputed[t].x[miss]
+            truth = true_latents[t][miss]
+            errs.append(torch.mean((pred - truth) ** 2).sqrt())
+        return float(torch.stack(errs).mean().item()) if errs else 0.0
+
+    rmse_lo = masked_rmse(0.2, seed=11)
+    rmse_hi = masked_rmse(0.6, seed=11)
+    assert rmse_hi + 1e-5 >= rmse_lo * 0.95
+
+
+def test_smoother_not_worse_than_filter_on_average() -> None:
+    """RTS smooth should not exceed filter RMSE vs ground-truth latents."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.88, 0.82]))
+    sequence, true_latents = _linear_latent_sequence(
+        true_k,
+        steps=14,
+        process_std=0.02,
+        seed=9,
+    )
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+
+    torch.manual_seed(0)
+    masks = torch.ones(len(sequence), sequence.num_nodes, dtype=torch.bool)
+    masks[::2, 1] = False
+    from koopman_graph import GraphSnapshotSequence
+
+    masked = GraphSnapshotSequence(list(sequence), observation_masks=masks)
+    observer = KoopmanObserver(model, process_noise=1e-3, observation_noise=1e-2)
+    filt = observer.filter(masked)
+    smth = observer.smooth(masked)
+    filt_err = torch.mean((filt.latents - true_latents) ** 2).sqrt()
+    smth_err = torch.mean((smth.latents - true_latents) ** 2).sqrt()
+    assert float(smth_err.item()) <= float(filt_err.item()) + 1e-5
+
+
+def test_koopman_observer_rejects_bilinear() -> None:
+    """Observer should refuse bilinear control_mode."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=1.0,
+        control_dim=1,
+        control_mode="bilinear",
+        koopman_parameterization="dense",
+    )
+    with pytest.raises(ValueError, match="bilinear"):
+        KoopmanObserver(model)
+
+
+def test_filter_result_is_frozen() -> None:
+    """Verify ``FilterResult`` is a frozen dataclass."""
+    from koopman_graph.adaptation import FilterResult
+
+    result = FilterResult(
+        latents=torch.zeros(2, 2, 2),
+        covariances=torch.eye(4).unsqueeze(0).repeat(2, 1, 1),
+    )
+    with pytest.raises(AttributeError):
+        result.latents = torch.ones(2, 2, 2)  # type: ignore[misc]

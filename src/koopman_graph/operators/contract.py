@@ -13,6 +13,8 @@ Parameterization = Literal["dense", "odo", "schur", "dissipative", "lyapunov"]
 #: Canonical discrete vs continuous dynamics vocabulary. Re-exported from
 #: :mod:`koopman_graph.protocols` as :data:`~koopman_graph.protocols.DynamicsMode`.
 DynamicsMode = Literal["discrete", "continuous"]
+#: Built-in discrete factory kind for :class:`~koopman_graph.model.GraphKoopmanModel`.
+KoopmanKind = Literal["pernode", "graph"]
 
 STABILITY_EPS_MARGIN = 1e-4
 DISSIPATIVE_MIN_EIGENVALUE = 1e-3
@@ -46,13 +48,17 @@ class StabilityCertificate:
 class KoopmanOperatorContract(Protocol):
     """Shared contract for discrete and continuous Koopman operators.
 
-    Both :class:`KoopmanOperator` and
-    :class:`~koopman_graph.operators.ContinuousKoopmanOperator` implement this
+    Both :class:`KoopmanOperator`,
+    :class:`~koopman_graph.operators.ContinuousKoopmanOperator`, and
+    :class:`~koopman_graph.operators.GraphKoopmanOperator` implement this
     surface. Domain-specific names (``K`` / ``L``, ``spectral_radius`` /
     ``max_real_part``, ``forward`` / ``inverse_step``) remain as thin aliases
     for notebooks and existing call sites. ``spectral_radius`` /
     ``max_real_part`` always report the true spectrum via ``eigvals``;
     :meth:`bound_metric` is the cheap soft/structural monitoring bound.
+    Networked operators additionally accept optional ``edge_index`` /
+    ``edge_weight`` on :meth:`advance` / :meth:`inverse_advance`; per-node
+    operators ignore those kwargs.
 
     Attributes
     ----------
@@ -85,6 +91,8 @@ class KoopmanOperatorContract(Protocol):
         delta_t: float | Tensor | None = None,
         *,
         control: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Advance latent states one step (discrete) or over ``Δt`` (continuous).
 
@@ -97,6 +105,12 @@ class KoopmanOperatorContract(Protocol):
             required for continuous operators.
         control : Tensor or None, optional
             Exogenous control input when ``control_dim > 0``.
+        edge_index : Tensor or None, optional
+            Graph topology for networked operators. Ignored by per-node
+            operators; required by
+            :class:`~koopman_graph.operators.GraphKoopmanOperator`.
+        edge_weight : Tensor or None, optional
+            Optional edge weights for networked operators.
 
         Returns
         -------
@@ -112,6 +126,8 @@ class KoopmanOperatorContract(Protocol):
         *,
         control: Tensor | None = None,
         inverse_matrix: Tensor | None = None,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
     ) -> Tensor:
         """Recover the previous latent state (discrete or continuous).
 
@@ -127,6 +143,11 @@ class KoopmanOperatorContract(Protocol):
         inverse_matrix : Tensor or None, optional
             Optional precomputed discrete inverse; ignored for continuous
             operators.
+        edge_index : Tensor or None, optional
+            Graph topology for networked operators. Ignored by per-node
+            operators.
+        edge_weight : Tensor or None, optional
+            Optional edge weights for networked operators.
 
         Returns
         -------

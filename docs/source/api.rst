@@ -22,7 +22,7 @@ Model
 
 .. automodule:: koopman_graph.model
    :members:
-   :exclude-members: EvaluationResult, GATDecoder, GATEncoder, GNNDecoder, GNNEncoder, GraphSnapshotSequence, KoopmanOperator
+   :exclude-members: EvaluationResult, GATDecoder, GATEncoder, GNNDecoder, GNNEncoder, GraphSnapshotSequence, GraphKoopmanOperator, KoopmanOperator
    :show-inheritance:
 
 Encoders
@@ -35,6 +35,18 @@ Former deep imports ``koopman_graph.encoder`` / ``decoder`` / ``gnn`` were
 removed in v0.3.0.
 
 .. automodule:: koopman_graph.nn.encoder
+   :members:
+   :show-inheritance:
+
+Delay Embeddings
+----------------
+
+Hankel / delay-coordinate lifting wraps a sized base encoder. Prefer
+``from koopman_graph import DelayEmbeddingEncoder`` or pass
+``n_delays`` to :class:`~koopman_graph.model.GraphKoopmanModel`.
+This is Takens-style channel stacking, not a full HAVOK / Hankel-DMD solver.
+
+.. automodule:: koopman_graph.nn.delay
    :members:
    :show-inheritance:
 
@@ -74,8 +86,8 @@ Koopman Operator
 ----------------
 
 Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
-``discrete``, ``continuous``). Prefer ``from koopman_graph import
-KoopmanOperator, ContinuousKoopmanOperator`` or
+``control``, ``discrete``, ``continuous``, ``graph``). Prefer ``from koopman_graph import
+KoopmanOperator, ContinuousKoopmanOperator, GraphKoopmanOperator`` or
 ``from koopman_graph.operators import …``. Former deep imports
 ``koopman_graph.operator`` / ``koopman_graph.continuous`` were removed in
 v0.3.0.
@@ -123,7 +135,23 @@ satisfy :class:`~koopman_graph.protocols.ForecastModel` (``fit`` / ``predict`` /
 ``reconstruction_matrix`` for observable-to-state least squares (not a GNN
 decoder). Prefer ``from koopman_graph.baselines import …`` or the root façade.
 
+Spatiotemporal GNN forecaster baselines
+(:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
+:class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
+:class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`) live under
+``koopman_graph.baselines.gnn``. They are lightweight ``nn.Module`` reference
+implementations for protocol-matched comparisons with
+:class:`~koopman_graph.model.GraphKoopmanModel` (including
+:func:`~koopman_graph.metrics.evaluate_forecast`). Their ``spectrum`` method
+raises ``RuntimeError`` (no linear Koopman operator). Prefer
+``from koopman_graph.baselines.gnn import …``.
+
 .. automodule:: koopman_graph.baselines
+   :members:
+   :exclude-members: STGCNBaseline, DCRNNBaseline, GraphWaveNetBaseline
+   :show-inheritance:
+
+.. automodule:: koopman_graph.baselines.gnn
    :members:
    :show-inheritance:
 
@@ -204,8 +232,8 @@ Online Adaptation
 -----------------
 
 ``RecursiveKoopmanAdapter`` remains on the root façade.
-``AdaptationStepResult`` is imported from :mod:`koopman_graph.adaptation`
-only.
+``AdaptationStepResult``, ``KoopmanObserver``, and ``FilterResult`` are
+imported from :mod:`koopman_graph.adaptation` only.
 
 .. automodule:: koopman_graph.adaptation
    :members:
@@ -253,5 +281,9 @@ Datasets
    :show-inheritance:
 
 .. automodule:: koopman_graph.datasets.metr_la
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.nonlinear
    :members:
    :show-inheritance:

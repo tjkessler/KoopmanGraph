@@ -1,13 +1,13 @@
-"""Dataset utilities for KoopmanGraph benchmarks and examples.
+"""Public dataset package exports for KoopmanGraph benchmarks.
 
 Factory idioms
 --------------
 Simulated benchmarks expose ``ClassName.generate(...)`` and return a
 :class:`~koopman_graph.data.GraphSnapshotSequence` built from Laplacian (or
-related) dynamics on a fixed topology. Real telemetry benchmarks expose
-``load_topology`` / ``load_sequence`` (or equivalent cache loaders) because the
-graph and time series are downloaded artifacts rather than synthesized in
-process.
+related) dynamics on a fixed topology. Real telemetry and cached teaching
+benchmarks expose ``load_topology`` / ``load_sequence`` (or equivalent cache
+loaders) because the graph and time series are downloaded or precomputed
+artifacts rather than synthesized in process.
 
 Prefer the classmethod entry points on the public benchmark classes below.
 Module-level helpers in individual dataset modules are implementation details
@@ -45,6 +45,15 @@ IEEE118DynamicBenchmark
 MetrLaTrafficBenchmark
     METR-LA traffic-speed sensor graph with cached speed snapshots
     (``load_topology`` / ``load_sequence``).
+EpidemicNetworkBenchmark
+    Networked SIR epidemic on ring / small-world / custom contact graphs.
+Lorenz96GraphBenchmark
+    Lorenz-96 chaotic ODE on a ring graph.
+KuramotoSivashinskyBenchmark
+    1D Kuramoto–Sivashinsky PDE on a path/ring discretization.
+CylinderWakeBenchmark
+    Cached Hopf/Stuart–Landau cylinder-wake teaching surrogate
+    (``load_topology`` / ``load_sequence``).
 """
 
 from koopman_graph.datasets.grid import (
@@ -53,13 +62,23 @@ from koopman_graph.datasets.grid import (
 )
 from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
 from koopman_graph.datasets.metr_la import MetrLaTrafficBenchmark
+from koopman_graph.datasets.nonlinear import (
+    CylinderWakeBenchmark,
+    EpidemicNetworkBenchmark,
+    KuramotoSivashinskyBenchmark,
+    Lorenz96GraphBenchmark,
+)
 from koopman_graph.datasets.synthetic import SyntheticDynamicGraphBenchmark
 from koopman_graph.datasets.topology import TopologyPayload
 
 __all__ = [
     "AnisotropicAdvectionGridBenchmark",
+    "CylinderWakeBenchmark",
+    "EpidemicNetworkBenchmark",
     "GridDynamicGraphBenchmark",
     "IEEE118DynamicBenchmark",
+    "KuramotoSivashinskyBenchmark",
+    "Lorenz96GraphBenchmark",
     "MetrLaTrafficBenchmark",
     "SyntheticDynamicGraphBenchmark",
     "TopologyPayload",

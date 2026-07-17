@@ -259,14 +259,14 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
 `[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
 `pyproject.toml`.
 
-### Checkpoint migration (v0.3.0)
+### Checkpoint migration (v0.3.0 / v0.4.0)
 
 Model checkpoints include a ``format_version`` field (see
 ``src/koopman_graph/serialization.py``):
@@ -287,6 +287,11 @@ thin public façade, and spectrum plot helpers) did **not** require a
 new ``format_version``; new saves still use ``FORMAT_VERSION`` 2. Custom
 injected operators are rejected on ``save`` and are therefore outside the
 checkpoint migration path.
+
+v0.4.0 likewise keeps ``FORMAT_VERSION`` 2. Networked operators
+(``koopman_kind``), bilinear control (``control_mode`` / ``bilinear_rank``),
+and delay embeddings (``n_delays``) are additive config fields with defaults
+compatible with older v2 checkpoints.
 
 ### Maintainer release checklist
 

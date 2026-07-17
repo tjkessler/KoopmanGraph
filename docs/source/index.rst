@@ -24,6 +24,12 @@ call-site contract, documented power-user modules (``graph_utils``,
 ``nn``, ``analysis``, ``baselines``), a **thin** root façade (core workflow in
 ``__all__``; specialized helpers via capability modules), and discrete
 spectrum plotting with unit-disk / data-zoom views.
+
+Version 0.4.0 extends the forecasting stack with networked
+``GraphKoopmanOperator`` coupling, delay / Hankel encoder embeddings, bilinear
+control-affine terms, latent Kalman observation / imputation, nonlinear and
+chaotic graph benchmarks, and lightweight STGCN / DCRNN / Graph WaveNet
+reference forecasters for protocol-matched comparisons.
 See :doc:`architecture` for the public vs power-user layering contract, the
 thin-façade keep/demote inventory, and the package-layout nesting policy.
 

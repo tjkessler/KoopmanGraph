@@ -11,8 +11,12 @@ import torch
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.datasets import (
     AnisotropicAdvectionGridBenchmark,
+    CylinderWakeBenchmark,
+    EpidemicNetworkBenchmark,
     GridDynamicGraphBenchmark,
     IEEE118DynamicBenchmark,
+    KuramotoSivashinskyBenchmark,
+    Lorenz96GraphBenchmark,
     MetrLaTrafficBenchmark,
     SyntheticDynamicGraphBenchmark,
     TopologyPayload,
@@ -31,6 +35,9 @@ from koopman_graph.datasets.grid import _grid_edge_index, grid_node_index
         GridDynamicGraphBenchmark,
         AnisotropicAdvectionGridBenchmark,
         IEEE118DynamicBenchmark,
+        EpidemicNetworkBenchmark,
+        Lorenz96GraphBenchmark,
+        KuramotoSivashinskyBenchmark,
     ],
 )
 def test_generate_defaults_seed_to_none(benchmark_cls: type) -> None:
@@ -626,3 +633,261 @@ def test_metr_la_read_h5_speed_window_invalid_window(tmp_path: Path) -> None:
         read_h5_speed_window(h5_path, num_timesteps=2, offset=-1)
     with pytest.raises(ValueError, match="exceeds available rows"):
         read_h5_speed_window(h5_path, num_timesteps=10, offset=0)
+
+
+def test_epidemic_network_generate_shapes_and_simplex() -> None:
+    """Verify SIR features stay on the simplex and infection spreads."""
+    sequence = EpidemicNetworkBenchmark.generate(
+        num_nodes=20,
+        num_timesteps=25,
+        topology="ring",
+        seed=0,
+    )
+    assert sequence.num_nodes == 20
+    assert sequence.in_channels == EpidemicNetworkBenchmark.IN_CHANNELS
+    assert sequence.num_timesteps == 25
+    for snapshot in sequence:
+        totals = snapshot.x.sum(dim=1)
+        assert torch.allclose(totals, torch.ones_like(totals), atol=1e-5)
+        assert torch.all(snapshot.x >= -1e-6)
+    assert float(sequence[12].x[:, 1].mean()) > float(sequence[0].x[:, 1].mean())
+
+
+def test_epidemic_network_seed_determinism_and_topologies() -> None:
+    """Verify fixed-seed identity and small-world / custom topologies."""
+    kwargs = {
+        "num_nodes": 18,
+        "num_timesteps": 12,
+        "topology": "small_world",
+        "seed": 11,
+    }
+    first = EpidemicNetworkBenchmark.generate(**kwargs)
+    second = EpidemicNetworkBenchmark.generate(**kwargs)
+    for left, right in zip(first, second, strict=True):
+        assert torch.equal(left.x, right.x)
+        assert torch.equal(left.edge_index, right.edge_index)
+
+    custom_edges = first[0].edge_index.clone()
+    custom = EpidemicNetworkBenchmark.generate(
+        num_nodes=18,
+        num_timesteps=5,
+        topology="custom",
+        edge_index=custom_edges,
+        seed=0,
+    )
+    assert custom.num_nodes == 18
+    assert torch.equal(custom[0].edge_index, custom_edges)
+
+
+def test_epidemic_network_rejects_invalid_params() -> None:
+    """Verify epidemic generator validates topology and rates."""
+    with pytest.raises(ValueError, match="custom"):
+        EpidemicNetworkBenchmark.generate(topology="custom")
+    with pytest.raises(ValueError, match="beta"):
+        EpidemicNetworkBenchmark.generate(beta=-0.1)
+    with pytest.raises(ValueError, match="Unsupported topology"):
+        EpidemicNetworkBenchmark.generate(topology="lattice")  # type: ignore[arg-type]
+
+
+def test_epidemic_intervention_controls_and_effect() -> None:
+    """Verify contact-reduction controls attach and suppress infection."""
+    baseline = EpidemicNetworkBenchmark.generate(
+        num_nodes=24,
+        num_timesteps=40,
+        topology="ring",
+        seed=2,
+    )
+    zero_u = EpidemicNetworkBenchmark.generate(
+        num_nodes=24,
+        num_timesteps=40,
+        topology="ring",
+        seed=2,
+        expose_intervention_control=True,
+        intervention=torch.zeros(40, 1),
+    )
+    for left, right in zip(baseline, zero_u, strict=True):
+        assert torch.allclose(left.x, right.x, atol=1e-6)
+    assert zero_u.has_controls
+    assert zero_u.control_dim == 1
+    assert zero_u.control_inputs is not None
+    assert zero_u.control_inputs.shape == (40, 1)
+
+    strong = EpidemicNetworkBenchmark.generate(
+        num_nodes=24,
+        num_timesteps=40,
+        topology="ring",
+        seed=2,
+        expose_intervention_control=True,
+        intervention=torch.full((40, 1), 0.85),
+    )
+    peak_base = max(float(snapshot.x[:, 1].mean()) for snapshot in baseline)
+    peak_strong = max(float(snapshot.x[:, 1].mean()) for snapshot in strong)
+    assert peak_strong < peak_base
+
+    default = EpidemicNetworkBenchmark.generate(
+        num_nodes=20,
+        num_timesteps=30,
+        topology="ring",
+        seed=0,
+        expose_intervention_control=True,
+    )
+    assert default.control_inputs is not None
+    assert float(default.control_inputs[:10].max()) == 0.0
+    assert float(default.control_inputs[-1]) > 0.0
+
+
+def test_epidemic_intervention_rejects_bad_controls() -> None:
+    """Verify intervention argument validation."""
+    with pytest.raises(ValueError, match="expose_intervention_control"):
+        EpidemicNetworkBenchmark.generate(intervention=torch.zeros(10))
+    with pytest.raises(ValueError, match="shape"):
+        EpidemicNetworkBenchmark.generate(
+            num_timesteps=10,
+            expose_intervention_control=True,
+            intervention=torch.zeros(5, 1),
+        )
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        EpidemicNetworkBenchmark.generate(
+            num_timesteps=10,
+            expose_intervention_control=True,
+            intervention=torch.full((10, 1), 1.5),
+        )
+
+
+def test_epidemic_intervention_bilinear_beats_additive_frozen_k() -> None:
+    """Soft check: bilinear lowers post-onset MSE vs additive with frozen K."""
+    from koopman_graph.operators import KoopmanOperator
+
+    torch.manual_seed(0)
+    num_timesteps = 80
+    onset_frac = 0.25
+    onset = int(onset_frac * num_timesteps)
+    schedule = EpidemicNetworkBenchmark.default_intervention_schedule(
+        num_timesteps,
+        onset_fraction=onset_frac,
+        max_reduction=0.85,
+    )
+    sequence = EpidemicNetworkBenchmark.generate(
+        num_nodes=24,
+        num_timesteps=num_timesteps,
+        topology="ring",
+        beta=0.5,
+        gamma=0.1,
+        seed=3,
+        expose_intervention_control=True,
+        intervention=schedule,
+    )
+    assert sequence.control_inputs is not None
+    states = [sequence[t].x for t in range(len(sequence) - 1)]
+    next_states = [sequence[t + 1].x for t in range(len(sequence) - 1)]
+    controls = [sequence.control_inputs[t] for t in range(len(sequence) - 1)]
+    design = torch.cat(states[: max(onset, 5)], dim=0)
+    targets = torch.cat(next_states[: max(onset, 5)], dim=0)
+    k0 = torch.linalg.lstsq(design, targets).solution.T
+    post = list(range(onset, len(states)))
+
+    def _fit(mode: str) -> float:
+        operator = KoopmanOperator(
+            3,
+            control_dim=1,
+            control_mode=mode,  # type: ignore[arg-type]
+            init_mode="identity",
+        )
+        with torch.no_grad():
+            kwargs: dict = {"control_matrix": torch.zeros(1, 3)}
+            if mode == "bilinear":
+                kwargs["bilinear_matrices"] = torch.zeros(1, 3, 3)
+            operator.set_dense_matrix(k0, **kwargs)
+        operator._parameters["K"].requires_grad_(False)
+        trainable = [
+            parameter for parameter in operator.parameters() if parameter.requires_grad
+        ]
+        opt = torch.optim.Adam(trainable, lr=3e-2)
+        final = 0.0
+        for _ in range(400):
+            opt.zero_grad()
+            loss = torch.zeros(())
+            for index in post:
+                pred = operator(states[index], control=controls[index])
+                loss = loss + (pred - next_states[index]).square().mean()
+            loss = loss / len(post)
+            loss.backward()
+            opt.step()
+            final = float(loss.detach())
+        return final
+
+    additive_loss = _fit("additive")
+    bilinear_loss = _fit("bilinear")
+    assert bilinear_loss <= additive_loss
+    assert (additive_loss - bilinear_loss) / max(additive_loss, 1e-12) >= 0.03
+
+
+def test_lorenz96_seed_determinism_and_chaos_scale() -> None:
+    """Verify Lorenz-96 ring trajectories are finite and deterministic."""
+    kwargs = {
+        "num_nodes": 16,
+        "num_timesteps": 40,
+        "burn_in": 30,
+        "forcing": 8.0,
+        "seed": 4,
+    }
+    first = Lorenz96GraphBenchmark.generate(**kwargs)
+    second = Lorenz96GraphBenchmark.generate(**kwargs)
+    assert first.num_nodes == 16
+    assert first.in_channels == 1
+    for left, right in zip(first, second, strict=True):
+        assert torch.equal(left.x, right.x)
+    assert torch.isfinite(first[-1].x).all()
+    # Chaotic F=8 should not collapse to a near-constant field.
+    assert float(first[-1].x.std()) > 0.5
+
+
+def test_kuramoto_sivashinsky_seed_determinism_and_energy() -> None:
+    """Verify KS ETDRK4 trajectories are finite and deterministic."""
+    kwargs = {
+        "num_nodes": 32,
+        "num_timesteps": 30,
+        "burn_in": 20,
+        "domain_length": 22.0,
+        "dt": 0.25,
+        "seed": 2,
+    }
+    first = KuramotoSivashinskyBenchmark.generate(**kwargs)
+    second = KuramotoSivashinskyBenchmark.generate(**kwargs)
+    assert first.in_channels == 1
+    for left, right in zip(first, second, strict=True):
+        assert torch.equal(left.x, right.x)
+    assert torch.isfinite(first[-1].x).all()
+    assert float(first[-1].x.std()) > 0.1
+    path_seq = KuramotoSivashinskyBenchmark.generate(
+        num_nodes=32,
+        num_timesteps=5,
+        burn_in=5,
+        topology="path",
+        seed=0,
+    )
+    assert path_seq[0].edge_index.shape[1] == 2 * (32 - 1)
+
+
+def test_cylinder_wake_cache_load(tmp_path: Path) -> None:
+    """Verify cylinder-wake cache build/load mirrors the METR-LA pattern."""
+    from koopman_graph.datasets.nonlinear import ensure_wake_cache
+
+    cache_path = ensure_wake_cache(tmp_path, force=True)
+    assert cache_path.exists()
+    sequence = CylinderWakeBenchmark.load_sequence(tmp_path)
+    topology = CylinderWakeBenchmark.load_topology(tmp_path)
+    assert sequence.num_nodes == topology.num_nodes
+    assert sequence.in_channels == CylinderWakeBenchmark.IN_CHANNELS
+    assert sequence.num_timesteps >= 2
+    assert torch.isfinite(sequence[0].x).all()
+
+
+def test_cylinder_wake_default_cache_loads() -> None:
+    """Verify the shipped default wake.pt cache is readable."""
+    sequence = CylinderWakeBenchmark.load_sequence()
+    assert sequence.num_nodes == CylinderWakeBenchmark.NUM_NODES
+    assert sequence.num_timesteps >= 2
+    again = CylinderWakeBenchmark.load_sequence()
+    for left, right in zip(sequence, again, strict=True):
+        assert torch.equal(left.x, right.x)

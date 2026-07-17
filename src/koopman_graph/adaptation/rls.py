@@ -1,4 +1,7 @@
-"""Recursive least-squares online adaptation for Koopman operators."""
+"""Recursive least-squares online adaptation for Koopman operators.
+
+Part of :mod:`koopman_graph.adaptation` (peer to the Kalman observer).
+"""
 
 from __future__ import annotations
 

@@ -11,6 +11,9 @@ Capability layout
 ``decoder``
     :class:`~koopman_graph.nn.decoder.GNNDecoder` /
     :class:`~koopman_graph.nn.decoder.GATDecoder`.
+``delay``
+    :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` Hankel wrapper and
+    delay-window helpers.
 
 The package itself is power-user; encoder/decoder classes remain in the root
 ``koopman_graph.__all__`` façade. Prefer
@@ -19,6 +22,7 @@ The package itself is power-user; encoder/decoder classes remain in the root
 """
 
 from koopman_graph.nn.decoder import GATDecoder, GNNDecoder
+from koopman_graph.nn.delay import DelayEmbeddingEncoder
 from koopman_graph.nn.encoder import GATEncoder, GNNEncoder
 from koopman_graph.nn.gnn import (
     ActivationName,
@@ -32,6 +36,7 @@ from koopman_graph.nn.gnn import (
 __all__ = [
     "ActivationName",
     "BaseGNNModule",
+    "DelayEmbeddingEncoder",
     "GATDecoder",
     "GATEncoder",
     "GNNDecoder",

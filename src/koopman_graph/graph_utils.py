@@ -44,6 +44,7 @@ callables; missing controls mean uncontrolled advance, and missing
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 
 import torch
@@ -363,6 +364,44 @@ def snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
     return Data(**fields)
 
 
+def _topology_kwargs_for(
+    method: Callable[..., Tensor],
+    *,
+    edge_index: Tensor | None,
+    edge_weight: Tensor | None,
+) -> dict[str, Tensor | None]:
+    """Return topology kwargs accepted by ``method`` (ignore if unsupported).
+
+    Built-in operators accept optional ``edge_index`` / ``edge_weight``. Older
+    custom injected operators may omit those parameters; skip them so Protocol
+    injection keeps working without forcing every stub to update.
+
+    Parameters
+    ----------
+    method : callable
+        ``advance`` or ``inverse_advance`` bound method.
+    edge_index : Tensor or None
+        Topology to forward when supported.
+    edge_weight : Tensor or None
+        Optional edge weights to forward when supported.
+
+    Returns
+    -------
+    dict
+        Keyword arguments safe to pass to ``method``.
+    """
+    params = inspect.signature(method).parameters
+    accepts_var_kw = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in params.values()
+    )
+    if accepts_var_kw or "edge_index" in params:
+        kwargs: dict[str, Tensor | None] = {"edge_index": edge_index}
+        if accepts_var_kw or "edge_weight" in params:
+            kwargs["edge_weight"] = edge_weight
+        return kwargs
+    return {}
+
+
 def propagate_latent(
     koopman: KoopmanPropagator,
     z: Tensor,
@@ -370,6 +409,8 @@ def propagate_latent(
     control: Tensor | None = None,
     delta_t: float | Tensor | None = None,
     default_delta_t: float | Tensor = 1.0,
+    edge_index: Tensor | None = None,
+    edge_weight: Tensor | None = None,
 ) -> Tensor:
     """Advance latent states via the unified Koopman contract.
 
@@ -377,7 +418,8 @@ def propagate_latent(
     :meth:`~koopman_graph.operators.KoopmanOperatorContract.advance`. Discrete
     operators ignore the interval; continuous operators (built-in or custom
     injected) require it. Dispatch does **not** use concrete ``isinstance``
-    checks.
+    checks. Topology kwargs are forwarded for networked operators and ignored
+    by per-node operators.
 
     Parameters
     ----------
@@ -394,6 +436,10 @@ def propagate_latent(
         Fallback interval when ``delta_t is None``. Callers with a model
         ``time_step`` should pass it here (see module ``delta_t`` default
         policy).
+    edge_index : Tensor or None, optional
+        Graph topology for networked operators.
+    edge_weight : Tensor or None, optional
+        Optional edge weights for networked operators.
 
     Returns
     -------
@@ -401,7 +447,16 @@ def propagate_latent(
         Advanced latent states.
     """
     interval = resolve_delta_t(delta_t, default_delta_t=default_delta_t)
-    return koopman.advance(z, interval, control=control)
+    return koopman.advance(
+        z,
+        interval,
+        control=control,
+        **_topology_kwargs_for(
+            koopman.advance,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+        ),
+    )
 
 
 def inverse_propagate_latent(
@@ -412,6 +467,8 @@ def inverse_propagate_latent(
     delta_t: float | Tensor | None = None,
     default_delta_t: float | Tensor = 1.0,
     inverse_matrix: Tensor | None = None,
+    edge_index: Tensor | None = None,
+    edge_weight: Tensor | None = None,
 ) -> Tensor:
     """Apply one inverse Koopman step via the unified contract.
 
@@ -435,6 +492,10 @@ def inverse_propagate_latent(
         Fallback interval when ``delta_t is None`` in continuous mode.
     inverse_matrix : Tensor or None, optional
         Optional precomputed discrete inverse matrix.
+    edge_index : Tensor or None, optional
+        Graph topology for networked operators.
+    edge_weight : Tensor or None, optional
+        Optional edge weights for networked operators.
 
     Returns
     -------
@@ -447,6 +508,11 @@ def inverse_propagate_latent(
         interval,
         control=control,
         inverse_matrix=inverse_matrix,
+        **_topology_kwargs_for(
+            koopman.inverse_advance,
+            edge_index=edge_index,
+            edge_weight=edge_weight,
+        ),
     )
 
 
@@ -463,6 +529,9 @@ def advance_and_decode(
 ) -> tuple[Tensor, Tensor]:
     """Advance latent state once and decode to physical node features.
 
+    Topology is passed to both the linear advance (networked operators) and
+    the decoder.
+
     Parameters
     ----------
     koopman : KoopmanOperator or ContinuousKoopmanOperator
@@ -472,7 +541,7 @@ def advance_and_decode(
     z : Tensor
         Current latent states.
     edge_index : Tensor
-        Decode topology with shape ``(2, num_edges)``.
+        Topology with shape ``(2, num_edges)`` for advance and decode.
     edge_weight : Tensor or None, optional
         Optional scalar edge weights with shape ``(num_edges,)``.
     control : Tensor or None, optional
@@ -493,6 +562,8 @@ def advance_and_decode(
         control=control,
         delta_t=delta_t,
         default_delta_t=default_delta_t,
+        edge_index=edge_index,
+        edge_weight=edge_weight,
     )
     prediction = decoder(z_next, edge_index, edge_weight)
     return z_next, prediction
