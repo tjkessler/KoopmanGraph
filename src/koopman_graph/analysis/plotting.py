@@ -27,9 +27,9 @@ _MATPLOTLIB_IMPORT_ERROR = (
     "Install with: pip install matplotlib  (or pip install 'koopman-graph[dev]')"
 )
 
-_MIN_DATA_HALF_SPAN = 0.05
+_MIN_DATA_HALF_SPAN = 1e-3
 _DEFAULT_UNIT_DISK_PAD = 0.15
-_DEFAULT_DATA_PAD = 0.15
+_DEFAULT_DATA_PAD = 0.05
 
 
 def _require_pyplot():  # noqa: ANN202 — returns pyplot module
@@ -108,13 +108,15 @@ def _data_limits(
     real, imag : ndarray
         Real and imaginary parts of the eigenvalues.
     pad : float
-        Padding as a fraction of the equal-aspect half-span.
+        Extra margin as a fraction of the equal-aspect half-span
+        (``half_span → half_span * (1 + pad)``).
 
     Returns
     -------
     tuple of float
         Axis limits ``(xmin, xmax, ymin, ymax)``. Empty inputs fall back to
-        the default unit-disk frame.
+        the default unit-disk frame. Degenerate (identical) points use a small
+        absolute floor so markers remain visible.
     """
     if real.size == 0:
         return _unit_disk_limits(pad=_DEFAULT_UNIT_DISK_PAD)
@@ -127,10 +129,9 @@ def _data_limits(
     x_span = x_max - x_min
     y_span = y_max - y_min
     half_span = 0.5 * max(x_span, y_span, 0.0)
-    # Identical / near-identical eigenvalues need a visible absolute floor.
+    # Identical / near-identical eigenvalues need a tiny absolute floor only.
     half_span = max(half_span, _MIN_DATA_HALF_SPAN)
-    pad_span = max(pad, 0.0) * half_span * 2.0
-    half_span = half_span + 0.5 * pad_span
+    half_span = half_span * (1.0 + max(pad, 0.0))
 
     x_center = 0.5 * (x_min + x_max)
     y_center = 0.5 * (y_min + y_max)
@@ -168,9 +169,10 @@ def plot_spectrum(
         ``"data"`` zooms to the eigenvalue bounding box with padding while
         keeping equal aspect ratio.
     pad : float, optional
-        Padding as a fraction of the half-span. Defaults to ``0.15`` for both
-        modes (``unit_disk`` → limits ``[-1.15, 1.15]²``). For ``"data"``, a
-        small absolute floor keeps single-point / identical eigenvalues visible.
+        Padding as a fraction of the framed half-span. Defaults to ``0.15`` for
+        ``"unit_disk"`` (limits ``[-1.15, 1.15]²``) and ``0.05`` for ``"data"``.
+        For ``"data"``, a small absolute floor keeps single-point / identical
+        eigenvalues visible.
     show_unit_circle : bool, optional
         Draw the unit circle (clipped to the axes). Default is ``True``.
     cmap : str, optional

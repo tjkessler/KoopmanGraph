@@ -57,10 +57,21 @@ def test_data_limits_tighter_than_unit_disk_for_clustered_modes() -> None:
 
         disk_xlim = ax_disk.get_xlim()
         data_xlim = ax_data.get_xlim()
+        data_ylim = ax_data.get_ylim()
         disk_span = disk_xlim[1] - disk_xlim[0]
         data_span = data_xlim[1] - data_xlim[0]
         assert data_span < disk_span
         assert ax_data.get_aspect() in {1.0, "equal"}
+
+        # Frame stays close to the data bounding box (modest pad only).
+        real = eigenvalues.real.numpy()
+        imag = eigenvalues.imag.numpy()
+        max_span = max(float(real.max() - real.min()), float(imag.max() - imag.min()))
+        assert data_span == pytest.approx(max_span * 1.05, rel=1e-6)
+        assert data_xlim[0] <= float(real.min())
+        assert data_xlim[1] >= float(real.max())
+        assert data_ylim[0] <= float(imag.min())
+        assert data_ylim[1] >= float(imag.max())
     finally:
         plt.close(fig_disk)
         plt.close(fig_data)
@@ -104,7 +115,22 @@ def test_data_limits_helper_uses_absolute_floor() -> None:
     xmin, xmax, ymin, ymax = _data_limits(
         np.asarray([1.0]),
         np.asarray([0.0]),
-        pad=0.15,
+        pad=0.05,
     )
     assert xmax - xmin == pytest.approx(ymax - ymin)
+    assert xmax - xmin == pytest.approx(2.0 * 1e-3 * 1.05)
     assert xmax - xmin > 0.0
+
+
+def test_data_limits_match_epidemic_style_cluster_tightly() -> None:
+    """Schur-like near-circle clusters are not inflated by a large absolute floor."""
+    real = np.asarray([0.968, 0.985, 0.995, 0.990, 0.978])
+    imag = np.asarray([-0.012, 0.0, 0.008, -0.005, 0.014])
+    xmin, xmax, ymin, ymax = _data_limits(real, imag, pad=0.05)
+    span = xmax - xmin
+    data_span = max(float(real.max() - real.min()), float(imag.max() - imag.min()))
+    assert span == pytest.approx(data_span * 1.05, rel=1e-6)
+    # Previous floor (half-span 0.05) produced ~0.1+ windows; stay well below that.
+    assert span < 0.06
+    assert xmin <= float(real.min()) <= float(real.max()) <= xmax
+    assert ymin <= float(imag.min()) <= float(imag.max()) <= ymax
