@@ -237,15 +237,15 @@ handling, read the maintainer architecture guide:
 - It defines the public façade vs power-user modules vs private (`_`-prefixed)
   helpers (**thin root `__all__`**: keep core workflow symbols; demote
   specialized helpers to `metrics` / `analysis` / `data` / `adaptation` /
-  `observables` — TASK-747–750), device/tensor conventions across `fit`, the
-  RL env, online adaptation, and classical baselines/datasets, plus
-  **optional-dependency** (fail-at-call / `[rl]` soft-import) and **frozen
-  dataclass result-type** conventions.
+  `observables`), device/tensor conventions across `fit`, the RL env, online
+  adaptation, and classical baselines/datasets, plus **optional-dependency**
+  (fail-at-call / `[rl]` soft-import) and **frozen dataclass result-type**
+  conventions.
 - **Package layout** (same page): when to nest into one-level capability
   packages vs stay flat; keep `model.py` at the package root; no deep trees;
   three-layer API preserved under any folder move; compatibility contract for
   root `__all__` vs power-user deep imports (same-named packages or in-repo
-  migration — no long-lived root shim modules after TASK-746).
+  migration — no long-lived root shim modules).
 
 ## Releasing
 
@@ -372,21 +372,6 @@ Install a built wheel in a clean virtual environment (install PyTorch and PyG fi
 pip install torch torch-geometric
 pip install dist/koopman_graph-*.whl
 ```
-
-## Agent-assisted development
-
-This repository maintains a development blueprint for structured, task-oriented
-work—particularly useful when using AI coding agents:
-
-- **[Development Blueprint](docs/BLUEPRINT.md)** — phased task tracker with
-  acceptance criteria, dependencies, and agent logs.
-
-Agents working from the blueprint should read one task at a time, present a
-plan for user approval, and update the blueprint status upon completion. During
-the plan gate, consult
-[`docs/source/architecture.rst`](docs/source/architecture.rst) whenever a task
-touches exports, internal helpers, or device placement. Human contributors may
-use the blueprint as a roadmap but are not required to follow it.
 
 ## License
 

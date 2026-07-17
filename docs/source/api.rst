@@ -32,7 +32,7 @@ Built-in encoders live in :mod:`koopman_graph.nn` (``encoder``, ``decoder``,
 ``gnn``). Prefer ``from koopman_graph import GNNEncoder, GATEncoder`` for
 application code, or ``from koopman_graph.nn import …`` for power-user imports.
 Former deep imports ``koopman_graph.encoder`` / ``decoder`` / ``gnn`` were
-removed in v0.3.0 (TASK-746).
+removed in v0.3.0.
 
 .. automodule:: koopman_graph.nn.encoder
    :members:
@@ -62,7 +62,7 @@ Physics-Informed Observables
 ----------------------------
 
 Hybrid physics helpers such as ``graph_laplacian_features`` are imported from
-:mod:`koopman_graph.observables` only (TASK-750). Prefer
+:mod:`koopman_graph.observables` only. Prefer
 ``physics_preset="graph_laplacian"`` on :class:`~koopman_graph.model.GraphKoopmanModel`
 for the built-in Laplacian path; pass a custom ``physics_lifting_fn`` when needed.
 
@@ -78,7 +78,7 @@ Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
 KoopmanOperator, ContinuousKoopmanOperator`` or
 ``from koopman_graph.operators import …``. Former deep imports
 ``koopman_graph.operator`` / ``koopman_graph.continuous`` were removed in
-v0.3.0 (TASK-746).
+v0.3.0.
 
 .. automodule:: koopman_graph.operators
    :members:
@@ -96,7 +96,7 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
 ``detect_anomaly``, ``calibrate_anomaly_threshold``,
 ``AnomalyDetectionResult``, ``plot_spectrum``) are imported from
-:mod:`koopman_graph.analysis` only (TASK-749 / TASK-751). The helpers live in
+:mod:`koopman_graph.analysis` only. The helpers live in
 the ``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` submodules.
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
@@ -154,7 +154,7 @@ Data Utilities
 Containers and split helpers (``GraphSnapshotSequence``, ``MultiTrajectory``,
 ``TemporalSplit``, ``temporal_split``, ``WindowSampler``) remain on the root
 façade. ``as_multi_trajectory`` is imported from :mod:`koopman_graph.data`
-only (TASK-750).
+only.
 
 .. automodule:: koopman_graph.data
    :members:
@@ -194,7 +194,7 @@ Metrics
 Primary forecast evaluation entrypoints (``evaluate_forecast``,
 ``EvaluationResult``) remain on the root façade. Low-level helpers
 (``mae``, ``rmse``, ``mape``, ``HorizonMetrics``) are imported from
-:mod:`koopman_graph.metrics` only (TASK-748).
+:mod:`koopman_graph.metrics` only.
 
 .. automodule:: koopman_graph.metrics
    :members:
@@ -205,7 +205,7 @@ Online Adaptation
 
 ``RecursiveKoopmanAdapter`` remains on the root façade.
 ``AdaptationStepResult`` is imported from :mod:`koopman_graph.adaptation`
-only (TASK-750).
+only.
 
 .. automodule:: koopman_graph.adaptation
    :members:

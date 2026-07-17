@@ -313,7 +313,7 @@ operator is acceptable. Continuous write-back can still degrade for very large
 
 Historical note: earlier releases used a first-order controlled approximation
 ``B̃ ≈ B(Δt) / Δt`` that disagreed with Van Loan integration; that path was
-replaced in the Phase 8 fidelity update (TASK-704).
+replaced in the Phase 8 fidelity update.
 
 Latent-space RL environment
 ---------------------------
