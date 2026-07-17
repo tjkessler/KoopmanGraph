@@ -20,9 +20,10 @@ the public API surface: symmetric GCN/GAT encoder–decoder pairs, preferred
 rollout primitives, optional ``koopman=`` operator injection, frozen public
 result types, classical baseline scaffolding with a clear ``ForecastModel``
 call-site contract, documented power-user modules (``graph_utils``,
-``protocols``), and a **thin** root façade (core workflow in ``__all__``;
-specialized helpers via ``metrics`` / ``analysis`` / ``data`` /
-``adaptation`` / ``observables``).
+``protocols``), capability packages (``training``, ``data``, ``operators``,
+``nn``, ``analysis``, ``baselines``), a **thin** root façade (core workflow in
+``__all__``; specialized helpers via capability modules), and discrete
+spectrum plotting with unit-disk / data-zoom views.
 See :doc:`architecture` for the public vs power-user layering contract, the
 thin-façade keep/demote inventory, and the package-layout nesting policy.
 

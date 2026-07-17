@@ -925,9 +925,11 @@ No ``FORMAT_VERSION`` bump was required: the field was already emitted in v2.
 v0.3.0 architectural consistency outcomes
 -----------------------------------------
 
-Phase 8 (TASK-700–720) standardized style without bumping the package beyond
-``0.3.0`` or ``FORMAT_VERSION`` 2. The five highest-impact remediations from the
-second style audit are:
+Phase 8 (TASK-700–752) standardized style and release quality without bumping
+the package beyond ``0.3.0`` or ``FORMAT_VERSION`` 2. Outcomes folded into the
+first public v0.3.0 cut:
+
+**Highest-impact API remediations (second style audit)**
 
 1. **Shared rollout** — ``predict`` / training losses / the RL env share
    :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` (and
@@ -946,6 +948,36 @@ second style audit are:
 5. **Frozen public result types** — ``FitHistory``, ``AdaptationStepResult``,
    and related dataclasses use ``frozen=True`` with tuple series;
    ``TrainingLossBreakdown`` is a frozen internal snapshot (not package-exported).
+
+**Contract and boundary follow-ups**
+
+* Honest continuous/discrete dispatch for injected operators; sequence
+  immutability; topology and control-layout capability guards; shared GNN
+  primitives; thin ``fit`` orchestration; spectrum-based dynamical similarity;
+  shared dataset validators; centralized dynamics/stability vocabulary;
+  hybrid ``physics.position`` round-trip; loss-breakdown hygiene.
+
+**Tutorial claim↔result integrity**
+
+* Notebooks 02 / 03 / 06 / 14 / 15 remediations so scientific claims match
+  stored outputs (history-constrained Vm scope, METR-LA baseline protocol,
+  epidemic spectrum wording, physics-informed evidence scope, RL takeaway
+  metrics).
+
+**Capability packages and thin façade**
+
+* Layout policy plus ``training/``, ``data/``, ``operators/``, ``nn/``,
+  ``analysis/``, and ``baselines/`` capability packages; deep-import shim
+  hard cut (TASK-746); thin root ``__all__`` with metrics / analysis / data /
+  adaptation / observables secondaries demoted to capability imports
+  (TASK-747–750).
+
+**Analysis UX and release quality**
+
+* :func:`~koopman_graph.analysis.plot_spectrum` with ``limits="unit_disk"`` /
+  ``"data"`` (capability-module import only).
+* Enforced pytest coverage gate of **90%** (``fail_under`` / CI
+  ``--cov-fail-under``); branch-aware suite remains well above the floor.
 
 Related documentation
 ---------------------
