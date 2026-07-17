@@ -1,0 +1,10 @@
+# Default owner for everything in the repository.
+*       @tjkessler
+
+# Workflow and packaging changes should always get an explicit look.
+.github/workflows/**       @tjkessler
+.github/dependabot.yml     @tjkessler
+pyproject.toml             @tjkessler
+CITATION.cff               @tjkessler
+paper.md                   @tjkessler
+paper.bib                  @tjkessler
