@@ -185,6 +185,8 @@ as **required** before merge:
 
 - `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest, Ruff lint/format, and the
   90% coverage gate across supported Python versions
+- `notebooks` — tutorial nbmake smoke tests (Python 3.12, parallel with the
+  test matrix)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))
