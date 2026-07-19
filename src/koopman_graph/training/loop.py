@@ -293,9 +293,7 @@ def run_fit_loop(
     )
     val_lie_losses: list[float] | None = [] if val_sequences is not None else None
     val_pde_losses: list[float] | None = [] if val_sequences is not None else None
-    val_sparsity_losses: list[float] | None = (
-        [] if val_sequences is not None else None
-    )
+    val_sparsity_losses: list[float] | None = [] if val_sequences is not None else None
     val_worst_case_losses: list[float] | None = (
         [] if val_sequences is not None else None
     )

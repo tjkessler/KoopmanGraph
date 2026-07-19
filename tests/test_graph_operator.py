@@ -412,9 +412,7 @@ def test_graph_operator_factorized_reset_and_monitoring() -> None:
     state = dense.state_dict()
     assert "_self.K" in state
     assert "_nbr.K" in state
-    restored = GraphKoopmanOperator(
-        2, control_dim=1, control_mode="bilinear"
-    )
+    restored = GraphKoopmanOperator(2, control_dim=1, control_mode="bilinear")
     restored.load_state_dict(state)
     assert torch.allclose(restored.K_self, dense.K_self)
     assert torch.allclose(restored.K_nbr, dense.K_nbr)
@@ -702,6 +700,7 @@ def test_pernode_model_spectrum_ignores_topology_kwargs() -> None:
     again = model.spectrum(edge_index=_path_edge_index(4), num_nodes=4)
     assert torch.allclose(spectrum.eigenvalues, again.eigenvalues)
 
+
 def test_resolve_spectrum_forwards_graph_topology() -> None:
     """resolve_spectrum / dynamical_similarity forward topology for graph models."""
     from koopman_graph.analysis import dynamical_similarity, resolve_spectrum
@@ -757,4 +756,3 @@ def test_graph_bound_metric_is_factor_level_not_effective() -> None:
     # Factor max(|λ(K_self)|, |λ(K_nbr)|) need not equal ρ(I⊗K_self+Â⊗K_nbr).
     assert factor_bound.item() != pytest.approx(effective_radius.item(), abs=1e-4)
     assert factor_bound.item() < effective_radius.item()
-

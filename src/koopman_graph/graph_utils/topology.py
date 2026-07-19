@@ -477,4 +477,3 @@ def snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
     if edge_weight is not None:
         fields["edge_weight"] = edge_weight.to(device)
     return Data(**fields)
-

@@ -264,8 +264,7 @@ def pool_control_sequence(
         raise ValueError(msg)
     if len(perms_per_step) != control_inputs.shape[0]:
         msg = (
-            f"expected {control_inputs.shape[0]} perm chains, "
-            f"got {len(perms_per_step)}"
+            f"expected {control_inputs.shape[0]} perm chains, got {len(perms_per_step)}"
         )
         raise ValueError(msg)
     pooled = [

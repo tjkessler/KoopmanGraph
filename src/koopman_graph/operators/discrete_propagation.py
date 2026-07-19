@@ -81,10 +81,7 @@ def advance_step(
         an invalid shape.
     """
     if z.shape[-1] != latent_dim:
-        msg = (
-            f"Expected trailing dimension {latent_dim}, "
-            f"got shape {tuple(z.shape)}"
-        )
+        msg = f"Expected trailing dimension {latent_dim}, got shape {tuple(z.shape)}"
         raise ValueError(msg)
     z_next = z @ matrix.T
     if control_dim == 0:

@@ -668,12 +668,8 @@ def test_backward_consistency_graph_bilinear_global_and_per_node(
     snapshots = [
         Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(3)
     ]
-    global_seq = GraphSnapshotSequence(
-        snapshots, control_inputs=torch.randn(3, 1)
-    )
-    per_node_seq = GraphSnapshotSequence(
-        snapshots, control_inputs=torch.randn(3, 5, 1)
-    )
+    global_seq = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(3, 1))
+    per_node_seq = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(3, 5, 1))
     for sequence in (global_seq, per_node_seq):
         loss = compute_backward_consistency_sequence_loss(model, sequence)
         assert loss.ndim == 0
@@ -1014,10 +1010,7 @@ def test_lie_consistency_is_wired_into_training_loss() -> None:
     )
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     sequence = GraphSnapshotSequence(
-        [
-            Data(x=torch.randn(2, 2), edge_index=edge_index)
-            for _ in range(2)
-        ]
+        [Data(x=torch.randn(2, 2), edge_index=edge_index) for _ in range(2)]
     )
 
     breakdown = compute_training_loss(

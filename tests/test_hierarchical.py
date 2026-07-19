@@ -75,9 +75,7 @@ def test_pool_unpool_shape_round_trip() -> None:
 def test_noop_ratio_preserves_node_count_and_features() -> None:
     """``pool_ratios=(1.0,)`` keeps all nodes; identity unpool recovers ``x``."""
     model = _tiny_model()
-    hier = HierarchicalGraphKoopmanModel(
-        model, pool_ratios=(1.0,), refine_unpool=True
-    )
+    hier = HierarchicalGraphKoopmanModel(model, pool_ratios=(1.0,), refine_unpool=True)
     sequence = SyntheticDynamicGraphBenchmark.generate(
         num_nodes=6,
         num_timesteps=3,
@@ -120,9 +118,7 @@ def test_predict_resolution_shapes() -> None:
 def test_sag_pooling_smoke() -> None:
     """Optional ``pooling='sag'`` constructs and pools."""
     model = _tiny_model()
-    hier = HierarchicalGraphKoopmanModel(
-        model, pool_ratios=(0.5,), pooling="sag"
-    )
+    hier = HierarchicalGraphKoopmanModel(model, pool_ratios=(0.5,), pooling="sag")
     sequence = SyntheticDynamicGraphBenchmark.generate(
         num_nodes=8,
         num_timesteps=3,
@@ -172,9 +168,7 @@ def test_global_and_per_node_controls() -> None:
         [[0, 1, 1, 2, 2, 3, 3, 4, 4, 5], [1, 0, 2, 1, 3, 2, 4, 3, 5, 4]],
         dtype=torch.long,
     )
-    snaps = [
-        Data(x=torch.randn(6, 1), edge_index=edge_index) for _ in range(5)
-    ]
+    snaps = [Data(x=torch.randn(6, 1), edge_index=edge_index) for _ in range(5)]
     # Global controls (T, C).
     sequence = GraphSnapshotSequence(
         snaps,

@@ -127,8 +127,7 @@ def map_control_term(
     if u.ndim == 1:
         if u.shape[0] != control_dim:
             msg = (
-                f"Expected global control shape ({control_dim},), "
-                f"got {tuple(u.shape)}"
+                f"Expected global control shape ({control_dim},), got {tuple(u.shape)}"
             )
             raise ValueError(msg)
         return u @ control_matrix
@@ -215,9 +214,7 @@ def write_dense_operator_parameters(
         raise ValueError(msg)
 
     with torch.no_grad():
-        dense_param.copy_(
-            matrix.to(device=dense_param.device, dtype=dense_param.dtype)
-        )
+        dense_param.copy_(matrix.to(device=dense_param.device, dtype=dense_param.dtype))
         if control_dim > 0:
             if control_parameter is None:
                 msg = "control_parameter is required when control_dim > 0"
@@ -246,16 +243,10 @@ def write_dense_operator_parameters(
                     )
                     raise ValueError(msg)
                 if bilinear_matrices is None:
-                    msg = (
-                        "bilinear_matrices is required when "
-                        "control_mode='bilinear'"
-                    )
+                    msg = "bilinear_matrices is required when control_mode='bilinear'"
                     raise ValueError(msg)
                 if bilinear_parameter is None:
-                    msg = (
-                        "bilinear_parameter is required when "
-                        "control_mode='bilinear'"
-                    )
+                    msg = "bilinear_parameter is required when control_mode='bilinear'"
                     raise ValueError(msg)
                 expected_n = (control_dim, latent_dim, latent_dim)
                 if bilinear_matrices.shape != expected_n:

@@ -498,7 +498,10 @@ def test_control_helper_validation_and_bilinear_terms() -> None:
     )
     with pytest.raises(ValueError, match="control_mode must be"):
         validate_control_mode(
-            control_dim=1, control_mode="quadratic", bilinear_rank=None, latent_dim=2  # type: ignore[arg-type]
+            control_dim=1,
+            control_mode="quadratic",
+            bilinear_rank=None,
+            latent_dim=2,  # type: ignore[arg-type]
         )
     with pytest.raises(ValueError, match="requires control_dim"):
         validate_control_mode(
@@ -518,9 +521,7 @@ def test_control_helper_validation_and_bilinear_terms() -> None:
         )
 
     module = torch.nn.Module()
-    allocate_bilinear_parameters(
-        module, control_dim=2, latent_dim=3, bilinear_rank=1
-    )
+    allocate_bilinear_parameters(module, control_dim=2, latent_dim=3, bilinear_rank=1)
     reset_bilinear_parameters(module)
     coupling = bilinear_coupling_tensor(module)
     assert coupling.shape == (2, 3, 3)

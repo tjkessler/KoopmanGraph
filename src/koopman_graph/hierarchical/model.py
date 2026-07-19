@@ -122,9 +122,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         self.model = model
         self.pool_ratios = tuple(float(r) for r in pool_ratios)
         self.pooling: PoolingKind = pooling
-        channels = (
-            _encoder_in_channels(model) if in_channels is None else in_channels
-        )
+        channels = _encoder_in_channels(model) if in_channels is None else in_channels
         self.in_channels = channels
         out_channels = _encoder_out_channels(model)
         self.out_channels = out_channels
@@ -371,9 +369,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
                 fine_x, fine_edge, fine_weight = resolve_snapshot_inputs(
                     initial_graph, edge_index, edge_weight
                 )
-                fine_template = snapshot_from_features(
-                    fine_x, fine_edge, fine_weight
-                )
+                fine_template = snapshot_from_features(fine_x, fine_edge, fine_weight)
                 coarse, pool_steps = self.pool_down(fine_template)
                 coarse_controls = self._pool_controls(controls, pool_steps)
 
@@ -411,9 +407,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
                     fine_feat = self.unpool_up(pred.x, pool_steps, levels=n_unpool)
                     if n_unpool == self.n_levels:
                         output.append(
-                            snapshot_from_features(
-                                fine_feat, fine_edge, fine_weight
-                            )
+                            snapshot_from_features(fine_feat, fine_edge, fine_weight)
                         )
                     else:
                         # Intermediate resolution: use topology after
@@ -549,9 +543,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         try:
             with torch.no_grad():
                 coarse_sequence, all_steps = self._pool_sequence(sequence)
-            history = self.model.fit(
-                coarse_sequence, epochs=epochs, lr=lr, **kwargs
-            )
+            history = self.model.fit(coarse_sequence, epochs=epochs, lr=lr, **kwargs)
         finally:
             self.train(was_training)
 
