@@ -1,4 +1,12 @@
-"""Shared scaffolding for classical DMD-family baselines."""
+"""Shared scaffolding for classical DMD-family baselines.
+
+Module-level helpers (``require_static_topology``, ``flatten_snapshots``,
+``fit_row_operator``, ``fit_controlled_row_operator``,
+``require_global_controls``, ``transition_controls``, ``copy_topology``,
+``check_initial_graph``) are documented non-private power-user symbols for
+classical and GNN baseline peers. They are not re-exported from package or
+root ``__all__``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +20,7 @@ from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.graph_utils import snapshot_edge_weight
 
 
-def _require_static_topology(sequence: GraphSnapshotSequence) -> None:
+def require_static_topology(sequence: GraphSnapshotSequence) -> None:
     """Reject dynamic-topology sequences for classical baselines.
 
     Classical DMD-family baselines flatten node states and copy only the
@@ -37,7 +45,7 @@ def _require_static_topology(sequence: GraphSnapshotSequence) -> None:
         raise ValueError(msg)
 
 
-def _flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:
+def flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:
     """Stack graph snapshot features into row-vector states.
 
     Parameters
@@ -65,7 +73,7 @@ def _flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:
     return torch.stack(states)
 
 
-def _fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
+def fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
     """Fit ``right ~= left @ A`` and return ``K`` for ``x_next = x @ K.T``.
 
     Parameters
@@ -108,7 +116,7 @@ def _fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
     return solution.T
 
 
-def _fit_controlled_row_operator(
+def fit_controlled_row_operator(
     left: Tensor,
     right: Tensor,
     controls: Tensor,
@@ -143,14 +151,14 @@ def _fit_controlled_row_operator(
         msg = f"controls has {controls.shape[0]} samples, expected {left.shape[0]}"
         raise ValueError(msg)
     augmented = torch.cat([left, controls], dim=-1)
-    joint = _fit_row_operator(augmented, right, rank)
+    joint = fit_row_operator(augmented, right, rank)
     state_dim = left.shape[1]
     k_matrix = joint[:, :state_dim]
     b_matrix = joint[:, state_dim:].T
     return k_matrix, b_matrix
 
 
-def _require_global_controls(sequence: GraphSnapshotSequence) -> None:
+def require_global_controls(sequence: GraphSnapshotSequence) -> None:
     """Reject per-node (3-D) control layouts for classical DMDc.
 
     :class:`~koopman_graph.baselines.DMDcBaseline` fits a single global control
@@ -182,7 +190,7 @@ def _require_global_controls(sequence: GraphSnapshotSequence) -> None:
         raise ValueError(msg)
 
 
-def _transition_controls(sequence: GraphSnapshotSequence) -> Tensor:
+def transition_controls(sequence: GraphSnapshotSequence) -> Tensor:
     """Return global control inputs aligned with consecutive transitions.
 
     Parameters
@@ -200,15 +208,15 @@ def _transition_controls(sequence: GraphSnapshotSequence) -> Tensor:
     ValueError
         If controls are missing or have per-node (3-D) layout.
     """
-    _require_global_controls(sequence)
+    require_global_controls(sequence)
     controls = sequence.control_inputs
-    if controls is None:  # pragma: no cover - guarded by _require_global_controls
+    if controls is None:  # pragma: no cover - guarded by require_global_controls
         msg = "sequence does not contain control inputs"
         raise ValueError(msg)
     return controls[:-1]
 
 
-def _copy_topology(initial_graph: Data) -> dict[str, Tensor]:
+def copy_topology(initial_graph: Data) -> dict[str, Tensor]:
     """Copy topology tensors for a predicted PyG snapshot.
 
     Parameters
@@ -228,7 +236,7 @@ def _copy_topology(initial_graph: Data) -> dict[str, Tensor]:
     return fields
 
 
-def _check_initial_graph(
+def check_initial_graph(
     initial_graph: Data,
     *,
     num_nodes: int,

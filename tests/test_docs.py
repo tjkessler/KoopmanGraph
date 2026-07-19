@@ -94,7 +94,7 @@ def test_source_definitions_have_numpy_docstrings() -> None:
     assert not missing, "Docstring issues:\n" + "\n".join(missing)
 
 
-# Headline JOSS features with direct literature precedents (TASK-900 / design-doc #13).
+# Headline JOSS features with direct literature precedents.
 _REQUIRED_PAPER_BIB_KEYS = (
     "Azencot2020",
     "Bruder2021",
@@ -144,4 +144,16 @@ def test_literature_precedent_citations_in_paper_sources() -> None:
     assert (
         "consistent Koopman autoencoder lineage" in readme
         or "consistent-autoencoder" in readme
+    )
+
+
+def test_joss_paper_narrative_word_count_at_most_1000() -> None:
+    """JOSS narrative body must stay within the TASK-1052 ≤1000-word gate."""
+    paper_text = (_PROJECT_ROOT / "paper.md").read_text()
+    body = re.sub(r"^---\n.*?\n---\n", "", paper_text, count=1, flags=re.S)
+    body = re.split(r"^# References\s*$", body, maxsplit=1, flags=re.M)[0]
+    n = len(re.findall(r"\b[\w'-]+\b", body))
+    assert n <= 1000, f"paper.md narrative word count {n} exceeds 1000"
+    assert not re.search(r"\\url\{\[", paper_text), (
+        "malformed hybrid \\url{[...]} markup must not reappear in paper.md"
     )

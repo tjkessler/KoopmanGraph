@@ -454,7 +454,7 @@ def _linear_latent_sequence(
 def test_koopman_observer_matches_reference_kf_fully_observed() -> None:
     """Fully observed linear latent system should match a textbook KF."""
     from koopman_graph.adaptation import KoopmanObserver
-    from koopman_graph.adaptation.observer import reference_kalman_filter
+    from koopman_graph.adaptation.kalman import reference_kalman_filter
 
     true_k = torch.diag(torch.tensor([0.9, 0.8]))
     sequence, true_latents = _linear_latent_sequence(true_k, steps=10, seed=3)
@@ -651,3 +651,400 @@ def test_filter_result_is_frozen() -> None:
     )
     with pytest.raises(AttributeError):
         result.latents = torch.ones(2, 2, 2)  # type: ignore[misc]
+
+
+def test_graph_diffuse_impute_and_validation() -> None:
+    """graph_diffuse_impute fills holes and rejects non-positive iterations."""
+    from koopman_graph.adaptation.impute import graph_diffuse_impute
+
+    edge_index = _two_node_edge_index()
+    x = torch.tensor([[1.0, 2.0], [0.0, 0.0]])
+    mask = torch.tensor([True, False])
+    with pytest.raises(ValueError, match="iterations"):
+        graph_diffuse_impute(x, mask, edge_index, iterations=0)
+    filled = graph_diffuse_impute(x, mask, edge_index, iterations=4)
+    assert torch.allclose(filled[0], x[0])
+    assert not torch.allclose(filled[1], torch.zeros(2))
+    unchanged = graph_diffuse_impute(x, torch.ones(2, dtype=torch.bool), edge_index)
+    assert torch.equal(unchanged, x)
+
+
+def test_koopman_observer_constructor_validation() -> None:
+    """Observer rejects non-positive noise scales and invalid observation models."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    with pytest.raises(ValueError, match="process_noise"):
+        KoopmanObserver(model, process_noise=0.0)
+    with pytest.raises(ValueError, match="observation_noise"):
+        KoopmanObserver(model, observation_noise=-1.0)
+    with pytest.raises(ValueError, match="initial_covariance"):
+        KoopmanObserver(model, initial_covariance=0.0)
+    with pytest.raises(ValueError, match="observation_model"):
+        KoopmanObserver(model, observation_model="not_a_mode")  # type: ignore[arg-type]
+
+
+def test_rts_smooth_helper_runs() -> None:
+    """Exported RTS helper should refine a short filtered trajectory."""
+    from koopman_graph.adaptation.kalman import reference_kalman_filter, rts_smooth
+
+    transition = torch.diag(torch.tensor([0.9, 0.8]))
+    process_cov = 1e-3 * torch.eye(2)
+    observation = torch.eye(2)
+    observation_cov = 1e-2 * torch.eye(2)
+    measurements = torch.randn(5, 2)
+    means, covs, pred_means, pred_covs = reference_kalman_filter(
+        transition=transition,
+        process_cov=process_cov,
+        observation=observation,
+        observation_cov=observation_cov,
+        measurements=measurements,
+        x0=measurements[0],
+        p0=torch.eye(2),
+    )
+    sm_means, sm_covs = rts_smooth(
+        transition=transition,
+        filtered_means=means,
+        filtered_covs=covs,
+        pred_means=pred_means,
+        pred_covs=pred_covs,
+    )
+    assert sm_means.shape == means.shape
+    assert sm_covs.shape == covs.shape
+    assert torch.isfinite(sm_means).all()
+
+
+def test_observer_graph_and_continuous_transitions() -> None:
+    """Filter should support graph and continuous Koopman operators."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.9, 0.8]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=5, seed=11)
+
+    graph_model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        koopman="graph",
+        koopman_parameterization="dense",
+    )
+    graph_model.koopman.set_dense_matrices(true_k, torch.zeros_like(true_k))
+    _patch_identity_io(graph_model)
+    graph_result = KoopmanObserver(graph_model).filter(sequence)
+    assert graph_result.latents.shape == (5, 2, 2)
+
+    cont_model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=0.5,
+        dynamics_mode="continuous",
+        koopman_parameterization="dense",
+    )
+    with torch.no_grad():
+        cont_model.koopman.set_dense_matrix(torch.diag(torch.tensor([-0.2, -0.3])))
+    _patch_identity_io(cont_model)
+    timestamps = torch.arange(5, dtype=torch.float32) * 0.5
+    cont_seq = GraphSnapshotSequence(list(sequence), timestamps=timestamps)
+    cont_result = KoopmanObserver(cont_model).filter(cont_seq)
+    assert cont_result.latents.shape == (5, 2, 2)
+
+
+def test_observer_protocol_injection_and_controls() -> None:
+    """Protocol-only operators use finite-diff A; controls add process bias."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    class _ProtocolOp(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.latent_dim = 2
+            self.control_dim = 1
+            self.parameterization = "dense"
+            self._k = torch.nn.Parameter(torch.diag(torch.tensor([0.9, 0.8])))
+            self.B = torch.nn.Parameter(torch.tensor([[0.1, -0.05]]))
+
+        @property
+        def matrix(self) -> torch.Tensor:
+            return self._k
+
+        @property
+        def K(self) -> torch.Tensor:
+            return self._k
+
+        def advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+            edge_index: torch.Tensor | None = None,
+            edge_weight: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            _ = delta_t, edge_index, edge_weight
+            out = z @ self._k.T
+            if control is not None:
+                out = out + control @ self.B
+            return out
+
+        def inverse_advance(
+            self,
+            z: torch.Tensor,
+            delta_t: float | torch.Tensor | None = None,
+            *,
+            control: torch.Tensor | None = None,
+            inverse_matrix: torch.Tensor | None = None,
+            edge_index: torch.Tensor | None = None,
+            edge_weight: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            _ = delta_t, edge_index, edge_weight, inverse_matrix
+            recovered = z
+            if control is not None:
+                recovered = recovered - control @ self.B
+            return recovered @ torch.linalg.pinv(self._k).T
+
+        def bound_metric(self) -> torch.Tensor:
+            return torch.linalg.eigvals(self._k).abs().max()
+
+    true_k = torch.diag(torch.tensor([0.9, 0.8]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=4, seed=13)
+    controls = torch.zeros(4, 1)
+    controls[1:, 0] = 0.2
+    controlled = GraphSnapshotSequence(list(sequence), control_inputs=controls)
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        control_dim=1,
+        koopman=_ProtocolOp(),
+    )
+    _patch_identity_io(model)
+    result = KoopmanObserver(model).filter(controlled)
+    assert result.latents.shape == (4, 2, 2)
+
+
+def test_observer_diffusion_warm_start_edge_weight_and_impute_paths() -> None:
+    """Warm-start, edge weights, filter-only impute, and empty-mask errors."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.9, 0.8]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=5, seed=17)
+    weighted_snaps = []
+    for snap in sequence:
+        data = Data(
+            x=snap.x.clone(),
+            edge_index=snap.edge_index.clone(),
+            edge_weight=torch.ones(snap.edge_index.shape[1]),
+        )
+        weighted_snaps.append(data)
+    masks = torch.ones(5, 2, dtype=torch.bool)
+    masks[:, 1] = False
+    weighted = GraphSnapshotSequence(weighted_snaps, observation_masks=masks)
+
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+    observer = KoopmanObserver(
+        model,
+        graph_diffusion_warm_start=True,
+        diffusion_iterations=3,
+    )
+    filtered = observer.filter(weighted)
+    assert filtered.latents.shape == (5, 2, 2)
+    imputed = observer.impute(weighted, use_smoother=False)
+    assert imputed.has_observation_masks
+    assert hasattr(imputed[0], "edge_weight")
+
+    full = GraphSnapshotSequence(weighted_snaps)
+    filled = observer.impute(full, use_smoother=False)
+    assert not filled.has_observation_masks
+
+    with pytest.raises(ValueError, match="no observed"):
+        observer._select_observed(
+            torch.zeros(4),
+            torch.eye(4),
+            torch.zeros(4, dtype=torch.bool),
+        )
+
+
+def test_observer_decoder_jacobian_with_edge_weight() -> None:
+    """decoder_jacobian path should accept edge_weight on snapshots."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.85, 0.75]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=4, seed=19)
+    snaps = [
+        Data(
+            x=snap.x.clone(),
+            edge_index=snap.edge_index.clone(),
+            edge_weight=torch.ones(snap.edge_index.shape[1]),
+        )
+        for snap in sequence
+    ]
+    weighted = GraphSnapshotSequence(snaps)
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+    observer = KoopmanObserver(model, observation_model="decoder_jacobian")
+    result = observer.filter(weighted)
+    assert result.latents.shape == (4, 2, 2)
+
+
+def test_observer_peers_do_not_call_private_advance_latent() -> None:
+    """Production peers must not invoke ``GraphKoopmanModel._advance_latent``."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src" / "koopman_graph"
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        # Same-named model package: private advance lives on the estimator only.
+        if path.name == "estimator.py" and path.parent.name == "model":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "_advance_latent" in text:
+            offenders.append(str(path.relative_to(root.parent.parent)))
+    assert offenders == []
+
+
+def test_observer_control_bias_parity_discrete_continuous_graph() -> None:
+    """Control biases match ``model._advance_latent`` under shared ``delta_t``."""
+    from koopman_graph.adaptation import KoopmanObserver
+    from koopman_graph.data import resolve_pair_delta_t
+    from koopman_graph.graph_utils import snapshot_edge_weight
+
+    true_k = torch.diag(torch.tensor([0.9, 0.8]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=4, seed=21)
+    controls = torch.zeros(4, 1)
+    controls[:, 0] = torch.tensor([0.1, -0.2, 0.3, 0.0])
+    controlled = GraphSnapshotSequence(list(sequence), control_inputs=controls)
+
+    cases: list[tuple[str, GraphKoopmanModel, GraphSnapshotSequence]] = []
+
+    discrete = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        control_dim=1,
+        koopman_parameterization="dense",
+    )
+    discrete.koopman.set_dense_matrix(
+        true_k,
+        control_matrix=torch.tensor([[0.15, -0.05]]),
+    )
+    _patch_identity_io(discrete)
+    cases.append(("discrete", discrete, controlled))
+
+    continuous = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=0.25,
+        dynamics_mode="continuous",
+        control_dim=1,
+        koopman_parameterization="dense",
+    )
+    continuous.koopman.set_dense_matrix(
+        torch.diag(torch.tensor([-0.2, -0.4])),
+        control_matrix=torch.tensor([[0.1, 0.05]]),
+    )
+    _patch_identity_io(continuous)
+    timestamps = torch.arange(4, dtype=torch.float32) * 0.25
+    cont_seq = GraphSnapshotSequence(
+        list(sequence),
+        timestamps=timestamps,
+        control_inputs=controls,
+    )
+    cases.append(("continuous", continuous, cont_seq))
+
+    graph = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        control_dim=1,
+        koopman="graph",
+        koopman_parameterization="dense",
+    )
+    graph.koopman.set_dense_matrices(
+        true_k,
+        0.1 * true_k,
+        control_matrix=torch.tensor([[0.2, -0.1]]),
+    )
+    _patch_identity_io(graph)
+    cases.append(("graph", graph, controlled))
+
+    for _label, model, seq in cases:
+        observer = KoopmanObserver(model)
+        state_dim = seq.num_nodes * model.latent_dim
+        biases = observer._control_biases(
+            seq,
+            state_dim=state_dim,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        assert len(biases) == len(seq) - 1
+        for t, bias in enumerate(biases):
+            snap = seq[t]
+            control = seq.control_at(t)
+            delta = resolve_pair_delta_t(
+                seq,
+                t,
+                default_time_step=float(model.time_step),
+            )
+            z0 = torch.zeros(seq.num_nodes, model.latent_dim)
+            expected = model._advance_latent(
+                z0,
+                control=control,
+                delta_t=delta,
+                edge_index=snap.edge_index,
+                edge_weight=snapshot_edge_weight(snap),
+            ).reshape(-1)
+            assert torch.allclose(bias, expected, atol=1e-6)
+
+
+def test_observer_finite_diff_matches_advance_jacobian() -> None:
+    """Finite-difference A recovers the dense Kronecker map for discrete K."""
+    from koopman_graph.adaptation import KoopmanObserver
+
+    true_k = torch.diag(torch.tensor([0.9, 0.7]))
+    sequence, _ = _linear_latent_sequence(true_k, steps=3, seed=23)
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 4, 2, num_layers=1),
+        GNNDecoder(2, 4, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        koopman_parameterization="dense",
+    )
+    model.koopman.set_dense_matrix(true_k)
+    _patch_identity_io(model)
+    observer = KoopmanObserver(model)
+    a_mat = observer._finite_diff_transition(
+        sequence,
+        0,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    expected = torch.kron(torch.eye(2), true_k)
+    assert torch.allclose(a_mat, expected, atol=1e-3)

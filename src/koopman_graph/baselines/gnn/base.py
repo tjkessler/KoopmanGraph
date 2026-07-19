@@ -10,9 +10,9 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from koopman_graph.baselines.base import (
-    _check_initial_graph,
-    _copy_topology,
-    _require_static_topology,
+    check_initial_graph,
+    copy_topology,
+    require_static_topology,
 )
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight, snapshot_to_device
@@ -223,7 +223,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
             dimensions do not match the constructor.
         """
         resolved = resolve_sequence(sequence)
-        _require_static_topology(resolved)
+        require_static_topology(resolved)
         if resolved.num_timesteps < self.history_len + 1:
             msg = (
                 f"{type(self).__name__}.fit requires at least "
@@ -295,7 +295,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
         self.num_nodes = resolved.num_nodes
         self._topology = {
             key: value.detach().cpu()
-            for key, value in _copy_topology(resolved[0]).items()
+            for key, value in copy_topology(resolved[0]).items()
         }
         self._fitted = True
         self.eval()
@@ -348,7 +348,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
             )
             raise ValueError(msg)
         assert self.num_nodes is not None  # guarded by _check_fitted
-        _check_initial_graph(
+        check_initial_graph(
             initial_graph,
             num_nodes=self.num_nodes,
             in_channels=self.in_channels,
@@ -359,7 +359,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
         edge_index = graph.edge_index
         edge_weight = snapshot_edge_weight(graph)
         history = graph.x.unsqueeze(0).repeat(self.history_len, 1, 1)
-        topology = _copy_topology(initial_graph)
+        topology = copy_topology(initial_graph)
 
         predictions: list[Data] = []
         was_training = self.training

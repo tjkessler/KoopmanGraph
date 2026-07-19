@@ -12,6 +12,10 @@ def constant_loss_weights(
     backward: float = 0.0,
     rollout: float = 0.0,
     eigenvalue: float = 0.0,
+    lie: float = 0.0,
+    pde: float = 0.0,
+    sparsity: float = 0.0,
+    worst_case: float = 0.0,
 ) -> LossWeights:
     """Build static loss weights for all training epochs.
 
@@ -27,6 +31,14 @@ def constant_loss_weights(
         Weight on the rollout reconstruction loss. Default is ``0.0``.
     eigenvalue : float, optional
         Weight on the eigenvalue hinge penalty. Default is ``0.0``.
+    lie : float, optional
+        Weight on Lie consistency. Default is ``0.0``.
+    pde : float, optional
+        Weight on the decoded-field PDE residual. Default is ``0.0``.
+    sparsity : float, optional
+        Weight on Koopman-matrix sparsity. Default is ``0.0``.
+    worst_case : float, optional
+        Weight on the worst-case reconstruction term. Default is ``0.0``.
 
     Returns
     -------
@@ -39,6 +51,10 @@ def constant_loss_weights(
         backward=backward,
         rollout=rollout,
         eigenvalue=eigenvalue,
+        lie=lie,
+        pde=pde,
+        sparsity=sparsity,
+        worst_case=worst_case,
     )
 
 
@@ -95,6 +111,10 @@ def linear_ramp_loss_weights(
             backward=start.backward + t * (end.backward - start.backward),
             rollout=start.rollout + t * (end.rollout - start.rollout),
             eigenvalue=start.eigenvalue + t * (end.eigenvalue - start.eigenvalue),
+            lie=start.lie + t * (end.lie - start.lie),
+            pde=start.pde + t * (end.pde - start.pde),
+            sparsity=start.sparsity + t * (end.sparsity - start.sparsity),
+            worst_case=start.worst_case + t * (end.worst_case - start.worst_case),
         )
 
     return schedule

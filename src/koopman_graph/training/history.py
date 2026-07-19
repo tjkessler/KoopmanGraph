@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
@@ -13,6 +13,30 @@ from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence, MultiTrajectory
+
+KnownDynamicsFn = Callable[[Data], Tensor]
+PDEResidualFn = Callable[[Tensor, Data], Tensor]
+
+
+@dataclass(frozen=True)
+class ExtraLosses:
+    """Fit-time callables required by optional physics residual losses.
+
+    These callables are training configuration, not persistent model state, and
+    are therefore intentionally not serialized in checkpoints.
+
+    Attributes
+    ----------
+    lie_dynamics_fn : callable or None
+        Known vector field ``snapshot -> dx/dt`` used by
+        :class:`~koopman_graph.losses.LieConsistencyLoss`.
+    pde_residual_fn : callable or None
+        Equation-specific residual ``(decoded, snapshot) -> residual`` used by
+        :class:`~koopman_graph.losses.PDEResidualLoss`.
+    """
+
+    lie_dynamics_fn: KnownDynamicsFn | None = None
+    pde_residual_fn: PDEResidualFn | None = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +55,15 @@ class LossWeights:
         Weight on the autoregressive rollout reconstruction loss.
     eigenvalue : float
         Weight on the unit-circle eigenvalue hinge penalty.
+    lie : float
+        Weight on known-vector-field Lie consistency.
+    pde : float
+        Weight on decoded-field PDE residual consistency.
+    sparsity : float
+        Weight on Koopman-matrix :math:`L_1` / smoothed :math:`L_p` sparsity.
+    worst_case : float
+        Weight on the batch :math:`L_\\infty`-style reconstruction term (robust
+        training only; not a generalization bound).
     """
 
     reconstruction: float = 1.0
@@ -38,6 +71,10 @@ class LossWeights:
     backward: float = 0.0
     rollout: float = 0.0
     eigenvalue: float = 0.0
+    lie: float = 0.0
+    pde: float = 0.0
+    sparsity: float = 0.0
+    worst_case: float = 0.0
 
 
 LossWeightSchedule = Callable[[int], LossWeights]
@@ -68,6 +105,14 @@ class TrainingLossBreakdown:
         Mean rollout reconstruction loss.
     eigenvalue : Tensor
         Eigenvalue hinge regularization loss.
+    lie : Tensor
+        Known-vector-field Lie consistency loss.
+    pde : Tensor
+        Decoded-field PDE residual loss.
+    sparsity : Tensor
+        Koopman-matrix sparsity penalty.
+    worst_case : Tensor
+        Worst-case (max over nodes) reconstruction loss.
     total : Tensor
         Weighted sum of all active loss terms.
     """
@@ -78,6 +123,10 @@ class TrainingLossBreakdown:
     rollout: Tensor
     eigenvalue: Tensor
     total: Tensor
+    lie: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    pde: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    sparsity: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    worst_case: Tensor = field(default_factory=lambda: torch.tensor(0.0))
 
     @classmethod
     def zeros(cls, device: torch.device) -> TrainingLossBreakdown:
@@ -94,7 +143,18 @@ class TrainingLossBreakdown:
             Breakdown with all scalar terms set to zero.
         """
         zero = torch.zeros((), device=device)
-        return cls(zero, zero, zero, zero, zero, zero)
+        return cls(
+            reconstruction=zero,
+            forward=zero,
+            backward=zero,
+            rollout=zero,
+            eigenvalue=zero,
+            total=zero,
+            lie=zero,
+            pde=zero,
+            sparsity=zero,
+            worst_case=zero,
+        )
 
     def to_floats(self) -> dict[str, float]:
         """Convert tensor terms to detached Python floats.
@@ -103,7 +163,8 @@ class TrainingLossBreakdown:
         -------
         dict of str to float
             Mapping with keys ``reconstruction``, ``forward``, ``backward``,
-            ``rollout``, ``eigenvalue``, and ``total``.
+            ``rollout``, ``eigenvalue``, ``lie``, ``pde``, ``sparsity``,
+            ``worst_case``, and ``total``.
         """
         return {
             "reconstruction": float(self.reconstruction.detach().cpu()),
@@ -111,6 +172,10 @@ class TrainingLossBreakdown:
             "backward": float(self.backward.detach().cpu()),
             "rollout": float(self.rollout.detach().cpu()),
             "eigenvalue": float(self.eigenvalue.detach().cpu()),
+            "lie": float(self.lie.detach().cpu()),
+            "pde": float(self.pde.detach().cpu()),
+            "sparsity": float(self.sparsity.detach().cpu()),
+            "worst_case": float(self.worst_case.detach().cpu()),
             "total": float(self.total.detach().cpu()),
         }
 
@@ -145,6 +210,10 @@ def mean_training_loss_breakdown(
         backward=sum(b.backward for b in breakdowns) / count,
         rollout=sum(b.rollout for b in breakdowns) / count,
         eigenvalue=sum(b.eigenvalue for b in breakdowns) / count,
+        lie=sum(b.lie for b in breakdowns) / count,
+        pde=sum(b.pde for b in breakdowns) / count,
+        sparsity=sum(b.sparsity for b in breakdowns) / count,
+        worst_case=sum(b.worst_case for b in breakdowns) / count,
         total=sum(b.total for b in breakdowns) / count,
     )
 
@@ -173,6 +242,14 @@ class FitHistory:
         Per-epoch unweighted rollout reconstruction loss.
     eigenvalue_loss : tuple of float
         Per-epoch unweighted eigenvalue regularization loss.
+    lie_loss : tuple of float
+        Per-epoch unweighted Lie consistency loss.
+    pde_loss : tuple of float
+        Per-epoch unweighted PDE residual loss.
+    sparsity_loss : tuple of float
+        Per-epoch unweighted Koopman sparsity penalty.
+    worst_case_loss : tuple of float
+        Per-epoch unweighted worst-case reconstruction loss.
     val_loss : tuple of float or None
         Per-epoch validation loss when a validation sequence is provided.
     val_reconstruction_loss : tuple of float or None
@@ -185,6 +262,14 @@ class FitHistory:
         Per-epoch unweighted validation rollout loss.
     val_eigenvalue_loss : tuple of float or None
         Per-epoch unweighted validation eigenvalue loss.
+    val_lie_loss : tuple of float or None
+        Per-epoch unweighted validation Lie consistency loss.
+    val_pde_loss : tuple of float or None
+        Per-epoch unweighted validation PDE residual loss.
+    val_sparsity_loss : tuple of float or None
+        Per-epoch unweighted validation sparsity loss.
+    val_worst_case_loss : tuple of float or None
+        Per-epoch unweighted validation worst-case reconstruction loss.
     stopped_early : bool
         Whether training stopped before the requested epoch count.
     best_epoch : int or None
@@ -202,12 +287,20 @@ class FitHistory:
     backward_loss: tuple[float, ...] = ()
     rollout_loss: tuple[float, ...] = ()
     eigenvalue_loss: tuple[float, ...] = ()
+    lie_loss: tuple[float, ...] = ()
+    pde_loss: tuple[float, ...] = ()
+    sparsity_loss: tuple[float, ...] = ()
+    worst_case_loss: tuple[float, ...] = ()
     val_loss: tuple[float, ...] | None = None
     val_reconstruction_loss: tuple[float, ...] | None = None
     val_forward_loss: tuple[float, ...] | None = None
     val_backward_loss: tuple[float, ...] | None = None
     val_rollout_loss: tuple[float, ...] | None = None
     val_eigenvalue_loss: tuple[float, ...] | None = None
+    val_lie_loss: tuple[float, ...] | None = None
+    val_pde_loss: tuple[float, ...] | None = None
+    val_sparsity_loss: tuple[float, ...] | None = None
+    val_worst_case_loss: tuple[float, ...] | None = None
     stopped_early: bool = False
     best_epoch: int | None = None
     best_loss: float | None = None

@@ -22,7 +22,6 @@ checks locally, and submit changes via pull request.
 - [Pull request process](#pull-request-process)
 - [Documentation](#documentation)
 - [Releasing](#releasing)
-- [Agent-assisted development](#agent-assisted-development)
 - [License](#license)
 
 ## Code of conduct
@@ -64,6 +63,11 @@ outputs, or choose an API for your problem, start a Discussion instead.
 Blank issues are disabled; the issue chooser also links to Discussions for
 non-bug questions. Responses are **best-effort** from maintainers and the
 community—there is **no SLA** or guaranteed response time.
+
+For common install, import-path, and checkpoint failures, see the Sphinx
+[FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html)
+page. To report a **security vulnerability**, use the private channel in
+[SECURITY.md](SECURITY.md)—do not open a public issue.
 
 ## Development environment
 
@@ -259,39 +263,33 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
 `[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
 `pyproject.toml`.
 
-### Checkpoint migration (v0.3.0 / v0.4.0)
+### Checkpoint format (current baseline)
 
 Model checkpoints include a ``format_version`` field (see
 ``src/koopman_graph/serialization.py``):
 
-| Version | Introduced | Notes |
+| Version | Status | Notes |
 | --- | --- | --- |
-| 1 | v0.2.x | Discrete dynamics; config omits continuous-time, physics, and control fields |
-| 2 | v0.3.0 | Full config for continuous mode, hybrid physics observables, control, and encoder/decoder ``type`` (``"gcn"`` / ``"gat"``; missing decoder ``type`` defaults to ``"gcn"``) |
+| 1 | Current baseline | Full config: discrete/continuous dynamics, hybrid physics, control (including bilinear metadata), delay embeddings, built-in operator kinds (``koopman_kind``), auxiliary-spectral settings, and GCN/GAT/SAGE/DiffConv/Transformer encoder-decoder types. Missing decoder ``type`` defaults to ``"gcn"``. |
 
-``GraphKoopmanModel.load`` accepts both v1 and v2 checkpoints. v1 payloads are
-migrated in memory by filling missing optional fields with defaults
-(``dynamics_mode="discrete"``, no physics observables, ``control_dim=0``,
-``koopman_parameterization="dense"``). Phase 8 architectural consistency
-(symmetric ``GATDecoder``, preferred ``encode``, shared operator contracts,
-shared rollout primitives, optional ``koopman=`` injection, frozen result
-types, baseline / ``ForecastModel`` call-site clarity, capability packages,
-thin public façade, and spectrum plot helpers) did **not** require a
-new ``format_version``; new saves still use ``FORMAT_VERSION`` 2. Custom
-injected operators are rejected on ``save`` and are therefore outside the
-checkpoint migration path.
+``GraphKoopmanModel.load`` accepts only supported format versions (currently
+``{1}``). Previously published format-2 checkpoints and sparse historical
+format-1 payloads that omit required current-schema keys are rejected with a
+clear error — there is no silent migration from those retired lineages.
+Future incompatible schema changes must bump ``FORMAT_VERSION``, extend
+``SUPPORTED_FORMAT_VERSIONS``, and add an explicit migration branch in
+``_migrate_config``. Custom injected operators are rejected on ``save`` and
+are therefore outside the checkpoint path.
 
-v0.4.0 likewise keeps ``FORMAT_VERSION`` 2. Networked operators
-(``koopman_kind``), bilinear control (``control_mode`` / ``bilinear_rank``),
-and delay embeddings (``n_delays``) are additive config fields with defaults
-compatible with older v2 checkpoints.
+Do not confuse checkpoint ``format_version`` with the package
+``__version__`` (for example ``0.5.0``).
 
 ### Maintainer release checklist
 

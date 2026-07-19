@@ -219,7 +219,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Project-local (not for version control)
-.cursor/
-docs/BLUEPRINT.md
 _project_proposal.pdf
 .DS_Store
+scripts/count_joss_words.py

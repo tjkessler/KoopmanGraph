@@ -1,4 +1,4 @@
-"""Tests for delay / Hankel embeddings (TASK-904)."""
+"""Tests for delay / Hankel embeddings."""
 
 from __future__ import annotations
 
@@ -189,3 +189,153 @@ def test_partial_observability_delay_improves_or_matches() -> None:
     rmse_3 = _fit(3)
     # Soft threshold: allow small noise; delay should be no worse than +25%.
     assert rmse_3 <= rmse_1 * 1.25 + 1e-3
+
+
+def test_delay_helpers_validation_and_masking() -> None:
+    """Exercise delay helper validation, masking, and history builders."""
+    from koopman_graph.nn.delay import (
+        apply_observation_mask_to_features,
+        flatten_delay_window,
+        history_from_snapshots,
+        resolve_delay_encoder,
+    )
+
+    x = torch.ones(3, 2)
+    assert torch.equal(apply_observation_mask_to_features(x, None), x)
+    masked = apply_observation_mask_to_features(x, torch.tensor([True, False, True]))
+    assert torch.equal(masked[1], torch.zeros(2))
+    with pytest.raises(ValueError, match="does not match"):
+        apply_observation_mask_to_features(x, torch.ones(2, dtype=torch.bool))
+
+    with pytest.raises(ValueError, match="n_delays"):
+        flatten_delay_window(torch.zeros(2, 3))
+    with pytest.raises(ValueError, match="n_delays must be"):
+        stack_delay_features(_make_sequence(), index=0, n_delays=0)
+    with pytest.raises(IndexError, match="index must satisfy"):
+        stack_delay_features(_make_sequence(), index=99, n_delays=2)
+    with pytest.raises(ValueError, match="insufficient history"):
+        stack_delay_features(
+            _make_sequence(num_timesteps=2),
+            index=0,
+            n_delays=3,
+            pad=False,
+        )
+
+    sequence = _make_sequence(num_timesteps=4, in_channels=2)
+    masks = torch.ones(4, 4, dtype=torch.bool)
+    masks[1, 0] = False
+    masked_seq = GraphSnapshotSequence(list(sequence), observation_masks=masks)
+    window, *_rest = stack_delay_features(masked_seq, index=2, n_delays=2, pad=False)
+    assert torch.allclose(window[0, 0], torch.zeros(2))
+
+    edge_a = _path_edge_index(3)
+    weight_mismatch = GraphSnapshotSequence(
+        [
+            Data(
+                x=torch.ones(3, 1),
+                edge_index=edge_a,
+                edge_weight=torch.ones(edge_a.shape[1]),
+            ),
+            Data(
+                x=torch.ones(3, 1),
+                edge_index=edge_a,
+                edge_weight=torch.ones(edge_a.shape[1]),
+            ),
+        ]
+    )
+    weight_mismatch[1].edge_weight = torch.ones(edge_a.shape[1]) * 2.0
+    with pytest.raises(ValueError, match="topology changed"):
+        stack_delay_features(weight_mismatch, index=1, n_delays=2, pad=False)
+
+    # Presence mismatch after construction (borrowed Data mutation).
+    presence = GraphSnapshotSequence(
+        [
+            Data(
+                x=torch.ones(3, 1),
+                edge_index=edge_a,
+                edge_weight=torch.ones(edge_a.shape[1]),
+            ),
+            Data(
+                x=torch.ones(3, 1),
+                edge_index=edge_a,
+                edge_weight=torch.ones(edge_a.shape[1]),
+            ),
+        ]
+    )
+    del presence[1].edge_weight
+    with pytest.raises(ValueError, match="topology changed"):
+        stack_delay_features(presence, index=1, n_delays=2, pad=False)
+
+    mismatched = GraphSnapshotSequence(
+        [
+            Data(x=torch.ones(3, 1), edge_index=edge_a),
+            Data(x=torch.ones(3, 1), edge_index=edge_a),
+        ],
+        allow_dynamic_topology=True,
+    )
+    mismatched[1].x = torch.ones(4, 1)
+    with pytest.raises(ValueError, match="share num_nodes"):
+        stack_delay_features(mismatched, index=1, n_delays=2, pad=False)
+
+    newest = Data(x=torch.ones(3, 2), edge_index=edge_a)
+    x_win, edge_index, _ew, history = history_from_snapshots(
+        [newest],
+        n_delays=3,
+        pad=True,
+    )
+    assert x_win.shape == (3, 3, 2)
+    assert history.tolist() == [False, False, True]
+    assert torch.equal(edge_index, edge_a)
+    with pytest.raises(ValueError, match="n_delays"):
+        history_from_snapshots([newest], n_delays=0)
+    with pytest.raises(ValueError, match="at least one"):
+        history_from_snapshots([], n_delays=2)
+    with pytest.raises(ValueError, match="pad=False"):
+        history_from_snapshots([newest], n_delays=2, pad=False)
+    long_hist = history_from_snapshots(
+        [Data(x=torch.ones(3, 2), edge_index=edge_a) for _ in range(5)],
+        n_delays=2,
+        pad=False,
+    )
+    assert long_hist[0].shape[0] == 2
+
+    base = GNNEncoder(in_channels=6, hidden_channels=4, latent_dim=3)
+    wrapped, n = resolve_delay_encoder(base, 3)
+    assert isinstance(wrapped, DelayEmbeddingEncoder)
+    assert n == 3
+    same, n1 = resolve_delay_encoder(wrapped, 1)
+    assert same is wrapped and n1 == 3
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_delay_encoder(wrapped, 2)
+    with pytest.raises(ValueError, match="n_delays must be"):
+        resolve_delay_encoder(base, 0)
+    with pytest.raises(TypeError, match="GNNEncoder/GATEncoder"):
+        resolve_delay_encoder(torch.nn.Linear(2, 2), 3)
+    with pytest.raises(ValueError, match="in_channels"):
+        DelayEmbeddingEncoder(torch.nn.Linear(4, 2), n_delays=2)  # type: ignore[arg-type]
+
+
+def test_delay_encoder_forward_paths_and_errors() -> None:
+    """DelayEmbeddingEncoder accepts Data/stacked tensors and validates shapes."""
+    base = GNNEncoder(in_channels=6, hidden_channels=8, latent_dim=4)
+    encoder = DelayEmbeddingEncoder(base, n_delays=3)
+    edge_index = _path_edge_index(4)
+    window = torch.randn(3, 4, 2)
+    stacked = flatten_delay_window(window)
+    z_window = encoder(window, edge_index)
+    z_stack = encoder(stacked, edge_index)
+    assert z_window.shape == (4, 4)
+    assert torch.allclose(z_window, z_stack)
+    data = Data(x=stacked, edge_index=edge_index)
+    assert encoder(data).shape == (4, 4)
+
+    with pytest.raises(ValueError, match="edge_index is required"):
+        encoder(window)
+    with pytest.raises(ValueError, match="leading dim"):
+        encoder(torch.randn(2, 4, 2), edge_index)
+    with pytest.raises(ValueError, match="feature_dim"):
+        encoder(torch.randn(3, 4, 3), edge_index)
+    with pytest.raises(ValueError, match="in_channels"):
+        encoder(torch.randn(4, 5), edge_index)
+    with pytest.raises(ValueError, match="expected delay window"):
+        encoder(torch.randn(4), edge_index)

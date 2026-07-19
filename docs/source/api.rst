@@ -20,17 +20,25 @@ Package
 Model
 -----
 
+Same-named capability package (:mod:`koopman_graph.model`) with peer modules
+``estimator``, ``factory``, ``validation``, ``timing``, ``encoding``,
+``inference``, and ``online_adaptation``. Prefer
+``from koopman_graph import GraphKoopmanModel`` or
+``from koopman_graph.model import GraphKoopmanModel``.
+
 .. automodule:: koopman_graph.model
    :members:
-   :exclude-members: EvaluationResult, GATDecoder, GATEncoder, GNNDecoder, GNNEncoder, GraphSnapshotSequence, GraphKoopmanOperator, KoopmanOperator
+   :imported-members:
+   :exclude-members: DiffConvDecoder, DiffConvEncoder, EvaluationResult, GATDecoder, GATEncoder, GNNDecoder, GNNEncoder, GraphSnapshotSequence, GraphKoopmanOperator, GraphTransformerDecoder, GraphTransformerEncoder, KoopmanOperator, SAGEDecoder, SAGEEncoder, encoding, estimator, factory, inference, online_adaptation, timing, validation
    :show-inheritance:
 
 Encoders
 --------
 
 Built-in encoders live in :mod:`koopman_graph.nn` (``encoder``, ``decoder``,
-``gnn``). Prefer ``from koopman_graph import GNNEncoder, GATEncoder`` for
-application code, or ``from koopman_graph.nn import …`` for power-user imports.
+``gnn``). Prefer ``from koopman_graph import GNNEncoder, GATEncoder,
+SAGEEncoder, DiffConvEncoder, GraphTransformerEncoder`` for application code,
+or ``from koopman_graph.nn import …`` for power-user imports.
 Former deep imports ``koopman_graph.encoder`` / ``decoder`` / ``gnn`` were
 removed in v0.3.0.
 
@@ -41,13 +49,18 @@ removed in v0.3.0.
 Delay Embeddings
 ----------------
 
-Hankel / delay-coordinate lifting wraps a sized base encoder. Prefer
-``from koopman_graph import DelayEmbeddingEncoder`` or pass
-``n_delays`` to :class:`~koopman_graph.model.GraphKoopmanModel`.
-This is Takens-style channel stacking, not a full HAVOK / Hankel-DMD solver.
+Hankel / delay-coordinate lifting wraps a sized base encoder.
+:class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` is a root-stable
+``__all__`` member (also importable from :mod:`koopman_graph.nn`). Prefer
+``from koopman_graph import DelayEmbeddingEncoder`` or pass ``n_delays`` to
+:class:`~koopman_graph.model.GraphKoopmanModel`. This is Takens-style channel
+stacking, not a full HAVOK / Hankel-DMD solver. Pure snapshot/tensor window
+helpers are owned by :mod:`koopman_graph.data.delay_windows` and
+thin-re-exported from this module for compatibility.
 
 .. automodule:: koopman_graph.nn.delay
    :members:
+   :imported-members:
    :show-inheritance:
 
 Decoder
@@ -61,10 +74,12 @@ Shared GNN Primitives (power-user)
 ----------------------------------
 
 Neutral message-passing helpers shared by peer encoder and decoder modules
-(:class:`~koopman_graph.nn.gnn.BaseGNNModule`, activation typing, GCN/GAT
-builders). Importable via :mod:`koopman_graph.nn.gnn`, but **not** part of the
-stable public façade (not in ``koopman_graph.__all__``). Prefer the public
-encoder/decoder classes for application code. See :doc:`architecture`.
+(:class:`~koopman_graph.nn.gnn.BaseGNNModule`, activation typing,
+GCN/GAT/SAGE/DiffConv/Transformer builders). Importable via
+:mod:`koopman_graph.nn.gnn`,
+but **not** part of the stable public façade (not in ``koopman_graph.__all__``).
+Prefer the public encoder/decoder classes for application code. See
+:doc:`architecture`.
 
 .. automodule:: koopman_graph.nn.gnn
    :members:
@@ -73,10 +88,10 @@ encoder/decoder classes for application code. See :doc:`architecture`.
 Physics-Informed Observables
 ----------------------------
 
-Hybrid physics helpers such as ``graph_laplacian_features`` are imported from
-:mod:`koopman_graph.observables` only. Prefer
-``physics_preset="graph_laplacian"`` on :class:`~koopman_graph.model.GraphKoopmanModel`
-for the built-in Laplacian path; pass a custom ``physics_lifting_fn`` when needed.
+Hybrid physics helpers are imported from :mod:`koopman_graph.observables` only.
+Built-in names are ``"graph_laplacian"``, ``"graph_gradient"``,
+``"graph_curvature"``, and ``"polynomial(degree)"``. Pass a custom
+``physics_lifting_fn`` when needed.
 
 .. automodule:: koopman_graph.observables
    :members:
@@ -86,8 +101,12 @@ Koopman Operator
 ----------------
 
 Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
-``control``, ``discrete``, ``continuous``, ``graph``). Prefer ``from koopman_graph import
-KoopmanOperator, ContinuousKoopmanOperator, GraphKoopmanOperator`` or
+``control``, ``discrete``, ``discrete_parameterizations``,
+``discrete_propagation``, ``continuous``, ``continuous_van_loan``,
+``continuous_parameterizations``, ``continuous_propagation``,
+``auxiliary_spectral``, ``graph``). Prefer
+``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
+GraphKoopmanOperator`` (all three are root-stable ``__all__`` members) or
 ``from koopman_graph.operators import …``. Former deep imports
 ``koopman_graph.operator`` / ``koopman_graph.continuous`` were removed in
 v0.3.0.
@@ -133,7 +152,13 @@ satisfy :class:`~koopman_graph.protocols.ForecastModel` (``fit`` / ``predict`` /
 ``ForecastModel`` call-site matrix in :doc:`architecture`.
 :class:`~koopman_graph.baselines.EDMDBaseline` exposes
 ``reconstruction_matrix`` for observable-to-state least squares (not a GNN
-decoder). Prefer ``from koopman_graph.baselines import …`` or the root façade.
+decoder) and supports ``dictionary`` in ``{"polynomial", "rbf", "kernel"}``
+(Williams2015 polynomial / RBF EDMD; kernel sections following
+Williams2015KernelDMD / Klus2018TransferOperator).
+The full ``kernel`` path with one center per training snapshot is
+:math:`O(T^2)` in feature dimension and is intended for small/medium ``T``
+only; ``kernel="linear"`` reduces to DMD. Prefer
+``from koopman_graph.baselines import …``.
 
 Spatiotemporal GNN forecaster baselines
 (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
@@ -179,29 +204,70 @@ duck-typed training vs hard-typed env / serialization.
 Data Utilities
 --------------
 
-Containers and split helpers (``GraphSnapshotSequence``, ``MultiTrajectory``,
-``TemporalSplit``, ``temporal_split``, ``WindowSampler``) remain on the root
-façade. ``as_multi_trajectory`` is imported from :mod:`koopman_graph.data`
-only.
+Containers for ``fit`` (``GraphSnapshotSequence``, ``MultiTrajectory``)
+remain on the root façade. Split / sampling helpers
+(``TemporalSplit``, ``temporal_split``, ``WindowSampler``) and
+``as_multi_trajectory`` are imported from :mod:`koopman_graph.data`
+only. The package peers are ``containers`` / ``construction`` /
+``validation`` / ``trajectories`` / ``delay_windows`` / ``sampling`` /
+``splits`` / ``rollout``; prefer ``from koopman_graph.data import …``.
+Array→snapshot builders are power-user imports from
+:mod:`koopman_graph.data.construction`. Delay-window stack/flatten helpers
+are power-user imports from :mod:`koopman_graph.data.delay_windows` (also
+re-exported by :mod:`koopman_graph.nn.delay`).
 
 .. automodule:: koopman_graph.data
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.data.construction
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.data.delay_windows
    :members:
    :show-inheritance:
 
 Shared Graph Utilities (power-user)
 -----------------------------------
 
-Documented internal helpers for graph-input resolution and latent propagation.
-Importable, but **not** part of the stable public façade (not in
-``koopman_graph.__all__``). Use :meth:`~koopman_graph.model.GraphKoopmanModel.encode`
-when lifting snapshots. See :doc:`architecture`.
+Documented internal helpers for graph-input resolution, Laplacian mathematics,
+and latent propagation. :mod:`koopman_graph.graph_utils` is a shallow
+capability package (``topology`` / ``propagation`` peers) whose ``__init__``
+re-exports the documented surface. Importable, but **not** part of the stable
+public façade (not in ``koopman_graph.__all__``). Use
+:meth:`~koopman_graph.model.GraphKoopmanModel.encode` when lifting snapshots.
+See :doc:`architecture`.
 
 .. automodule:: koopman_graph.graph_utils
+   :members:
+   :imported-members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.graph_utils.topology
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.graph_utils.propagation
    :members:
    :show-inheritance:
 
 Losses
 ------
+
+Same-named capability package (:mod:`koopman_graph.losses`) with peer
+modules ``consistency``, ``regularization``, ``reconstruction``,
+``physics``, and ``rollout``. Prefer ``from koopman_graph.losses import …``.
+
+PIKN-style :class:`~koopman_graph.losses.LieConsistencyLoss`, PINN-style
+:class:`~koopman_graph.losses.PDEResidualLoss`,
+:class:`~koopman_graph.losses.KoopmanSparsityLoss`, and
+:class:`~koopman_graph.losses.WorstCaseReconstructionLoss` are power-user
+module imports; they are intentionally omitted from root
+``koopman_graph.__all__``. Training composition uses
+:class:`~koopman_graph.training.ExtraLosses` (physics residuals) plus
+:class:`~koopman_graph.training.LossWeights` (including ``sparsity`` /
+``worst_case``).
 
 .. automodule:: koopman_graph.losses
    :members:
@@ -211,6 +277,18 @@ Losses
 Training
 --------
 
+Capability peers under :mod:`koopman_graph.training` include
+``pair_objectives`` (reconstruction / consistency composition),
+``extra_objectives`` (Lie / PDE / sparsity / worst-case),
+``objectives`` (``compute_training_loss`` orchestrator plus eigenvalue /
+rollout), ``epochs`` (single-epoch train / eval helpers), ``inputs``
+(multi-trajectory resolve), and ``loop`` (``run_fit_loop`` plus
+early-stop / scheduler helpers). Prefer
+``from koopman_graph.training import …``. The frozen internal
+``TrainingLossBreakdown`` snapshot lives under
+:mod:`koopman_graph.training.history` and is not a training-package
+export.
+
 .. automodule:: koopman_graph.training
    :members:
    :exclude-members: GraphSnapshotSequence
@@ -219,10 +297,9 @@ Training
 Metrics
 -------
 
-Primary forecast evaluation entrypoints (``evaluate_forecast``,
-``EvaluationResult``) remain on the root façade. Low-level helpers
-(``mae``, ``rmse``, ``mape``, ``HorizonMetrics``) are imported from
-:mod:`koopman_graph.metrics` only.
+Forecast evaluation entrypoints (``evaluate_forecast``,
+``EvaluationResult``) and low-level helpers (``mae``, ``rmse``, ``mape``,
+``HorizonMetrics``) are imported from :mod:`koopman_graph.metrics` only.
 
 .. automodule:: koopman_graph.metrics
    :members:
@@ -231,16 +308,58 @@ Primary forecast evaluation entrypoints (``evaluate_forecast``,
 Online Adaptation
 -----------------
 
-``RecursiveKoopmanAdapter`` remains on the root façade.
-``AdaptationStepResult``, ``KoopmanObserver``, and ``FilterResult`` are
-imported from :mod:`koopman_graph.adaptation` only.
+``RecursiveKoopmanAdapter``, ``AdaptationStepResult``, ``KoopmanObserver``,
+and ``FilterResult`` are imported from :mod:`koopman_graph.adaptation`
+only. Shallow peers
+``kalman`` (reference filter / RTS) and ``impute``
+(``graph_diffuse_impute``) are power-user deep imports under the same
+package.
 
 .. automodule:: koopman_graph.adaptation
    :members:
    :show-inheritance:
 
+Uncertainty Quantification (power-user)
+---------------------------------------
+
+Deep ensembles and latent-Gaussian forecast UQ live under
+:mod:`koopman_graph.uq` and are **not** on the root façade.
+:class:`~koopman_graph.uq.EnsembleGraphKoopmanModel` composes independently
+seeded :class:`~koopman_graph.model.GraphKoopmanModel` members
+(Lakshminarayanan et al., NeurIPS 2017).
+:class:`~koopman_graph.uq.LatentGaussianKoopmanUQ` propagates a Gaussian
+latent under the linear Koopman map with optional Kalman refinement
+(related to the Kalman half of K²VAE-style pipelines). Neither path is Deep
+Probabilistic Koopman (which predicts time-varying distribution parameters),
+and the Gaussian peer is **not** a full VAE + KalmanNet reimplementation.
+
+.. automodule:: koopman_graph.uq
+   :members:
+   :show-inheritance:
+
+Hierarchical forecasting (power-user)
+-------------------------------------
+
+Multi-resolution pool → coarse Koopman → unpool lives under
+:mod:`koopman_graph.hierarchical` and is **not** on the root façade.
+:class:`~koopman_graph.hierarchical.HierarchicalGraphKoopmanModel` composes
+:class:`~koopman_graph.model.GraphKoopmanModel` on a TopK-pooled (optional SAG)
+graph. This is coarse-level forecasting with learned unpooling — **not** a
+P-K-GCN-style physics-augmented spatiotemporal super-resolution pipeline
+(Zhang et al., 2026). Graph-operator spectra use the **pooled** topology.
+Global controls pass through; per-node controls follow the pooling ``perm``
+chain.
+
+.. automodule:: koopman_graph.hierarchical
+   :members:
+   :show-inheritance:
+
 RL Environment
 --------------
+
+``GraphKoopmanEnv`` is imported from :mod:`koopman_graph.env` (not on the
+root façade). Soft-imports Gymnasium so the module loads without the
+``[rl]`` extra; construction fails at call time with install guidance.
 
 .. automodule:: koopman_graph.env
    :members:
@@ -284,6 +403,18 @@ Datasets
    :members:
    :show-inheritance:
 
-.. automodule:: koopman_graph.datasets.nonlinear
+.. automodule:: koopman_graph.datasets.epidemic
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.lorenz96
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.kuramoto_sivashinsky
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.cylinder_wake
    :members:
    :show-inheritance:

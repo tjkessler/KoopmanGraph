@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 220" role="img" aria-labelledby="title desc">
+  <title id="title">KoopmanGraph encodeadvancedecode architecture</title>
+  <desc id="desc">Node features on a graph are lifted by a GNN encoder, advanced by a linear Koopman operator, and reconstructed by a GNN decoder.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect width="920" height="220" fill="#f8fafc"/>
+  <text x="460" y="28" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0f172a">Encode ’ linear Koopman advance ’ decode</text>
+
+  <!-- Encoder -->
+  <rect x="40" y="60" width="200" height="100" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <text x="140" y="100" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#0c4a6e">GNN Encoder</text>
+  <text x="140" y="124" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#075985">topology-aware lifting</text>
+  <text x="140" y="146" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#334155">xœ ’ zœ</text>
+
+  <!-- Arrow 1 -->
+  <line x1="250" y1="110" x2="310" y2="110" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Koopman -->
+  <rect x="320" y="60" width="240" height="100" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <text x="440" y="100" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#065f46">Koopman operator</text>
+  <text x="440" y="124" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#047857">linear latent dynamics</text>
+  <text x="440" y="146" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#334155">zœ ’ zœŠ H K zœ</text>
+
+  <!-- Arrow 2 -->
+  <line x1="570" y1="110" x2="630" y2="110" stroke="#334155" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <!-- Decoder -->
+  <rect x="640" y="60" width="220" height="100" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="750" y="100" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#92400e">GNN Decoder</text>
+  <text x="750" y="124" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#b45309">reconstruction</text>
+  <text x="750" y="146" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#334155">zœŠ ’ xœŠ</text>
+
+  <text x="140" y="190" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#64748b">N × F on graph</text>
+  <text x="440" y="190" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#64748b">N × d latent states</text>
+  <text x="750" y="190" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="11" fill="#64748b">N × F predictions</text>
+</svg>

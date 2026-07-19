@@ -2,26 +2,24 @@
 
 Checkpoint format versions
 --------------------------
-``format_version`` 1 (v0.2.x)
-    Discrete dynamics only; config omits ``dynamics_mode``, ``physics``,
-    ``control_dim``, and structured-operator fields added in v0.3.0.
+``format_version`` 1 (current baseline)
+    Full architecture config for discrete and continuous dynamics, hybrid
+    physics observables, control (including bilinear metadata), delay
+    embeddings, and built-in operator kinds (per-node / graph). Decoder
+    configs may include ``type`` (``"gcn"``, ``"gat"``, ``"sage"``,
+    ``"diffconv"``, or ``"transformer"``); missing ``type`` defaults to
+    ``"gcn"``. Hybrid ``physics``
+    blocks own ``dim``, ``preset``, and ``position``; ``position`` is
+    round-tripped and validated on load (currently only ``"prepend"``).
+    Missing ``position`` defaults to ``"prepend"``. Optional ``n_delays``
+    records Hankel delay embedding; the stored encoder block is always the
+    base encoder config with ``in_channels = n_delays * feature_dim``.
 
-``format_version`` 2 (v0.3.0+)
-    Full config including continuous-time mode, hybrid physics observables,
-    control dimension, and Koopman parameterization metadata. Decoder configs
-    may include ``type`` (``"gcn"`` or ``"gat"``); missing ``type`` defaults to
-    ``"gcn"`` for backward compatibility. Hybrid ``physics`` blocks own
-    ``dim``, ``preset``, and ``position``; ``position`` is round-tripped and
-    validated on load (currently only ``"prepend"``). Missing ``position``
-    defaults to ``"prepend"``. Optional ``n_delays`` (default ``1``) records
-    Hankel delay embedding; the stored encoder block is always the base
-    GCN/GAT config with ``in_channels = n_delays * feature_dim``.
-    v0.4.0 keeps this format: ``koopman_kind``, ``control_mode``, and
-    ``bilinear_rank`` are additive optional fields with safe defaults.
-
-Loaders accept both versions. v1 checkpoints are migrated in memory by filling
-missing optional fields with defaults (``dynamics_mode="discrete"``, no physics,
-``control_dim=0``, ``koopman_parameterization="dense"``).
+Loaders accept only the supported format set (currently ``{1}``). Retired
+lineages — previously published ``format_version`` 2 checkpoints and legacy
+format-1 payloads that omit required current-schema keys — are rejected with
+a clear error (no silent migration). Future incompatible schema changes bump
+``FORMAT_VERSION`` and add a migration branch in :func:`_migrate_config`.
 
 Custom injected operators (anything other than
 :class:`~koopman_graph.operators.KoopmanOperator`,
@@ -43,10 +41,16 @@ from torch import nn
 
 from koopman_graph.nn import (
     DelayEmbeddingEncoder,
+    DiffConvDecoder,
+    DiffConvEncoder,
     GATDecoder,
     GATEncoder,
     GNNDecoder,
     GNNEncoder,
+    GraphTransformerDecoder,
+    GraphTransformerEncoder,
+    SAGEDecoder,
+    SAGEEncoder,
 )
 from koopman_graph.observables import (
     PHYSICS_POSITION,
@@ -65,10 +69,37 @@ from koopman_graph.operators import (
 if TYPE_CHECKING:
     from koopman_graph.model import GraphKoopmanModel
 
-FORMAT_VERSION = 2
-SUPPORTED_FORMAT_VERSIONS = frozenset({1, 2})
+FORMAT_VERSION = 1
+SUPPORTED_FORMAT_VERSIONS = frozenset({1})
 
-Decoder = GNNDecoder | GATDecoder
+# Keys always written by :func:`build_model_config` for the current format-1
+# baseline. Sparse historical payloads that omit these are rejected on load.
+_FORMAT_1_REQUIRED_KEYS = frozenset(
+    {
+        "latent_dim",
+        "time_step",
+        "dynamics_mode",
+        "koopman_kind",
+        "koopman_init_mode",
+        "koopman_init_scale",
+        "koopman_parameterization",
+        "koopman_max_spectral_radius",
+        "control_dim",
+        "control_mode",
+        "bilinear_rank",
+        "n_delays",
+        "physics",
+        "encoder",
+        "decoder",
+    }
+)
+
+Decoder = (
+    GNNDecoder | GATDecoder | SAGEDecoder | DiffConvDecoder | GraphTransformerDecoder
+)
+BaseEncoder = (
+    GNNEncoder | GATEncoder | SAGEEncoder | DiffConvEncoder | GraphTransformerEncoder
+)
 _SERIALIZABLE_KOOPMAN_TYPES = (
     KoopmanOperator,
     ContinuousKoopmanOperator,
@@ -76,32 +107,64 @@ _SERIALIZABLE_KOOPMAN_TYPES = (
 )
 
 
+def _require_format1_schema(config: dict[str, Any]) -> None:
+    """Reject incomplete configs that lack the current format-1 schema keys.
+
+    Parameters
+    ----------
+    config : dict
+        Architecture configuration block from a checkpoint.
+
+    Raises
+    ------
+    ValueError
+        If any required current-schema key is missing.
+    """
+    missing = sorted(_FORMAT_1_REQUIRED_KEYS - config.keys())
+    if missing:
+        msg = (
+            "Checkpoint config is missing required format_version 1 fields: "
+            f"{', '.join(missing)}. Re-save the model with the current package "
+            "or reconstruct the architecture explicitly."
+        )
+        raise ValueError(msg)
+
+
 def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str, Any]:
-    """Fill v0.2.x checkpoint config defaults for v0.3.0 fields.
+    """Apply version-specific migrations before reconstruct.
+
+    Format 1 is the current baseline: validate the full schema and return the
+    config unchanged (no field backfill). Future incompatible bumps should add
+    branches here (for example ``if format_version == 1: ...``) before
+    returning a migrated config.
 
     Parameters
     ----------
     config : dict
         Architecture configuration block from a saved checkpoint.
     format_version : int
-        Checkpoint ``format_version`` before migration.
+        Checkpoint ``format_version`` after supported-version validation.
 
     Returns
     -------
     dict
-        Config with v0.3.0 optional fields populated when absent.
+        Config ready for :func:`reconstruct_model`.
+
+    Raises
+    ------
+    ValueError
+        If the format version has no migration path or the config fails
+        schema validation for the active version.
     """
-    if format_version >= 2:
+    if format_version == 1:
+        _require_format1_schema(config)
         return config
 
-    migrated = dict(config)
-    migrated.setdefault("dynamics_mode", "discrete")
-    migrated.setdefault("koopman_parameterization", "dense")
-    migrated.setdefault("koopman_max_spectral_radius", 1.0)
-    migrated.setdefault("control_dim", 0)
-    migrated.setdefault("physics", None)
-    migrated.setdefault("n_delays", 1)
-    return migrated
+    msg = (
+        f"No migration path for checkpoint format_version {format_version}; "
+        f"supported versions: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
+    )
+    raise ValueError(msg)
 
 
 def _package_version() -> str:
@@ -119,36 +182,48 @@ def _package_version() -> str:
         return "0.0.0"
 
 
-_SUPPORTED_ENCODER_TYPES: dict[str, type[GNNEncoder] | type[GATEncoder]] = {
+_SUPPORTED_ENCODER_TYPES: dict[str, type[BaseEncoder]] = {
     "gcn": GNNEncoder,
     "gat": GATEncoder,
+    "sage": SAGEEncoder,
+    "diffconv": DiffConvEncoder,
+    "transformer": GraphTransformerEncoder,
 }
 
-_SUPPORTED_DECODER_TYPES: dict[str, type[GNNDecoder] | type[GATDecoder]] = {
+_SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
     "gcn": GNNDecoder,
     "gat": GATDecoder,
+    "sage": SAGEDecoder,
+    "diffconv": DiffConvDecoder,
+    "transformer": GraphTransformerDecoder,
 }
 
 
-def _encoder_type(encoder: GNNEncoder | GATEncoder) -> str:
+def _encoder_type(encoder: BaseEncoder) -> str:
     """Return the checkpoint encoder type string for an encoder instance.
 
     Parameters
     ----------
-    encoder : GNNEncoder or GATEncoder
+    encoder : GNNEncoder, GATEncoder, SAGEEncoder, DiffConvEncoder, or
+        GraphTransformerEncoder
         Encoder whose architecture type will be serialized.
 
     Returns
     -------
     str
-        ``"gcn"`` for :class:`~koopman_graph.nn.encoder.GNNEncoder` and ``"gat"``
-        for :class:`~koopman_graph.nn.encoder.GATEncoder`.
+        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, or ``"transformer"``.
 
     Raises
     ------
     TypeError
         If ``encoder`` is not a supported encoder class.
     """
+    if isinstance(encoder, GraphTransformerEncoder):
+        return "transformer"
+    if isinstance(encoder, DiffConvEncoder):
+        return "diffconv"
+    if isinstance(encoder, SAGEEncoder):
+        return "sage"
     if isinstance(encoder, GATEncoder):
         return "gat"
     if isinstance(encoder, GNNEncoder):
@@ -159,7 +234,7 @@ def _encoder_type(encoder: GNNEncoder | GATEncoder) -> str:
 
 def _unwrap_base_encoder(
     encoder: nn.Module,
-) -> tuple[GNNEncoder | GATEncoder, int]:
+) -> tuple[BaseEncoder, int]:
     """Return the serializable base encoder and delay count.
 
     Parameters
@@ -169,21 +244,42 @@ def _unwrap_base_encoder(
 
     Returns
     -------
-    base_encoder : GNNEncoder or GATEncoder
+    base_encoder : GNNEncoder, GATEncoder, SAGEEncoder, DiffConvEncoder, or
+        GraphTransformerEncoder
         Checkpoint-rebuildable encoder.
     n_delays : int
         Delay window length (``1`` when unwrapped).
     """
     if isinstance(encoder, DelayEmbeddingEncoder):
         base = encoder.base_encoder
-        if not isinstance(base, (GNNEncoder, GATEncoder)):
+        if not isinstance(
+            base,
+            (
+                GNNEncoder,
+                GATEncoder,
+                SAGEEncoder,
+                DiffConvEncoder,
+                GraphTransformerEncoder,
+            ),
+        ):
             msg = (
-                "DelayEmbeddingEncoder.base_encoder must be GNNEncoder or "
-                f"GATEncoder for checkpoints; got {type(base).__name__}"
+                "DelayEmbeddingEncoder.base_encoder must be GNNEncoder, "
+                "GATEncoder, SAGEEncoder, DiffConvEncoder, or "
+                "GraphTransformerEncoder for "
+                f"checkpoints; got {type(base).__name__}"
             )
             raise TypeError(msg)
         return base, encoder.n_delays
-    if isinstance(encoder, (GNNEncoder, GATEncoder)):
+    if isinstance(
+        encoder,
+        (
+            GNNEncoder,
+            GATEncoder,
+            SAGEEncoder,
+            DiffConvEncoder,
+            GraphTransformerEncoder,
+        ),
+    ):
         return encoder, 1
     msg = f"Unsupported encoder type: {type(encoder).__name__}"
     raise TypeError(msg)
@@ -194,20 +290,26 @@ def _decoder_type(decoder: Decoder) -> str:
 
     Parameters
     ----------
-    decoder : GNNDecoder or GATDecoder
+    decoder : GNNDecoder, GATDecoder, SAGEDecoder, DiffConvDecoder, or
+        GraphTransformerDecoder
         Decoder whose architecture type will be serialized.
 
     Returns
     -------
     str
-        ``"gcn"`` for :class:`~koopman_graph.nn.decoder.GNNDecoder` and ``"gat"``
-        for :class:`~koopman_graph.nn.decoder.GATDecoder`.
+        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, or ``"transformer"``.
 
     Raises
     ------
     TypeError
         If ``decoder`` is not a supported decoder class.
     """
+    if isinstance(decoder, GraphTransformerDecoder):
+        return "transformer"
+    if isinstance(decoder, DiffConvDecoder):
+        return "diffconv"
+    if isinstance(decoder, SAGEDecoder):
+        return "sage"
     if isinstance(decoder, GATDecoder):
         return "gat"
     if isinstance(decoder, GNNDecoder):
@@ -227,7 +329,10 @@ def _require_serializable_koopman(model: GraphKoopmanModel) -> None:
     Raises
     ------
     TypeError
-        If ``model.koopman`` is not a built-in discrete or continuous operator.
+        If ``model.koopman`` is not a built-in
+        :class:`~koopman_graph.operators.KoopmanOperator`,
+        :class:`~koopman_graph.operators.ContinuousKoopmanOperator`, or
+        :class:`~koopman_graph.operators.GraphKoopmanOperator`.
     """
     if isinstance(model.koopman, _SERIALIZABLE_KOOPMAN_TYPES):
         return
@@ -258,8 +363,9 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
     ------
     TypeError
         If ``model.koopman`` is a custom injected operator (not a built-in
-        :class:`~koopman_graph.operators.KoopmanOperator` or
-        :class:`~koopman_graph.operators.ContinuousKoopmanOperator`).
+        :class:`~koopman_graph.operators.KoopmanOperator`,
+        :class:`~koopman_graph.operators.ContinuousKoopmanOperator`, or
+        :class:`~koopman_graph.operators.GraphKoopmanOperator`).
     """
     _require_serializable_koopman(model)
     encoder, n_delays = _unwrap_base_encoder(model.encoder)
@@ -272,9 +378,13 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         "num_layers": encoder.num_layers,
         "activation": encoder.activation_name,
     }
-    if isinstance(encoder, GATEncoder):
+    if isinstance(encoder, (GATEncoder, GraphTransformerEncoder)):
         encoder_config["heads"] = encoder.heads
         encoder_config["dropout"] = encoder.dropout
+    if isinstance(encoder, GraphTransformerEncoder):
+        encoder_config["edge_dim"] = encoder.edge_dim
+    if isinstance(encoder, DiffConvEncoder):
+        encoder_config["diffusion_steps"] = encoder.diffusion_steps
 
     decoder_config: dict[str, Any] = {
         "type": _decoder_type(decoder),
@@ -284,9 +394,13 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         "num_layers": decoder.num_layers,
         "activation": decoder.activation_name,
     }
-    if isinstance(decoder, GATDecoder):
+    if isinstance(decoder, (GATDecoder, GraphTransformerDecoder)):
         decoder_config["heads"] = decoder.heads
         decoder_config["dropout"] = decoder.dropout
+    if isinstance(decoder, GraphTransformerDecoder):
+        decoder_config["edge_dim"] = decoder.edge_dim
+    if isinstance(decoder, DiffConvDecoder):
+        decoder_config["diffusion_steps"] = decoder.diffusion_steps
 
     physics_config: dict[str, Any] | None = None
     if model.physics_dim > 0:
@@ -308,6 +422,12 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
             model.koopman,
             dynamics_mode=model.dynamics_mode,
         ),
+        "koopman_auxiliary_hidden_dims": (
+            list(model.koopman.auxiliary_hidden_dims)
+            if isinstance(model.koopman, ContinuousKoopmanOperator)
+            and model.koopman.parameterization == "auxiliary_spectral"
+            else None
+        ),
         "control_dim": model.control_dim,
         "control_mode": getattr(model, "control_mode", "additive"),
         "bilinear_rank": getattr(model, "bilinear_rank", None),
@@ -318,7 +438,7 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
     }
 
 
-def _build_encoder(config: dict[str, Any]) -> GNNEncoder | GATEncoder:
+def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
     """Instantiate an encoder from a checkpoint configuration block.
 
     Parameters
@@ -328,7 +448,8 @@ def _build_encoder(config: dict[str, Any]) -> GNNEncoder | GATEncoder:
 
     Returns
     -------
-    GNNEncoder or GATEncoder
+    GNNEncoder, GATEncoder, SAGEEncoder, DiffConvEncoder, or
+        GraphTransformerEncoder
         Reconstructed encoder matching the saved architecture.
 
     Raises
@@ -355,6 +476,20 @@ def _build_encoder(config: dict[str, Any]) -> GNNEncoder | GATEncoder:
             heads=config.get("heads", 1),
             dropout=config.get("dropout", 0.0),
         )
+    if encoder_type == "transformer":
+        return GraphTransformerEncoder(
+            **common_kwargs,
+            heads=config.get("heads", 1),
+            dropout=config.get("dropout", 0.0),
+            edge_dim=config.get("edge_dim"),
+        )
+    if encoder_type == "sage":
+        return SAGEEncoder(**common_kwargs)
+    if encoder_type == "diffconv":
+        return DiffConvEncoder(
+            **common_kwargs,
+            diffusion_steps=config.get("diffusion_steps", 2),
+        )
     return GNNEncoder(**common_kwargs)
 
 
@@ -370,7 +505,8 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
 
     Returns
     -------
-    GNNDecoder or GATDecoder
+    GNNDecoder, GATDecoder, SAGEDecoder, DiffConvDecoder, or
+        GraphTransformerDecoder
         Reconstructed decoder matching the saved architecture.
 
     Raises
@@ -396,6 +532,20 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
             **common_kwargs,
             heads=config.get("heads", 1),
             dropout=config.get("dropout", 0.0),
+        )
+    if decoder_type == "transformer":
+        return GraphTransformerDecoder(
+            **common_kwargs,
+            heads=config.get("heads", 1),
+            dropout=config.get("dropout", 0.0),
+            edge_dim=config.get("edge_dim"),
+        )
+    if decoder_type == "sage":
+        return SAGEDecoder(**common_kwargs)
+    if decoder_type == "diffconv":
+        return DiffConvDecoder(
+            **common_kwargs,
+            diffusion_steps=config.get("diffusion_steps", 2),
         )
     return GNNDecoder(**common_kwargs)
 
@@ -464,6 +614,7 @@ def reconstruct_model(
         koopman_init_scale=config["koopman_init_scale"],
         koopman_parameterization=config.get("koopman_parameterization", "dense"),
         koopman_max_spectral_radius=config.get("koopman_max_spectral_radius", 1.0),
+        koopman_auxiliary_hidden_dims=config.get("koopman_auxiliary_hidden_dims"),
         control_dim=config.get("control_dim", 0),
         control_mode=config.get("control_mode", "additive"),
         bilinear_rank=config.get("bilinear_rank"),

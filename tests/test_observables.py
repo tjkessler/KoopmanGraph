@@ -11,11 +11,14 @@ from torch_geometric.data import Data
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence, temporal_split
 from koopman_graph.datasets import AnisotropicAdvectionGridBenchmark
-from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
 from koopman_graph.observables import (
     PHYSICS_PRESETS,
     concatenate_observables,
+    graph_curvature_features,
+    graph_gradient_features,
     graph_laplacian_features,
+    make_polynomial_features,
+    polynomial_features,
     resolve_physics_lifting_fn,
     resolve_physics_position,
 )
@@ -80,19 +83,73 @@ def test_graph_laplacian_features_shape(small_snapshot: Data) -> None:
     assert physics.shape == (3, 3)
 
 
+def test_graph_gradient_and_curvature_presets_preserve_shape_and_isolates() -> None:
+    """Graph derivative presets preserve channels and map isolates to zero."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    snapshot = Data(
+        x=torch.tensor([[0.0], [2.0], [7.0]]),
+        edge_index=edge_index,
+    )
+
+    gradient = graph_gradient_features(snapshot)
+    curvature = graph_curvature_features(snapshot)
+
+    assert gradient.shape == snapshot.x.shape
+    assert curvature.shape == snapshot.x.shape
+    assert torch.all(gradient >= 0)
+    assert gradient[2].item() == pytest.approx(0.0)
+    assert curvature[2].item() == pytest.approx(0.0)
+
+
+def test_polynomial_features_factory_and_dynamic_preset(small_snapshot: Data) -> None:
+    """Polynomial lifting concatenates powers and resolves dynamic preset names."""
+    direct = polynomial_features(small_snapshot, degree=3)
+    factory = make_polynomial_features(3)
+    resolved = resolve_physics_lifting_fn(physics_preset="polynomial(3)")
+
+    assert direct.shape == (3, 9)
+    assert torch.equal(direct[:, :3], small_snapshot.x)
+    assert torch.equal(direct[:, 3:6], small_snapshot.x.square())
+    assert torch.equal(factory(small_snapshot), direct)
+    assert resolved is not None
+    assert torch.equal(resolved(small_snapshot), direct)
+
+
+def test_polynomial_features_rejects_invalid_degree(small_snapshot: Data) -> None:
+    """Polynomial lifting requires a positive integer degree."""
+    with pytest.raises(ValueError, match="degree"):
+        polynomial_features(small_snapshot, degree=0)
+    with pytest.raises(ValueError, match="physics_preset"):
+        resolve_physics_lifting_fn(physics_preset="polynomial(0)")
+
+
 def test_graph_laplacian_features_matches_dense_normalized_laplacian(
     small_snapshot: Data,
 ) -> None:
-    """Physics lifting should equal (I - D^{-1/2} A D^{-1/2}) x."""
+    """Physics lifting should equal ``(P - Â) x`` (``I - Â`` without isolates)."""
+    from koopman_graph.graph_utils import dense_symmetric_normalized_laplacian
+
     physics = graph_laplacian_features(small_snapshot)
-    adjacency = dense_symmetric_normalized_adjacency(
+    laplacian = dense_symmetric_normalized_laplacian(
         small_snapshot.edge_index,
         num_nodes=small_snapshot.x.shape[0],
         edge_weight=small_snapshot.edge_weight,
         dtype=small_snapshot.x.dtype,
     )
-    expected = small_snapshot.x - adjacency @ small_snapshot.x
+    expected = laplacian @ small_snapshot.x
     assert torch.allclose(physics, expected, atol=1e-6)
+
+
+def test_graph_laplacian_features_zeros_isolated_nodes() -> None:
+    """Isolated nodes must map to zeros under L_sym (not identity passthrough)."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    data = Data(
+        x=torch.tensor([[1.0, 0.5], [0.0, 1.0], [2.0, -1.0]]),
+        edge_index=edge_index,
+    )
+    physics = graph_laplacian_features(data)
+    assert torch.allclose(physics[2], torch.zeros(2))
+    assert not torch.allclose(physics[0], torch.zeros(2))
 
 
 def test_concatenate_observables_prepends_physics() -> None:
@@ -347,5 +404,6 @@ def test_physics_ablation_improves_advection_recovery() -> None:
 
 
 def test_registered_physics_presets_include_graph_laplacian() -> None:
-    """The graph Laplacian preset should be publicly registered."""
-    assert "graph_laplacian" in PHYSICS_PRESETS
+    """Static graph derivative presets should be publicly registered."""
+    expected = {"graph_laplacian", "graph_gradient", "graph_curvature"}
+    assert expected <= PHYSICS_PRESETS.keys()

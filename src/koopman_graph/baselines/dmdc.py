@@ -7,22 +7,21 @@ from collections.abc import Sequence
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.analysis import compute_spectrum
 from koopman_graph.baselines.base import (
     ClassicalBaseline,
-    _check_initial_graph,
-    _copy_topology,
-    _fit_controlled_row_operator,
-    _flatten_snapshots,
-    _require_global_controls,
-    _require_static_topology,
-    _transition_controls,
+    check_initial_graph,
+    copy_topology,
+    fit_controlled_row_operator,
+    flatten_snapshots,
+    require_global_controls,
+    require_static_topology,
+    transition_controls,
 )
 from koopman_graph.data import (
     GraphSnapshotSequence,
     resolve_sequence,
 )
-from koopman_graph.spectrum_types import KoopmanSpectrum
+from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 
 class DMDcBaseline(ClassicalBaseline):
@@ -149,20 +148,20 @@ class DMDcBaseline(ClassicalBaseline):
             rank is invalid.
         """
         resolved = resolve_sequence(sequence)
-        _require_static_topology(resolved)
+        require_static_topology(resolved)
         if resolved.num_timesteps < 2:
             msg = "DMDcBaseline.fit requires at least two snapshots"
             raise ValueError(msg)
         if not resolved.has_controls or resolved.control_inputs is None:
             msg = "DMDcBaseline.fit requires sequences with control inputs"
             raise ValueError(msg)
-        _require_global_controls(resolved)
+        require_global_controls(resolved)
 
-        states = _flatten_snapshots(resolved)
-        controls = _transition_controls(resolved)
+        states = flatten_snapshots(resolved)
+        controls = transition_controls(resolved)
         self.control_dim = int(controls.shape[1])
 
-        self.K, self.B = _fit_controlled_row_operator(
+        self.K, self.B = fit_controlled_row_operator(
             states[:-1],
             states[1:],
             controls,
@@ -213,14 +212,14 @@ class DMDcBaseline(ClassicalBaseline):
         if len(controls) != steps:
             msg = f"expected {steps} control inputs, got {len(controls)}"
             raise ValueError(msg)
-        _check_initial_graph(
+        check_initial_graph(
             initial_graph,
             num_nodes=num_nodes,
             in_channels=in_channels,
         )
 
         state = initial_graph.x.reshape(-1)
-        topology = _copy_topology(initial_graph)
+        topology = copy_topology(initial_graph)
         predictions: list[Data] = []
         for control in controls:
             control_vector = self._control_vector(control)

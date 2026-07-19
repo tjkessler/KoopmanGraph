@@ -15,10 +15,12 @@ from koopman_graph.operators.contract import (
 from koopman_graph.operators.control import (
     ControlMode,
     bilinear_state_control_term,
+    broadcast_control_term,
     effective_bilinear_matrix,
+    per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.discrete import KoopmanOperator
-from koopman_graph.spectrum_types import KoopmanSpectrum
+from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 GraphSparsity = Literal["dense", "block_diagonal", "distributed"]
 
@@ -149,9 +151,7 @@ class GraphKoopmanOperator(nn.Module):
         parameters, optionally adding ``init_scale`` noise.
         """
         if self.parameterization == "dense":
-            dense_k = self._nbr._parameters.get("K")
-            if dense_k is None:
-                raise AttributeError("K")
+            dense_k = self._nbr.K
             with torch.no_grad():
                 dense_k.zero_()
                 if self.init_mode in {"identity_noise", "xavier"}:
@@ -209,8 +209,11 @@ class GraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            ``K_self``. Use :meth:`effective_matrix` / :meth:`spectrum` for the
-            full ``N·d`` networked operator on a given topology.
+            ``K_self``. This is the Protocol ``matrix`` for per-node API
+            compatibility and is **not** the networked ``N·d`` operator.
+            Use :meth:`effective_matrix` / :meth:`spectrum` (and
+            :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum` with
+            topology) for the full topology-coupled spectrum.
         """
         return self.K_self
 
@@ -254,12 +257,20 @@ class GraphKoopmanOperator(nn.Module):
         self._nbr.set_dense_matrix(k_nbr, control_matrix=None)
 
     def bound_metric(self) -> Tensor:
-        """Return ``max(bound(K_self), bound(K_nbr))`` for monitoring.
+        """Return ``max(bound(K_self), bound(K_nbr))`` for factor monitoring.
+
+        This is a **factor-level** soft/structural surrogate used by
+        structural eigenvalue regularization. It is **not** the spectral
+        radius of the topology-coupled effective operator and must not be
+        treated as a whole-network stability certificate. For dense/ODO
+        analysis and regularization of the networked map, use
+        :meth:`effective_matrix` / :meth:`spectrum` (and the topology-aware
+        eigenvalue loss path) instead.
 
         Returns
         -------
         Tensor
-            Scalar bound metric used by soft stability losses.
+            Scalar factor bound metric.
         """
         return torch.maximum(self._self.bound_metric(), self._nbr.bound_metric())
 
@@ -290,6 +301,7 @@ class GraphKoopmanOperator(nn.Module):
         edge_weight: Tensor | None = None,
         *,
         k_self: Tensor | None = None,
+        k_self_blocks: Tensor | None = None,
     ) -> Tensor:
         """Assemble the dense effective operator ``I⊗K_self + Â⊗K_nbr``.
 
@@ -302,15 +314,29 @@ class GraphKoopmanOperator(nn.Module):
         edge_weight : Tensor or None, optional
             Optional edge weights ``(E,)``.
         k_self : Tensor or None, optional
-            Optional override for the self-coupling matrix (used when folding
-            a global bilinear term into ``K_self`` for inversion).
+            Optional override for a **shared** self-coupling matrix (used when
+            folding a global bilinear term into ``K_self`` for inversion).
+        k_self_blocks : Tensor or None, optional
+            Optional per-node self blocks with shape ``(N, d, d)`` (used when
+            folding per-node bilinear terms). Mutually exclusive with
+            ``k_self``.
 
         Returns
         -------
         Tensor
             Dense matrix with shape ``(N·d, N·d)``.
+
+        Raises
+        ------
+        ValueError
+            If both ``k_self`` and ``k_self_blocks`` are set, or if
+            ``k_self_blocks`` has the wrong shape.
         """
         from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
+
+        if k_self is not None and k_self_blocks is not None:
+            msg = "Pass at most one of k_self and k_self_blocks"
+            raise ValueError(msg)
 
         self_matrix = self.K_self if k_self is None else k_self
         adj = dense_symmetric_normalized_adjacency(
@@ -319,8 +345,20 @@ class GraphKoopmanOperator(nn.Module):
             edge_weight=edge_weight,
             dtype=self_matrix.dtype,
         )
-        identity = torch.eye(num_nodes, dtype=adj.dtype, device=adj.device)
-        return torch.kron(identity, self_matrix) + torch.kron(adj, self.K_nbr)
+        neighbor = torch.kron(adj, self.K_nbr)
+        if k_self_blocks is None:
+            identity = torch.eye(num_nodes, dtype=adj.dtype, device=adj.device)
+            return torch.kron(identity, self_matrix) + neighbor
+
+        expected = (num_nodes, self.latent_dim, self.latent_dim)
+        if k_self_blocks.shape != expected:
+            msg = (
+                f"k_self_blocks must have shape {expected}, "
+                f"got {tuple(k_self_blocks.shape)}"
+            )
+            raise ValueError(msg)
+        self_blocks = torch.block_diag(*k_self_blocks.unbind(0))
+        return self_blocks + neighbor
 
     def spectrum(
         self,
@@ -348,9 +386,6 @@ class GraphKoopmanOperator(nn.Module):
         KoopmanSpectrum
             Spectrum of :meth:`effective_matrix`.
         """
-        # Lazy import keeps operators → analysis dependency out of package init.
-        from koopman_graph.analysis.spectrum import compute_spectrum
-
         return compute_spectrum(
             self.effective_matrix(edge_index, num_nodes, edge_weight=edge_weight),
             time_step,
@@ -414,7 +449,7 @@ class GraphKoopmanOperator(nn.Module):
             raise ValueError(msg)
         offset = self._self.control_term(control, num_nodes=z.shape[0])
         if control.ndim == 1:
-            offset = self._self._broadcast_control_term(z, offset)
+            offset = broadcast_control_term(z, offset, latent_dim=self.latent_dim)
         z_next = z_next + offset
         if self.control_mode == "bilinear":
             z_next = z_next + bilinear_state_control_term(
@@ -473,7 +508,12 @@ class GraphKoopmanOperator(nn.Module):
 
         Dense inversion is used (suitable for modest ``N``). ``inverse_matrix``,
         when provided, must be the effective ``(N·d, N·d)`` inverse for the
-        same topology; otherwise it is assembled on demand.
+        same topology and control; otherwise it is assembled on demand.
+
+        For ``control_mode="bilinear"``, global controls fold into a shared
+        ``K_self`` override; per-node controls use node-specific bilinear self
+        blocks plus the same ``Â ⊗ K_nbr`` neighbor coupling as forward
+        advance. Singular effective maps fall back to a pseudoinverse.
 
         Parameters
         ----------
@@ -482,7 +522,8 @@ class GraphKoopmanOperator(nn.Module):
         delta_t : float, Tensor, or None, optional
             Ignored.
         control : Tensor or None, optional
-            Control that drove the forward step.
+            Control that drove the forward step (global ``(C,)`` or per-node
+            ``(N, C)``).
         inverse_matrix : Tensor or None, optional
             Optional precomputed effective inverse.
         edge_index : Tensor or None, optional
@@ -513,29 +554,49 @@ class GraphKoopmanOperator(nn.Module):
                 raise ValueError(msg)
             offset = self._self.control_term(control, num_nodes=z.shape[0])
             if control.ndim == 1:
-                offset = self._self._broadcast_control_term(z, offset)
+                offset = broadcast_control_term(z, offset, latent_dim=self.latent_dim)
             adjusted = z - offset
 
         num_nodes = z.shape[0]
         if inverse_matrix is None:
             k_self_override: Tensor | None = None
+            k_self_blocks: Tensor | None = None
             if self.control_mode == "bilinear":
-                if control is None or control.ndim != 1:
+                if control is None:
+                    msg = "control input is required when control_dim > 0"
+                    raise ValueError(msg)
+                coupling = self._self.bilinear_matrices()
+                if control.ndim == 1:
+                    k_self_override = effective_bilinear_matrix(
+                        self.K_self,
+                        control,
+                        coupling,
+                    )
+                elif control.ndim == 2:
+                    if control.shape[0] != num_nodes:
+                        msg = (
+                            f"Per-node control has {control.shape[0]} rows, "
+                            f"expected {num_nodes}"
+                        )
+                        raise ValueError(msg)
+                    k_self_blocks = per_node_effective_bilinear_matrices(
+                        self.K_self,
+                        control,
+                        coupling,
+                    )
+                else:
                     msg = (
-                        "GraphKoopmanOperator.inverse_advance supports bilinear "
-                        "mode with global controls only"
+                        "control input must have shape (control_dim,) for "
+                        "global control or (num_nodes, control_dim) for "
+                        f"per-node control, got {tuple(control.shape)}"
                     )
                     raise ValueError(msg)
-                k_self_override = effective_bilinear_matrix(
-                    self.K_self,
-                    control,
-                    self._self.bilinear_matrices(),
-                )
             effective = self.effective_matrix(
                 edge_index,
                 num_nodes,
                 edge_weight=edge_weight,
                 k_self=k_self_override,
+                k_self_blocks=k_self_blocks,
             )
             try:
                 inverse_matrix = torch.linalg.inv(effective)

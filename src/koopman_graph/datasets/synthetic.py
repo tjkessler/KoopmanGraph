@@ -15,57 +15,9 @@ from koopman_graph.datasets.dynamics import (
     make_generator,
     validate_diffusion_generation_params,
 )
+from koopman_graph.datasets.topology import path_edge_index, ring_edge_index
 
 TopologyName = Literal["path", "ring"]
-
-
-def _path_edge_index(num_nodes: int) -> Tensor:
-    """Build bidirectional path-graph edges.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of nodes in the path.
-
-    Returns
-    -------
-    Tensor
-        Edge index with shape ``(2, num_edges)``.
-    """
-    if num_nodes < 2:
-        return torch.zeros((2, 0), dtype=torch.long)
-
-    src: list[int] = []
-    dst: list[int] = []
-    for node in range(num_nodes - 1):
-        src.extend([node, node + 1])
-        dst.extend([node + 1, node])
-    return torch.tensor([src, dst], dtype=torch.long)
-
-
-def _ring_edge_index(num_nodes: int) -> Tensor:
-    """Build bidirectional ring-graph edges.
-
-    Parameters
-    ----------
-    num_nodes : int
-        Number of nodes in the ring.
-
-    Returns
-    -------
-    Tensor
-        Edge index with shape ``(2, num_edges)``.
-    """
-    if num_nodes < 2:
-        return torch.zeros((2, 0), dtype=torch.long)
-
-    src: list[int] = []
-    dst: list[int] = []
-    for node in range(num_nodes):
-        nxt = (node + 1) % num_nodes
-        src.extend([node, nxt])
-        dst.extend([nxt, node])
-    return torch.tensor([src, dst], dtype=torch.long)
 
 
 def _build_topology(topology: TopologyName, num_nodes: int) -> Tensor:
@@ -89,9 +41,9 @@ def _build_topology(topology: TopologyName, num_nodes: int) -> Tensor:
         If ``topology`` is not supported.
     """
     if topology == "path":
-        return _path_edge_index(num_nodes)
+        return path_edge_index(num_nodes)
     if topology == "ring":
-        return _ring_edge_index(num_nodes)
+        return ring_edge_index(num_nodes)
     msg = f"Unsupported topology {topology!r}; expected 'path' or 'ring'"
     raise ValueError(msg)
 

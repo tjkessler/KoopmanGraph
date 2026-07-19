@@ -6,12 +6,13 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import GraphSnapshotSequence, evaluate_forecast
+from koopman_graph import GraphSnapshotSequence
 from koopman_graph.baselines.gnn import (
     DCRNNBaseline,
     GraphWaveNetBaseline,
     STGCNBaseline,
 )
+from koopman_graph.metrics import evaluate_forecast
 from koopman_graph.protocols import ForecastModel
 
 
@@ -152,3 +153,64 @@ def test_gnn_baseline_rejects_controls_and_unfitted_predict() -> None:
     model.fit(sequence, epochs=1, lr=1e-2)
     with pytest.raises(ValueError, match="does not support controls"):
         model.predict(sequence[0], steps=1, controls=torch.zeros(1, 1))
+
+
+def test_gnn_forecaster_base_helpers_and_validation() -> None:
+    """Cover dense adjacency helpers and fit/predict validation branches."""
+    from koopman_graph.baselines.gnn.base import dense_adjacency, random_walk_normalize
+
+    edge_index = _ring_edge_index(4)
+    adj = dense_adjacency(edge_index, None, 4)
+    assert adj.shape == (4, 4)
+    weighted = dense_adjacency(
+        edge_index,
+        torch.ones(edge_index.shape[1]) * 2.0,
+        4,
+    )
+    assert torch.allclose(
+        weighted[edge_index[0], edge_index[1]],
+        torch.full((edge_index.shape[1],), 2.0),
+    )
+    normalized = random_walk_normalize(adj)
+    assert torch.allclose(normalized.sum(dim=1), torch.ones(4), atol=1e-5)
+
+    with pytest.raises(ValueError, match="in_channels"):
+        STGCNBaseline(0, 4, 1)
+    with pytest.raises(ValueError, match="time_step"):
+        STGCNBaseline(1, 4, 1, time_step=0.0)
+
+    sequence = _diffusion_sequence(timesteps=6)
+    model = DCRNNBaseline(1, 4, 1, history_len=2, diffusion_steps=1)
+    with pytest.raises(ValueError, match="at least"):
+        model.fit(_diffusion_sequence(timesteps=2), epochs=1)
+    with pytest.raises(ValueError, match="in_channels"):
+        DCRNNBaseline(2, 4, 2, history_len=1, diffusion_steps=1).fit(sequence, epochs=1)
+    with pytest.raises(ValueError, match="epochs"):
+        model.fit(sequence, epochs=0)
+    with pytest.raises(ValueError, match="lr"):
+        model.fit(sequence, epochs=1, lr=0.0)
+
+    mismatched = DCRNNBaseline(1, 4, 2, history_len=1, diffusion_steps=1)
+    with pytest.raises(ValueError, match="out_channels must equal"):
+        mismatched.fit(sequence, epochs=1)
+
+    model.fit(sequence, epochs=2, lr=1e-2, batch_size=2)
+    with pytest.raises(ValueError, match="steps must be"):
+        model.predict(sequence[0], steps=0)
+    with pytest.raises(ValueError, match="future_topologies"):
+        model.predict(sequence[0], steps=1, future_topologies=[sequence[0]])
+
+    # Fit path with edge weights present.
+    weighted_snaps = [
+        Data(
+            x=snap.x.clone(),
+            edge_index=snap.edge_index.clone(),
+            edge_weight=torch.ones(snap.edge_index.shape[1]),
+        )
+        for snap in sequence
+    ]
+    weighted = GraphSnapshotSequence(weighted_snaps)
+    weighted_model = DCRNNBaseline(1, 4, 1, history_len=1, diffusion_steps=1)
+    weighted_model.fit(weighted, epochs=1, lr=1e-2)
+    preds = weighted_model.predict(weighted[0], steps=1)
+    assert len(preds) == 1

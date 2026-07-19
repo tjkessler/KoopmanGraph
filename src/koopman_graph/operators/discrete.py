@@ -1,4 +1,12 @@
-"""Discrete finite-dimensional Koopman operator matrix **K**."""
+"""Discrete finite-dimensional Koopman operator matrix **K**.
+
+Thin string-mode orchestrator for dense / ODO / Schur / dissipative /
+Lyapunov parameterizations. Cohesive assembly / reset and advance / inverse
+execution live in shallow sibling modules
+(:mod:`~koopman_graph.operators.discrete_parameterizations`,
+:mod:`~koopman_graph.operators.discrete_propagation`) and are re-exported
+here so deep imports keep working.
+"""
 
 from __future__ import annotations
 
@@ -6,25 +14,55 @@ import torch
 from torch import Tensor, nn
 
 from koopman_graph.operators.contract import (
-    DISSIPATIVE_MIN_EIGENVALUE,
     InitMode,
     Parameterization,
     StabilityCertificate,
-    _bounded_diagonal,
-    _safe_diagonal_inverse,
-    _strict_diagonal_values,
-    cayley_orthogonal,
-    strict_spectral_bound,
+    build_stability_certificate,
+    strict_diagonal_values,
 )
 from koopman_graph.operators.control import (
     ControlMode,
     allocate_bilinear_parameters,
     bilinear_coupling_tensor,
-    bilinear_state_control_term,
     effective_bilinear_matrix,
+    map_control_term,
     reset_bilinear_parameters,
     validate_control_mode,
+    write_dense_operator_parameters,
 )
+from koopman_graph.operators.discrete_parameterizations import (
+    assemble_dissipative_matrix,
+    assemble_lyapunov_matrix,
+    assemble_odo_matrix,
+    assemble_schur_matrix,
+    dissipative_generator,
+    identity_diag_raw,
+    identity_strict_diag_raw,
+    lyapunov_certificate_matrix,
+    lyapunov_diagonal,
+    odo_diagonal,
+    odo_orthogonal_factors,
+    reset_dense_matrix,
+    reset_dissipative_matrix,
+    reset_lyapunov_matrix,
+    reset_odo_matrix,
+    reset_schur_matrix,
+    schur_triangular,
+)
+from koopman_graph.operators.discrete_propagation import (
+    advance_step,
+    dense_inverse_or_pinv,
+    inverse_matrix_for_parameterization,
+)
+from koopman_graph.operators.discrete_propagation import (
+    inverse_step as propagate_inverse_step,
+)
+
+__all__ = [
+    "KoopmanOperator",
+    "identity_diag_raw",
+    "identity_strict_diag_raw",
+]
 
 
 class KoopmanOperator(nn.Module):
@@ -154,8 +192,8 @@ class KoopmanOperator(nn.Module):
             ``"schur"``, ``"dissipative"``, and ``"lyapunov"`` embed
             **structural** stability guarantees (strict unit-disk eigenvalues)
             and require ``max_spectral_radius`` in ``(0, 1]``. Dissipative
-            ignores the numeric value when assembling ``K``. Default is
-            ``"dense"``.
+            ignores the numeric value when assembling ``K``. Continuous-only
+            ``"auxiliary_spectral"`` is rejected here. Default is ``"dense"``.
         max_spectral_radius : float, optional
             Target spectral bound for ``"odo"`` diagonal factors and for
             Schur/Lyapunov diagonals. Soft modes (``"odo"``) may use values
@@ -205,6 +243,12 @@ class KoopmanOperator(nn.Module):
             raise ValueError(msg)
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
+            raise ValueError(msg)
+        if parameterization == "auxiliary_spectral":
+            msg = (
+                "parameterization='auxiliary_spectral' is continuous-only; "
+                "use ContinuousKoopmanOperator (dynamics_mode='continuous')"
+            )
             raise ValueError(msg)
         validate_control_mode(
             control_dim=control_dim,
@@ -330,51 +374,12 @@ class KoopmanOperator(nn.Module):
             If :attr:`control_dim` is zero, ``u`` has invalid shape, or
             per-node ``u`` does not match ``num_nodes``.
         """
-        if self.control_dim == 0:
-            msg = "control_term requires control_dim > 0"
-            raise ValueError(msg)
-        if u.ndim == 1:
-            if u.shape[0] != self.control_dim:
-                msg = (
-                    f"Expected global control shape ({self.control_dim},), "
-                    f"got {tuple(u.shape)}"
-                )
-                raise ValueError(msg)
-            return u @ self.B
-        if u.ndim == 2:
-            if u.shape[1] != self.control_dim:
-                msg = (
-                    f"Expected per-node control shape (num_nodes, {self.control_dim}), "
-                    f"got {tuple(u.shape)}"
-                )
-                raise ValueError(msg)
-            if num_nodes is not None and u.shape[0] != num_nodes:
-                msg = f"Per-node control has {u.shape[0]} rows, expected {num_nodes}"
-                raise ValueError(msg)
-            return u @ self.B
-        msg = (
-            "control input must have shape (control_dim,) for global control "
-            f"or (num_nodes, control_dim) for per-node control, got {tuple(u.shape)}"
+        return map_control_term(
+            u,
+            getattr(self, "B", None),
+            control_dim=self.control_dim,
+            num_nodes=num_nodes,
         )
-        raise ValueError(msg)
-
-    def _broadcast_control_term(self, z: Tensor, control_term: Tensor) -> Tensor:
-        """Broadcast a global control offset to match latent state shape.
-
-        Parameters
-        ----------
-        z : Tensor
-            Latent states with shape ``(..., latent_dim)``.
-        control_term : Tensor
-            Global control offset with shape ``(latent_dim,)``.
-
-        Returns
-        -------
-        Tensor
-            Broadcast control offset with the same shape as ``z``.
-        """
-        view_shape = (1,) * (z.ndim - 1) + (self.latent_dim,)
-        return control_term.view(view_shape).expand_as(z)
 
     @property
     def K(self) -> Tensor:
@@ -441,64 +446,31 @@ class KoopmanOperator(nn.Module):
                 f"got {self.parameterization!r}"
             )
             raise ValueError(msg)
-        if matrix.shape != (self.latent_dim, self.latent_dim):
-            msg = (
-                f"Expected matrix shape ({self.latent_dim}, {self.latent_dim}), "
-                f"got {tuple(matrix.shape)}"
-            )
-            raise ValueError(msg)
 
         dense_k = self._parameters.get("K")
         if dense_k is None:
             raise AttributeError("K")
-        with torch.no_grad():
-            dense_k.copy_(matrix.to(device=dense_k.device, dtype=dense_k.dtype))
-            if self.control_dim > 0:
-                if control_matrix is None:
-                    msg = "control_matrix is required when control_dim > 0"
-                    raise ValueError(msg)
-                expected = (self.control_dim, self.latent_dim)
-                if control_matrix.shape != expected:
-                    msg = (
-                        f"Expected control_matrix shape {expected}, "
-                        f"got {tuple(control_matrix.shape)}"
-                    )
-                    raise ValueError(msg)
-                self.B.copy_(
-                    control_matrix.to(device=self.B.device, dtype=self.B.dtype)
+        write_dense_operator_parameters(
+            dense_k,
+            matrix,
+            control_dim=self.control_dim,
+            latent_dim=self.latent_dim,
+            control_mode=self.control_mode,
+            bilinear_rank=self.bilinear_rank,
+            control_parameter=self.B if self.control_dim > 0 else None,
+            bilinear_parameter=(
+                self.N
+                if (
+                    self.control_dim > 0
+                    and self.control_mode == "bilinear"
+                    and self.bilinear_rank is None
                 )
-                if self.control_mode == "bilinear":
-                    if self.bilinear_rank is not None:
-                        msg = (
-                            "set_dense_matrix bilinear_matrices writeback "
-                            "requires bilinear_rank=None (full-rank N)"
-                        )
-                        raise ValueError(msg)
-                    if bilinear_matrices is None:
-                        msg = (
-                            "bilinear_matrices is required when control_mode='bilinear'"
-                        )
-                        raise ValueError(msg)
-                    expected_n = (
-                        self.control_dim,
-                        self.latent_dim,
-                        self.latent_dim,
-                    )
-                    if bilinear_matrices.shape != expected_n:
-                        msg = (
-                            f"Expected bilinear_matrices shape {expected_n}, "
-                            f"got {tuple(bilinear_matrices.shape)}"
-                        )
-                        raise ValueError(msg)
-                    self.N.copy_(
-                        bilinear_matrices.to(device=self.N.device, dtype=self.N.dtype)
-                    )
-                elif bilinear_matrices is not None:
-                    msg = "bilinear_matrices provided to an additive-control operator"
-                    raise ValueError(msg)
-            elif control_matrix is not None or bilinear_matrices is not None:
-                msg = "control_matrix provided to an uncontrolled operator"
-                raise ValueError(msg)
+                else None
+            ),
+            control_matrix=control_matrix,
+            bilinear_matrices=bilinear_matrices,
+            matrix_label="matrix",
+        )
 
     def reset_parameters(self) -> None:
         """Reinitialize operator parameters according to :attr:`init_mode`.
@@ -519,175 +491,91 @@ class KoopmanOperator(nn.Module):
     def _reset_dense_parameters(self) -> None:
         """Reinitialize the dense learnable matrix ``K``.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
-        matrix = self._parameters["K"]
-        if self.init_mode == "identity":
-            nn.init.eye_(matrix)
-        elif self.init_mode == "identity_noise":
-            nn.init.eye_(matrix)
-            with torch.no_grad():
-                matrix.add_(torch.randn_like(matrix) * self.init_scale)
-        elif self.init_mode == "xavier":
-            nn.init.xavier_uniform_(matrix)
-        else:
-            msg = f"Unknown init_mode: {self.init_mode!r}"
-            raise ValueError(msg)
-
-    def _identity_diag_raw(self) -> float:
-        """Return raw diagonal parameters for a near-identity ODO operator.
-
-        Returns
-        -------
-        float
-            Unconstrained diagonal parameter mapped near unit eigenvalues.
-        """
-        target = min(1.0, self.max_spectral_radius) * (1.0 - 1e-6)
-        ratio = target / self.max_spectral_radius
-        return float(torch.atanh(torch.tensor(ratio)).item())
-
-    def _identity_strict_diag_raw(self) -> float:
-        """Return raw diagonal parameters for a near-identity strict-stable mode.
-
-        Returns
-        -------
-        float
-            Unconstrained diagonal parameter mapped near the strict bound.
-        """
-        bound = strict_spectral_bound(self.max_spectral_radius)
-        target = bound * (1.0 - 1e-6)
-        ratio = target / bound
-        return float(torch.atanh(torch.tensor(ratio)).item())
+        reset_dense_matrix(
+            self._parameters["K"],
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+        )
 
     def _reset_odo_parameters(self) -> None:
         """Reinitialize Cayley and diagonal ODO parameters.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
-        nn.init.zeros_(self.cayley_O1)
-        nn.init.zeros_(self.cayley_O2)
-        if self.init_mode == "identity":
-            nn.init.constant_(self.diag_raw, self._identity_diag_raw())
-        elif self.init_mode == "identity_noise":
-            nn.init.constant_(self.diag_raw, self._identity_diag_raw())
-            with torch.no_grad():
-                noise = torch.randn_like(self.diag_raw) * self.init_scale
-                current = torch.tanh(self.diag_raw) * self.max_spectral_radius
-                updated = (current + noise).clamp(
-                    min=-self.max_spectral_radius + 1e-6,
-                    max=self.max_spectral_radius - 1e-6,
-                )
-                self.diag_raw.copy_(torch.atanh(updated / self.max_spectral_radius))
-        elif self.init_mode == "xavier":
-            nn.init.xavier_uniform_(self.cayley_O1)
-            nn.init.xavier_uniform_(self.cayley_O2)
-            nn.init.uniform_(self.diag_raw, -0.5, 0.5)
-        else:
-            msg = f"Unknown init_mode: {self.init_mode!r}"
-            raise ValueError(msg)
-
-    def _reset_strict_diagonal(
-        self,
-        diag_param: nn.Parameter,
-        *,
-        cayley: nn.Parameter | None = None,
-        off_param: nn.Parameter | None = None,
-    ) -> None:
-        """Initialize strict-stable Schur/Lyapunov diagonal and optional factors.
-
-        Parameters
-        ----------
-        diag_param : nn.Parameter
-            Diagonal parameter tensor to initialize.
-        cayley : nn.Parameter or None, optional
-            Optional Cayley parameter matrix for orthogonal factors.
-        off_param : nn.Parameter or None, optional
-            Optional upper-triangular off-diagonal parameters.
-
-        Returns
-        -------
-        None
-        """
-        if cayley is not None:
-            nn.init.zeros_(cayley)
-        if off_param is not None:
-            nn.init.zeros_(off_param)
-        if self.init_mode == "identity":
-            nn.init.constant_(diag_param, self._identity_strict_diag_raw())
-        elif self.init_mode == "identity_noise":
-            nn.init.constant_(diag_param, self._identity_strict_diag_raw())
-            with torch.no_grad():
-                bound = strict_spectral_bound(self.max_spectral_radius)
-                noise = torch.randn_like(diag_param) * self.init_scale
-                current = torch.tanh(diag_param) * bound
-                updated = (current + noise).clamp(
-                    min=-bound + 1e-6,
-                    max=bound - 1e-6,
-                )
-                diag_param.copy_(torch.atanh(updated / bound))
-        elif self.init_mode == "xavier":
-            if cayley is not None:
-                nn.init.xavier_uniform_(cayley)
-            if off_param is not None:
-                nn.init.xavier_uniform_(off_param)
-                off_param.data.copy_(torch.triu(off_param.data, diagonal=1))
-            nn.init.uniform_(diag_param, -0.5, 0.5)
-        else:
-            msg = f"Unknown init_mode: {self.init_mode!r}"
-            raise ValueError(msg)
+        reset_odo_matrix(
+            self.cayley_O1,
+            self.cayley_O2,
+            self.diag_raw,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+            max_spectral_radius=self.max_spectral_radius,
+        )
 
     def _reset_schur_parameters(self) -> None:
         """Reinitialize Schur-form parameters.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
-        self._reset_strict_diagonal(
+        reset_schur_matrix(
+            self.cayley_Q,
             self.schur_diag_raw,
-            cayley=self.cayley_Q,
-            off_param=self.schur_off_raw,
+            self.schur_off_raw,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+            max_spectral_radius=self.max_spectral_radius,
         )
 
     def _reset_dissipative_parameters(self) -> None:
         """Reinitialize dissipative generator parameters.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
-        nn.init.zeros_(self.dissipative_L)
-        if self.init_mode == "identity_noise":
-            with torch.no_grad():
-                noise = torch.randn_like(self.dissipative_L) * self.init_scale
-                self.dissipative_L.add_(noise)
-        elif self.init_mode == "xavier":
-            nn.init.xavier_uniform_(self.dissipative_L)
-            self.dissipative_L.data.copy_(torch.tril(self.dissipative_L.data))
+        reset_dissipative_matrix(
+            self.dissipative_L,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+        )
 
     def _reset_lyapunov_parameters(self) -> None:
         """Reinitialize Lyapunov-certified symmetric parameters.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
-        self._reset_strict_diagonal(self.lyap_diag_raw, cayley=self.cayley_Q)
-        nn.init.zeros_(self.lyap_p_raw)
+        reset_lyapunov_matrix(
+            self.cayley_Q,
+            self.lyap_diag_raw,
+            self.lyap_p_raw,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+            max_spectral_radius=self.max_spectral_radius,
+        )
 
     def _odo_orthogonal_factors(self) -> tuple[Tensor, Tensor]:
         """Build orthogonal factors for the ODO parameterization.
 
         Returns
         -------
-        tuple of Tensor
-            Orthogonal matrices ``(O_1, O_2)``.
+        Tensor
+            Assembled matrix or factor for the active parameterization.
         """
-        return cayley_orthogonal(self.cayley_O1), cayley_orthogonal(self.cayley_O2)
+        return odo_orthogonal_factors(self.cayley_O1, self.cayley_O2)
 
     def _odo_diagonal(self) -> Tensor:
         """Build the bounded diagonal factor for the ODO parameterization.
@@ -695,9 +583,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Diagonal matrix with bounded eigenvalues.
+            Assembled matrix or factor for the active parameterization.
         """
-        return _bounded_diagonal(self.diag_raw, self.max_spectral_radius)
+        return odo_diagonal(self.diag_raw, self.max_spectral_radius)
 
     def _assemble_odo_matrix(self) -> Tensor:
         """Assemble ``K = O_1 D O_2^T`` from ODO factors.
@@ -705,11 +593,14 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Assembled operator matrix.
+            Assembled matrix or factor for the active parameterization.
         """
-        o1, o2 = self._odo_orthogonal_factors()
-        diagonal = self._odo_diagonal()
-        return o1 @ diagonal @ o2.T
+        return assemble_odo_matrix(
+            self.cayley_O1,
+            self.cayley_O2,
+            self.diag_raw,
+            self.max_spectral_radius,
+        )
 
     def _schur_triangular(self) -> Tensor:
         """Build the upper-triangular Schur factor ``T``.
@@ -717,14 +608,13 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Upper-triangular Schur factor with bounded diagonal.
+            Assembled matrix or factor for the active parameterization.
         """
-        diag_vals = _strict_diagonal_values(
+        return schur_triangular(
             self.schur_diag_raw,
+            self.schur_off_raw,
             self.max_spectral_radius,
         )
-        triangular = torch.triu(self.schur_off_raw, diagonal=1)
-        return triangular + torch.diag(diag_vals)
 
     def _assemble_schur_matrix(self) -> Tensor:
         """Assemble ``K = Q T Q^T`` from Schur factors.
@@ -732,26 +622,14 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Assembled Schur-form operator matrix.
+            Assembled matrix or factor for the active parameterization.
         """
-        q = cayley_orthogonal(self.cayley_Q)
-        return q @ self._schur_triangular() @ q.T
-
-    def _dissipative_factor(self) -> Tensor:
-        """Build the lower-triangular factor ``L`` for the generator ``S``.
-
-        Returns
-        -------
-        Tensor
-            Lower-triangular factor with positive diagonal entries.
-        """
-        lower = torch.tril(self.dissipative_L)
-        diag_index = torch.arange(self.latent_dim, device=lower.device)
-        lower[diag_index, diag_index] = (
-            torch.nn.functional.softplus(lower[diag_index, diag_index])
-            + DISSIPATIVE_MIN_EIGENVALUE
+        return assemble_schur_matrix(
+            self.cayley_Q,
+            self.schur_diag_raw,
+            self.schur_off_raw,
+            self.max_spectral_radius,
         )
-        return lower
 
     def _dissipative_generator(self) -> Tensor:
         """Build the SPD generator ``S = L L^T + \\varepsilon I``.
@@ -759,15 +637,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Symmetric positive-definite generator matrix.
+            Symmetric positive-definite dissipative generator.
         """
-        factor = self._dissipative_factor()
-        identity = torch.eye(
-            self.latent_dim,
-            device=factor.device,
-            dtype=factor.dtype,
-        )
-        return factor @ factor.T + DISSIPATIVE_MIN_EIGENVALUE * identity
+        return dissipative_generator(self.dissipative_L, self.latent_dim)
 
     def _assemble_dissipative_matrix(self) -> Tensor:
         """Assemble ``K = exp(-S)`` from the dissipative generator.
@@ -775,10 +647,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Symmetric contractive operator matrix.
+            Assembled matrix or factor for the active parameterization.
         """
-        generator = self._dissipative_generator()
-        return torch.linalg.matrix_exp(-generator)
+        return assemble_dissipative_matrix(self.dissipative_L, self.latent_dim)
 
     def _lyapunov_diagonal(self) -> Tensor:
         """Return strict stable eigenvalues for the Lyapunov parameterization.
@@ -786,11 +657,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Diagonal eigenvalues strictly inside
-            ``(-max_spectral_radius, max_spectral_radius)`` with
-            ``max_spectral_radius <= 1``, so they lie inside the unit disk.
+            Assembled matrix or factor for the active parameterization.
         """
-        return _strict_diagonal_values(self.lyap_diag_raw, self.max_spectral_radius)
+        return lyapunov_diagonal(self.lyap_diag_raw, self.max_spectral_radius)
 
     def _lyapunov_matrix(self) -> Tensor:
         """Return the Lyapunov certificate matrix ``P = Q diag(p) Q^T``.
@@ -798,11 +667,9 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Symmetric positive-definite Lyapunov matrix.
+            Assembled matrix or factor for the active parameterization.
         """
-        q = cayley_orthogonal(self.cayley_Q)
-        p = torch.nn.functional.softplus(self.lyap_p_raw) + 1e-6
-        return q @ torch.diag(p) @ q.T
+        return lyapunov_certificate_matrix(self.cayley_Q, self.lyap_p_raw)
 
     def _assemble_lyapunov_matrix(self) -> Tensor:
         """Assemble ``K = Q diag(d) Q^T`` with Lyapunov certificate ``P``.
@@ -810,18 +677,21 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Lyapunov-certified symmetric operator matrix.
+            Assembled matrix or factor for the active parameterization.
         """
-        q = cayley_orthogonal(self.cayley_Q)
-        return q @ torch.diag(self._lyapunov_diagonal()) @ q.T
+        return assemble_lyapunov_matrix(
+            self.cayley_Q,
+            self.lyap_diag_raw,
+            self.max_spectral_radius,
+        )
 
     def _assemble_matrix(self) -> Tensor:
         """Assemble ``K`` for the active non-dense parameterization.
 
-        Returns
-        -------
-        Tensor
-            Assembled operator matrix.
+        Notes
+        -----
+        Thin wrapper that delegates to the shared discrete parameterization
+        helpers for the active mode.
         """
         assemblers = {
             "odo": self._assemble_odo_matrix,
@@ -855,7 +725,7 @@ class KoopmanOperator(nn.Module):
                 if self.parameterization == "schur"
                 else self.lyap_diag_raw
             )
-            return _strict_diagonal_values(raw, self.max_spectral_radius).abs().max()
+            return strict_diagonal_values(raw, self.max_spectral_radius).abs().max()
         if self.parameterization == "dissipative":
             generator = self._dissipative_generator()
             min_eval = torch.linalg.eigvalsh(generator).min()
@@ -893,13 +763,13 @@ class KoopmanOperator(nn.Module):
         """
         if self.parameterization == "lyapunov":
             radius = self.bound_metric()
-            return StabilityCertificate(
-                margin=torch.as_tensor(1.0 - radius),
+            return build_stability_certificate(
+                torch.as_tensor(1.0 - radius),
                 lyapunov_matrix=self._lyapunov_matrix(),
             )
         if self.parameterization in {"schur", "dissipative"}:
             radius = self.bound_metric()
-            return StabilityCertificate(margin=torch.as_tensor(1.0 - radius))
+            return build_stability_certificate(torch.as_tensor(1.0 - radius))
         return None
 
     def forward(self, z: Tensor, control: Tensor | None = None) -> Tensor:
@@ -914,7 +784,8 @@ class KoopmanOperator(nn.Module):
             z_next = z @ K.T + u @ B + sum_i u[..., i] * (z @ N_i.T)
 
         Global control ``u`` has shape ``(control_dim,)``; per-node control
-        has shape ``(num_nodes, control_dim)``.
+        has shape ``(num_nodes, control_dim)``. Thin wrapper around
+        :func:`~koopman_graph.operators.discrete_propagation.advance_step`.
 
         Parameters
         ----------
@@ -936,35 +807,17 @@ class KoopmanOperator(nn.Module):
             controls are missing for a controlled operator, or ``control`` has
             an invalid shape.
         """
-        if z.shape[-1] != self.latent_dim:
-            msg = (
-                f"Expected trailing dimension {self.latent_dim}, "
-                f"got shape {tuple(z.shape)}"
-            )
-            raise ValueError(msg)
-        z_next = z @ self.K.T
-        if self.control_dim == 0:
-            if control is not None:
-                msg = "control input provided to an uncontrolled operator"
-                raise ValueError(msg)
-            return z_next
-        if control is None:
-            msg = "control input is required when control_dim > 0"
-            raise ValueError(msg)
-        offset = self.control_term(
+        coupling = self.bilinear_matrices() if self.control_mode == "bilinear" else None
+        return advance_step(
+            z,
             control,
-            num_nodes=z.shape[-2] if z.ndim >= 2 else None,
+            matrix=self.K,
+            control_matrix=getattr(self, "B", None) if self.control_dim > 0 else None,
+            control_dim=self.control_dim,
+            control_mode=self.control_mode,
+            latent_dim=self.latent_dim,
+            coupling=coupling,
         )
-        if control.ndim == 1:
-            offset = self._broadcast_control_term(z, offset)
-        z_next = z_next + offset
-        if self.control_mode == "bilinear":
-            z_next = z_next + bilinear_state_control_term(
-                z,
-                control,
-                self.bilinear_matrices(),
-            )
-        return z_next
 
     def inverse_step(
         self,
@@ -979,7 +832,9 @@ class KoopmanOperator(nn.Module):
         an estimate of ``z_t`` from ``z_{t+1}`` and the control ``u_t`` that
         drove the transition. For bilinear control with **global** ``u``, the
         effective map ``K_eff = K + sum_i u_i N_i`` is inverted. Per-node
-        bilinear inverse applies a distinct ``K_eff`` per node.
+        bilinear inverse applies a distinct ``K_eff`` per node. Thin wrapper
+        around
+        :func:`~koopman_graph.operators.discrete_propagation.inverse_step`.
 
         Parameters
         ----------
@@ -998,76 +853,24 @@ class KoopmanOperator(nn.Module):
         Tensor
             Recovered latent states at time ``t``, same shape as ``z``.
         """
-        adjusted = z
-        if self.control_dim > 0:
-            if control is None:
-                msg = "control input is required when control_dim > 0"
-                raise ValueError(msg)
-            offset = self.control_term(
-                control,
-                num_nodes=z.shape[-2] if z.ndim >= 2 else None,
-            )
-            if control.ndim == 1:
-                offset = self._broadcast_control_term(z, offset)
-            adjusted = z - offset
-
-            if self.control_mode == "bilinear":
-                return self._inverse_bilinear(adjusted, control)
-
-        inverse_k = self._inverse_matrix(inverse_matrix=inverse_matrix)
-        return adjusted @ inverse_k.T
-
-    def _inverse_bilinear(self, adjusted: Tensor, control: Tensor) -> Tensor:
-        """Invert a bilinear step after subtracting the additive ``u @ B`` term.
-
-        Parameters
-        ----------
-        adjusted : Tensor
-            ``z_next - u @ B`` with shape ``(..., latent_dim)``.
-        control : Tensor
-            Control that drove the forward step.
-
-        Returns
-        -------
-        Tensor
-            Recovered ``z_t``.
-        """
-        coupling = self.bilinear_matrices()
-        if control.ndim == 1:
-            k_eff = effective_bilinear_matrix(self.K, control, coupling)
-            try:
-                inverse_k = torch.linalg.inv(k_eff)
-            except RuntimeError:
-                inverse_k = torch.linalg.pinv(k_eff)
-            return adjusted @ inverse_k.T
-
-        if control.ndim == 2:
-            # Per-node: z_n @ (K + sum_i u_{n,i} N_i).T
-            if adjusted.ndim < 2 or adjusted.shape[-2] != control.shape[0]:
-                msg = (
-                    "per-node bilinear inverse requires adjusted latents with "
-                    f"node axis matching control rows, got {tuple(adjusted.shape)}"
-                )
-                raise ValueError(msg)
-            recovered = torch.empty_like(adjusted)
-            for node_idx in range(control.shape[0]):
-                k_eff = effective_bilinear_matrix(
-                    self.K,
-                    control[node_idx],
-                    coupling,
-                )
-                try:
-                    inverse_k = torch.linalg.inv(k_eff)
-                except RuntimeError:
-                    inverse_k = torch.linalg.pinv(k_eff)
-                recovered[..., node_idx, :] = adjusted[..., node_idx, :] @ inverse_k.T
-            return recovered
-
-        msg = (
-            "control input must have shape (control_dim,) or "
-            f"(num_nodes, control_dim), got {tuple(control.shape)}"
+        coupling = self.bilinear_matrices() if self.control_mode == "bilinear" else None
+        use_bilinear = self.control_dim > 0 and self.control_mode == "bilinear"
+        inverse_k = (
+            None
+            if use_bilinear
+            else self._inverse_matrix(inverse_matrix=inverse_matrix)
         )
-        raise ValueError(msg)
+        return propagate_inverse_step(
+            z,
+            control=control,
+            matrix=self.K,
+            control_matrix=getattr(self, "B", None) if self.control_dim > 0 else None,
+            control_dim=self.control_dim,
+            control_mode=self.control_mode,
+            latent_dim=self.latent_dim,
+            coupling=coupling,
+            inverse_matrix=inverse_k,
+        )
 
     def advance(
         self,
@@ -1148,6 +951,9 @@ class KoopmanOperator(nn.Module):
     def _inverse_matrix(self, *, inverse_matrix: Tensor | None = None) -> Tensor:
         """Return ``K^{-1}`` for the active parameterization.
 
+        Thin dispatcher around
+        :func:`~koopman_graph.operators.discrete_propagation.inverse_matrix_for_parameterization`.
+
         Parameters
         ----------
         inverse_matrix : Tensor or None, optional
@@ -1159,24 +965,36 @@ class KoopmanOperator(nn.Module):
             Inverse operator matrix with shape ``(latent_dim, latent_dim)``.
         """
         if self.parameterization == "dense":
-            if inverse_matrix is not None:
-                return inverse_matrix
-            return self.dense_inverse_matrix()
+            return inverse_matrix_for_parameterization(
+                self.parameterization,
+                dense_matrix=self.K,
+                inverse_matrix=inverse_matrix,
+            )
         if self.parameterization == "odo":
             o1, o2 = self._odo_orthogonal_factors()
-            diag_values = torch.diag(self._odo_diagonal())
-            return o2 @ _safe_diagonal_inverse(diag_values) @ o1.T
+            return inverse_matrix_for_parameterization(
+                self.parameterization,
+                odo_left=o1,
+                odo_right=o2,
+                odo_diagonal=self._odo_diagonal(),
+            )
         if self.parameterization == "schur":
-            q = cayley_orthogonal(self.cayley_Q)
-            triangular = self._schur_triangular()
-            triangular_inv = torch.linalg.inv(triangular)
-            return q @ triangular_inv @ q.T
+            return inverse_matrix_for_parameterization(
+                self.parameterization,
+                schur_cayley_q=self.cayley_Q,
+                schur_triangular=self._schur_triangular(),
+            )
         if self.parameterization == "dissipative":
-            generator = self._dissipative_generator()
-            return torch.linalg.matrix_exp(generator)
+            return inverse_matrix_for_parameterization(
+                self.parameterization,
+                dissipative_generator=self._dissipative_generator(),
+            )
         if self.parameterization == "lyapunov":
-            q = cayley_orthogonal(self.cayley_Q)
-            return q @ _safe_diagonal_inverse(self._lyapunov_diagonal()) @ q.T
+            return inverse_matrix_for_parameterization(
+                self.parameterization,
+                lyapunov_cayley_q=self.cayley_Q,
+                lyapunov_diagonal=self._lyapunov_diagonal(),
+            )
         msg = f"Unknown parameterization: {self.parameterization!r}"
         raise ValueError(msg)
 
@@ -1184,7 +1002,8 @@ class KoopmanOperator(nn.Module):
         """Return the inverse (or pseudo-inverse) of the assembled dense matrix.
 
         Intended for reuse across multiple backward-consistency pair evaluations
-        within one training step.
+        within one training step. Thin wrapper around
+        :func:`~koopman_graph.operators.discrete_propagation.dense_inverse_or_pinv`.
 
         Returns
         -------
@@ -1200,8 +1019,4 @@ class KoopmanOperator(nn.Module):
         if self.parameterization != "dense":
             msg = "dense_inverse_matrix is only available for dense parameterization"
             raise ValueError(msg)
-        matrix = self.K
-        try:
-            return torch.linalg.inv(matrix)
-        except RuntimeError:
-            return torch.linalg.pinv(matrix)
+        return dense_inverse_or_pinv(self.K)

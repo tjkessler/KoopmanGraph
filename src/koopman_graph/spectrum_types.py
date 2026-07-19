@@ -1,9 +1,11 @@
-"""Neutral value types for Koopman spectral analysis.
+"""Neutral value types and discrete spectrum assembly.
 
 Power-user module: importable as ``koopman_graph.spectrum_types``, documented
 in architecture docs, and **not** re-exported in package ``__all__``.
-:class:`KoopmanSpectrum` is re-exported from :mod:`koopman_graph.analysis` and
-the package root for the public API.
+:class:`KoopmanSpectrum` and :func:`compute_spectrum` are re-exported from
+:mod:`koopman_graph.analysis` and (for the type / discrete helper) the package
+root public surface. Operators import discrete spectrum assembly from here so
+they never depend on :mod:`koopman_graph.analysis`.
 """
 
 from __future__ import annotations
@@ -24,7 +26,8 @@ class KoopmanSpectrum:
 
     Semantics depend on how the spectrum was produced:
 
-    - :func:`~koopman_graph.analysis.compute_spectrum` (discrete ``K``):
+    - :func:`~koopman_graph.spectrum_types.compute_spectrum` (discrete ``K``;
+      also re-exported as :func:`~koopman_graph.analysis.compute_spectrum`):
       ``growth_rates = log(|lambda|) / time_step`` and
       ``frequencies = angle(lambda) / (2 * pi * time_step)``, with
       ``time_step`` equal to the discrete sampling interval.
@@ -94,3 +97,63 @@ class KoopmanSpectrum:
         flat_states = states.reshape(-1, latent_dim)
         amplitudes = torch.linalg.solve(vectors, flat_states.T).T
         return amplitudes.reshape(latent_states.shape)
+
+
+def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
+    """Compute the sorted spectrum and continuous-time mode characteristics.
+
+    Neutral-leaf discrete spectrum assembly used by operators (for example
+    :meth:`~koopman_graph.operators.graph.GraphKoopmanOperator.spectrum`) and
+    re-exported from :mod:`koopman_graph.analysis` for the public API.
+
+    Parameters
+    ----------
+    operator : Tensor
+        Square discrete-time Koopman matrix with shape
+        ``(latent_dim, latent_dim)``.
+    time_step : float
+        Positive physical duration represented by one operator step.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Eigenpairs sorted by descending magnitude, plus growth rates and
+        frequencies converted using ``time_step``.
+
+    Raises
+    ------
+    ValueError
+        If ``operator`` is not a non-empty square matrix or ``time_step`` is
+        not positive.
+    TypeError
+        If ``operator`` is not floating-point or complex.
+    """
+    if operator.ndim != 2 or operator.shape[0] != operator.shape[1]:
+        msg = f"operator must be a square matrix, got shape {tuple(operator.shape)}"
+        raise ValueError(msg)
+    if operator.shape[0] == 0:
+        raise ValueError("operator must be non-empty")
+    if time_step <= 0:
+        msg = f"time_step must be positive, got {time_step}"
+        raise ValueError(msg)
+    if not (operator.is_floating_point() or operator.is_complex()):
+        msg = f"operator must be floating-point or complex, got {operator.dtype}"
+        raise TypeError(msg)
+
+    eigenvalues, eigenvectors = torch.linalg.eig(operator)
+    magnitudes = eigenvalues.abs()
+    order = torch.argsort(magnitudes, descending=True)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    magnitudes = magnitudes[order]
+
+    growth_rates = torch.log(magnitudes) / time_step
+    frequencies = torch.angle(eigenvalues) / (2 * torch.pi * time_step)
+    return KoopmanSpectrum(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        magnitudes=magnitudes,
+        growth_rates=growth_rates,
+        frequencies=frequencies,
+        time_step=float(time_step),
+    )

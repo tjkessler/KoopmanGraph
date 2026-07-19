@@ -1,6 +1,6 @@
 """Shared Laplacian diffusion dynamics for benchmark datasets.
 
-Uses the same symmetric normalized Laplacian ``L_sym`` core as
+Uses the same pseudoinverse-normalized Laplacian ``L_sym = P - Â`` as
 :func:`~koopman_graph.observables.graph_laplacian_features` (via
 :mod:`koopman_graph.graph_utils`), but assembles a **dense** one-step diffusion
 operator for offline benchmark rollouts. Prefer the sparse matvec path in
@@ -15,7 +15,7 @@ import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
-from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
+from koopman_graph.graph_utils import dense_symmetric_normalized_laplacian
 
 InitialStateName = Literal["random", "ones"]
 
@@ -29,10 +29,15 @@ def normalized_step_operator(
 ) -> Tensor:
     """Build one-step Laplacian diffusion operator ``I - alpha * L_sym``.
 
-    The symmetric normalized Laplacian is ``L_sym = I - D^{-1/2} A D^{-1/2}``,
-    sharing its adjacency normalization with
+    The symmetrically normalized Laplacian is
+    ``L_sym = P - Â = (D^+)^{1/2} (D - A) (D^+)^{1/2}``, sharing its adjacency
+    normalization with
     :func:`~koopman_graph.graph_utils.symmetric_normalized_adjacency_edge_weights`.
-    The returned operator is ``(1 - alpha) * I + alpha * D^{-1/2} A D^{-1/2}``.
+    Isolated nodes have ``L_sym`` row/column zero, so the step operator leaves
+    their features unchanged (diagonal contribution ``1``). On graphs with no
+    isolates this reduces to ``(1 - alpha) * I + alpha * Â``.
+
+    The contract assumes an undirected, symmetrically represented adjacency.
 
     Parameters
     ----------
@@ -50,13 +55,13 @@ def normalized_step_operator(
     Tensor
         Step operator with shape ``(num_nodes, num_nodes)``.
     """
-    adj = dense_symmetric_normalized_adjacency(
+    laplacian = dense_symmetric_normalized_laplacian(
         edge_index,
         num_nodes,
         dtype=dtype,
     )
     eye = torch.eye(num_nodes, dtype=dtype, device=edge_index.device)
-    return (1.0 - diffusion_rate) * eye + diffusion_rate * adj
+    return eye - diffusion_rate * laplacian
 
 
 def make_generator(seed: int | None) -> torch.Generator | None:

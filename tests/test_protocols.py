@@ -8,7 +8,8 @@ from typing import get_args, get_type_hints
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import DMDBaseline, DMDcBaseline, EDMDBaseline, GraphKoopmanModel
+from koopman_graph import GraphKoopmanModel
+from koopman_graph.baselines import DMDBaseline, DMDcBaseline, EDMDBaseline
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.losses import rollout_multi_start_loss, rollout_sequence_loss
 from koopman_graph.nn import GNNDecoder, GNNEncoder

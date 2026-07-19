@@ -4,12 +4,17 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import DMDBaseline, DMDcBaseline, EDMDBaseline, GraphSnapshotSequence
-from koopman_graph.baselines import ClassicalBaseline
+from koopman_graph import GraphSnapshotSequence
+from koopman_graph.baselines import (
+    ClassicalBaseline,
+    DMDBaseline,
+    DMDcBaseline,
+    EDMDBaseline,
+)
 from koopman_graph.baselines.base import (
-    _fit_controlled_row_operator,
-    _flatten_snapshots,
-    _transition_controls,
+    fit_controlled_row_operator,
+    flatten_snapshots,
+    transition_controls,
 )
 
 
@@ -284,7 +289,7 @@ def test_flatten_snapshots_rejects_empty_sequence() -> None:
             return iter([])
 
     with pytest.raises(ValueError, match="at least one snapshot"):
-        _flatten_snapshots(_EmptySequence())
+        flatten_snapshots(_EmptySequence())
 
 
 def test_flatten_snapshots_rejects_integer_features(
@@ -297,7 +302,7 @@ def test_flatten_snapshots_rejects_integer_features(
     ]
 
     with pytest.raises(TypeError, match="must be floating-point"):
-        _flatten_snapshots(GraphSnapshotSequence(snapshots))
+        flatten_snapshots(GraphSnapshotSequence(snapshots))
 
 
 def test_dmd_baseline_truncated_rank_recovers_dynamics(
@@ -416,14 +421,14 @@ def test_fit_controlled_row_operator_validates_controls() -> None:
     right = torch.randn(4, 2, dtype=torch.float64)
 
     with pytest.raises(ValueError, match="controls must have shape"):
-        _fit_controlled_row_operator(
+        fit_controlled_row_operator(
             left,
             right,
             torch.randn(4, dtype=torch.float64),
             None,
         )
     with pytest.raises(ValueError, match="samples, expected"):
-        _fit_controlled_row_operator(
+        fit_controlled_row_operator(
             left,
             right,
             torch.randn(3, 1, dtype=torch.float64),
@@ -438,7 +443,7 @@ def test_transition_controls_requires_controls(
     sequence = _linear_fit_sequence(synthetic_edge_index)
 
     with pytest.raises(ValueError, match="does not contain control inputs"):
-        _transition_controls(sequence)
+        transition_controls(sequence)
 
 
 def test_transition_controls_rejects_per_node_inputs(
@@ -448,7 +453,7 @@ def test_transition_controls_rejects_per_node_inputs(
     sequence = _controlled_sequence(synthetic_edge_index, per_node=True)
 
     with pytest.raises(ValueError, match="does not support per-node"):
-        _transition_controls(sequence)
+        transition_controls(sequence)
 
 
 def test_dmdc_baseline_rejects_single_snapshot(
@@ -562,3 +567,146 @@ def test_edmd_baseline_rejects_invalid_steps(
 
     with pytest.raises(ValueError, match="steps must be >= 1"):
         baseline.predict(_linear_fit_sequence(synthetic_edge_index)[0], steps=0)
+
+
+def test_edmd_baseline_rejects_invalid_dictionary_knobs() -> None:
+    """Verify unsupported dictionary / kernel knobs raise ``ValueError``."""
+    with pytest.raises(ValueError, match="dictionary must be"):
+        EDMDBaseline(dictionary="wavelet")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="length_scale must be positive"):
+        EDMDBaseline(dictionary="rbf", length_scale=0.0)
+    with pytest.raises(ValueError, match="kernel must be"):
+        EDMDBaseline(dictionary="kernel", kernel="laplacian")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="num_centers must be >= 1"):
+        EDMDBaseline(dictionary="rbf", num_centers=0)
+
+
+def test_edmd_rbf_dictionary_smoke(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify RBF EDMD fits and rolls out on a small nonlinear sequence."""
+    scale = 0.85
+    states = [
+        torch.tensor([1.2 * (scale**t), 0.4 * (scale ** (2 * t))], dtype=torch.float64)
+        for t in range(8)
+    ]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    baseline = EDMDBaseline(
+        dictionary="rbf",
+        num_centers=4,
+        length_scale=1.5,
+    ).fit(sequence)
+
+    assert baseline.centers is not None
+    assert baseline.centers.shape == (4, 2)
+    assert baseline.observable_dim == 4
+    assert baseline.K is not None
+    assert baseline.K.shape == (4, 4)
+    preds = baseline.predict(sequence[0], steps=2)
+    assert len(preds) == 2
+    assert preds[-1].x.shape == (2, 1)
+
+
+def test_edmd_kernel_gaussian_smoke(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify Gaussian kernel-section EDMD fits on a short sequence."""
+    states = [
+        torch.tensor([0.5 + 0.1 * t, 1.0 - 0.05 * t], dtype=torch.float64)
+        for t in range(6)
+    ]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        length_scale=2.0,
+    ).fit(sequence)
+
+    assert baseline.centers is not None
+    assert baseline.centers.shape[0] == 6
+    assert baseline.observable_dim == 6
+    preds = baseline.predict(sequence[0], steps=1)
+    assert preds[0].x.shape == (2, 1)
+
+
+def test_edmd_linear_kernel_matches_dmd(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify linear-kernel EDMD reduces to DMD on a linear synthetic system."""
+    operator = torch.tensor(
+        [[0.8, 0.1], [-0.2, 1.05]],
+        dtype=torch.float64,
+    )
+    states = _linear_sequence(
+        operator,
+        torch.tensor([1.0, -0.5], dtype=torch.float64),
+    )
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+
+    dmd = DMDBaseline().fit(sequence)
+    edmd = EDMDBaseline(dictionary="kernel", kernel="linear").fit(sequence)
+
+    assert dmd.K is not None
+    assert edmd.K is not None
+    assert torch.allclose(edmd.K, dmd.K, atol=1e-10)
+    dmd_preds = dmd.predict(sequence[0], steps=3)
+    edmd_preds = edmd.predict(sequence[0], steps=3)
+    for left, right in zip(dmd_preds, edmd_preds, strict=True):
+        assert torch.allclose(left.x, right.x, atol=1e-10)
+
+
+def test_edmd_kernel_rejects_oversized_num_centers(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Verify requesting more centers than snapshots fails clearly."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+    with pytest.raises(ValueError, match="num_centers=.*exceeds"):
+        EDMDBaseline(dictionary="rbf", num_centers=100).fit(sequence)
+
+
+def test_baseline_peers_have_no_private_cross_module_imports() -> None:
+    """Baseline peers must not import leading-``_`` symbols across modules."""
+    import ast
+    from pathlib import Path
+
+    baselines_root = (
+        Path(__file__).resolve().parents[1] / "src" / "koopman_graph" / "baselines"
+    )
+    peer_paths = [
+        baselines_root / "dmd.py",
+        baselines_root / "dmdc.py",
+        baselines_root / "edmd.py",
+        baselines_root / "gnn" / "base.py",
+        baselines_root / "gnn" / "stgcn.py",
+        baselines_root / "gnn" / "dcrnn.py",
+        baselines_root / "gnn" / "wavenet.py",
+    ]
+    private_imports: list[str] = []
+    for path in peer_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.startswith("koopman_graph.baselines"):
+                continue
+            for alias in node.names:
+                if alias.name.startswith("_"):
+                    private_imports.append(f"{path.name}:{node.module}.{alias.name}")
+    assert private_imports == []

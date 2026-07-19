@@ -52,7 +52,7 @@ body:
     attributes:
       label: KoopmanGraph version
       description: Output of `python -c "import koopman_graph; print(koopman_graph.__version__)"` or commit hash if installed from source.
-      placeholder: e.g. 0.2.0 or abc1234
+      placeholder: e.g. 0.5.0 or abc1234
     validations:
       required: true
 

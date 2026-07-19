@@ -100,22 +100,20 @@ def test_normalized_step_operator_and_diffusion_step() -> None:
 
 
 def test_normalized_step_operator_matches_closed_form_laplacian_update() -> None:
-    """S = (1-α)I + α Ã and one step equals decay · S @ x."""
-    from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
+    """S = I - α L_sym and one step equals decay · S @ x."""
+    from koopman_graph.graph_utils import dense_symmetric_normalized_laplacian
 
     edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
     diffusion_rate = 0.3
     decay_rate = 0.9
     state = torch.tensor([[1.0, 0.5], [0.0, 1.0], [0.25, 0.75]])
 
-    adjacency = dense_symmetric_normalized_adjacency(
+    laplacian = dense_symmetric_normalized_laplacian(
         edge_index,
         num_nodes=3,
         dtype=torch.float32,
     )
-    expected_operator = (1.0 - diffusion_rate) * torch.eye(
-        3
-    ) + diffusion_rate * adjacency
+    expected_operator = torch.eye(3) - diffusion_rate * laplacian
     operator = normalized_step_operator(
         edge_index,
         num_nodes=3,
@@ -127,6 +125,22 @@ def test_normalized_step_operator_matches_closed_form_laplacian_update() -> None
     expected_state = decay_rate * (expected_operator @ state)
     updated = apply_laplacian_diffusion_step(state, operator, decay_rate=decay_rate)
     assert torch.allclose(updated, expected_state, atol=1e-6)
+
+
+def test_normalized_step_operator_leaves_isolated_nodes_unchanged() -> None:
+    """I - α L_sym must keep isolated-node features unchanged for α in (0, 1]."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    state = torch.tensor([[1.0, 0.5], [0.0, 1.0], [2.0, -1.0]])
+    for alpha in (0.25, 0.5, 1.0):
+        operator = normalized_step_operator(
+            edge_index,
+            num_nodes=3,
+            diffusion_rate=alpha,
+            dtype=torch.float32,
+        )
+        updated = operator @ state
+        assert torch.allclose(updated[2], state[2], atol=1e-6)
+        assert torch.allclose(operator[2], torch.tensor([0.0, 0.0, 1.0]), atol=1e-6)
 
 
 def test_initial_node_features_random_and_ones() -> None:

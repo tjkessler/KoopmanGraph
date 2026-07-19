@@ -97,9 +97,9 @@ class RecursiveKoopmanAdapter:
     ``dynamics_mode="continuous"`` and adapted parameters must match
     continuous forward propagation.
 
-    Historical note: prior to TASK-704, continuous write-back used the
-    first-order approximations ``L ≈ logm(K)/Δt`` with ``B̃ ≈ B(Δt)/Δt``
-    for controlled systems, which disagreed with Van Loan integration.
+    Historical note: earlier releases used the first-order approximations
+    ``L ≈ logm(K)/Δt`` with ``B̃ ≈ B(Δt)/Δt`` for controlled systems, which
+    disagreed with Van Loan integration.
 
     Attributes
     ----------

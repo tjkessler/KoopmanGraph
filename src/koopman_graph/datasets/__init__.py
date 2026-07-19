@@ -56,18 +56,16 @@ CylinderWakeBenchmark
     (``load_topology`` / ``load_sequence``).
 """
 
+from koopman_graph.datasets.cylinder_wake import CylinderWakeBenchmark
+from koopman_graph.datasets.epidemic import EpidemicNetworkBenchmark
 from koopman_graph.datasets.grid import (
     AnisotropicAdvectionGridBenchmark,
     GridDynamicGraphBenchmark,
 )
 from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
+from koopman_graph.datasets.kuramoto_sivashinsky import KuramotoSivashinskyBenchmark
+from koopman_graph.datasets.lorenz96 import Lorenz96GraphBenchmark
 from koopman_graph.datasets.metr_la import MetrLaTrafficBenchmark
-from koopman_graph.datasets.nonlinear import (
-    CylinderWakeBenchmark,
-    EpidemicNetworkBenchmark,
-    KuramotoSivashinskyBenchmark,
-    Lorenz96GraphBenchmark,
-)
 from koopman_graph.datasets.synthetic import SyntheticDynamicGraphBenchmark
 from koopman_graph.datasets.topology import TopologyPayload
 

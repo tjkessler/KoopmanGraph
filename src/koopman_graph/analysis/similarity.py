@@ -127,6 +127,9 @@ def resolve_spectrum(
     source: SpectrumSource,
     *,
     delta_t: float | None = None,
+    edge_index: Tensor | None = None,
+    num_nodes: int | None = None,
+    edge_weight: Tensor | None = None,
 ) -> KoopmanSpectrum:
     """Resolve a :class:`KoopmanSpectrum` from a value or spectrum provider.
 
@@ -140,6 +143,14 @@ def resolve_spectrum(
         accepts a ``delta_t`` parameter (or ``**kwargs``). Ignored for
         precomputed spectra and for providers whose ``spectrum`` takes no
         kwargs (classical baselines).
+    edge_index : Tensor or None, optional
+        Topology for networked ``koopman="graph"`` models. Forwarded when
+        accepted by ``source.spectrum``.
+    num_nodes : int or None, optional
+        Node count for the effective networked operator. Forwarded when
+        accepted by ``source.spectrum``.
+    edge_weight : Tensor or None, optional
+        Optional edge weights for networked spectrum. Forwarded when accepted.
 
     Returns
     -------
@@ -162,7 +173,17 @@ def resolve_spectrum(
         raise TypeError(msg)
 
     spectrum_fn = source.spectrum
-    if delta_t is None:
+    call_kwargs: dict[str, object] = {}
+    if delta_t is not None:
+        call_kwargs["delta_t"] = delta_t
+    if edge_index is not None:
+        call_kwargs["edge_index"] = edge_index
+    if num_nodes is not None:
+        call_kwargs["num_nodes"] = num_nodes
+    if edge_weight is not None:
+        call_kwargs["edge_weight"] = edge_weight
+
+    if not call_kwargs:
         return spectrum_fn()
 
     try:
@@ -171,12 +192,18 @@ def resolve_spectrum(
         return spectrum_fn()
 
     parameters = signature.parameters
-    if "delta_t" in parameters or any(
+    accepts_var_keyword = any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
-    ):
-        return spectrum_fn(delta_t=delta_t)
-    return spectrum_fn()
+    )
+    filtered = {
+        key: value
+        for key, value in call_kwargs.items()
+        if key in parameters or accepts_var_keyword
+    }
+    if not filtered:
+        return spectrum_fn()
+    return spectrum_fn(**filtered)
 
 
 def dynamical_similarity(
@@ -186,13 +213,17 @@ def dynamical_similarity(
     *,
     num_modes: int | None = None,
     delta_t: float | None = None,
+    edge_index: Tensor | None = None,
+    num_nodes: int | None = None,
+    edge_weight: Tensor | None = None,
 ) -> Tensor:
     """Compare learned dynamics via Koopman spectra.
 
     Accepts precomputed :class:`KoopmanSpectrum` values and/or spectrum
     providers (classical baselines or
-    :class:`~koopman_graph.model.GraphKoopmanModel`). Optional ``delta_t`` is
-    forwarded only to providers whose ``spectrum`` accepts it.
+    :class:`~koopman_graph.model.GraphKoopmanModel`). Optional ``delta_t`` and
+    topology kwargs are forwarded only to providers whose ``spectrum`` accepts
+    them.
 
     Call patterns::
 
@@ -200,6 +231,9 @@ def dynamical_similarity(
         dynamical_similarity(dmd_a, dmd_b)
         dynamical_similarity(dmd, neural_model)
         dynamical_similarity(neural_a, neural_b, delta_t=0.1)
+        dynamical_similarity(
+            graph_a, graph_b, edge_index=edges, num_nodes=n
+        )
 
     Decoder-specific spatial mode analysis remains on
     :func:`~koopman_graph.analysis.decode_mode_shapes` (hard-typed to
@@ -217,6 +251,12 @@ def dynamical_similarity(
     delta_t : float or None, optional
         Integration horizon for continuous-time neural ``spectrum`` calls.
         Ignored for precomputed spectra and classical baselines.
+    edge_index : Tensor or None, optional
+        Topology for networked graph-model spectrum resolution.
+    num_nodes : int or None, optional
+        Node count for networked graph-model spectrum resolution.
+    edge_weight : Tensor or None, optional
+        Optional edge weights for networked spectrum resolution.
 
     Returns
     -------
@@ -224,8 +264,20 @@ def dynamical_similarity(
         Scalar spectral distance between the two sources.
     """
     return spectrum_distance(
-        resolve_spectrum(model_a, delta_t=delta_t),
-        resolve_spectrum(model_b, delta_t=delta_t),
+        resolve_spectrum(
+            model_a,
+            delta_t=delta_t,
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weight=edge_weight,
+        ),
+        resolve_spectrum(
+            model_b,
+            delta_t=delta_t,
+            edge_index=edge_index,
+            num_nodes=num_nodes,
+            edge_weight=edge_weight,
+        ),
         method,
         num_modes=num_modes,
     )

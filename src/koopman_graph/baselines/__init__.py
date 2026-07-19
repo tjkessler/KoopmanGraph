@@ -4,13 +4,17 @@ Capability layout
 -----------------
 ``base``
     :class:`~koopman_graph.baselines.ClassicalBaseline` scaffolding and shared
-    flattening / least-squares helpers.
+    non-private helpers (``require_static_topology``, ``flatten_snapshots``,
+    ``fit_row_operator``, ``fit_controlled_row_operator``,
+    ``require_global_controls``, ``transition_controls``, ``copy_topology``,
+    ``check_initial_graph``). Not re-exported in package ``__all__``.
 ``dmd``
     :class:`~koopman_graph.baselines.DMDBaseline`.
 ``dmdc``
     :class:`~koopman_graph.baselines.DMDcBaseline`.
 ``edmd``
-    :class:`~koopman_graph.baselines.EDMDBaseline`.
+    :class:`~koopman_graph.baselines.EDMDBaseline` (polynomial / RBF / kernel
+    dictionaries; full kernel centers are O(T^2)).
 ``gnn``
     Spatiotemporal GNN forecaster baselines
     (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,

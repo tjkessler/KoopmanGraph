@@ -75,6 +75,23 @@ Roll out from the first snapshot in the sequence:
    print(f"Predicted {len(future_graphs)} future snapshots")
    print(f"First prediction shape: {future_graphs[0].x.shape}")
 
+Inspect the spectrum
+--------------------
+
+After training, inspect the learned discrete Koopman operator with
+:meth:`~koopman_graph.model.GraphKoopmanModel.spectrum` (returns a
+:class:`~koopman_graph.spectrum_types.KoopmanSpectrum`). Eigenvalues are
+sorted by descending magnitude:
+
+.. code-block:: python
+
+   spectrum = model.spectrum()
+   print(f"K eigenvalues: {tuple(spectrum.eigenvalues.shape)}")
+   print(f"Top |λ|: {spectrum.magnitudes[:3].tolist()}")
+
+For continuous operators, generator vs discrete-time spectra, mode shapes,
+and plotting, see the :doc:`api` spectrum helpers and the tutorial notebooks.
+
 Save and reload
 ---------------
 
@@ -319,12 +336,50 @@ Physics-informed observables
 ----------------------------
 
 Prepend domain features to the GNN latent with ``physics_preset`` or a custom
-``physics_lifting_fn`` (see :func:`~koopman_graph.observables.graph_laplacian_features`
-and :mod:`koopman_graph.observables`). Custom callables are not serialized —
-re-supply them on :meth:`~koopman_graph.model.GraphKoopmanModel.load`. See
-``examples/14_physics_informed_diffusion.ipynb`` for Laplacian presets and a
-west/north directional custom function (absolute neighbor states) with save/load
-round-trip.
+``physics_lifting_fn``. Built-ins include ``"graph_laplacian"``,
+``"graph_gradient"``, ``"graph_curvature"``, and dynamic
+``"polynomial(degree)"`` names such as ``"polynomial(3)"``; see
+:mod:`koopman_graph.observables`. Graph derivative presets use the shared
+pseudoinverse-normalized ``L_sym = P - Â`` contract, where isolates map to zero.
+Custom callables are not serialized — re-supply them on
+:meth:`~koopman_graph.model.GraphKoopmanModel.load`.
+
+Optional physics residuals are fit-time configuration:
+
+.. code-block:: python
+
+   from koopman_graph.training import ExtraLosses, LossWeights
+
+   history = model.fit(
+       sequence,
+       loss_weights=LossWeights(lie=0.1, pde=0.05),
+       extra_losses=ExtraLosses(
+           lie_dynamics_fn=lambda snapshot: known_dx_dt(snapshot),
+           pde_residual_fn=lambda decoded, snapshot: diffusion_residual(
+               decoded, snapshot
+           ),
+       ),
+   )
+
+``LieConsistencyLoss`` requires an uncontrolled continuous-time model and
+enforces the PIKN Lie-operator relation for a known autonomous vector field (`Liu et al., 2022
+<https://doi.org/10.48550/arXiv.2211.09419>`_). ``PDEResidualLoss`` evaluates
+an equation-specific residual on one-step decoded fields, following the soft
+residual pattern popularized by `Raissi et al., 2019
+<https://doi.org/10.1016/j.jcp.2018.10.045>`_. The callables remain on the
+training call (not the model/checkpoint). This is not a
+symplectic/Hamiltonian guarantee and is not an implementation of the
+`PIKE/SPIKE <https://proceedings.mlr.press/v328/minoza26a.html>`_
+PINN-regularization architecture. See
+``examples/14_physics_informed_diffusion.ipynb``.
+
+Optional sparsity / worst-case reconstruction (power-user
+``koopman_graph.losses`` imports; ``LossWeights.sparsity`` /
+``LossWeights.worst_case``) encourage sparse latent operators and
+max-over-nodes robust training. Graph sparsity targets ``K_self`` /
+``K_nbr`` parameters only — not the topology-bound effective operator —
+and the worst-case term is **not** a generalization certificate. See
+``examples/26_sparse_interpretable_operator.ipynb``.
 
 Online adaptation
 -----------------
@@ -357,7 +412,7 @@ operator is acceptable. Continuous write-back can still degrade for very large
 
 Historical note: earlier releases used a first-order controlled approximation
 ``B̃ ≈ B(Δt) / Δt`` that disagreed with Van Loan integration; that path was
-replaced in the Phase 8 fidelity update.
+replaced by the current exact block-matrix treatment.
 
 Bilinear / control-affine control
 ---------------------------------

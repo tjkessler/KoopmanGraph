@@ -4,7 +4,9 @@ Capability layout
 -----------------
 ``spectrum``
     Discrete/continuous spectrum helpers and
-    :func:`~koopman_graph.analysis.decode_mode_shapes`.
+    :func:`~koopman_graph.analysis.decode_mode_shapes`. Discrete
+    :func:`~koopman_graph.analysis.compute_spectrum` is re-exported from
+    the neutral :mod:`koopman_graph.spectrum_types` leaf.
 ``similarity``
     Spectral distances, KoopSTD,
     :func:`~koopman_graph.analysis.resolve_spectrum`, and
@@ -16,8 +18,9 @@ Capability layout
     (:func:`~koopman_graph.analysis.plot_spectrum`).
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` stays in the neutral
-top-level :mod:`koopman_graph.spectrum_types` module (TASK-725 dependency
-direction) and is re-exported here for the public analysis surface.
+top-level :mod:`koopman_graph.spectrum_types` module to preserve dependency
+direction. Discrete ``compute_spectrum`` also lives there, and both are
+re-exported here for the public analysis surface.
 """
 
 from koopman_graph.analysis.anomaly import (

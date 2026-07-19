@@ -14,130 +14,55 @@
 [![codecov](https://codecov.io/gh/tjkessler/KoopmanGraph/graph/badge.svg)](https://codecov.io/gh/tjkessler/KoopmanGraph)
 [![Documentation Status](https://readthedocs.org/projects/koopmangraph/badge/?version=latest)](https://koopmangraph.readthedocs.io/en/latest/?badge=latest)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12-blue)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![PyG](https://img.shields.io/badge/PyTorch_Geometric-3C2179?logo=pytorch&logoColor=white)](https://pytorch-geometric.readthedocs.io/)
 
 **[Documentation](https://koopmangraph.readthedocs.io/)** |
-**[Quickstart](#quickstart)** |
-**[Examples](https://github.com/tjkessler/KoopmanGraph/tree/main/examples)** |
+**[Tutorials](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)** |
+**[API](https://koopmangraph.readthedocs.io/en/latest/api.html)** |
 **[Contributing](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md)** |
-**[Support](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#support)** |
-**[Code of Conduct](https://github.com/tjkessler/KoopmanGraph/blob/main/CODE_OF_CONDUCT.md)**
+**[Citation](#community-and-citation)**
 
 </div>
 
 ---
 
-**KoopmanGraph** is an open-source PyTorch library that combines **Graph Neural Networks (GNNs)** with **Koopman operator theory** to model spatiotemporal dynamics on graphs. Instead of treating node states as flat vectors, KoopmanGraph lifts features into a latent space with topology-aware encoders, advances them via a learned linear Koopman operator, and decodes predictions back to physical node features.
+**KoopmanGraph** is an open-source PyTorch library that combines **Graph Neural Networks** with **Koopman operator theory** to model spatiotemporal dynamics on graphs. Topology-aware encoders lift node features into a latent space, a learned linear Koopman operator advances latent states, and a matching decoder reconstructs physical node features.
 
-The result is a **topology-aware alternative to vector-based Koopman methods** — well suited for smart grids, traffic networks, epidemic modeling, and other networked dynamical systems.
+It is a **topology-aware alternative to vector-based Koopman methods**, aimed at researchers working on smart grids, traffic networks, epidemic contact graphs, and related networked dynamical systems.
 
 ## Why KoopmanGraph?
 
-Koopman theory encodes nonlinear dynamics into a linear domain where evolution is simple matrix multiplication and spectral analysis reveals system behavior. Existing deep Koopman packages often ignore graph structure, while GNN forecasting methods typically lack explicit linear latent dynamics.
+Koopman theory maps nonlinear dynamics into a linear latent domain where multi-step forecasting and spectral analysis are natural. Existing deep Koopman packages typically ignore graph structure, while spatiotemporal GNN forecasters usually lack an explicit linear latent operator.
 
-KoopmanGraph bridges that gap:
+KoopmanGraph bridges that gap with GNN lifting/decoding, an inspectable Koopman matrix **K**, row-state latent advance $z \leftarrow z K^{\top}$, and a PyTorch Geometric-native `fit` / `predict` workflow.
 
-- **Topology-aware lifting** — GCN and GAT encoders propagate information along edges before Koopman evolution.
-- **Explicit linear dynamics** — A learnable finite-dimensional Koopman matrix **K** governs latent evolution.
-- **Multi-step forecasting** — Roll out future graph snapshots from a single initial state.
-- **Spectral interpretability** — Eigendecomposition of the learned operator with continuous-time growth rates and spatial mode shapes.
-- **Built on PyTorch Geometric** — Native `Data` objects, standard GNN layers, and familiar training APIs.
+The library sits in the consistent Koopman autoencoder lineage and is **not claimed as a new theoretical contribution**; it packages topology-aware lifting, linear latent evolution, and analysis tooling for networked dynamical systems.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tjkessler/KoopmanGraph/main/docs/source/_static/architecture-overview.svg" alt="Encode → linear Koopman advance → decode architecture" width="820"/>
+</p>
 
+## Highlights
 
-## Key Features
+- **Topology-aware learning** — GCN/GAT encoders and decoders, delay embeddings, dynamic topology, and edge weights
+- **Flexible dynamics** — discrete, continuous-time, and networked (`koopman="graph"`) operators, with soft or structural stability modes
+- **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, and checkpointing
+- **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, and anomaly helpers
+- **Control and adaptation** — additive/bilinear control, online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
+- **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, and reproducible graph benchmarks
 
-
-| Feature | Description |
-| --- | --- |
-| **GraphKoopmanModel** | End-to-end encode → Koopman advance → decode pipeline with `fit`, `predict`, `evaluate`, and `encode` |
-| **GNNEncoder / GATEncoder** | Topology-aware latent lifting with GCN or multi-head attention |
-| **DelayEmbeddingEncoder** | Hankel / delay-coordinate wrapper (`n_delays`); size `in_channels = n_delays * F` (composition) |
-| **GNNDecoder / GATDecoder** | Symmetric GCN or GAT reconstruction paired with the matching encoder |
-| **KoopmanOperator** | Learnable linear propagator; soft modes (`dense`, `odo` + eigenloss) or structural guarantees (`schur`, `dissipative`, `lyapunov`) |
-| **GraphKoopmanOperator** | Networked discrete advance (`koopman="graph"`) with self/neighbor coupling via `edge_index` so dynamic topology affects the linear step |
-| **Spectral analysis** | Root: `KoopmanSpectrum`, `compute_spectrum`. Mode decoding and continuous helpers via `koopman_graph.analysis` |
-| **Dynamical similarity** | `spectrum_distance`, `koopman_std`, `dynamical_similarity`, `detect_anomaly`, and `calibrate_anomaly_threshold` via `koopman_graph.analysis` |
-| **Model persistence** | `save` / `load` checkpoints with architecture config; optional best-epoch restoration in `fit` |
-| **Evaluation metrics** | Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via root `evaluate_forecast`; low-level `mae`/`rmse`/`mape` via `koopman_graph.metrics` |
-| **Consistency losses** | Forward and backward latent linearity constraints (consistent Koopman autoencoder lineage) plus optional eigenvalue stability regularization |
-| **Classical baselines** | `DMDBaseline`, `EDMDBaseline` (dictionary EDMD lineage), and `DMDcBaseline` for topology-agnostic comparison |
-| **GNN forecaster baselines** | Lightweight STGCN / DCRNN / Graph WaveNet references in `koopman_graph.baselines.gnn` for protocol-matched comparisons (not dedicated-library SOTA) |
-| **Control inputs** | Koopman-with-control dynamics (`z_{t+1} = K z_t + B u_t`) plus optional bilinear / control-affine terms (`control_mode="bilinear"`) |
-| **Dynamic topology** | Per-snapshot `edge_index` support for rewiring contact networks |
-| **Edge weights** | End-to-end `edge_weight` propagation through GCN encoder/decoder and METR-LA benchmark |
-| **Advanced training** | LR schedulers, per-term loss history, explicit `MultiTrajectory` fit (`as_multi_trajectory` via `koopman_graph.data`), and windowed mini-batching |
-| **Structural stability** | Guaranteed-stable parameterizations (`schur`, `dissipative`, `lyapunov`) for 200+ step rollouts — distinct from soft `odo`/eigenloss regularization |
-| **Continuous-time dynamics** | `ContinuousKoopmanOperator` with `dynamics_mode="continuous"`, irregular timestamps, and `predict_at` |
-| **Online adaptation** | `RecursiveKoopmanAdapter` and `adapt_step` for RLS updates to a frozen encoder |
-| **Kalman observer** | `KoopmanObserver` for latent-space filtering / imputation under `observation_masks` |
-| **Physics-informed observables** | Hybrid `koopman_graph.observables.graph_laplacian_features` concatenated with GNN latents before linear propagation |
-| **RL environment** | `GraphKoopmanEnv` and `to_latent_env` for Gymnasium / Stable-Baselines3 closed-loop control |
-| **GraphSnapshotSequence** | Time-ordered container for PyG graph snapshots with optional controls and weights |
-| **Benchmark datasets** | Synthetic, grid, IEEE 118-bus, METR-LA, and nonlinear/chaotic graph benchmarks |
-| **Jupyter tutorials** | End-to-end notebooks with real networked and nonlinear datasets |
-| **Tested & documented** | ≥90% coverage enforced in CI, Sphinx docs on Read the Docs (see [architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) for public vs power-user API layers, shared rollout, optional `koopman=` injection, and `ForecastModel` call-site contracts) |
-
-**Stability mode selection:** use `dense` or `odo` when you want a soft prior (`odo` bounds `ρ(K)` via the operator 2-norm but lacks a strict ε-interior certificate; continuous `odo` needs eigenvalue loss on the true spectrum); choose `schur`, `dissipative`, or `lyapunov` when you need eigenvalues mathematically forced inside the unit disk (see [`11_long_horizon_stability.ipynb`](examples/11_long_horizon_stability.ipynb) vs [`08_loss_stability.ipynb`](examples/08_loss_stability.ipynb)).
-
-
-
-
-## Architecture
-
-Each prediction step follows three stages:
-
-```
-  Node features x_t          Latent state z_t           Predicted x_{t+1}
-  (N × F, on graph)    →    (N × d, on graph)     →    (N × F, on graph)
-
-       ┌──────────┐              ┌──────────┐              ┌──────────┐
-  x_t  │  GNN     │  z_t         │ Koopman  │  z_{t+1}     │  GNN     │  x_{t+1}
-  ───► │ Encoder  │ ───►   ───►  │    K     │ ───►   ───►  │ Decoder  │ ───►
-       └──────────┘              └──────────┘              └──────────┘
-         (lifting)              (linear step)              (reconstruction)
-```
-
-During training, the model minimizes:
-
-1. **Reconstruction** — Autoencoder fidelity between input and decoded node features.
-2. **Forward consistency** — Latent states should satisfy z_{t+1} ≈ K z_t (consistent-autoencoder style constraint).
-3. **Backward consistency** — Inverse linear evolution in latent space (same lineage).
-
-These losses package established deep-Koopman training ideas for graph-structured states; they are not claimed as a new theoretical contribution.
-
-
+Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
 ## Installation
 
-KoopmanGraph requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html). Install those first, then install KoopmanGraph:
+Requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html). Install those first, then:
 
 ```bash
 pip install koopman-graph
 ```
 
-For development from source:
-
-```bash
-git clone https://github.com/tjkessler/KoopmanGraph.git
-cd KoopmanGraph
-pip install -e ".[dev]"
-```
-
-For documentation builds:
-
-```bash
-pip install -e ".[docs]"
-cd docs && make html
-```
-
-See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for platform-specific PyTorch/PyG wheels and verification steps. Release history is in [CHANGELOG.md](CHANGELOG.md); release workflow and version policy are documented in [CONTRIBUTING.md](CONTRIBUTING.md#releasing).
+See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for editable installs, docs builds, and platform-specific wheels. Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quickstart
-
-Train a model on a synthetic spatiotemporal graph and predict five future snapshots:
 
 ```python
 import torch
@@ -164,9 +89,12 @@ model = GraphKoopmanModel(
 torch.manual_seed(0)
 history = model.fit(data_sequence, epochs=20, lr=1e-3)
 future_graphs = model.predict(data_sequence[0], steps=5)
+spectrum = model.spectrum()
 
 print(f"Final loss: {history.loss[-1]:.6f}")
 print(f"Predicted {len(future_graphs)} snapshots, shape: {future_graphs[0].x.shape}")
+print(f"K eigenvalues: {tuple(spectrum.eigenvalues.shape)}")
+print(f"Top |λ|: {spectrum.magnitudes[:3].tolist()}")
 ```
 
 Expected output:
@@ -174,80 +102,51 @@ Expected output:
 ```text
 Final loss: <float>
 Predicted 5 snapshots, shape: torch.Size([20, 3])
+K eigenvalues: (64,)
+Top |λ|: [<float>, <float>, <float>]
 ```
 
-More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) · [API reference](https://koopmangraph.readthedocs.io/en/latest/api.html)
+More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) · [API reference](https://koopmangraph.readthedocs.io/en/latest/api.html)
 
-## Built-in Datasets
+## See it in action
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tjkessler/KoopmanGraph/main/docs/source/_static/epidemic-forecast.png" alt="Epidemic truth versus KoopmanGraph forecast on a ring graph" width="820"/>
+</p>
 
-| Benchmark                           | Domain        | Description                                                |
-| ----------------------------------- | ------------- | ---------------------------------------------------------- |
-| `SyntheticDynamicGraphBenchmark`    | Synthetic     | Laplacian diffusion on path/ring graphs                    |
-| `GridDynamicGraphBenchmark`         | Synthetic     | Laplacian diffusion on a 4-connected 2D lattice            |
-| `AnisotropicAdvectionGridBenchmark` | Synthetic     | Directional advection with asymmetric edge weights         |
-| `EpidemicNetworkBenchmark`          | Epidemic      | Networked SIR on ring / small-world / custom graphs        |
-| `Lorenz96GraphBenchmark`            | Chaotic ODE   | Lorenz-96 on a ring graph                                  |
-| `KuramotoSivashinskyBenchmark`      | Chaotic PDE   | 1D KS on a path/ring discretization                        |
-| `CylinderWakeBenchmark`             | Fluids (cache)| Hopf/Stuart–Landau cylinder-wake teaching surrogate        |
-| `IEEE118DynamicBenchmark`           | Power systems | IEEE 118-bus topology with simulated voltage/load dynamics |
-| `MetrLaTrafficBenchmark`            | Traffic       | METR-LA sensor graph with cached speed snapshots           |
+<p align="center"><em>SIR epidemic on a ring: truth vs forecast from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb">examples/06_epidemic_ring.ipynb</a>.</em></p>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/tjkessler/KoopmanGraph/main/docs/source/_static/metrla-gnn-baselines.png" alt="METR-LA aggregate RMSE for GraphKoopman versus STGCN, DCRNN, and Graph WaveNet teaching baselines" width="640"/>
+</p>
 
+<p align="center"><em>METR-LA aggregate RMSE vs in-repo STGCN / DCRNN / Graph WaveNet <strong>teaching baselines</strong> (not dedicated-library SOTA) from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb">examples/22_gnn_forecaster_comparison.ipynb</a>.</em></p>
 
+Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
 
-## Examples
+## Learn more
 
-Jupyter tutorials in the [`examples/`](https://github.com/tjkessler/KoopmanGraph/tree/main/examples) directory cover training, evaluation, and analysis workflows:
+- [Quickstart](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) — train / predict walkthrough
+- [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) — feature inventory and datasets
+- [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
+- [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
+- [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
+- What’s new in 0.5.0: see [CHANGELOG.md](CHANGELOG.md).
 
-| Notebook | Topic |
-| --- | --- |
-| [`01_synthetic_graph.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) | End-to-end synthetic graph dynamics |
-| [`02_ieee118_bus.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/02_ieee118_bus.ipynb) | IEEE 118-bus Vm forecasting (chronological split; held-out RMSE scale + bus ranking; honest DMDc comparison) |
-| [`03_traffic_network.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) | METR-LA weekday cache: chronological split, trained graph vs DMD/EDMD (multi-origin RMSE) |
-| [`04_grid_attention.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/04_grid_attention.ipynb) | GAT encoder on grid graphs |
-| [`05_custom_data.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/05_custom_data.ipynb) | Bring your own graph sequences |
-| [`06_epidemic_ring.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) | SIR ring wave showcase with Schur-stable spectrum (truth vs forecast) |
-| [`07_koopman_spectrum.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb) | Koopman eigenvalue analysis |
-| [`08_loss_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb) | Loss weighting and training stability |
-| [`09_topology_ablation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb) | Topology ablation study |
-| [`10_advanced_training.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/10_advanced_training.ipynb) | LR schedulers, rollout origins, multi-trajectory `fit` |
-| [`11_long_horizon_stability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb) | Structural stability parameterizations, 200-step IEEE 118 rollout |
-| [`12_irregular_sampling_continuous_time.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/12_irregular_sampling_continuous_time.ipynb) | Synthetic continuous-time demo: generator recovery, irregular Δt comparison, `predict_at` (METR-LA forecasting → notebook 03) |
-| [`13_online_adaptation_traffic_drift.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_traffic_drift.ipynb) | Recursive least-squares online Koopman adaptation |
-| [`14_physics_informed_diffusion.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_diffusion.ipynb) | Hybrid physics observables API (cautionary matched-capacity RMSE; custom `physics_lifting_fn` save/load) |
-| [`15_closed_loop_voltage_control_rl.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb) | Latent PPO regulates IEEE 118 Vm surrogate near 1.0 p.u. |
-| [`16_spectral_similarity_anomalies.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb) | Spectral distance clustering and anomaly detection on IEEE 118 |
-| [`17_delay_embedding_partial_observability.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/17_delay_embedding_partial_observability.ipynb) | Delay / Hankel encoder windows under partial observations |
-| [`18_networked_koopman_dynamic_topology.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/18_networked_koopman_dynamic_topology.ipynb) | Networked `koopman="graph"` latent advance under mid-horizon rewiring |
-| [`19_bilinear_control_koopman.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/19_bilinear_control_koopman.ipynb) | Bilinear vs additive: synthetic plant + SIR contact-reduction intervention |
-| [`22_gnn_forecaster_comparison.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) | METR-LA: GraphKoopman vs STGCN / DCRNN / Graph WaveNet reference baselines |
-| [`24_chaotic_pde_benchmarks.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_chaotic_pde_benchmarks.ipynb) | Nonlinear/chaotic benchmarks vs vector DMD (KS, Lorenz-96, SIR, wake cache) |
-| [`25_kalman_koopman_state_estimation.ipynb`](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/25_kalman_koopman_state_estimation.ipynb) | Kalman-Koopman observer: imputation under observation masks |
+## Related software
 
+- [PyKoopman](https://pykoopman.readthedocs.io/) and [DLKoopman](https://github.com/GaloisInc/dlkoopman) target vector-valued Koopman / deep-Koopman workflows; they treat the state as a flat vector rather than propagating information along graph edges.
+- [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/) provides mature GNN infrastructure on irregular graphs; KoopmanGraph adds an explicit linear latent operator, consistency losses, and a documented `fit` / `predict` forecasting stack on that substrate.
+- Spatiotemporal GNN forecasters such as STGCN, DCRNN, and Graph WaveNet typically learn nonlinear convolutional or recurrent maps on graphs; KoopmanGraph instead advances an inspectable linear Koopman matrix **K** (see in-repo teaching baselines in [examples/22](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb)).
 
+## Community and citation
 
+- Contribute, report issues, or seek support: [CONTRIBUTING.md](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md) · [Support](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#support) · [Code of Conduct](CODE_OF_CONDUCT.md)
+- Install / runtime troubleshooting: [FAQ](https://koopmangraph.readthedocs.io/en/latest/faq.html)
+- Security vulnerabilities (private): [SECURITY.md](SECURITY.md)
+- Development checks and release process: [CONTRIBUTING.md](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#running-checks-locally)
 
-## Development
-
-Run the test suite and coverage check locally:
-
-```bash
-pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
-```
-
-Lint and format:
-
-```bash
-ruff check src/ tests/
-ruff format --check src/ tests/
-```
-
-See [CONTRIBUTING.md](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md) for the full development workflow, pre-commit hooks, and pull request guidelines. For usage questions, see [Support](https://github.com/tjkessler/KoopmanGraph/blob/main/CONTRIBUTING.md#support) (GitHub Discussions). Community standards are in the [Code of Conduct](CODE_OF_CONDUCT.md). User-facing release notes live in [CHANGELOG.md](CHANGELOG.md).
-
-## Citation
-
-If you use KoopmanGraph in your research, please cite the repository:
+If you use KoopmanGraph in research, please cite:
 
 ```bibtex
 @software{koopmangraph2026,
@@ -260,8 +159,6 @@ If you use KoopmanGraph in your research, please cite the repository:
   version      = {0.4.0},
 }
 ```
-
-
 
 ## License
 
