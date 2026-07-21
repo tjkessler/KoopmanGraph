@@ -6,7 +6,7 @@
 
 # KoopmanGraph
 
-**Graph Neural Networks with Koopman operator theory for spatiotemporal graph dynamics**
+**Topology-aware Koopman autoencoders for forecasting and analyzing networked dynamics**
 
 [![Tests](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21468449.svg)](https://doi.org/10.5281/zenodo.21468449)
@@ -25,9 +25,9 @@
 
 ---
 
-**KoopmanGraph** is an open-source PyTorch library that combines **Graph Neural Networks** with **Koopman operator theory** to model spatiotemporal dynamics on graphs. Topology-aware encoders lift node features into a latent space, a learned linear Koopman operator advances latent states, and a matching decoder reconstructs physical node features.
+**KoopmanGraph** is an open-source PyTorch Geometric library for learning **topology-aware Koopman autoencoders** on graphs. GNN encoders lift node features into a latent space, a learned linear operator advances those states, and a matching decoder reconstructs physical node features for multi-step forecasting and spectral analysis.
 
-It is a **topology-aware alternative to vector-based Koopman methods**, aimed at researchers working on smart grids, traffic networks, epidemic contact graphs, and related networked dynamical systems.
+It is aimed at researchers studying **networked dynamical systems**—smart grids, traffic networks, epidemic contact graphs, and similar domains—who want an inspectable linear latent operator instead of a flat-vector Koopman model or a purely nonlinear GNN forecaster.
 
 ## Why KoopmanGraph?
 
@@ -152,7 +152,7 @@ If you use KoopmanGraph in research, please cite:
 ```bibtex
 @software{koopmangraph2026,
   author       = {Travis Kessler},
-  title        = {KoopmanGraph: Graph Neural Networks with Koopman Operator Theory},
+  title        = {KoopmanGraph: Topology-Aware Koopman Autoencoders for Networked Dynamics},
   year         = {2026},
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21468449},

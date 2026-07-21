@@ -1,9 +1,10 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
-title: "KoopmanGraph: Graph Neural Networks with Koopman Operator Theory"
+title: "KoopmanGraph: Topology-Aware Koopman Autoencoders for Networked Dynamics"
 abstract: >-
-  A PyTorch Geometric library integrating Graph Neural Networks with Koopman
-  operator theory for topology-aware modeling of spatiotemporal graph dynamics.
+  A PyTorch Geometric library for topology-aware Koopman autoencoders on
+  graphs: GNN lifting and decoding with a learned linear latent operator for
+  forecasting and analyzing networked dynamical systems.
 type: software
 authors:
   - given-names: Travis
