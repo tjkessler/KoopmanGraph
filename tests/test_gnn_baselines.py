@@ -214,3 +214,102 @@ def test_gnn_forecaster_base_helpers_and_validation() -> None:
     weighted_model.fit(weighted, epochs=1, lr=1e-2)
     preds = weighted_model.predict(weighted[0], steps=1)
     assert len(preds) == 1
+
+
+@pytest.mark.parametrize(
+    ("cls", "kwargs"),
+    [
+        (STGCNBaseline, {"history_len": 2, "num_st_blocks": 1, "kernel_size": 2}),
+        (DCRNNBaseline, {"history_len": 2, "diffusion_steps": 1}),
+        (
+            GraphWaveNetBaseline,
+            {"history_len": 2, "num_layers": 2, "adaptive_adj": True},
+        ),
+    ],
+)
+def test_gnn_baseline_batched_predict_next_matches_single(
+    cls: type,
+    kwargs: dict,
+) -> None:
+    """Batched predict_next must match stacked single-window calls."""
+    sequence = _diffusion_sequence(timesteps=8, seed=2)
+    model = cls(1, 8, 1, **kwargs)
+    model.fit(sequence, epochs=1, lr=1e-2)
+    features = torch.stack([snapshot.x for snapshot in sequence])
+    h0 = features[0:2]
+    h1 = features[1:3]
+    edge_index = sequence.edge_index
+    single = torch.stack(
+        [
+            model.predict_next(h0, edge_index, None),
+            model.predict_next(h1, edge_index, None),
+        ]
+    )
+    batched = model.predict_next(torch.stack([h0, h1]), edge_index, None)
+    assert batched.shape == single.shape
+    assert torch.allclose(batched, single, atol=1e-5, rtol=1e-5)
+
+
+def test_gnn_baseline_constructor_and_rank_validation() -> None:
+    """Cover constructor guards and invalid history ranks for GNN baselines."""
+    from koopman_graph.baselines.gnn.dcrnn import _DiffusionConv
+
+    with pytest.raises(ValueError, match="diffusion_steps"):
+        DCRNNBaseline(1, 4, 1, diffusion_steps=0)
+    with pytest.raises(ValueError, match="num_st_blocks"):
+        STGCNBaseline(1, 4, 1, num_st_blocks=0)
+    with pytest.raises(ValueError, match="kernel_size"):
+        STGCNBaseline(1, 4, 1, kernel_size=0)
+    with pytest.raises(ValueError, match="num_layers"):
+        GraphWaveNetBaseline(1, 4, 1, num_layers=0)
+
+    sequence = _diffusion_sequence(timesteps=6)
+    edge_index = sequence.edge_index
+    bad_history = torch.randn(4, 1)  # rank-2, not 3 or 4
+
+    dcrnn = DCRNNBaseline(1, 4, 1, history_len=1, diffusion_steps=1)
+    dcrnn.fit(sequence, epochs=1, lr=1e-2)
+    with pytest.raises(ValueError, match="history must have shape"):
+        dcrnn.predict_next(bad_history, edge_index, None)
+
+    # Mismatched in/out channels forces the decoder zero-input branch.
+    mismatched = DCRNNBaseline(1, 4, 2, history_len=1, diffusion_steps=1)
+    history = torch.stack([sequence[0].x])
+    # Bypass fit validation by calling predict_next after manual support cache.
+    mismatched._cached_supports = None
+    out = mismatched.predict_next(history, edge_index, None)
+    assert out.shape == (sequence.num_nodes, 2)
+
+    stgcn = STGCNBaseline(1, 4, 1, history_len=2, num_st_blocks=1, kernel_size=2)
+    stgcn.fit(sequence, epochs=1, lr=1e-2)
+    with pytest.raises(ValueError, match="history must have shape"):
+        stgcn.predict_next(bad_history, edge_index, None)
+
+    wavenet = GraphWaveNetBaseline(
+        1, 4, 1, history_len=2, num_layers=1, adaptive_adj=False
+    )
+    wavenet.fit(sequence, epochs=1, lr=1e-2)
+    with pytest.raises(ValueError, match="history must have shape"):
+        wavenet.predict_next(bad_history, edge_index, None)
+
+    # Weighted WaveNet fit exercises the edge_weight.to(device) branch.
+    weighted_snaps = [
+        Data(
+            x=snap.x.clone(),
+            edge_index=snap.edge_index.clone(),
+            edge_weight=torch.ones(snap.edge_index.shape[1]),
+        )
+        for snap in sequence
+    ]
+    GraphWaveNetBaseline(1, 4, 1, history_len=2, num_layers=1, adaptive_adj=False).fit(
+        GraphSnapshotSequence(weighted_snaps), epochs=1, lr=1e-2
+    )
+
+    # Diffusion conv 2-D path and invalid rank.
+    conv = _DiffusionConv(1, 2, diffusion_steps=1)
+    support = torch.eye(4)
+    supports = [support, support, support]
+    y2d = conv(torch.randn(4, 1), supports)
+    assert y2d.shape == (4, 2)
+    with pytest.raises(ValueError, match="x must have shape"):
+        conv(torch.randn(4), supports)

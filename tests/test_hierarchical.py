@@ -252,3 +252,99 @@ def test_grid_fit_predict_smoke() -> None:
     preds = hier.predict(sequence[0], steps=3)
     assert len(preds) == 3
     assert preds[0].x.shape == sequence[0].x.shape
+
+
+def test_hierarchical_validation_and_resolution_paths(tmp_path: Path) -> None:
+    """Cover hierarchical constructor/unpool/load guards and mid-resolution."""
+    from types import SimpleNamespace
+
+    from koopman_graph.hierarchical.model import (
+        _encoder_in_channels,
+        _encoder_out_channels,
+    )
+    from koopman_graph.hierarchical.pooling import (
+        filter_subgraph,
+        resolve_snapshot_inputs,
+        snapshot_from_features,
+    )
+
+    with pytest.raises(ValueError, match="pool_ratios must contain"):
+        HierarchicalGraphKoopmanModel(_tiny_model(), pool_ratios=())
+
+    bare = SimpleNamespace(encoder=object(), decoder=object())
+    with pytest.raises(ValueError, match="encoder.in_channels"):
+        _encoder_in_channels(bare)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="decoder.out_channels"):
+        _encoder_out_channels(bare)  # type: ignore[arg-type]
+
+    model = _tiny_model()
+    hier = HierarchicalGraphKoopmanModel(
+        model, pool_ratios=(0.5, 0.5), refine_unpool=False
+    )
+    assert hier.control_dim == 0
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=8,
+        num_timesteps=5,
+        in_channels=1,
+        noise_std=0.0,
+        seed=7,
+    )
+    coarse, steps = hier.pool_down(sequence[0])
+    with pytest.raises(ValueError, match="expected 2 pool steps"):
+        hier.unpool_up(coarse.x, steps[:1])
+    with pytest.raises(ValueError, match="levels must be in"):
+        hier.unpool_up(coarse.x, steps, levels=3)
+    with pytest.raises(ValueError, match="levels must be in"):
+        hier.unpool_up(coarse.x, steps, levels=-1)
+
+    # Intermediate resolution uses mid-level topology from pool_steps.
+    mid = hier.predict(sequence[0], steps=1, resolution=1)
+    assert len(mid) == 1
+    assert mid[0].x is not None
+    assert mid[0].x.shape[0] == int(steps[0].perm.numel())
+
+    # future_topologies + history pooling branches
+    preds = hier.predict(
+        sequence[0],
+        steps=1,
+        future_topologies=[sequence[1]],
+        history=[sequence[0]],
+    )
+    assert len(preds) == 1
+
+    # Timestamped fit pools timestamps onto the coarse sequence.
+    stamped = GraphSnapshotSequence(
+        list(sequence),
+        timestamps=torch.arange(len(sequence), dtype=torch.float32),
+    )
+    hier.fit(stamped, epochs=1, lr=1e-2, unpool_epochs=0)
+
+    # Missing manifest on load.
+    with pytest.raises(FileNotFoundError, match="hierarchical manifest"):
+        HierarchicalGraphKoopmanModel.load(tmp_path / "missing")
+
+    # Pooling helpers: multi-dim edge_attr trim is hard to hit via TopK;
+    # cover resolve_snapshot_inputs / filter_subgraph / weighted snapshot.
+    edge_index = sequence.edge_index
+    x = sequence[0].x
+    assert x is not None
+    weighted = snapshot_from_features(x, edge_index, torch.ones(edge_index.shape[1]))
+    assert weighted.edge_weight is not None
+    feats, ei, ew = resolve_snapshot_inputs(weighted)
+    assert feats.shape == x.shape and ei.shape == edge_index.shape and ew is not None
+    with pytest.raises(ValueError, match="node features"):
+        resolve_snapshot_inputs(Data(edge_index=edge_index))
+    with pytest.raises(ValueError, match="edge_index is required"):
+        resolve_snapshot_inputs(x)
+    mask = torch.zeros(sequence.num_nodes, dtype=torch.bool)
+    mask[:4] = True
+    sub_ei, _ = filter_subgraph(edge_index, mask)
+    assert sub_ei.shape[0] == 2
+
+    # refine=False ScatterUnpool path
+    unpool = ScatterUnpool(1, refine=False)
+    coarse_x = torch.randn(2, 1)
+    perm = torch.tensor([0, 2])
+    restored = unpool(coarse_x, perm, num_fine=4)
+    assert restored.shape == (4, 1)
+    assert torch.equal(restored[0], coarse_x[0])

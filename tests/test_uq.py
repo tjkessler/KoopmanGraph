@@ -636,3 +636,57 @@ def test_encode_rollout_origin_matches_predict_preamble() -> None:
     # Origin latent used by UQ must agree with a fresh encode_rollout_origin.
     z2, _, _ = model.encode_rollout_origin(initial, history=history)
     assert torch.allclose(z, z2)
+
+
+def test_uq_validation_error_paths(tmp_path: Path) -> None:
+    """Cover ensemble / latent-Gaussian validation branches."""
+    from koopman_graph.uq.ensemble import _stack_member_features
+
+    with pytest.raises(ValueError, match="at least one member rollout"):
+        _stack_member_features([])
+    edge = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    with pytest.raises(ValueError, match="same number of steps"):
+        _stack_member_features(
+            [
+                [Data(x=torch.randn(2, 1), edge_index=edge)],
+                [
+                    Data(x=torch.randn(2, 1), edge_index=edge),
+                    Data(x=torch.randn(2, 1), edge_index=edge),
+                ],
+            ]
+        )
+    with pytest.raises(ValueError, match="node features"):
+        _stack_member_features([[Data(edge_index=edge)]])
+
+    with pytest.raises(ValueError, match="n_members must be"):
+        EnsembleGraphKoopmanModel.from_factory(_tiny_factory, 0)
+    with pytest.raises(ValueError, match="seeds must have length"):
+        EnsembleGraphKoopmanModel.from_factory(_tiny_factory, 2, seeds=[0])
+
+    ensemble = EnsembleGraphKoopmanModel.from_factory(_tiny_factory, 2)
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=4, num_timesteps=6, in_channels=1, noise_std=0.0, seed=0
+    )
+    with pytest.raises(ValueError, match="seeds must have length"):
+        ensemble.fit(sequence, epochs=1, seeds=[0])
+
+    with pytest.raises(FileNotFoundError, match="ensemble manifest"):
+        EnsembleGraphKoopmanModel.load(tmp_path / "missing")
+    bad_manifest = tmp_path / "ens"
+    bad_manifest.mkdir()
+    (bad_manifest / "ensemble_manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="at least one member checkpoint"):
+        EnsembleGraphKoopmanModel.load(bad_manifest)
+
+    with pytest.raises(ValueError, match="num_nodes must be positive"):
+        dense_nodewise_transition(torch.eye(2), 0)
+
+    uq = LatentGaussianKoopmanUQ(_tiny_factory())
+    with pytest.raises(ValueError, match="steps must be"):
+        uq.forecast_latents(sequence[0], steps=0)
+    with pytest.raises(ValueError, match="observations must have length"):
+        uq.forecast_latents(sequence[0], steps=2, observations=[sequence[0]])
+    with pytest.raises(TypeError, match="positional args"):
+        uq.predict_interval(sequence[0], 1, "extra")  # type: ignore[misc]
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        uq.predict_interval(sequence[0], 1, not_a_kw=True)  # type: ignore[call-arg]

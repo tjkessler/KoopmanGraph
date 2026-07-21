@@ -148,7 +148,7 @@ def test_literature_precedent_citations_in_paper_sources() -> None:
 
 
 def test_joss_paper_narrative_word_count_at_most_1000() -> None:
-    """JOSS narrative body must stay within the TASK-1052 ≤1000-word gate."""
+    """JOSS narrative body must stay within the ≤1000-word gate."""
     paper_text = (_PROJECT_ROOT / "paper.md").read_text()
     body = re.sub(r"^---\n.*?\n---\n", "", paper_text, count=1, flags=re.S)
     body = re.split(r"^# References\s*$", body, maxsplit=1, flags=re.M)[0]

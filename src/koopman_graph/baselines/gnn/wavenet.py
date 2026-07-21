@@ -14,6 +14,7 @@ from koopman_graph.baselines.gnn.base import (
     random_walk_normalize,
 )
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
+from koopman_graph.graph_utils import snapshot_edge_weight
 
 
 class _DilatedTemporalConv(nn.Module):
@@ -237,6 +238,7 @@ class GraphWaveNetBaseline(GNNForecasterBaseline):
             nn.ReLU(),
             nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
         )
+        self._cached_rw_adj: Tensor | None = None
 
     def fit(
         self,
@@ -271,13 +273,29 @@ class GraphWaveNetBaseline(GNNForecasterBaseline):
         if self.adaptive_adj:
             for layer in self.layers:
                 layer.set_num_nodes(resolved.num_nodes)
-        return super().fit(
-            resolved,
-            epochs=epochs,
-            lr=lr,
-            batch_size=batch_size,
-            device=device,
+        train_device = (
+            torch.device(device)
+            if device is not None
+            else next(self.parameters()).device
         )
+        edge_index = resolved.edge_index.to(train_device)
+        edge_weight = snapshot_edge_weight(resolved[0])
+        if edge_weight is not None:
+            edge_weight = edge_weight.to(train_device)
+        # Cache fixed RW adjacency for the whole fit (topology is static).
+        self._cached_rw_adj = random_walk_normalize(
+            dense_adjacency(edge_index, edge_weight, resolved.num_nodes)
+        )
+        try:
+            return super().fit(
+                resolved,
+                epochs=epochs,
+                lr=lr,
+                batch_size=batch_size,
+                device=device,
+            )
+        finally:
+            self._cached_rw_adj = None
 
     def predict_next(
         self,
@@ -290,7 +308,8 @@ class GraphWaveNetBaseline(GNNForecasterBaseline):
         Parameters
         ----------
         history : Tensor
-            History with shape ``(history_len, num_nodes, in_channels)``.
+            History with shape ``(history_len, num_nodes, in_channels)`` or
+            ``(batch, history_len, num_nodes, in_channels)``.
         edge_index : Tensor
             Graph connectivity.
         edge_weight : Tensor or None, optional
@@ -299,20 +318,37 @@ class GraphWaveNetBaseline(GNNForecasterBaseline):
         Returns
         -------
         Tensor
-            Next-step features with shape ``(num_nodes, out_channels)``.
+            Next-step features with shape ``(num_nodes, out_channels)`` or
+            ``(batch, num_nodes, out_channels)`` when ``history`` is batched.
         """
-        num_nodes = history.shape[1]
+        squeeze = history.dim() == 3
+        if squeeze:
+            history = history.unsqueeze(0)
+        elif history.dim() != 4:
+            msg = (
+                "history must have shape (history_len, N, C) or "
+                f"(batch, history_len, N, C), got {tuple(history.shape)}"
+            )
+            raise ValueError(msg)
+        num_nodes = history.shape[2]
         if self.adaptive_adj:
             for layer in self.layers:
                 layer.set_num_nodes(num_nodes)
-        adjacency = random_walk_normalize(
-            dense_adjacency(edge_index, edge_weight, num_nodes)
-        )
-        x = history.permute(2, 1, 0).unsqueeze(0)
+        cached = self._cached_rw_adj
+        if cached is not None and cached.shape[0] == num_nodes:
+            adjacency = cached
+        else:
+            adjacency = random_walk_normalize(
+                dense_adjacency(edge_index, edge_weight, num_nodes)
+            )
+        # (B, C, N, T)
+        x = history.permute(0, 3, 2, 1)
         x = self.input_proj(x)
         skip_sum = torch.zeros_like(x)
         for layer in self.layers:
             x, skip = layer(x, adjacency, use_adaptive=self.adaptive_adj)
             skip_sum = skip_sum + skip
         out = self.output_proj(skip_sum)
-        return out[0, :, :, -1].transpose(0, 1).contiguous()
+        # (B, N, C)
+        result = out[:, :, :, -1].transpose(1, 2).contiguous()
+        return result[0] if squeeze else result

@@ -28,7 +28,11 @@ from koopman_graph.datasets.dynamics import (
     validate_advection_decay_rate,
     validate_diffusion_generation_params,
 )
-from koopman_graph.datasets.grid import _grid_edge_index, grid_node_index
+from koopman_graph.datasets.grid import (
+    _grid_edge_index,
+    anisotropic_advection_step,
+    grid_node_index,
+)
 from koopman_graph.datasets.topology import path_edge_index, ring_edge_index
 
 
@@ -214,6 +218,18 @@ def test_advection_grid_one_step_matches_closed_form_mixture() -> None:
         [mix0, mix1, mix2, mix3]
     )
     assert torch.allclose(sequence[1].x, expected, atol=1e-6)
+    assert torch.allclose(
+        anisotropic_advection_step(
+            state,
+            num_rows=2,
+            num_cols=2,
+            decay_rate=decay_rate,
+            west_weight=west_weight,
+            north_weight=north_weight,
+        ),
+        expected,
+        atol=1e-6,
+    )
 
 
 def test_advection_grid_generate_returns_graph_snapshot_sequence() -> None:

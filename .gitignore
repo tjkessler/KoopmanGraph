@@ -222,3 +222,5 @@ __marimo__/
 _project_proposal.pdf
 .DS_Store
 scripts/count_joss_words.py
+.cursor/
+.local/

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 from torch import Tensor, nn
+from torch_geometric.data import Data
 
 from koopman_graph.baselines.gnn.base import (
     GNNForecasterBaseline,
     dense_adjacency,
     random_walk_normalize,
 )
+from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
+from koopman_graph.graph_utils import snapshot_edge_weight
 
 
 class _DiffusionConv(nn.Module):
@@ -51,18 +56,32 @@ class _DiffusionConv(nn.Module):
         Parameters
         ----------
         x : Tensor
-            Node features with shape ``(num_nodes, in_channels)``.
+            Node features with shape ``(num_nodes, in_channels)`` or
+            ``(batch, num_nodes, in_channels)``.
         supports : list of Tensor
             Dense support matrices, length ``1 + 2 * diffusion_steps``.
 
         Returns
         -------
         Tensor
-            Diffused features with shape ``(num_nodes, out_channels)``.
+            Diffused features with shape ``(num_nodes, out_channels)`` or
+            ``(batch, num_nodes, out_channels)``.
         """
-        out = x.new_zeros(x.shape[0], self.weights.shape[-1])
+        if x.dim() == 2:
+            out = x.new_zeros(x.shape[0], self.weights.shape[-1])
+            for support, weight in zip(supports, self.weights, strict=True):
+                out = out + (support @ x) @ weight
+            return out + self.bias
+        if x.dim() != 3:
+            msg = (
+                "x must have shape (N, C) or (batch, N, C), "
+                f"got {tuple(x.shape)}"
+            )
+            raise ValueError(msg)
+        out = x.new_zeros(x.shape[0], x.shape[1], self.weights.shape[-1])
         for support, weight in zip(supports, self.weights, strict=True):
-            out = out + (support @ x) @ weight
+            # (B, N, Cin) -> (B, N, Cout) with shared dense support (N, N).
+            out = out + torch.einsum("ij,bjc,cd->bid", support, x, weight)
         return out + self.bias
 
 
@@ -113,9 +132,10 @@ class _DCGRUCell(nn.Module):
         Parameters
         ----------
         x : Tensor
-            Input features ``(num_nodes, in_channels)``.
+            Input features ``(num_nodes, in_channels)`` or
+            ``(batch, num_nodes, in_channels)``.
         hidden : Tensor
-            Previous hidden state ``(num_nodes, hidden_channels)``.
+            Previous hidden state with the same leading layout as ``x``.
         supports : list of Tensor
             Diffusion support matrices.
 
@@ -226,6 +246,63 @@ class DCRNNBaseline(GNNForecasterBaseline):
         self.encoder = _DCGRUCell(in_channels, hidden_channels, diffusion_steps)
         self.decoder = _DCGRUCell(out_channels, hidden_channels, diffusion_steps)
         self.readout = nn.Linear(hidden_channels, out_channels)
+        self._cached_supports: list[Tensor] | None = None
+
+    def fit(
+        self,
+        sequence: GraphSnapshotSequence | Sequence[Data],
+        *,
+        epochs: int = 40,
+        lr: float = 1e-3,
+        batch_size: int | None = None,
+        device: torch.device | str | None = None,
+    ) -> DCRNNBaseline:
+        """Fit with diffusion supports cached for the static training topology.
+
+        Parameters
+        ----------
+        sequence : GraphSnapshotSequence or sequence of Data
+            Training snapshots with fixed topology.
+        epochs : int, optional
+            Number of Adam epochs. Default is ``40``.
+        lr : float, optional
+            Adam learning rate. Default is ``1e-3``.
+        batch_size : int or None, optional
+            Mini-batch size over sliding windows.
+        device : torch.device, str, or None, optional
+            Training device.
+
+        Returns
+        -------
+        DCRNNBaseline
+            ``self`` for sklearn-style chaining.
+        """
+        resolved = resolve_sequence(sequence)
+        train_device = (
+            torch.device(device)
+            if device is not None
+            else next(self.parameters()).device
+        )
+        edge_index = resolved.edge_index.to(train_device)
+        edge_weight = snapshot_edge_weight(resolved[0])
+        if edge_weight is not None:
+            edge_weight = edge_weight.to(train_device)
+        self._cached_supports = _build_diffusion_supports(
+            edge_index,
+            edge_weight,
+            resolved.num_nodes,
+            self.diffusion_steps,
+        )
+        try:
+            return super().fit(
+                resolved,
+                epochs=epochs,
+                lr=lr,
+                batch_size=batch_size,
+                device=device,
+            )
+        finally:
+            self._cached_supports = None
 
     def predict_next(
         self,
@@ -238,7 +315,8 @@ class DCRNNBaseline(GNNForecasterBaseline):
         Parameters
         ----------
         history : Tensor
-            History with shape ``(history_len, num_nodes, in_channels)``.
+            History with shape ``(history_len, num_nodes, in_channels)`` or
+            ``(batch, history_len, num_nodes, in_channels)``.
         edge_index : Tensor
             Graph connectivity.
         edge_weight : Tensor or None, optional
@@ -247,23 +325,38 @@ class DCRNNBaseline(GNNForecasterBaseline):
         Returns
         -------
         Tensor
-            Next-step features with shape ``(num_nodes, out_channels)``.
+            Next-step features with shape ``(num_nodes, out_channels)`` or
+            ``(batch, num_nodes, out_channels)`` when ``history`` is batched.
         """
-        num_nodes = history.shape[1]
-        supports = _build_diffusion_supports(
-            edge_index,
-            edge_weight,
-            num_nodes,
-            self.diffusion_steps,
-        )
-        hidden = history.new_zeros(num_nodes, self.hidden_channels)
-        for step in range(history.shape[0]):
-            hidden = self.encoder(history[step], hidden, supports)
+        squeeze = history.dim() == 3
+        if squeeze:
+            history = history.unsqueeze(0)
+        elif history.dim() != 4:
+            msg = (
+                "history must have shape (history_len, N, C) or "
+                f"(batch, history_len, N, C), got {tuple(history.shape)}"
+            )
+            raise ValueError(msg)
+        batch, _history_len, num_nodes, _channels = history.shape
+        cached = self._cached_supports
+        if cached is not None and cached[0].shape[0] == num_nodes:
+            supports = cached
+        else:
+            supports = _build_diffusion_supports(
+                edge_index,
+                edge_weight,
+                num_nodes,
+                self.diffusion_steps,
+            )
+        hidden = history.new_zeros(batch, num_nodes, self.hidden_channels)
+        for step in range(history.shape[1]):
+            hidden = self.encoder(history[:, step], hidden, supports)
         # One-step decoder from the last observed frame as teacher input.
-        decoder_input = history[-1]
+        decoder_input = history[:, -1]
         if self.out_channels != self.in_channels:
             decoder_input = self.readout(
-                history.new_zeros(num_nodes, self.hidden_channels)
+                history.new_zeros(batch, num_nodes, self.hidden_channels)
             )
         hidden = self.decoder(decoder_input, hidden, supports)
-        return self.readout(hidden)
+        out = self.readout(hidden)
+        return out[0] if squeeze else out

@@ -161,6 +161,7 @@ The project enforces a minimum of **90% line coverage** on `koopman_graph`:
 
 - Configuration: `[tool.coverage.report]` in `pyproject.toml` (`fail_under = 90`)
 - CI: `--cov-fail-under=90` in `.github/workflows/ci.yml`
+- Codecov: project and patch `target: 90%` in `codecov.yml` (uploaded from CI)
 
 Generate a local coverage report:
 
@@ -168,7 +169,7 @@ Generate a local coverage report:
 pytest tests/ --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
-Pull requests that drop coverage below 90% will fail CI.
+Pull requests that drop coverage below 90% will fail CI (and Codecov status checks).
 
 ## Code style
 

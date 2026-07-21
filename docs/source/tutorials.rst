@@ -58,8 +58,8 @@ Forecasting and benchmarks
      - SIR ring wave with Schur-stable spectrum
    * - `22_gnn_forecaster_comparison.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb>`_
      - GraphKoopman vs STGCN / DCRNN / Graph WaveNet references
-   * - `24_chaotic_pde_benchmarks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_chaotic_pde_benchmarks.ipynb>`_
-     - Nonlinear/chaotic benchmarks vs vector DMD
+   * - `24_nonlinear_chaotic_benchmarks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_nonlinear_chaotic_benchmarks.ipynb>`_
+     - Nonlinear/chaotic graph benchmarks vs linear vector DMD
 
 Analysis and stability
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -87,7 +87,7 @@ Analysis and stability
    * - `21_uncertainty_quantification.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/21_uncertainty_quantification.ipynb>`_
      - Deep-ensemble and latent-Gaussian predictive intervals (``koopman_graph.uq``)
    * - `23_hierarchical_multiresolution.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/23_hierarchical_multiresolution.ipynb>`_
-     - Hierarchical TopK pool / unpool vs flat model (wall-clock vs RMSE; not P-K-GCN SR)
+     - Hierarchical TopK pool / unpool vs flat model (in-sample RMSE + spectrum; not P-K-GCN SR)
 
 Control, observation, and advanced dynamics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -106,10 +106,10 @@ Control, observation, and advanced dynamics
      - Continuous-time generator, irregular Δt, ``predict_at``
    * - `20_continuous_spectrum_auxiliary_network.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/20_continuous_spectrum_auxiliary_network.ipynb>`_
      - Parametric continuous spectrum via auxiliary network (local linearity)
-   * - `13_online_adaptation_traffic_drift.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_traffic_drift.ipynb>`_
-     - Recursive least-squares online adaptation
-   * - `14_physics_informed_diffusion.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_diffusion.ipynb>`_
-     - Hybrid physics observables API
+   * - `13_online_adaptation_topology_shock.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_topology_shock.ipynb>`_
+     - Recursive least-squares online adaptation under topology shock
+   * - `14_physics_informed_advection.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_advection.ipynb>`_
+     - Hybrid physics observables on directional advection
    * - `15_closed_loop_voltage_control_rl.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb>`_
      - Latent PPO on IEEE 118 Vm surrogate
    * - `17_delay_embedding_partial_observability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/17_delay_embedding_partial_observability.ipynb>`_

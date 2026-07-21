@@ -1417,7 +1417,8 @@ Outcomes folded into the first public v0.3.0 cut:
 * :func:`~koopman_graph.analysis.plot_spectrum` with ``limits="unit_disk"`` /
   ``"data"`` (capability-module import only).
 * Enforced pytest coverage gate of **90%** (``fail_under`` / CI
-  ``--cov-fail-under``); branch-aware suite remains well above the floor.
+  ``--cov-fail-under`` / Codecov project and patch ``target``); branch-aware
+  suite remains well above the floor.
 
 v0.4.0 expanded capabilities
 ----------------------------

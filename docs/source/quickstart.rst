@@ -371,7 +371,7 @@ training call (not the model/checkpoint). This is not a
 symplectic/Hamiltonian guarantee and is not an implementation of the
 `PIKE/SPIKE <https://proceedings.mlr.press/v328/minoza26a.html>`_
 PINN-regularization architecture. See
-``examples/14_physics_informed_diffusion.ipynb``.
+``examples/14_physics_informed_advection.ipynb``.
 
 Optional sparsity / worst-case reconstruction (power-user
 ``koopman_graph.losses`` imports; ``LossWeights.sparsity`` /
@@ -398,7 +398,7 @@ operator with recursive least squares (RLS) as new snapshots arrive:
 
 ``adapt_step`` encodes each pair with the frozen encoder and updates ``K`` (or
 the continuous generator) in place. Requires ``koopman_parameterization="dense"``.
-See ``examples/13_online_adaptation_traffic_drift.ipynb``.
+See ``examples/13_online_adaptation_topology_shock.ipynb``.
 
 **Discrete vs. continuous RLS fidelity.** Discrete models (the default) adapt
 ``K`` directly and are exact for the fitted row convention. Continuous models

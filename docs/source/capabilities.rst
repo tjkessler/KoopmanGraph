@@ -98,8 +98,8 @@ Hierarchical / multi-resolution (power-user)
   scatter-unpool; ``predict(..., resolution=...)`` for coarse vs fine
 * Coarse-level forecasting with unpooling — **not** P-K-GCN spatiotemporal
   super-resolution; graph spectra use the pooled topology
-* See notebook ``23_hierarchical_multiresolution.ipynb`` for wall-clock vs
-  RMSE on a grid
+* See notebook ``23_hierarchical_multiresolution.ipynb`` for in-sample RMSE,
+  fine-grid snapshots, and a dense-``K`` ``spectrum`` API demo on a grid
 
 Research tooling
 ~~~~~~~~~~~~~~~~
