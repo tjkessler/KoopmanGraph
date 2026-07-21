@@ -150,10 +150,21 @@ jobs:
 
       - name: Run tests
         if: matrix.coverage != 'true'
+        env:
+          # Avoid BLAS/PyTorch oversubscription under pytest-xdist.
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          TORCH_NUM_THREADS: "1"
         run: uv run --no-sync pytest tests/ -n auto
 
       - name: Run tests with coverage
         if: matrix.coverage == 'true'
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          TORCH_NUM_THREADS: "1"
         run: >
           uv run --no-sync pytest tests/ -n auto
           --cov=koopman_graph
@@ -170,9 +181,18 @@ jobs:
           fail_ci_if_error: false
 
   notebooks:
+    name: notebooks (${{ matrix.shard }})
     needs: changes
     if: needs.changes.outputs.notebooks == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: "01-13"
+            pattern: "examples/0[1-9]_*.ipynb examples/1[0-3]_*.ipynb"
+          - shard: "14-26"
+            pattern: "examples/1[4-9]_*.ipynb examples/2[0-6]_*.ipynb"
     steps:
       - uses: actions/checkout@v7
 
@@ -188,11 +208,12 @@ jobs:
 
       - name: Execute tutorial notebooks
         env:
-          # Limit BLAS/OpenMP oversubscription when notebooks run in parallel.
+          # Limit BLAS/OpenMP/PyTorch oversubscription when notebooks run in parallel.
           OMP_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
-        run: uv run --no-sync pytest --nbmake examples/ -n 4 --durations=25
+          TORCH_NUM_THREADS: "1"
+        run: uv run --no-sync pytest --nbmake ${{ matrix.pattern }} -n 4 --durations=25
 
   docs:
     needs: changes

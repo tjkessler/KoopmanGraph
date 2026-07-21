@@ -245,7 +245,8 @@ Individual jobs still appear on the workflow run for diagnosis:
 
 - `lint` — Ruff via `uvx` (no full torch install)
 - `test (3.10)`, `test (3.12)` — pytest with `pytest-xdist`; coverage gate on 3.12 only
-- `notebooks` — tutorial nbmake smoke tests (Python 3.12)
+- `notebooks (01-13)`, `notebooks (14-26)` — sharded tutorial nbmake smoke
+  tests (Python 3.12)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))
