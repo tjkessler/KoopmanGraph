@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Documented [uv](https://docs.astral.sh/uv/) install paths alongside pip
+  (README, CONTRIBUTING, installation guide, FAQ); added ``[tool.uv]`` CPU
+  PyTorch index defaults, committed ``uv.lock``, and switched CI to
+  ``astral-sh/setup-uv``.
+
 ## [0.5.0] - 2026-07-18
 
 ### Added
