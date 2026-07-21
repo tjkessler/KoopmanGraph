@@ -230,6 +230,160 @@ def _grid_neighbors(
     return neighbors
 
 
+def _anisotropic_advection_step(
+    state: Tensor,
+    *,
+    num_rows: int,
+    num_cols: int,
+    decay_rate: float,
+    west_weight: float,
+    north_weight: float,
+) -> Tensor:
+    """Apply one noiseless anisotropic advection step (no parameter checks).
+
+    Parameters
+    ----------
+    state : Tensor
+        Node features with shape ``(num_rows * num_cols, in_channels)``.
+    num_rows : int
+        Grid height.
+    num_cols : int
+        Grid width.
+    decay_rate : float
+        Self-retention factor in ``(0, 1)``.
+    west_weight : float
+        Relative influence of the western neighbor.
+    north_weight : float
+        Relative influence of the northern neighbor.
+
+    Returns
+    -------
+    Tensor
+        Updated node features with the same shape as ``state``.
+    """
+    in_channels = state.shape[1]
+    dtype = state.dtype
+    updated = decay_rate * state
+    for row in range(num_rows):
+        for col in range(num_cols):
+            node = grid_node_index(row, col, num_cols=num_cols)
+            neighbors = _grid_neighbors(
+                row,
+                col,
+                num_rows=num_rows,
+                num_cols=num_cols,
+            )
+            if not neighbors:
+                continue
+
+            weights: dict[int, float] = {}
+            if "west" in neighbors:
+                weights[neighbors["west"]] = west_weight
+            if "north" in neighbors:
+                weights[neighbors["north"]] = north_weight
+            other_neighbors = [
+                index
+                for name, index in neighbors.items()
+                if name not in {"west", "north"}
+            ]
+            if other_neighbors:
+                remaining = 1.0 - west_weight - north_weight
+                share = remaining / len(other_neighbors)
+                for index in other_neighbors:
+                    weights[index] = share
+
+            weight_sum = sum(weights.values())
+            if weight_sum <= 0.0:
+                continue
+            mixture = torch.zeros(in_channels, dtype=dtype)
+            for neighbor, weight in weights.items():
+                mixture = mixture + weight * state[neighbor]
+            mixture = mixture / weight_sum
+            updated[node] = updated[node] + (1.0 - decay_rate) * mixture
+    return updated
+
+
+def anisotropic_advection_step(
+    state: Tensor,
+    *,
+    num_rows: int,
+    num_cols: int,
+    decay_rate: float = 0.85,
+    west_weight: float = 0.7,
+    north_weight: float = 0.2,
+) -> Tensor:
+    """Apply one noiseless anisotropic advection step on a 2D lattice.
+
+    This is the deterministic update used by
+    :class:`~koopman_graph.datasets.grid.AnisotropicAdvectionGridBenchmark`
+    before optional Gaussian noise is added. Tutorials can call it directly for
+    impulse-response diagnostics without reimplementing the neighbor mixture.
+
+    Parameters
+    ----------
+    state : Tensor
+        Node features with shape ``(num_rows * num_cols, in_channels)``.
+    num_rows : int
+        Grid height.
+    num_cols : int
+        Grid width.
+    decay_rate : float, optional
+        Self-retention factor in ``(0, 1)``. Default is ``0.85``.
+    west_weight : float, optional
+        Relative influence of the western neighbor. Default is ``0.7``.
+    north_weight : float, optional
+        Relative influence of the northern neighbor. Default is ``0.2``.
+
+    Returns
+    -------
+    Tensor
+        Updated node features with the same shape as ``state``.
+
+    Raises
+    ------
+    ValueError
+        If grid dimensions, ``state`` shape, or advection weights are invalid.
+    """
+    if num_rows < 1:
+        msg = f"num_rows must be >= 1, got {num_rows}"
+        raise ValueError(msg)
+    if num_cols < 1:
+        msg = f"num_cols must be >= 1, got {num_cols}"
+        raise ValueError(msg)
+    if state.ndim != 2:
+        msg = (
+            f"state must be 2D (num_nodes, in_channels), got shape {tuple(state.shape)}"
+        )
+        raise ValueError(msg)
+    expected_nodes = num_rows * num_cols
+    if state.shape[0] != expected_nodes:
+        msg = (
+            f"state.shape[0] must equal num_rows * num_cols ({expected_nodes}), "
+            f"got {state.shape[0]}"
+        )
+        raise ValueError(msg)
+    if state.shape[1] < 1:
+        msg = f"state in_channels must be >= 1, got {state.shape[1]}"
+        raise ValueError(msg)
+    validate_advection_decay_rate(decay_rate)
+    if west_weight < 0.0 or north_weight < 0.0:
+        msg = "west_weight and north_weight must be non-negative"
+        raise ValueError(msg)
+    if west_weight + north_weight >= 1.0:
+        msg = (
+            f"west_weight + north_weight must be < 1, got {west_weight + north_weight}"
+        )
+        raise ValueError(msg)
+    return _anisotropic_advection_step(
+        state,
+        num_rows=num_rows,
+        num_cols=num_cols,
+        decay_rate=decay_rate,
+        west_weight=west_weight,
+        north_weight=north_weight,
+    )
+
+
 class AnisotropicAdvectionGridBenchmark:
     """Directional advection on a 2D lattice with asymmetric neighbor weights.
 
@@ -379,44 +533,14 @@ class AnisotropicAdvectionGridBenchmark:
 
         snapshots = [state.clone()]
         for _ in range(num_timesteps - 1):
-            updated = decay_rate * state
-            for row in range(num_rows):
-                for col in range(num_cols):
-                    node = grid_node_index(row, col, num_cols=num_cols)
-                    neighbors = _grid_neighbors(
-                        row,
-                        col,
-                        num_rows=num_rows,
-                        num_cols=num_cols,
-                    )
-                    if not neighbors:
-                        continue
-
-                    weights: dict[int, float] = {}
-                    if "west" in neighbors:
-                        weights[neighbors["west"]] = west_weight
-                    if "north" in neighbors:
-                        weights[neighbors["north"]] = north_weight
-                    other_neighbors = [
-                        index
-                        for name, index in neighbors.items()
-                        if name not in {"west", "north"}
-                    ]
-                    if other_neighbors:
-                        remaining = 1.0 - west_weight - north_weight
-                        share = remaining / len(other_neighbors)
-                        for index in other_neighbors:
-                            weights[index] = share
-
-                    weight_sum = sum(weights.values())
-                    if weight_sum <= 0.0:
-                        continue
-                    mixture = torch.zeros(in_channels, dtype=dtype)
-                    for neighbor, weight in weights.items():
-                        mixture = mixture + weight * state[neighbor]
-                    mixture = mixture / weight_sum
-                    updated[node] = updated[node] + (1.0 - decay_rate) * mixture
-
+            updated = _anisotropic_advection_step(
+                state,
+                num_rows=num_rows,
+                num_cols=num_cols,
+                decay_rate=decay_rate,
+                west_weight=west_weight,
+                north_weight=north_weight,
+            )
             state = add_gaussian_noise(
                 updated,
                 noise_std,

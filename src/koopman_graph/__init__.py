@@ -4,18 +4,26 @@ Public API
 ----------
 ``GraphKoopmanModel``
     End-to-end encode → Koopman advance → decode model.
-``GNNEncoder``, ``GATEncoder``
-    GNN encoders for latent lifting.
+``GNNEncoder``, ``GATEncoder``, ``SAGEEncoder``, ``DiffConvEncoder``
+    Topology-aware GNN encoders (GCN, GAT, GraphSAGE, DiffConv).
+``GraphTransformerEncoder``
+    Graph Transformer encoder (PyG ``TransformerConv``; edges×heads cost).
 ``DelayEmbeddingEncoder``
     Hankel / delay-coordinate wrapper around a sized base encoder.
-``GNNDecoder``, ``GATDecoder``
-    GNN decoders for physical reconstruction.
+``GNNDecoder``, ``GATDecoder``, ``SAGEDecoder``, ``DiffConvDecoder``
+    Matching GNN decoders for physical reconstruction.
+``GraphTransformerDecoder``
+    Graph Transformer decoder peer.
 ``KoopmanOperator``
     Learnable finite-dimensional Koopman matrix.
 ``ContinuousKoopmanOperator``
     Continuous-time Koopman generator integrated via matrix exponentials.
 ``GraphKoopmanOperator``
     Discrete networked Koopman step with self/neighbor coupling via ``edge_index``.
+``GraphSnapshotSequence``, ``MultiTrajectory``
+    Container and explicit multi-trajectory wrapper for graph snapshots.
+    ``TemporalSplit``, ``temporal_split``, ``WindowSampler``, and
+    ``as_multi_trajectory`` live in :mod:`koopman_graph.data`.
 ``KoopmanSpectrum``, ``compute_spectrum``
     Primary spectral analysis entrypoints. Specialized helpers
     (``compute_generator_spectrum``, ``discrete_spectrum_at_delta_t``,
@@ -23,105 +31,71 @@ Public API
     ``dynamical_similarity``, ``detect_anomaly``,
     ``calibrate_anomaly_threshold``, ``AnomalyDetectionResult``) live in
     :mod:`koopman_graph.analysis`.
-``DMDBaseline``, ``EDMDBaseline``, ``DMDcBaseline``
-    Classical topology-agnostic Koopman baselines.
-``GraphSnapshotSequence``, ``MultiTrajectory``, ``WindowSampler``
-    Container, explicit multi-trajectory wrapper, and fixed-length mini-batch
-    sampler for graph snapshots. ``as_multi_trajectory`` lives in
-    :mod:`koopman_graph.data`.
-``TemporalSplit``, ``temporal_split``
-    Temporal train/validation/test splitting utilities.
-``EvaluationResult``, ``evaluate_forecast``
-    Multi-horizon forecast evaluation entrypoints. Low-level metrics
-    (``mae``, ``rmse``, ``mape``, ``HorizonMetrics``) live in
-    :mod:`koopman_graph.metrics`.
-``ForwardConsistencyLoss``
-    Latent-space linear evolution consistency loss.
-``BackwardConsistencyLoss``
-    Latent-space inverse linear evolution consistency loss.
-``EigenvalueRegularizationLoss``
-    Unit-circle eigenvalue hinge penalty for operator stability.
-``FitHistory``, ``LossWeights``
-    Training history and loss-weight schedule for ``fit``.
-``RecursiveKoopmanAdapter``
-    Recursive least-squares online Koopman operator adaptation.
-    ``AdaptationStepResult``, ``KoopmanObserver``, and ``FilterResult`` live in
-    :mod:`koopman_graph.adaptation`.
-``GraphKoopmanEnv``
-    Gymnasium environment for latent-space closed-loop control.
 ``__version__``
     Package version string.
+
+Training customization, evaluation utilities, baselines, adaptation, and
+control live in capability modules: :mod:`koopman_graph.losses` (consistency /
+eigenvalue / physics residuals), :mod:`koopman_graph.training`
+(``FitHistory``, ``LossWeights``), :mod:`koopman_graph.baselines`,
+:mod:`koopman_graph.adaptation` (``RecursiveKoopmanAdapter`` and observers),
+:mod:`koopman_graph.env` (``GraphKoopmanEnv``), and :mod:`koopman_graph.metrics`
+(``evaluate_forecast``, ``EvaluationResult``, and low-level metrics).
 
 Physics-informed helpers such as ``graph_laplacian_features`` live in
 :mod:`koopman_graph.observables`. Power-user modules such as
 :mod:`koopman_graph.graph_utils`, :mod:`koopman_graph.nn`,
-:mod:`koopman_graph.protocols`, and :mod:`koopman_graph.spectrum_types` are
-importable but intentionally omitted from ``__all__`` (encoder/decoder
-*classes* remain public). See the architecture docs for the public vs
-power-user contract.
+:mod:`koopman_graph.protocols`, :mod:`koopman_graph.spectrum_types`, and
+:mod:`koopman_graph.uq` (deep ensembles / optional ``predict_interval``), and
+:mod:`koopman_graph.hierarchical` (TopK / SAG pool → coarse Koopman → unpool)
+are importable but intentionally omitted from ``__all__`` (encoder/decoder/delay
+and operator *classes*, including ``DelayEmbeddingEncoder`` and
+``GraphKoopmanOperator``, remain root-stable). See the architecture docs for
+the public vs power-user contract.
 """
 
-from koopman_graph.adaptation import RecursiveKoopmanAdapter
 from koopman_graph.analysis import KoopmanSpectrum, compute_spectrum
-from koopman_graph.baselines import DMDBaseline, DMDcBaseline, EDMDBaseline
-from koopman_graph.data import (
-    GraphSnapshotSequence,
-    MultiTrajectory,
-    TemporalSplit,
-    WindowSampler,
-    temporal_split,
-)
-from koopman_graph.env import GraphKoopmanEnv
-from koopman_graph.losses import (
-    BackwardConsistencyLoss,
-    EigenvalueRegularizationLoss,
-    ForwardConsistencyLoss,
-)
-from koopman_graph.metrics import EvaluationResult, evaluate_forecast
+from koopman_graph.data import GraphSnapshotSequence, MultiTrajectory
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.nn import (
     DelayEmbeddingEncoder,
+    DiffConvDecoder,
+    DiffConvEncoder,
     GATDecoder,
     GATEncoder,
     GNNDecoder,
     GNNEncoder,
+    GraphTransformerDecoder,
+    GraphTransformerEncoder,
+    SAGEDecoder,
+    SAGEEncoder,
 )
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
     GraphKoopmanOperator,
     KoopmanOperator,
 )
-from koopman_graph.training import FitHistory, LossWeights
 
 __all__ = [
-    "BackwardConsistencyLoss",
     "ContinuousKoopmanOperator",
     "DelayEmbeddingEncoder",
-    "DMDBaseline",
-    "DMDcBaseline",
-    "EDMDBaseline",
-    "EigenvalueRegularizationLoss",
-    "EvaluationResult",
-    "FitHistory",
-    "ForwardConsistencyLoss",
+    "DiffConvDecoder",
+    "DiffConvEncoder",
     "GATDecoder",
     "GATEncoder",
     "GNNDecoder",
     "GNNEncoder",
-    "GraphKoopmanEnv",
     "GraphKoopmanModel",
     "GraphKoopmanOperator",
     "GraphSnapshotSequence",
+    "GraphTransformerDecoder",
+    "GraphTransformerEncoder",
     "KoopmanOperator",
     "KoopmanSpectrum",
-    "LossWeights",
     "MultiTrajectory",
-    "RecursiveKoopmanAdapter",
-    "TemporalSplit",
-    "WindowSampler",
+    "SAGEDecoder",
+    "SAGEEncoder",
     "__version__",
     "compute_spectrum",
-    "evaluate_forecast",
-    "temporal_split",
 ]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

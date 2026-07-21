@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
+from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph import (
@@ -21,11 +24,14 @@ from koopman_graph.analysis import (
 from koopman_graph.data import resolve_pair_delta_t
 from koopman_graph.operators import (
     STABILITY_EPS_MARGIN,
+    GraphKoopmanOperator,
+    KoopmanOperator,
     matrix_log,
     van_loan_factors,
     van_loan_generator_from_discrete,
 )
-from koopman_graph.operators.continuous import _negative_strict_diagonal_values
+from koopman_graph.operators.continuous import negative_strict_diagonal_values
+from koopman_graph.training import LossWeights
 
 
 def test_matrix_log_round_trips_spd_matrix() -> None:
@@ -229,7 +235,7 @@ def test_continuous_structured_max_real_part_strictly_negative(
 def test_negative_strict_diagonal_stays_strict_at_raw_zero() -> None:
     """Verify raw=0 maps into (-bound, 0), not onto the imaginary axis."""
     raw = torch.zeros(3)
-    values = _negative_strict_diagonal_values(raw, max_real_eigenvalue=1.0)
+    values = negative_strict_diagonal_values(raw, max_real_eigenvalue=1.0)
     bound = 1.0 - STABILITY_EPS_MARGIN
     assert torch.all(values < 0)
     assert torch.all(values > -bound)
@@ -484,7 +490,7 @@ def test_irregular_timestamp_training_recovers_generator(
         sequence,
         epochs=400,
         lr=1e-2,
-        loss_weights=__import__("koopman_graph").LossWeights(
+        loss_weights=LossWeights(
             reconstruction=1.0,
             forward=5.0,
         ),
@@ -657,7 +663,7 @@ def test_masked_irregular_training_continuous_matches_or_beats_discrete(
         timestamps=timestamps,
         observation_masks=masks,
     )
-    loss_weights = __import__("koopman_graph").LossWeights(
+    loss_weights = LossWeights(
         reconstruction=1.0,
         forward=4.0,
     )
@@ -771,14 +777,14 @@ def test_continuous_delta_t_policy_aligned_across_call_sites() -> None:
     from koopman_graph.graph_utils import resolve_delta_t as resolve_helper
     from koopman_graph.losses import ForwardConsistencyLoss
     from koopman_graph.training import one_step_loss
-    from koopman_graph.training.objectives import _model_default_delta_t
+    from koopman_graph.training.pair_objectives import model_default_delta_t
 
     assert resolve_helper(None) == 1.0
-    assert _model_default_delta_t(model) == pytest.approx(time_step)
+    assert model_default_delta_t(model) == pytest.approx(time_step)
     assert resolve_pair_delta_t(
         sequence,
         0,
-        default_time_step=_model_default_delta_t(model),
+        default_time_step=model_default_delta_t(model),
     ) == pytest.approx(time_step)
 
     control0 = sequence.control_at(0)
@@ -818,8 +824,7 @@ def test_continuous_delta_t_policy_aligned_across_call_sites() -> None:
             torch.nn.functional.mse_loss(pred, sequence[1].x),
         )
 
-    from koopman_graph import GraphKoopmanEnv
-    from koopman_graph.env import flatten_latent
+    from koopman_graph.env import GraphKoopmanEnv, flatten_latent
 
     env = GraphKoopmanEnv(
         model,
@@ -837,3 +842,196 @@ def test_continuous_delta_t_policy_aligned_across_call_sites() -> None:
         expected_obs = flatten_latent(z_env)
     next_obs, *_ = env.step(action)
     np.testing.assert_allclose(next_obs, expected_obs, rtol=1e-5, atol=1e-5)
+
+
+def test_auxiliary_spectral_rejected_on_discrete_and_graph() -> None:
+    """auxiliary_spectral is continuous-only."""
+    with pytest.raises(ValueError, match="continuous-only"):
+        KoopmanOperator(4, parameterization="auxiliary_spectral")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="continuous-only"):
+        GraphKoopmanOperator(4, parameterization="auxiliary_spectral")  # type: ignore[arg-type]
+
+
+def test_auxiliary_spectral_generator_at_and_odd_dim() -> None:
+    """Block-diagonal L(z) covers even and odd latent dims."""
+    even = ContinuousKoopmanOperator(4, parameterization="auxiliary_spectral")
+    z = torch.randn(4)
+    generator = even.generator_at(z)
+    assert generator.shape == (4, 4)
+    spectrum = even.instantaneous_spectrum(z)
+    assert spectrum.shape == (4,)
+    with pytest.raises(ValueError, match="generator_at"):
+        _ = even.L
+
+    odd = ContinuousKoopmanOperator(
+        3,
+        parameterization="auxiliary_spectral",
+        auxiliary_hidden_dims=(32,),
+    )
+    assert odd.auxiliary_hidden_dims == (32,)
+    g_odd = odd.generator_at(torch.randn(3))
+    assert g_odd.shape == (3, 3)
+
+
+def test_auxiliary_spectral_batched_advance_gradients() -> None:
+    """State-dependent advance is differentiable for batched latents."""
+    op = ContinuousKoopmanOperator(4, parameterization="auxiliary_spectral")
+    z = torch.randn(5, 4, requires_grad=True)
+    next_z = op.advance(z, 0.1)
+    assert next_z.shape == z.shape
+    next_z.sum().backward()
+    assert z.grad is not None
+
+
+def test_auxiliary_spectral_controlled_additive_and_bilinear() -> None:
+    """Controlled Van Loan advance works with frozen L(z)."""
+    additive = ContinuousKoopmanOperator(
+        4,
+        parameterization="auxiliary_spectral",
+        control_dim=2,
+        control_mode="additive",
+    )
+    z = torch.randn(4)
+    u = torch.randn(2)
+    advanced = additive.advance(z, 0.05, control=u)
+    assert advanced.shape == z.shape
+    recovered = additive.inverse_advance(advanced, 0.05, control=u)
+    assert recovered.shape == z.shape
+
+    bilinear = ContinuousKoopmanOperator(
+        4,
+        parameterization="auxiliary_spectral",
+        control_dim=1,
+        control_mode="bilinear",
+    )
+    u_b = torch.tensor([0.2])
+    advanced_b = bilinear.advance(z, 0.05, control=u_b)
+    assert advanced_b.shape == z.shape
+
+
+def test_auxiliary_spectral_configurable_hidden_dims_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Custom aux-net widths serialize under format-1 and reload."""
+    encoder = GNNEncoder(in_channels=2, hidden_channels=8, latent_dim=4, num_layers=2)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=2, num_layers=2)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        dynamics_mode="continuous",
+        koopman_parameterization="auxiliary_spectral",
+        koopman_auxiliary_hidden_dims=(16, 8),
+    )
+    assert model.koopman.auxiliary_hidden_dims == (16, 8)
+    path = tmp_path / "aux.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.parameterization == "auxiliary_spectral"
+    assert loaded.koopman.auxiliary_hidden_dims == (16, 8)
+    for key in model.state_dict():
+        assert torch.allclose(model.state_dict()[key], loaded.state_dict()[key])
+
+
+def _amplitude_dependent_oscillator_pairs(
+    n_pairs: int = 256,
+    delta_t: float = 0.1,
+    seed: int = 0,
+) -> tuple[Tensor, Tensor]:
+    """Sample (z_t, z_{t+Δt}) from an amplitude-dependent planar oscillator."""
+    generator = torch.Generator().manual_seed(seed)
+    radii = 0.5 + 1.5 * torch.rand(n_pairs, generator=generator)
+    angles = 2 * torch.pi * torch.rand(n_pairs, generator=generator)
+    z0 = torch.stack([radii * torch.cos(angles), radii * torch.sin(angles)], dim=-1)
+    omega = 1.0 + 0.75 * radii
+    damp = 0.05
+    # Locally exact step under frozen ω(r) at t0.
+    mu = -damp
+    advanced = []
+    for idx in range(n_pairs):
+        w = float(omega[idx])
+        block = torch.tensor([[mu, -w], [w, mu]], dtype=torch.float32)
+        advanced.append(z0[idx] @ torch.linalg.matrix_exp(block * delta_t).T)
+    return z0, torch.stack(advanced, dim=0)
+
+
+def _fit_operator_pairs(
+    op: ContinuousKoopmanOperator,
+    z0: Tensor,
+    z1: Tensor,
+    *,
+    delta_t: float,
+    epochs: int = 200,
+    lr: float = 1e-2,
+) -> float:
+    """Minimize one-step MSE; return long-horizon rollout MSE on held-out starts."""
+    opt = torch.optim.Adam(op.parameters(), lr=lr)
+    for _ in range(epochs):
+        opt.zero_grad()
+        pred = op.advance(z0, delta_t)
+        loss = torch.nn.functional.mse_loss(pred, z1)
+        loss.backward()
+        opt.step()
+
+    with torch.no_grad():
+        starts = z0[:32]
+        horizon = 20
+        roll_aux = starts.clone()
+        target = starts.clone()
+        for _ in range(horizon):
+            # Ground-truth local step with frozen ω(r) each sub-step.
+            radii = target.norm(dim=-1)
+            omega = 1.0 + 0.75 * radii
+            next_states = []
+            for idx in range(target.shape[0]):
+                w = float(omega[idx])
+                block = torch.tensor([[-0.05, -w], [w, -0.05]], dtype=torch.float32)
+                next_states.append(
+                    target[idx] @ torch.linalg.matrix_exp(block * delta_t).T
+                )
+            target = torch.stack(next_states, dim=0)
+            roll_aux = op.advance(roll_aux, delta_t)
+        return float(torch.nn.functional.mse_loss(roll_aux, target).item())
+
+
+def test_auxiliary_spectral_beats_dense_on_amplitude_oscillator() -> None:
+    """Auxiliary mode should beat fixed dense L on amplitude-dependent dynamics."""
+    delta_t = 0.1
+    z0, z1 = _amplitude_dependent_oscillator_pairs(n_pairs=512, delta_t=delta_t)
+
+    torch.manual_seed(0)
+    aux = ContinuousKoopmanOperator(
+        2,
+        parameterization="auxiliary_spectral",
+        auxiliary_hidden_dims=(64, 64),
+        init_mode="identity",
+    )
+    torch.manual_seed(0)
+    dense = ContinuousKoopmanOperator(2, parameterization="dense", init_mode="identity")
+
+    aux_err = _fit_operator_pairs(aux, z0, z1, delta_t=delta_t)
+    dense_err = _fit_operator_pairs(dense, z0, z1, delta_t=delta_t)
+    assert aux_err < dense_err
+
+    with torch.no_grad():
+        radii = z0.norm(dim=-1)
+        _mu, omega, _real = aux.auxiliary_net(z0)
+        r_c = torch.corrcoef(torch.stack([radii, omega.reshape(-1)]))[0, 1]
+        assert r_c.item() > 0.3
+
+
+def test_model_spectrum_rejects_auxiliary_spectral() -> None:
+    """Global model.spectrum must not pretend a fixed generator exists."""
+    encoder = GNNEncoder(in_channels=2, hidden_channels=8, latent_dim=4, num_layers=2)
+    decoder = GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=2, num_layers=2)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=4,
+        time_step=0.1,
+        dynamics_mode="continuous",
+        koopman_parameterization="auxiliary_spectral",
+    )
+    with pytest.raises(ValueError, match="generator_at"):
+        model.spectrum()

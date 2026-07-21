@@ -7,41 +7,55 @@ Functions annotate against
 Capability layout
 -----------------
 ``history``
-    ``LossWeights``, ``FitHistory``, ``TrainingLossBreakdown``, and related
-    type aliases.
+    ``LossWeights``, ``FitHistory``, and related type aliases (internal
+    ``TrainingLossBreakdown`` lives here but is not package-exported).
 ``schedules``
     Static and ramped loss-weight schedules.
 ``device``
     Training device resolution and sequence placement.
+``pair_objectives``
+    One-step / pair reconstruction and forward/backward consistency
+    composition over :mod:`koopman_graph.losses`.
+``extra_objectives``
+    Lie / PDE / sparsity / worst-case composition helpers.
 ``objectives``
-    Training-side composition of loss primitives from
-    :mod:`koopman_graph.losses` (which remains a top-level module).
+    Thin ``compute_training_loss`` orchestrator plus eigenvalue / rollout
+    composition (re-exports pair helpers for stable deep imports).
+``epochs``
+    ``train_one_epoch``, ``train_windowed_epoch``, ``eval_one_epoch``.
+``inputs``
+    Multi-trajectory classification and
+    ``resolve_training_sequences`` / ``resolve_validation_sequences``.
 ``loop``
-    Epoch helpers, input resolution, and :func:`run_fit_loop`.
+    ``run_fit_loop`` plus early-stopping / LR-scheduler helpers.
 """
 
 from koopman_graph.training.device import resolve_device, sequence_to_device
+from koopman_graph.training.epochs import (
+    eval_one_epoch,
+    train_one_epoch,
+    train_windowed_epoch,
+)
 from koopman_graph.training.history import (
     EarlyStoppingMonitor,
+    ExtraLosses,
     FitHistory,
     LossWeights,
     LossWeightSchedule,
     LRSchedulerFactory,
     TrainingInput,
-    TrainingLossBreakdown,
     ValidationInput,
     mean_training_loss_breakdown,
 )
-from koopman_graph.training.loop import (
-    eval_one_epoch,
-    resolve_early_stopping_monitor,
-    resolve_lr_scheduler,
+from koopman_graph.training.inputs import (
     resolve_training_sequences,
     resolve_validation_sequences,
+)
+from koopman_graph.training.loop import (
+    resolve_early_stopping_monitor,
+    resolve_lr_scheduler,
     run_fit_loop,
     should_stop_early,
-    train_one_epoch,
-    train_windowed_epoch,
 )
 from koopman_graph.training.objectives import (
     compute_backward_consistency_sequence_loss,
@@ -60,12 +74,12 @@ from koopman_graph.training.schedules import (
 
 __all__ = [
     "EarlyStoppingMonitor",
+    "ExtraLosses",
     "FitHistory",
     "LRSchedulerFactory",
     "LossWeightSchedule",
     "LossWeights",
     "TrainingInput",
-    "TrainingLossBreakdown",
     "ValidationInput",
     "compute_backward_consistency_sequence_loss",
     "compute_eigenvalue_regularization_loss",

@@ -1,4 +1,4 @@
-"""Epoch helpers, input resolution, and the multi-epoch fit loop."""
+"""Multi-epoch fit-loop orchestration and early-stop / scheduler helpers."""
 
 from __future__ import annotations
 
@@ -10,250 +10,39 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from torch_geometric.data import Data
 
 from koopman_graph.data import (
     GraphSnapshotSequence,
-    MultiTrajectory,
     RolloutStartIndices,
     WindowSampler,
     resolve_rollout_start_indices,
-    resolve_sequence,
 )
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.device import resolve_device, sequence_to_device
+from koopman_graph.training.epochs import (
+    eval_one_epoch,
+    train_one_epoch,
+    train_windowed_epoch,
+)
 from koopman_graph.training.history import (
     EarlyStoppingMonitor,
+    ExtraLosses,
     FitHistory,
     LossWeights,
     LossWeightSchedule,
     LRSchedulerFactory,
-    TrainingInput,
-    TrainingLossBreakdown,
-    ValidationInput,
-    mean_training_loss_breakdown,
 )
-from koopman_graph.training.objectives import compute_training_loss
 from koopman_graph.training.schedules import resolve_loss_weights_for_epoch
 
-
-def train_one_epoch(
-    model: TrainableKoopmanModel,
-    sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
-    optimizer: Optimizer,
-    loss_weights: LossWeights,
-    *,
-    max_grad_norm: float | None = None,
-    rollout_horizon: int | None = None,
-    rollout_start_indices: Sequence[int] | None = None,
-) -> TrainingLossBreakdown:
-    """Run one training epoch and return the averaged loss breakdown.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-        One or more training trajectories.
-    optimizer : Optimizer
-        PyTorch optimizer used for the parameter update.
-    loss_weights : :class:`~koopman_graph.training.LossWeights`
-        Weights for reconstruction and consistency terms this epoch.
-    max_grad_norm : float or None, optional
-        When set, clip the global gradient norm to this value before
-        ``optimizer.step()``.
-    rollout_horizon : int or None, optional
-        Number of rollout steps when ``loss_weights.rollout`` is non-zero.
-    rollout_start_indices : sequence of int or None, optional
-        Rollout origin indices for this epoch.
-
-    Returns
-    -------
-    TrainingLossBreakdown
-        Mean loss breakdown across trajectories.
-    """
-    if isinstance(sequences, GraphSnapshotSequence):
-        trajectory_list = [sequences]
-    else:
-        trajectory_list = list(sequences)
-
-    model.train()
-    optimizer.zero_grad()
-    breakdowns = [
-        compute_training_loss(
-            model,
-            sequence,
-            loss_weights,
-            rollout_horizon=rollout_horizon,
-            rollout_start_indices=rollout_start_indices,
-        )
-        for sequence in trajectory_list
-    ]
-    breakdown = mean_training_loss_breakdown(breakdowns)
-    breakdown.total.backward()
-    if max_grad_norm is not None:
-        nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-    optimizer.step()
-    return breakdown
-
-
-def train_windowed_epoch(
-    model: TrainableKoopmanModel,
-    sampler: WindowSampler,
-    optimizer: Optimizer,
-    loss_weights: LossWeights,
-    *,
-    epoch: int = 0,
-    max_grad_norm: float | None = None,
-    rollout_horizon: int | None = None,
-    rollout_start_indices: RolloutStartIndices = None,
-    rollout_starts_per_epoch: int | None = None,
-    rollout_start_seed: int | None = None,
-) -> TrainingLossBreakdown:
-    """Train on mini-batches of fixed-length temporal windows.
-
-    Each batch averages its window losses before one optimizer step. The
-    returned breakdown is weighted by the number of windows in each batch, so
-    a smaller final batch does not receive disproportionate weight.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sampler : WindowSampler
-        Window sampler defining trajectories, window size, and batch schedule.
-    optimizer : Optimizer
-        Optimizer updated once per yielded batch.
-    loss_weights : LossWeights
-        Active loss weights for the epoch.
-    epoch : int, optional
-        Zero-based epoch index used for sampler shuffling. Default is ``0``.
-    max_grad_norm : float or None, optional
-        Optional global gradient clipping threshold.
-    rollout_horizon : int or None, optional
-        Rollout horizon. Defaults to ``window_length - 1``.
-    rollout_start_indices : sequence of int, ``"all"``, or None, optional
-        Rollout origins relative to each sampled window.
-    rollout_starts_per_epoch : int or None, optional
-        Number of randomly sampled rollout origins.
-    rollout_start_seed : int or None, optional
-        Base seed for rollout-origin sampling.
-
-    Returns
-    -------
-    TrainingLossBreakdown
-        Window-weighted mean loss breakdown for the epoch.
-    """
-    horizon = sampler.window_length - 1 if rollout_horizon is None else rollout_horizon
-    reference_window = sampler.sequences[0].slice(0, sampler.window_length)
-    starts = None
-    if loss_weights.rollout != 0.0:
-        starts = resolve_rollout_start_indices(
-            reference_window,
-            horizon=horizon,
-            rollout_start_indices=rollout_start_indices,
-            rollout_starts_per_epoch=rollout_starts_per_epoch,
-            rollout_start_seed=rollout_start_seed,
-            epoch=epoch,
-        )
-
-    model.train()
-    weighted_terms: dict[str, Tensor] | None = None
-    window_count = 0
-    for batch in sampler.iter_epoch(epoch):
-        optimizer.zero_grad()
-        batch_breakdown = mean_training_loss_breakdown(
-            [
-                compute_training_loss(
-                    model,
-                    window,
-                    loss_weights,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=starts,
-                )
-                for window in batch
-            ]
-        )
-        batch_breakdown.total.backward()
-        if max_grad_norm is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-        optimizer.step()
-
-        batch_size = len(batch)
-        detached = {
-            name: getattr(batch_breakdown, name).detach() * batch_size
-            for name in (
-                "reconstruction",
-                "forward",
-                "backward",
-                "rollout",
-                "eigenvalue",
-                "total",
-            )
-        }
-        if weighted_terms is None:
-            weighted_terms = detached
-        else:
-            for name, value in detached.items():
-                weighted_terms[name] = weighted_terms[name] + value
-        window_count += batch_size
-
-    assert weighted_terms is not None
-    return TrainingLossBreakdown(
-        **{name: value / window_count for name, value in weighted_terms.items()}
-    )
-
-
-def eval_one_epoch(
-    model: TrainableKoopmanModel,
-    sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
-    loss_weights: LossWeights,
-    *,
-    rollout_horizon: int | None = None,
-    rollout_start_indices: Sequence[int] | None = None,
-) -> TrainingLossBreakdown:
-    """Compute validation loss for one epoch without parameter updates.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model to evaluate.
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-        One or more validation trajectories.
-    loss_weights : LossWeights
-        Weights for reconstruction and consistency terms.
-    rollout_horizon : int or None, optional
-        Number of rollout steps when ``loss_weights.rollout`` is non-zero.
-    rollout_start_indices : sequence of int or None, optional
-        Rollout origin indices for this epoch.
-
-    Returns
-    -------
-    TrainingLossBreakdown
-        Mean loss breakdown across trajectories.
-    """
-    if isinstance(sequences, GraphSnapshotSequence):
-        trajectory_list = [sequences]
-    else:
-        trajectory_list = list(sequences)
-
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            breakdowns = [
-                compute_training_loss(
-                    model,
-                    sequence,
-                    loss_weights,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=rollout_start_indices,
-                )
-                for sequence in trajectory_list
-            ]
-    finally:
-        model.train(was_training)
-    return mean_training_loss_breakdown(breakdowns)
+__all__ = [
+    "eval_one_epoch",
+    "resolve_early_stopping_monitor",
+    "resolve_lr_scheduler",
+    "run_fit_loop",
+    "should_stop_early",
+    "train_one_epoch",
+    "train_windowed_epoch",
+]
 
 
 def resolve_early_stopping_monitor(
@@ -286,179 +75,6 @@ def resolve_early_stopping_monitor(
         msg = "early_stopping_monitor='val' requires validation_sequence"
         raise ValueError(msg)
     return monitor
-
-
-def _classify_trajectory_items(
-    items: Sequence[object],
-    *,
-    empty_message: str,
-) -> list[GraphSnapshotSequence]:
-    """Normalize a bare list/tuple into a single-trajectory snapshot sequence.
-
-    Multi-trajectory input must use :class:`~koopman_graph.data.MultiTrajectory`.
-    A bare list of :class:`~koopman_graph.data.GraphSnapshotSequence` is rejected.
-
-    Parameters
-    ----------
-    items : sequence
-        Elements from a bare list/tuple passed to ``fit``.
-    empty_message : str
-        Error message when ``items`` is empty.
-
-    Returns
-    -------
-    list of GraphSnapshotSequence
-        A single-element list wrapping the ``Data`` snapshots.
-
-    Raises
-    ------
-    ValueError
-        If ``items`` is empty, mixes ``GraphSnapshotSequence`` with ``Data``,
-        or is a bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
-    TypeError
-        If any element is neither a snapshot sequence nor a ``Data`` graph.
-    """
-    if not items:
-        raise ValueError(empty_message)
-
-    sequence_indices = [
-        index
-        for index, item in enumerate(items)
-        if isinstance(item, GraphSnapshotSequence)
-    ]
-    data_indices = [index for index, item in enumerate(items) if isinstance(item, Data)]
-    if len(sequence_indices) == len(items):
-        msg = (
-            "a bare list of GraphSnapshotSequence is not accepted; "
-            "wrap multi-trajectory input in MultiTrajectory(...) "
-            "(or as_multi_trajectory(...))"
-        )
-        raise TypeError(msg)
-    if len(data_indices) == len(items):
-        return [resolve_sequence(items)]  # type: ignore[arg-type]
-    if sequence_indices and data_indices:
-        msg = (
-            "cannot mix GraphSnapshotSequence and Data in the same fit input; "
-            "use MultiTrajectory([...]) for multiple trajectories, or a list "
-            "of Data for one trajectory"
-        )
-        raise ValueError(msg)
-    bad_index = next(
-        index
-        for index, item in enumerate(items)
-        if not isinstance(item, (GraphSnapshotSequence, Data))
-    )
-    msg = (
-        "fit trajectory elements must be GraphSnapshotSequence or Data; "
-        f"index {bad_index} has type {type(items[bad_index]).__name__}"
-    )
-    raise TypeError(msg)
-
-
-def resolve_training_sequences(
-    data_sequence: TrainingInput,
-) -> list[GraphSnapshotSequence]:
-    """Normalize training input into one or more snapshot sequences.
-
-    Multi-trajectory input must be a
-    :class:`~koopman_graph.data.MultiTrajectory`. A bare list of ``Data``
-    snapshots is always a single trajectory.
-
-    Parameters
-    ----------
-    data_sequence : TrainingInput
-        Single sequence, list of ``Data`` snapshots, or ``MultiTrajectory``.
-
-    Returns
-    -------
-    list of GraphSnapshotSequence
-        One or more validated training trajectories.
-
-    Raises
-    ------
-    ValueError
-        If multi-trajectory input is empty or mixes sequence and ``Data``
-        elements.
-    TypeError
-        If a bare sequence contains unsupported element types, including a
-        bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
-    """
-    if isinstance(data_sequence, MultiTrajectory):
-        return list(data_sequence.sequences)
-    if isinstance(data_sequence, GraphSnapshotSequence):
-        return [data_sequence]
-    if not isinstance(data_sequence, Sequence) or isinstance(
-        data_sequence, (Data, str, bytes)
-    ):
-        return [resolve_sequence(data_sequence)]  # type: ignore[arg-type]
-    return _classify_trajectory_items(
-        list(data_sequence),
-        empty_message=(
-            "data_sequence must be non-empty; pass a GraphSnapshotSequence, "
-            "a non-empty list of Data, or MultiTrajectory(...)"
-        ),
-    )
-
-
-def resolve_validation_sequences(
-    validation_sequence: ValidationInput,
-    *,
-    num_training_sequences: int,
-) -> list[GraphSnapshotSequence] | None:
-    """Normalize validation input for :meth:`fit`.
-
-    A single validation sequence (or list of ``Data``) is reused for all
-    training trajectories. A :class:`~koopman_graph.data.MultiTrajectory` must
-    match the training trajectory count.
-
-    Parameters
-    ----------
-    validation_sequence : ValidationInput
-        Optional validation data.
-    num_training_sequences : int
-        Number of training trajectories supplied to :meth:`fit`.
-
-    Returns
-    -------
-    list of GraphSnapshotSequence or None
-        Validation trajectories aligned with training input.
-
-    Raises
-    ------
-    ValueError
-        If a multi-trajectory validation length does not match
-        ``num_training_sequences``, or if input is empty or mixed.
-    TypeError
-        If a bare sequence contains unsupported element types, including a
-        bare list of :class:`~koopman_graph.data.GraphSnapshotSequence`.
-    """
-    if validation_sequence is None:
-        return None
-    if isinstance(validation_sequence, MultiTrajectory):
-        sequences = list(validation_sequence.sequences)
-        if len(sequences) != num_training_sequences:
-            msg = (
-                "validation_sequence list length must match the number of "
-                f"training trajectories ({num_training_sequences}), "
-                f"got {len(sequences)}"
-            )
-            raise ValueError(msg)
-        return sequences
-    if isinstance(validation_sequence, GraphSnapshotSequence):
-        return [validation_sequence]
-    if not isinstance(validation_sequence, Sequence) or isinstance(
-        validation_sequence, (Data, str, bytes)
-    ):
-        return [resolve_sequence(validation_sequence)]  # type: ignore[arg-type]
-
-    return _classify_trajectory_items(
-        list(validation_sequence),
-        empty_message=(
-            "validation_sequence must be non-empty when provided as a list; "
-            "pass None, a GraphSnapshotSequence, a non-empty list of Data, "
-            "or MultiTrajectory(...)"
-        ),
-    )
 
 
 def resolve_lr_scheduler(
@@ -530,6 +146,7 @@ def run_fit_loop(
     device: str | torch.device | None = None,
     loss_weights: LossWeights | None = None,
     loss_weight_schedule: LossWeightSchedule | None = None,
+    extra_losses: ExtraLosses | None = None,
     rollout_horizon: int | None = None,
     rollout_start_indices: RolloutStartIndices = None,
     rollout_starts_per_epoch: int | None = None,
@@ -575,6 +192,8 @@ def run_fit_loop(
         Static loss weights for all epochs.
     loss_weight_schedule : callable or None, optional
         Per-epoch weight schedule; overrides ``loss_weights`` when set.
+    extra_losses : ExtraLosses or None, optional
+        Fit-time callables for enabled Lie and PDE residual terms.
     rollout_horizon : int or None, optional
         Autoregressive rollout steps when rollout weight is non-zero.
     rollout_start_indices : sequence of int, ``"all"``, or None, optional
@@ -658,6 +277,10 @@ def run_fit_loop(
     backward_losses: list[float] = []
     rollout_losses: list[float] = []
     eigenvalue_losses: list[float] = []
+    lie_losses: list[float] = []
+    pde_losses: list[float] = []
+    sparsity_losses: list[float] = []
+    worst_case_losses: list[float] = []
     val_losses: list[float] | None = [] if val_sequences is not None else None
     val_reconstruction_losses: list[float] | None = (
         [] if val_sequences is not None else None
@@ -666,6 +289,12 @@ def run_fit_loop(
     val_backward_losses: list[float] | None = [] if val_sequences is not None else None
     val_rollout_losses: list[float] | None = [] if val_sequences is not None else None
     val_eigenvalue_losses: list[float] | None = (
+        [] if val_sequences is not None else None
+    )
+    val_lie_losses: list[float] | None = [] if val_sequences is not None else None
+    val_pde_losses: list[float] | None = [] if val_sequences is not None else None
+    val_sparsity_losses: list[float] | None = [] if val_sequences is not None else None
+    val_worst_case_losses: list[float] | None = (
         [] if val_sequences is not None else None
     )
     best_loss_for_stop = float("inf")
@@ -702,6 +331,7 @@ def run_fit_loop(
                 train_sequences,
                 optim,
                 epoch_weights,
+                extra_losses=extra_losses,
                 max_grad_norm=max_grad_norm,
                 rollout_horizon=rollout_horizon,
                 rollout_start_indices=epoch_rollout_starts,
@@ -712,6 +342,7 @@ def run_fit_loop(
                 window_sampler,
                 optim,
                 epoch_weights,
+                extra_losses=extra_losses,
                 epoch=epoch,
                 max_grad_norm=max_grad_norm,
                 rollout_horizon=rollout_horizon,
@@ -729,6 +360,10 @@ def run_fit_loop(
         backward_losses.append(term_values["backward"])
         rollout_losses.append(term_values["rollout"])
         eigenvalue_losses.append(term_values["eigenvalue"])
+        lie_losses.append(term_values["lie"])
+        pde_losses.append(term_values["pde"])
+        sparsity_losses.append(term_values["sparsity"])
+        worst_case_losses.append(term_values["worst_case"])
 
         monitored_loss = term_values["total"]
         if val_sequences is not None:
@@ -736,6 +371,7 @@ def run_fit_loop(
                 model,
                 val_sequences,
                 epoch_weights,
+                extra_losses=extra_losses,
                 rollout_horizon=rollout_horizon,
                 rollout_start_indices=epoch_rollout_starts,
             )
@@ -746,12 +382,20 @@ def run_fit_loop(
             assert val_backward_losses is not None
             assert val_rollout_losses is not None
             assert val_eigenvalue_losses is not None
+            assert val_lie_losses is not None
+            assert val_pde_losses is not None
+            assert val_sparsity_losses is not None
+            assert val_worst_case_losses is not None
             val_losses.append(val_terms["total"])
             val_reconstruction_losses.append(val_terms["reconstruction"])
             val_forward_losses.append(val_terms["forward"])
             val_backward_losses.append(val_terms["backward"])
             val_rollout_losses.append(val_terms["rollout"])
             val_eigenvalue_losses.append(val_terms["eigenvalue"])
+            val_lie_losses.append(val_terms["lie"])
+            val_pde_losses.append(val_terms["pde"])
+            val_sparsity_losses.append(val_terms["sparsity"])
+            val_worst_case_losses.append(val_terms["worst_case"])
             if early_stopping_monitor == "val":
                 monitored_loss = val_terms["total"]
 
@@ -790,6 +434,10 @@ def run_fit_loop(
         backward_loss=tuple(backward_losses),
         rollout_loss=tuple(rollout_losses),
         eigenvalue_loss=tuple(eigenvalue_losses),
+        lie_loss=tuple(lie_losses),
+        pde_loss=tuple(pde_losses),
+        sparsity_loss=tuple(sparsity_losses),
+        worst_case_loss=tuple(worst_case_losses),
         val_loss=None if val_losses is None else tuple(val_losses),
         val_reconstruction_loss=(
             None
@@ -807,6 +455,14 @@ def run_fit_loop(
         ),
         val_eigenvalue_loss=(
             None if val_eigenvalue_losses is None else tuple(val_eigenvalue_losses)
+        ),
+        val_lie_loss=None if val_lie_losses is None else tuple(val_lie_losses),
+        val_pde_loss=None if val_pde_losses is None else tuple(val_pde_losses),
+        val_sparsity_loss=(
+            None if val_sparsity_losses is None else tuple(val_sparsity_losses)
+        ),
+        val_worst_case_loss=(
+            None if val_worst_case_losses is None else tuple(val_worst_case_losses)
         ),
         stopped_early=stopped_early,
         best_epoch=best_epoch,

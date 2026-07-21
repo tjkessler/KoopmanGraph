@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from koopman_graph.datasets.nonlinear import ensure_wake_cache
+from koopman_graph.datasets.cylinder_wake import ensure_wake_cache
 
 
 def main() -> None:

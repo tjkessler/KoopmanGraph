@@ -3,7 +3,8 @@
 Optional dependency convention
 ------------------------------
 Gymnasium is an optional ``[rl]`` extra. This module soft-imports it at load
-time so ``import koopman_graph`` and ``from koopman_graph import GraphKoopmanEnv``
+time so ``import koopman_graph.env`` and
+``from koopman_graph.env import GraphKoopmanEnv``
 succeed without Gymnasium installed. Construction fails at call time via
 :func:`_require_gymnasium` with install guidance. Soft import is required here
 because :class:`GraphKoopmanEnv` subclasses ``gymnasium.Env`` when available.

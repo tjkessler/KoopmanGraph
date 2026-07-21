@@ -4,21 +4,29 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import (
-    BackwardConsistencyLoss,
-    ForwardConsistencyLoss,
-    GNNDecoder,
-    GNNEncoder,
-    GraphKoopmanModel,
-)
+from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
     snapshot_topology_at,
 )
-from koopman_graph.losses import rollout_sequence_loss
-from koopman_graph.operators import KoopmanOperator
+from koopman_graph.losses import (
+    BackwardConsistencyLoss,
+    ForwardConsistencyLoss,
+    KoopmanSparsityLoss,
+    LieConsistencyLoss,
+    PDEResidualLoss,
+    WorstCaseReconstructionLoss,
+    rollout_sequence_loss,
+)
+from koopman_graph.operators import (
+    ContinuousKoopmanOperator,
+    GraphKoopmanOperator,
+    KoopmanOperator,
+)
 from koopman_graph.training import (
+    ExtraLosses,
+    LossWeights,
     compute_backward_consistency_sequence_loss,
     compute_forward_consistency_sequence_loss,
     compute_training_loss,
@@ -553,6 +561,198 @@ def test_eigenvalue_loss_dissipative_zero_continuous() -> None:
     )
 
 
+def test_eigenvalue_loss_graph_dense_requires_topology() -> None:
+    """Graph dense/ODO eigenvalue loss never falls back to K_self alone."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    loss_fn = EigenvalueRegularizationLoss()
+    with pytest.raises(ValueError, match="edge_index and num_nodes are required"):
+        loss_fn(op)
+
+
+def test_eigenvalue_loss_graph_neighbor_coupling_affects_penalty() -> None:
+    """Fixed K_self with larger K_nbr increases the effective-operator hinge."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    k_self = 0.5 * torch.eye(2)
+    loss_fn = EigenvalueRegularizationLoss()
+
+    mild = GraphKoopmanOperator(2, init_mode="identity")
+    mild.set_dense_matrices(k_self, 0.1 * torch.eye(2))
+    strong = GraphKoopmanOperator(2, init_mode="identity")
+    strong.set_dense_matrices(k_self.clone(), 2.0 * torch.eye(2))
+
+    mild_loss = loss_fn(mild, edge_index=edge_index, num_nodes=2)
+    strong_loss = loss_fn(strong, edge_index=edge_index, num_nodes=2)
+    assert mild_loss.item() == pytest.approx(0.0, abs=1e-6)
+    assert strong_loss.item() > mild_loss.item()
+
+
+def test_eigenvalue_loss_graph_edge_weight_affects_penalty() -> None:
+    """Edge weights change graph dense regularization with fixed K factors."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    # Triangle: unequal weights change Â eigenvalues (unlike a weighted path).
+    edge_index = torch.tensor(
+        [[0, 1, 1, 2, 2, 0], [1, 0, 2, 1, 0, 2]],
+        dtype=torch.long,
+    )
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    op.set_dense_matrices(0.2 * torch.eye(2), 1.5 * torch.eye(2))
+    loss_fn = EigenvalueRegularizationLoss()
+
+    equal = loss_fn(
+        op,
+        edge_index=edge_index,
+        num_nodes=3,
+        edge_weight=torch.ones(6),
+    )
+    unequal = loss_fn(
+        op,
+        edge_index=edge_index,
+        num_nodes=3,
+        edge_weight=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.01, 0.01]),
+    )
+    assert equal.item() != pytest.approx(unequal.item(), abs=1e-4)
+
+
+def test_eigenvalue_loss_graph_structural_uses_factor_bound() -> None:
+    """Graph structural modes keep factor bound_metric without topology."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    op = GraphKoopmanOperator(3, parameterization="dissipative")
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(op).item() == pytest.approx(0.0, abs=1e-8)
+
+
+def test_compute_eigenvalue_regularization_graph_requires_sequence() -> None:
+    """Training helper refuses graph dense regularization without a sequence."""
+    from koopman_graph.operators import GraphKoopmanOperator
+    from koopman_graph.training import compute_eigenvalue_regularization_loss
+
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=0.1,
+        koopman="graph",
+    )
+    assert isinstance(model.koopman, GraphKoopmanOperator)
+    with pytest.raises(ValueError, match="sequence is required"):
+        compute_eigenvalue_regularization_loss(model)
+
+
+def test_backward_consistency_graph_bilinear_global_and_per_node(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Backward consistency accepts global and per-node graph bilinear controls."""
+    encoder = GNNEncoder(in_channels=3, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=3, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=0.1,
+        koopman="graph",
+        control_dim=1,
+        control_mode="bilinear",
+    )
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(3)
+    ]
+    global_seq = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(3, 1))
+    per_node_seq = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(3, 5, 1))
+    for sequence in (global_seq, per_node_seq):
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+        assert loss.ndim == 0
+        assert torch.isfinite(loss).item()
+        loss.backward()
+        model.zero_grad(set_to_none=True)
+
+
+def test_compute_training_loss_graph_eigenvalue_uses_topology(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Training loss threads sequence topology into graph eigenvalue hinge."""
+    from koopman_graph.operators import GraphKoopmanOperator
+    from koopman_graph.training import compute_eigenvalue_regularization_loss
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=3, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=0.1,
+        koopman="graph",
+    )
+    assert isinstance(model.koopman, GraphKoopmanOperator)
+    model.koopman.set_dense_matrices(0.5 * torch.eye(2), 2.0 * torch.eye(2))
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index) for _ in range(3)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    eig = compute_eigenvalue_regularization_loss(model, sequence)
+    assert eig.item() > 0.0
+    breakdown = compute_training_loss(
+        model,
+        sequence,
+        constant_loss_weights(eigenvalue=1.0),
+    )
+    assert breakdown.eigenvalue.item() == pytest.approx(eig.item(), abs=1e-6)
+
+
+def test_compute_eigenvalue_regularization_dynamic_pair_mean(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Dynamic sequences average pair-target topology hinges."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+    from koopman_graph.training import compute_eigenvalue_regularization_loss
+
+    encoder = GNNEncoder(in_channels=3, hidden_channels=4, latent_dim=2, num_layers=1)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=3, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=0.1,
+        koopman="graph",
+    )
+    assert isinstance(model.koopman, GraphKoopmanOperator)
+    model.koopman.set_dense_matrices(0.2 * torch.eye(2), 1.5 * torch.eye(2))
+
+    alt_edges = torch.tensor(
+        [[0, 1, 1, 2, 2, 3, 3, 4], [1, 0, 2, 1, 3, 2, 4, 3]],
+        dtype=torch.long,
+    )
+    snapshots = [
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index),
+        Data(x=torch.randn(5, 3), edge_index=synthetic_edge_index),
+        Data(x=torch.randn(5, 3), edge_index=alt_edges),
+    ]
+    sequence = GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+    loss_fn = EigenvalueRegularizationLoss()
+    expected = 0.5 * (
+        loss_fn(
+            model.koopman,
+            edge_index=synthetic_edge_index,
+            num_nodes=5,
+        )
+        + loss_fn(model.koopman, edge_index=alt_edges, num_nodes=5)
+    )
+    got = compute_eigenvalue_regularization_loss(model, sequence)
+    assert got.item() == pytest.approx(expected.item(), abs=1e-5)
+
+
 def test_backward_consistency_dense_precomputes_inverse(
     trainable_model: GraphKoopmanModel,
     scaling_sequence: GraphSnapshotSequence,
@@ -729,3 +929,236 @@ def test_predict_and_rollout_loss_agree_on_static_topology(
             start=start,
         )
         assert torch.allclose(loss, expected_loss, atol=1e-6)
+
+
+def test_lie_consistency_is_zero_for_exact_linear_vector_field() -> None:
+    """An identity observable exactly matches its continuous linear generator."""
+    generator = torch.tensor([[-0.2, 1.0], [-1.0, -0.2]])
+    operator = ContinuousKoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        operator.L.copy_(generator)
+    state = torch.randn(5, 2, requires_grad=True)
+
+    loss = LieConsistencyLoss()(
+        state,
+        observable_fn=lambda value: value,
+        dynamics_fn=lambda value: value @ generator.T,
+        koopman=operator,
+    )
+
+    assert loss.item() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_lie_consistency_rejects_wrong_vector_field_shape() -> None:
+    """The known vector field must preserve the physical-state shape."""
+    operator = ContinuousKoopmanOperator(2)
+    with pytest.raises(ValueError, match="dynamics_fn output"):
+        LieConsistencyLoss()(
+            torch.randn(3, 2),
+            observable_fn=lambda value: value,
+            dynamics_fn=lambda value: value[:, :1],
+            koopman=operator,
+        )
+
+
+def test_lie_consistency_rejects_controlled_operator() -> None:
+    """Autonomous Lie consistency must not silently discard control terms."""
+    operator = ContinuousKoopmanOperator(2, control_dim=1)
+    with pytest.raises(ValueError, match="uncontrolled"):
+        LieConsistencyLoss()(
+            torch.randn(3, 2),
+            observable_fn=lambda value: value,
+            dynamics_fn=lambda value: -value,
+            koopman=operator,
+        )
+
+
+def test_pde_residual_loss_distinguishes_exact_and_wrong_residuals() -> None:
+    """A satisfied residual is zero while an incorrect PDE remains positive."""
+    decoded = torch.ones(4, 1)
+    snapshot = Data(
+        x=decoded.clone(),
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+    )
+    loss_fn = PDEResidualLoss()
+
+    exact = loss_fn(
+        decoded,
+        snapshot,
+        pde_fn=lambda prediction, context: prediction - context.x,
+    )
+    wrong = loss_fn(
+        decoded,
+        snapshot,
+        pde_fn=lambda prediction, context: prediction + context.x,
+    )
+
+    assert exact.item() == pytest.approx(0.0)
+    assert wrong.item() == pytest.approx(4.0)
+
+
+def test_lie_consistency_is_wired_into_training_loss() -> None:
+    """Continuous training composes the fit-time vector field and Lie weight."""
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2)
+    decoder = GNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2)
+    model = GraphKoopmanModel(
+        encoder,
+        decoder,
+        latent_dim=2,
+        dynamics_mode="continuous",
+        time_step=0.1,
+    )
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    sequence = GraphSnapshotSequence(
+        [Data(x=torch.randn(2, 2), edge_index=edge_index) for _ in range(2)]
+    )
+
+    breakdown = compute_training_loss(
+        model,
+        sequence,
+        LossWeights(reconstruction=0.0, lie=1.0),
+        extra_losses=ExtraLosses(
+            lie_dynamics_fn=lambda snapshot: -snapshot.x,
+        ),
+    )
+    breakdown.total.backward()
+
+    assert breakdown.lie.ndim == 0
+    assert torch.isfinite(breakdown.lie).item()
+    assert any(parameter.grad is not None for parameter in model.parameters())
+
+
+def _sparsity_fraction(matrix: torch.Tensor, *, threshold: float = 1e-2) -> float:
+    """Return the fraction of entries with absolute value below ``threshold``."""
+    entries = matrix.detach().reshape(-1).abs()
+    return float((entries < threshold).float().mean().item())
+
+
+def test_koopman_sparsity_loss_l1_mean_absolute() -> None:
+    """Pure L1 sparsity equals the mean absolute entry of ``K``."""
+    koopman = KoopmanOperator(3, init_mode="identity")
+    with torch.no_grad():
+        koopman.K.copy_(
+            torch.tensor(
+                [[1.0, -2.0, 0.0], [0.5, 0.0, -0.5], [0.0, 0.0, 0.25]],
+            )
+        )
+    loss = KoopmanSparsityLoss()(koopman)
+    expected = koopman.matrix.abs().mean()
+    assert loss.item() == pytest.approx(expected.item(), abs=1e-6)
+
+
+def test_koopman_sparsity_loss_smoothed_lp_positive() -> None:
+    """Smoothed Lp (p<1) is finite and positive for a nonzero dense matrix."""
+    koopman = KoopmanOperator(2, init_mode="identity_noise")
+    loss = KoopmanSparsityLoss(p=0.5, eps=1e-6)(koopman)
+    assert loss.ndim == 0
+    assert loss.item() > 0.0
+    assert torch.isfinite(loss).item()
+
+
+def test_koopman_sparsity_loss_rejects_invalid_p() -> None:
+    """Sparsity exponent must lie in (0, 1]."""
+    with pytest.raises(ValueError, match="p must be in"):
+        KoopmanSparsityLoss(p=1.5)
+
+
+def test_koopman_sparsity_loss_graph_targets_self_and_nbr_not_effective() -> None:
+    """Graph sparsity penalizes ``K_self``/``K_nbr``, not ``effective_matrix``."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    other_edges = torch.tensor([[0, 1, 0], [1, 0, 0]], dtype=torch.long)
+    koopman = GraphKoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        koopman.set_dense_matrices(
+            torch.tensor([[1.0, 0.0], [0.0, 0.0]]),
+            torch.tensor([[0.0, 2.0], [0.0, 0.0]]),
+        )
+    loss = KoopmanSparsityLoss()(koopman)
+    factor_entries = torch.cat(
+        (koopman.K_self.reshape(-1), koopman.K_nbr.reshape(-1)),
+        dim=0,
+    )
+    expected = factor_entries.abs().mean()
+    effective = koopman.effective_matrix(edge_index, num_nodes=2)
+    assert loss.item() == pytest.approx(expected.item(), abs=1e-6)
+    # Factor stack is 2 d² entries; effective is (N d)² — different tensors.
+    assert factor_entries.numel() == 8
+    assert effective.numel() == 16
+    assert factor_entries.abs().sum().item() != pytest.approx(
+        effective.abs().sum().item(),
+        abs=1e-6,
+    )
+    # Topology must not affect the sparsity target (parameter-level only).
+    assert KoopmanSparsityLoss()(koopman).item() == pytest.approx(loss.item(), abs=1e-6)
+    assert not torch.allclose(
+        effective,
+        koopman.effective_matrix(other_edges, num_nodes=2),
+    )
+
+
+def test_worst_case_reconstruction_loss_is_max_node_mse() -> None:
+    """Worst-case loss matches the max over per-node mean squared errors."""
+    prediction = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]])
+    target = torch.zeros_like(prediction)
+    loss = WorstCaseReconstructionLoss()(prediction, target)
+    node_mse = (prediction - target).square().mean(dim=-1)
+    assert loss.item() == pytest.approx(node_mse.max().item(), abs=1e-6)
+
+
+def test_worst_case_reconstruction_loss_respects_mask() -> None:
+    """Masked worst-case ignores unobserved nodes."""
+    prediction = torch.tensor([[10.0], [0.5], [0.25]])
+    target = torch.zeros_like(prediction)
+    mask = torch.tensor([False, True, True])
+    loss = WorstCaseReconstructionLoss()(prediction, target, mask)
+    assert loss.item() == pytest.approx(0.25, abs=1e-6)
+
+
+def test_compute_training_loss_includes_sparsity_and_worst_case(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Non-zero sparsity / worst-case weights appear in the breakdown total."""
+    weights = LossWeights(reconstruction=1.0, sparsity=0.5, worst_case=0.25)
+    breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
+    assert breakdown.sparsity.item() > 0.0
+    assert breakdown.worst_case.item() > 0.0
+    expected_total = (
+        weights.reconstruction * breakdown.reconstruction
+        + weights.sparsity * breakdown.sparsity
+        + weights.worst_case * breakdown.worst_case
+    )
+    assert breakdown.total.item() == pytest.approx(expected_total.item(), abs=1e-5)
+
+
+def test_sparsity_fraction_increases_with_weight(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Seeded sweep: larger ``LossWeights.sparsity`` yields a sparser ``K``."""
+    fractions: list[float] = []
+    for sparsity_weight in (0.0, 0.5, 2.0):
+        torch.manual_seed(0)
+        encoder = GNNEncoder(in_channels=3, hidden_channels=16, latent_dim=8)
+        decoder = GNNDecoder(latent_dim=8, hidden_channels=16, out_channels=3)
+        model = GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=8,
+            time_step=0.1,
+        )
+        model.fit(
+            scaling_sequence,
+            epochs=40,
+            lr=5e-2,
+            loss_weights=LossWeights(reconstruction=1.0, sparsity=sparsity_weight),
+        )
+        fractions.append(_sparsity_fraction(model.koopman.matrix, threshold=1e-2))
+
+    assert fractions[0] < fractions[1] < fractions[2]
+
+
+def test_worst_case_is_robust_training_term_not_generalization_claim() -> None:
+    """Docstring states worst-case loss is not a generalization certificate."""
+    doc = WorstCaseReconstructionLoss.__doc__ or ""
+    assert "not" in doc.lower()
+    assert "generalization" in doc.lower()

@@ -9,12 +9,12 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import (
-    DMDcBaseline,
     GNNDecoder,
     GNNEncoder,
     GraphKoopmanModel,
     GraphSnapshotSequence,
 )
+from koopman_graph.baselines import DMDcBaseline
 from koopman_graph.data import temporal_split
 from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
 from koopman_graph.operators import KoopmanOperator
@@ -478,3 +478,90 @@ def test_bilinear_model_serialization_round_trip(tmp_path: Path) -> None:
     assert torch.allclose(restored.koopman.P, model.koopman.P)
     assert torch.allclose(restored.koopman.Q, model.koopman.Q)
     assert torch.allclose(restored.koopman.B, model.koopman.B)
+
+
+def test_control_helper_validation_and_bilinear_terms() -> None:
+    """Shared control helpers cover validation and bilinear assembly paths."""
+    from koopman_graph.operators.control import (
+        allocate_bilinear_parameters,
+        bilinear_coupling_tensor,
+        bilinear_state_control_term,
+        broadcast_control_term,
+        effective_bilinear_matrix,
+        per_node_effective_bilinear_matrices,
+        reset_bilinear_parameters,
+        validate_control_mode,
+    )
+
+    validate_control_mode(
+        control_dim=2, control_mode="bilinear", bilinear_rank=1, latent_dim=3
+    )
+    with pytest.raises(ValueError, match="control_mode must be"):
+        validate_control_mode(
+            control_dim=1,
+            control_mode="quadratic",
+            bilinear_rank=None,
+            latent_dim=2,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="requires control_dim"):
+        validate_control_mode(
+            control_dim=0, control_mode="bilinear", bilinear_rank=None, latent_dim=2
+        )
+    with pytest.raises(ValueError, match="bilinear_rank requires"):
+        validate_control_mode(
+            control_dim=1, control_mode="additive", bilinear_rank=1, latent_dim=2
+        )
+    with pytest.raises(ValueError, match="bilinear_rank must be"):
+        validate_control_mode(
+            control_dim=1, control_mode="bilinear", bilinear_rank=0, latent_dim=2
+        )
+    with pytest.raises(ValueError, match="cannot exceed"):
+        validate_control_mode(
+            control_dim=1, control_mode="bilinear", bilinear_rank=5, latent_dim=2
+        )
+
+    module = torch.nn.Module()
+    allocate_bilinear_parameters(module, control_dim=2, latent_dim=3, bilinear_rank=1)
+    reset_bilinear_parameters(module)
+    coupling = bilinear_coupling_tensor(module)
+    assert coupling.shape == (2, 3, 3)
+
+    empty = torch.nn.Module()
+    with pytest.raises(AttributeError, match="no bilinear factors"):
+        bilinear_coupling_tensor(empty)
+
+    z = torch.randn(4, 3)
+    global_u = torch.tensor([0.5, -0.25])
+    term = bilinear_state_control_term(z, global_u, coupling)
+    assert term.shape == z.shape
+    per_node = torch.randn(4, 2)
+    assert bilinear_state_control_term(z, per_node, coupling).shape == z.shape
+    with pytest.raises(ValueError, match="node axis"):
+        bilinear_state_control_term(torch.randn(3), per_node, coupling)
+    with pytest.raises(ValueError, match="rows"):
+        bilinear_state_control_term(z, torch.randn(5, 2), coupling)
+    with pytest.raises(ValueError, match="control input must have shape"):
+        bilinear_state_control_term(z, torch.randn(2, 2, 2), coupling)
+
+    offset = torch.tensor([1.0, -0.5, 0.25])
+    broadcast = broadcast_control_term(z, offset, latent_dim=3)
+    assert broadcast.shape == z.shape
+    assert torch.allclose(broadcast[0], offset)
+    assert torch.allclose(broadcast[-1], offset)
+    batched = torch.randn(2, 4, 3)
+    assert broadcast_control_term(batched, offset, latent_dim=3).shape == batched.shape
+
+    base = torch.eye(3)
+    effective = effective_bilinear_matrix(base, global_u, coupling)
+    assert effective.shape == (3, 3)
+    with pytest.raises(ValueError, match="global control"):
+        effective_bilinear_matrix(base, per_node, coupling)
+
+    blocks = per_node_effective_bilinear_matrices(base, per_node, coupling)
+    assert blocks.shape == (4, 3, 3)
+    assert torch.allclose(
+        blocks[0],
+        effective_bilinear_matrix(base, per_node[0], coupling),
+    )
+    with pytest.raises(ValueError, match="per-node control"):
+        per_node_effective_bilinear_matrices(base, global_u, coupling)

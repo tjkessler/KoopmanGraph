@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel, LossWeights
+from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import (
     GraphSnapshotSequence,
     MultiTrajectory,
@@ -14,8 +14,9 @@ from koopman_graph.data import (
     temporal_split,
 )
 from koopman_graph.training import (
+    ExtraLosses,
     FitHistory,
-    TrainingLossBreakdown,
+    LossWeights,
     compute_sequence_loss,
     compute_training_loss,
     constant_loss_weights,
@@ -29,6 +30,7 @@ from koopman_graph.training import (
     should_stop_early,
     train_one_epoch,
 )
+from koopman_graph.training.history import TrainingLossBreakdown
 
 
 @pytest.fixture
@@ -232,9 +234,121 @@ def test_compute_training_loss_skips_zero_reconstruction_weight(
 ) -> None:
     """Verify zero reconstruction weight skips the reconstruction term."""
     weights = LossWeights(reconstruction=0.0, forward=1.0, backward=0.0)
-    breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
+    with (
+        patch(
+            "koopman_graph.training.objectives.compute_sequence_loss",
+            side_effect=AssertionError("reconstruction path should be skipped"),
+        ) as mock_reconstruction,
+        patch(
+            "koopman_graph.training.objectives.compute_backward_consistency_sequence_loss",
+            side_effect=AssertionError("backward path should be skipped"),
+        ) as mock_backward,
+        patch(
+            "koopman_graph.training.objectives.compute_eigenvalue_regularization_loss",
+            side_effect=AssertionError("eigenvalue path should be skipped"),
+        ) as mock_eigenvalue,
+    ):
+        breakdown = compute_training_loss(trainable_model, scaling_sequence, weights)
+
+    assert mock_reconstruction.call_count == 0
+    assert mock_backward.call_count == 0
+    assert mock_eigenvalue.call_count == 0
+    assert breakdown.reconstruction.item() == 0.0
+    assert breakdown.backward.item() == 0.0
+    assert breakdown.eigenvalue.item() == 0.0
+    assert breakdown.forward.item() >= 0.0
     assert breakdown.total.ndim == 0
     assert torch.isfinite(breakdown.total).item()
+
+
+def test_compute_training_loss_skips_zero_weight_core_terms(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Zero core weights skip compute helpers; non-zero weights retain values."""
+    device = next(trainable_model.parameters()).device
+    nonzero = LossWeights(
+        reconstruction=1.0,
+        forward=0.5,
+        backward=0.25,
+        eigenvalue=0.1,
+    )
+    baseline = compute_training_loss(trainable_model, scaling_sequence, nonzero)
+
+    with (
+        patch(
+            "koopman_graph.training.objectives.compute_sequence_loss",
+            side_effect=AssertionError("reconstruction path should be skipped"),
+        ),
+        patch(
+            "koopman_graph.training.objectives.compute_forward_consistency_sequence_loss",
+            side_effect=AssertionError("forward path should be skipped"),
+        ),
+        patch(
+            "koopman_graph.training.objectives.compute_backward_consistency_sequence_loss",
+            side_effect=AssertionError("backward path should be skipped"),
+        ),
+        patch(
+            "koopman_graph.training.objectives.compute_eigenvalue_regularization_loss",
+            side_effect=AssertionError("eigenvalue path should be skipped"),
+        ),
+    ):
+        skipped = compute_training_loss(
+            trainable_model,
+            scaling_sequence,
+            LossWeights(
+                reconstruction=0.0,
+                forward=0.0,
+                backward=0.0,
+                eigenvalue=0.0,
+            ),
+        )
+
+    assert skipped.reconstruction.item() == 0.0
+    assert skipped.forward.item() == 0.0
+    assert skipped.backward.item() == 0.0
+    assert skipped.eigenvalue.item() == 0.0
+    assert skipped.total.item() == 0.0
+    assert skipped.reconstruction.device == device
+
+    retained = compute_training_loss(trainable_model, scaling_sequence, nonzero)
+    assert torch.allclose(retained.reconstruction, baseline.reconstruction)
+    assert torch.allclose(retained.forward, baseline.forward)
+    assert torch.allclose(retained.backward, baseline.backward)
+    assert torch.allclose(retained.eigenvalue, baseline.eigenvalue)
+    assert torch.allclose(retained.total, baseline.total)
+
+
+def test_compute_training_loss_requires_enabled_extra_loss_callable(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """A non-zero physics residual weight requires its fit-time callable."""
+    with pytest.raises(ValueError, match="pde_residual_fn"):
+        compute_training_loss(
+            trainable_model,
+            scaling_sequence,
+            LossWeights(pde=1.0),
+        )
+
+
+def test_fit_records_pde_residual_from_extra_losses(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Fit-time PDE callables contribute to loss and history without persistence."""
+    history = trainable_model.fit(
+        scaling_sequence,
+        epochs=1,
+        loss_weights=LossWeights(reconstruction=0.0, pde=1.0),
+        extra_losses=ExtraLosses(
+            pde_residual_fn=lambda prediction, snapshot: prediction - snapshot.x
+        ),
+    )
+
+    assert len(history.pde_loss) == 1
+    assert history.pde_loss[0] >= 0.0
+    assert history.lie_loss == (0.0,)
 
 
 def test_linear_ramp_loss_weights_interpolates() -> None:
@@ -866,13 +980,23 @@ def test_training_loss_breakdown_zeros() -> None:
 
 
 def test_training_loss_breakdown_is_frozen() -> None:
-    """Verify ``TrainingLossBreakdown`` is a frozen value snapshot."""
+    """Verify ``TrainingLossBreakdown`` is a frozen internal snapshot."""
     import koopman_graph
+    import koopman_graph.training as training_pkg
 
     breakdown = TrainingLossBreakdown.zeros(torch.device("cpu"))
     with pytest.raises(AttributeError):
         breakdown.total = torch.ones(())  # type: ignore[misc]
     assert "TrainingLossBreakdown" not in koopman_graph.__all__
+    assert "TrainingLossBreakdown" not in training_pkg.__all__
+    assert not hasattr(training_pkg, "TrainingLossBreakdown")
+    with pytest.raises(ImportError):
+        from koopman_graph.training import (  # noqa: F401
+            TrainingLossBreakdown as _demoted,
+        )
+    from koopman_graph.training.history import TrainingLossBreakdown as deep
+
+    assert deep is TrainingLossBreakdown
 
 
 def test_mean_training_loss_breakdown_rejects_empty_input() -> None:

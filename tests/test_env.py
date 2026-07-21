@@ -7,9 +7,9 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
-from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanEnv, GraphKoopmanModel
+from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence
-from koopman_graph.env import flatten_latent, unflatten_latent
+from koopman_graph.env import GraphKoopmanEnv, flatten_latent, unflatten_latent
 
 gymnasium = pytest.importorskip("gymnasium")
 

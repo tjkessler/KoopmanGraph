@@ -6,20 +6,19 @@ from collections.abc import Sequence
 
 from torch_geometric.data import Data
 
-from koopman_graph.analysis import compute_spectrum
 from koopman_graph.baselines.base import (
     ClassicalBaseline,
-    _check_initial_graph,
-    _copy_topology,
-    _fit_row_operator,
-    _flatten_snapshots,
-    _require_static_topology,
+    check_initial_graph,
+    copy_topology,
+    fit_row_operator,
+    flatten_snapshots,
+    require_static_topology,
 )
 from koopman_graph.data import (
     GraphSnapshotSequence,
     resolve_sequence,
 )
-from koopman_graph.spectrum_types import KoopmanSpectrum
+from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 
 class DMDBaseline(ClassicalBaseline):
@@ -81,13 +80,13 @@ class DMDBaseline(ClassicalBaseline):
             topology, or rank is invalid.
         """
         resolved = resolve_sequence(sequence)
-        _require_static_topology(resolved)
+        require_static_topology(resolved)
         if resolved.num_timesteps < 2:
             msg = "DMDBaseline.fit requires at least two snapshots"
             raise ValueError(msg)
 
-        states = _flatten_snapshots(resolved)
-        self.K = _fit_row_operator(states[:-1], states[1:], self.rank)
+        states = flatten_snapshots(resolved)
+        self.K = fit_row_operator(states[:-1], states[1:], self.rank)
         self.num_nodes = resolved.num_nodes
         self.in_channels = resolved.in_channels
         self.state_dim = states.shape[1]
@@ -119,14 +118,14 @@ class DMDBaseline(ClassicalBaseline):
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)
-        _check_initial_graph(
+        check_initial_graph(
             initial_graph,
             num_nodes=num_nodes,
             in_channels=in_channels,
         )
 
         state = initial_graph.x.reshape(-1)
-        topology = _copy_topology(initial_graph)
+        topology = copy_topology(initial_graph)
         predictions: list[Data] = []
         for _ in range(steps):
             state = state @ operator.T

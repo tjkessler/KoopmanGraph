@@ -15,7 +15,7 @@ copyright = "2026, Travis Kessler"
 try:
     from koopman_graph import __version__ as release
 except ImportError:
-    release = "0.3.0"
+    release = "0.5.0"
 
 version = release
 
@@ -23,10 +23,15 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.mathjax",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx_copybutton",
 ]
+
+# Explicit HTML math renderer for documentation formulas.
+# Prefer MathJax over imgmath so CI/ReadTheDocs do not require a LaTeX install.
+mathjax_path = "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
 
 templates_path = ["_templates"]
 exclude_patterns: list[str] = []

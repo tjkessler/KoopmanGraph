@@ -21,11 +21,63 @@ from koopman_graph.datasets import (
     SyntheticDynamicGraphBenchmark,
     TopologyPayload,
 )
+from koopman_graph.datasets import kuramoto_sivashinsky as ks_mod
+from koopman_graph.datasets import lorenz96 as lorenz96_mod
+from koopman_graph.datasets import synthetic as synthetic_mod
 from koopman_graph.datasets.dynamics import (
     validate_advection_decay_rate,
     validate_diffusion_generation_params,
 )
-from koopman_graph.datasets.grid import _grid_edge_index, grid_node_index
+from koopman_graph.datasets.grid import (
+    _grid_edge_index,
+    anisotropic_advection_step,
+    grid_node_index,
+)
+from koopman_graph.datasets.topology import path_edge_index, ring_edge_index
+
+
+def test_path_ring_edge_builders_are_shared() -> None:
+    """Verify synthetic and chaotic peers reuse the same topology builders."""
+    assert synthetic_mod.path_edge_index is path_edge_index
+    assert synthetic_mod.ring_edge_index is ring_edge_index
+    assert lorenz96_mod.ring_edge_index is ring_edge_index
+    assert ks_mod.path_edge_index is path_edge_index
+    assert ks_mod.ring_edge_index is ring_edge_index
+    assert not hasattr(synthetic_mod, "_path_edge_index")
+    assert not hasattr(synthetic_mod, "_ring_edge_index")
+    assert not hasattr(lorenz96_mod, "_path_edge_index")
+    assert not hasattr(lorenz96_mod, "_ring_edge_index")
+    assert not hasattr(ks_mod, "_path_edge_index")
+    assert not hasattr(ks_mod, "_ring_edge_index")
+
+    assert path_edge_index(1).shape == (2, 0)
+    assert ring_edge_index(1).shape == (2, 0)
+    assert path_edge_index(5).shape == (2, 8)
+    assert ring_edge_index(5).shape == (2, 10)
+    assert torch.equal(path_edge_index(4), synthetic_mod._build_topology("path", 4))
+    assert torch.equal(ring_edge_index(4), synthetic_mod._build_topology("ring", 4))
+
+
+def test_retired_nonlinear_module_unavailable() -> None:
+    """Verify the hard migration removed datasets.nonlinear."""
+    import importlib
+
+    import koopman_graph.datasets as datasets_pkg
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("koopman_graph.datasets.nonlinear")
+
+    assert datasets_pkg.EpidemicNetworkBenchmark is EpidemicNetworkBenchmark
+    assert datasets_pkg.Lorenz96GraphBenchmark is Lorenz96GraphBenchmark
+    assert datasets_pkg.KuramotoSivashinskyBenchmark is KuramotoSivashinskyBenchmark
+    assert datasets_pkg.CylinderWakeBenchmark is CylinderWakeBenchmark
+    for name in (
+        "EpidemicNetworkBenchmark",
+        "Lorenz96GraphBenchmark",
+        "KuramotoSivashinskyBenchmark",
+        "CylinderWakeBenchmark",
+    ):
+        assert name in datasets_pkg.__all__
 
 
 @pytest.mark.parametrize(
@@ -166,6 +218,18 @@ def test_advection_grid_one_step_matches_closed_form_mixture() -> None:
         [mix0, mix1, mix2, mix3]
     )
     assert torch.allclose(sequence[1].x, expected, atol=1e-6)
+    assert torch.allclose(
+        anisotropic_advection_step(
+            state,
+            num_rows=2,
+            num_cols=2,
+            decay_rate=decay_rate,
+            west_weight=west_weight,
+            north_weight=north_weight,
+        ),
+        expected,
+        atol=1e-6,
+    )
 
 
 def test_advection_grid_generate_returns_graph_snapshot_sequence() -> None:
@@ -269,6 +333,84 @@ def test_advection_grid_gat_beats_gcn_on_rollout() -> None:
         )
     )
     assert gat_mse < gcn_mse
+
+
+def test_advection_grid_diffconv_beats_gcn_on_rollout() -> None:
+    """Verify DiffConv beats GCN on asymmetric advection at matched capacity."""
+    from koopman_graph import (
+        DiffConvDecoder,
+        DiffConvEncoder,
+        GNNDecoder,
+        GNNEncoder,
+        GraphKoopmanModel,
+    )
+    from koopman_graph.training import constant_loss_weights
+
+    sequence = AnisotropicAdvectionGridBenchmark.generate(
+        num_rows=8,
+        num_cols=8,
+        num_timesteps=30,
+        seed=0,
+    )
+    in_channels = sequence.in_channels
+    hidden = 32
+    latent = 32
+    weights = constant_loss_weights(reconstruction=1.0, forward=1.0, rollout=2.0)
+    fit_kwargs = {
+        "epochs": 60,
+        "lr": 1e-3,
+        "loss_weights": weights,
+        "rollout_horizon": 5,
+        "max_grad_norm": 1.0,
+    }
+
+    diff_model = GraphKoopmanModel(
+        DiffConvEncoder(
+            in_channels,
+            hidden,
+            latent,
+            diffusion_steps=2,
+        ),
+        DiffConvDecoder(
+            latent,
+            hidden,
+            in_channels,
+            diffusion_steps=2,
+        ),
+        latent_dim=latent,
+        time_step=0.1,
+    )
+    gcn_model = GraphKoopmanModel(
+        GNNEncoder(in_channels, hidden, latent),
+        GNNDecoder(latent, hidden, in_channels),
+        latent_dim=latent,
+        time_step=0.1,
+    )
+    torch.manual_seed(0)
+    diff_model.fit(sequence, **fit_kwargs)
+    torch.manual_seed(0)
+    gcn_model.fit(sequence, **fit_kwargs)
+
+    diff_preds = diff_model.predict(sequence[0], steps=5)
+    gcn_preds = gcn_model.predict(sequence[0], steps=5)
+    ground_truth = sequence[1:6]
+    diff_mse = torch.mean(
+        torch.stack(
+            [
+                torch.mean((pred.x - truth.x) ** 2)
+                for pred, truth in zip(diff_preds, ground_truth, strict=True)
+            ]
+        )
+    )
+    gcn_mse = torch.mean(
+        torch.stack(
+            [
+                torch.mean((pred.x - truth.x) ** 2)
+                for pred, truth in zip(gcn_preds, ground_truth, strict=True)
+            ]
+        )
+    )
+    assert diff_mse < gcn_mse
 
 
 def test_grid_generate_returns_graph_snapshot_sequence() -> None:
@@ -871,7 +1013,7 @@ def test_kuramoto_sivashinsky_seed_determinism_and_energy() -> None:
 
 def test_cylinder_wake_cache_load(tmp_path: Path) -> None:
     """Verify cylinder-wake cache build/load mirrors the METR-LA pattern."""
-    from koopman_graph.datasets.nonlinear import ensure_wake_cache
+    from koopman_graph.datasets.cylinder_wake import ensure_wake_cache
 
     cache_path = ensure_wake_cache(tmp_path, force=True)
     assert cache_path.exists()

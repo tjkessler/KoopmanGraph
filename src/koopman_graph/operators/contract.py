@@ -9,7 +9,14 @@ import torch
 from torch import Tensor
 
 InitMode = Literal["identity", "identity_noise", "xavier"]
-Parameterization = Literal["dense", "odo", "schur", "dissipative", "lyapunov"]
+Parameterization = Literal[
+    "dense",
+    "odo",
+    "schur",
+    "dissipative",
+    "lyapunov",
+    "auxiliary_spectral",
+]
 #: Canonical discrete vs continuous dynamics vocabulary. Re-exported from
 #: :mod:`koopman_graph.protocols` as :data:`~koopman_graph.protocols.DynamicsMode`.
 DynamicsMode = Literal["discrete", "continuous"]
@@ -258,7 +265,7 @@ def cayley_orthogonal(skew_params: Tensor) -> Tensor:
     return torch.linalg.solve(identity - skew, identity + skew)
 
 
-def _bounded_diagonal(raw: Tensor, max_radius: float) -> Tensor:
+def bounded_diagonal(raw: Tensor, max_radius: float) -> Tensor:
     """Map unconstrained parameters to a bounded diagonal matrix.
 
     Parameters
@@ -277,7 +284,7 @@ def _bounded_diagonal(raw: Tensor, max_radius: float) -> Tensor:
     return torch.diag(values)
 
 
-def _strict_diagonal_values(raw: Tensor, max_spectral_radius: float) -> Tensor:
+def strict_diagonal_values(raw: Tensor, max_spectral_radius: float) -> Tensor:
     """Map raw parameters to strictly bounded diagonal eigenvalues.
 
     Parameters
@@ -296,7 +303,7 @@ def _strict_diagonal_values(raw: Tensor, max_spectral_radius: float) -> Tensor:
     return torch.tanh(raw) * bound
 
 
-def _safe_diagonal_inverse(diag_values: Tensor) -> Tensor:
+def safe_diagonal_inverse(diag_values: Tensor) -> Tensor:
     """Return ``diag(1 / d_i)`` with magnitude flooring that preserves sign.
 
     Parameters
@@ -314,3 +321,29 @@ def _safe_diagonal_inverse(diag_values: Tensor) -> Tensor:
     eps = torch.finfo(diag_values.dtype).eps
     safe = torch.copysign(diag_values.abs().clamp_min(eps), diag_values)
     return torch.diag(1.0 / safe)
+
+
+def build_stability_certificate(
+    margin: Tensor,
+    *,
+    lyapunov_matrix: Tensor | None = None,
+) -> StabilityCertificate:
+    """Build a frozen :class:`StabilityCertificate` from a scalar margin.
+
+    Shared by discrete (unit-disk gap) and continuous (Hurwitz gap)
+    orchestrators so certificate construction stays in ``contract`` rather
+    than being re-inlined beside domain-specific bound formulas.
+
+    Parameters
+    ----------
+    margin : Tensor
+        Positive stability margin for the active certificate.
+    lyapunov_matrix : Tensor or None, optional
+        Optional positive-definite Lyapunov matrix ``P``.
+
+    Returns
+    -------
+    StabilityCertificate
+        Frozen certificate with ``margin`` and optional ``lyapunov_matrix``.
+    """
+    return StabilityCertificate(margin=margin, lyapunov_matrix=lyapunov_matrix)

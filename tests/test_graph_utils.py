@@ -9,7 +9,9 @@ from torch_geometric.data import Data
 from koopman_graph.graph_utils import (
     advance_and_decode,
     autoregressive_latent_rollout,
+    degree_support_mask,
     dense_symmetric_normalized_adjacency,
+    dense_symmetric_normalized_laplacian,
     hold_last_topology_at,
     inverse_propagate_latent,
     propagate_latent,
@@ -22,6 +24,7 @@ from koopman_graph.graph_utils import (
     snapshot_topology_at,
     symmetric_normalized_adjacency_edge_weights,
     symmetric_normalized_adjacency_matvec,
+    symmetric_normalized_laplacian_matvec,
 )
 from koopman_graph.operators import ContinuousKoopmanOperator, KoopmanOperator
 
@@ -81,7 +84,7 @@ def test_dense_adjacency_accumulates_duplicate_edges() -> None:
 
 
 def test_isolated_node_normalized_adjacency_has_zero_row() -> None:
-    """Isolated nodes contribute zero degree and a zero row/column of Ã."""
+    """Isolated nodes contribute zero degree and a zero row/column of Â."""
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     num_nodes = 3
     x = torch.tensor([[1.0, 0.0], [0.0, 1.0], [2.0, -1.0]])
@@ -95,8 +98,50 @@ def test_isolated_node_normalized_adjacency_has_zero_row() -> None:
 
     sparse = symmetric_normalized_adjacency_matvec(edge_index, x, num_nodes=num_nodes)
     assert torch.allclose(sparse[2], torch.zeros(2))
-    # L_sym @ x leaves isolated-node features unchanged (Ã row is zero).
-    assert torch.allclose(x[2] - sparse[2], x[2])
+
+    support = degree_support_mask(
+        edge_index,
+        num_nodes=num_nodes,
+        dtype=torch.float32,
+    )
+    assert torch.allclose(support, torch.tensor([1.0, 1.0, 0.0]))
+
+    # L_sym = P - Â maps isolated-node features to zeros (not identity passthrough).
+    laplacian_sparse = symmetric_normalized_laplacian_matvec(
+        edge_index,
+        x,
+        num_nodes=num_nodes,
+    )
+    laplacian_dense = dense_symmetric_normalized_laplacian(
+        edge_index,
+        num_nodes,
+        dtype=torch.float32,
+    )
+    assert torch.allclose(laplacian_sparse[2], torch.zeros(2))
+    assert torch.allclose(laplacian_dense @ x, laplacian_sparse, atol=1e-6)
+    assert torch.allclose(laplacian_dense[2], torch.zeros(3))
+    assert torch.allclose(laplacian_dense[:, 2], torch.zeros(3))
+
+
+def test_no_isolate_laplacian_reduces_to_i_minus_adj() -> None:
+    """On fully positive-degree graphs, L_sym equals I - Â."""
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    num_nodes = 3
+    x = torch.randn(3, 2)
+    adj = dense_symmetric_normalized_adjacency(
+        edge_index,
+        num_nodes,
+        dtype=torch.float32,
+    )
+    laplacian = dense_symmetric_normalized_laplacian(
+        edge_index,
+        num_nodes,
+        dtype=torch.float32,
+    )
+    expected = torch.eye(num_nodes) - adj
+    assert torch.allclose(laplacian, expected, atol=1e-6)
+    sparse = symmetric_normalized_laplacian_matvec(edge_index, x, num_nodes=num_nodes)
+    assert torch.allclose(sparse, expected @ x, atol=1e-6)
 
 
 def test_snapshot_edge_weight_absent_and_present() -> None:
@@ -324,3 +369,50 @@ def test_autoregressive_latent_rollout_rejects_invalid_steps() -> None:
             steps=0,
             topology_at=hold_last_topology_at(edge_index),
         )
+
+
+_DOCUMENTED_GRAPH_UTILS_EXPORTS = (
+    "ControlAtFn",
+    "DecoderFn",
+    "DeltaTAtFn",
+    "KoopmanPropagator",
+    "TopologyAtFn",
+    "advance_and_decode",
+    "autoregressive_latent_rollout",
+    "degree_support_mask",
+    "dense_symmetric_normalized_adjacency",
+    "dense_symmetric_normalized_laplacian",
+    "hold_last_topology_at",
+    "inverse_propagate_latent",
+    "node_degrees",
+    "pack_rollout_snapshots",
+    "propagate_latent",
+    "resolve_delta_t",
+    "resolve_edge_index",
+    "resolve_edge_weight",
+    "resolve_graph_inputs",
+    "snapshot_edge_weight",
+    "snapshot_to_device",
+    "snapshot_topology_at",
+    "symmetric_normalized_adjacency_edge_weights",
+    "symmetric_normalized_adjacency_matvec",
+    "symmetric_normalized_laplacian_matvec",
+)
+
+
+def test_graph_utils_package_import_contract() -> None:
+    """Verify package re-exports every documented graph_utils symbol."""
+    import koopman_graph.graph_utils as graph_utils
+    from koopman_graph.graph_utils import topology as topology_mod
+    from koopman_graph.graph_utils.propagation import _topology_kwargs_for
+
+    assert graph_utils.__all__ == list(_DOCUMENTED_GRAPH_UTILS_EXPORTS)
+    for name in _DOCUMENTED_GRAPH_UTILS_EXPORTS:
+        assert hasattr(graph_utils, name), name
+        assert name in vars(graph_utils)
+
+    # Topology peers stay importable; private helpers stay same-module only.
+    assert callable(topology_mod.dense_symmetric_normalized_laplacian)
+    assert callable(_topology_kwargs_for)
+    assert not hasattr(graph_utils, "_topology_kwargs_for")
+    assert not hasattr(topology_mod, "_topology_kwargs_for")

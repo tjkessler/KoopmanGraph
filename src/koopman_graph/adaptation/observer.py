@@ -1,17 +1,18 @@
-"""Latent-space Kalman observer for partial observations / imputation."""
+"""Koopman latent-space Kalman observer façade for partial observations."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
+from koopman_graph.adaptation.impute import graph_diffuse_impute
+from koopman_graph.adaptation.kalman import FilterResult
 from koopman_graph.data import GraphSnapshotSequence, resolve_pair_delta_t
-from koopman_graph.graph_utils import snapshot_edge_weight
-from koopman_graph.nn.delay import apply_observation_mask_to_features
+from koopman_graph.data.delay_windows import apply_observation_mask_to_features
+from koopman_graph.graph_utils import propagate_latent, snapshot_edge_weight
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
     GraphKoopmanOperator,
@@ -22,29 +23,6 @@ if TYPE_CHECKING:
     from koopman_graph.model import GraphKoopmanModel
 
 ObservationModel = Literal["latent_encode", "decoder_jacobian"]
-
-
-@dataclass(frozen=True)
-class FilterResult:
-    """Per-timestep filtered or smoothed latent means and covariances.
-
-    Public result types in this package are frozen dataclasses with attribute
-    access (not mapping/dict styles).
-
-    Attributes
-    ----------
-    latents : Tensor
-        Filtered or smoothed latent states with shape
-        ``(num_timesteps, num_nodes, latent_dim)``.
-    covariances : Tensor
-        Flattened-state covariances with shape
-        ``(num_timesteps, num_nodes * latent_dim, num_nodes * latent_dim)``.
-        Node blocks are stacked in row-major order matching ``latents.reshape
-        (..., -1)``.
-    """
-
-    latents: Tensor
-    covariances: Tensor
 
 
 def _as_bool_mask(mask: Tensor | None, num_nodes: int) -> Tensor:
@@ -65,174 +43,6 @@ def _as_bool_mask(mask: Tensor | None, num_nodes: int) -> Tensor:
     if mask is None:
         return torch.ones(num_nodes, dtype=torch.bool)
     return mask.bool()
-
-
-def graph_diffuse_impute(
-    x: Tensor,
-    mask: Tensor,
-    edge_index: Tensor,
-    *,
-    iterations: int = 8,
-) -> Tensor:
-    """Fill unobserved node features by iterative neighbor averaging.
-
-    This is a **heuristic** warm-start for masked sensors, not a calibrated
-    observation model. Observed rows are left unchanged.
-
-    Parameters
-    ----------
-    x : Tensor
-        Node features ``(num_nodes, feature_dim)``.
-    mask : Tensor
-        Boolean observation mask ``(num_nodes,)`` (``True`` = observed).
-    edge_index : Tensor
-        Edge index ``(2, E)``.
-    iterations : int, optional
-        Diffusion sweeps. Default is ``8``.
-
-    Returns
-    -------
-    Tensor
-        Imputed features with the same shape as ``x``.
-    """
-    if iterations < 1:
-        msg = f"iterations must be positive, got {iterations}"
-        raise ValueError(msg)
-    out = x.clone()
-    observed = mask.bool()
-    if bool(observed.all()):
-        return out
-    num_nodes = x.size(0)
-    src, dst = edge_index[0], edge_index[1]
-    for _ in range(iterations):
-        deg = torch.zeros(num_nodes, dtype=out.dtype, device=out.device)
-        acc = torch.zeros_like(out)
-        deg.index_add_(
-            0, dst, torch.ones(dst.numel(), dtype=out.dtype, device=out.device)
-        )
-        acc.index_add_(0, dst, out[src])
-        neighbor_mean = acc / deg.clamp_min(1.0).unsqueeze(1)
-        out = torch.where(observed.unsqueeze(1), out, neighbor_mean)
-    return out
-
-
-def _reference_kalman_filter(
-    *,
-    transition: Tensor,
-    process_cov: Tensor,
-    observation: Tensor,
-    observation_cov: Tensor,
-    measurements: Tensor,
-    x0: Tensor,
-    p0: Tensor,
-    control_bias: Tensor | None = None,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Run a textbook linear-Gaussian Kalman filter (predict then update).
-
-    Parameters use column-vector state convention.
-
-    Parameters
-    ----------
-    transition : Tensor
-        State transition matrix ``A`` with shape ``(D, D)``.
-    process_cov : Tensor
-        Process noise covariance ``Q`` with shape ``(D, D)``.
-    observation : Tensor
-        Observation matrix ``H`` with shape ``(M, D)``.
-    observation_cov : Tensor
-        Observation noise covariance ``R`` with shape ``(M, M)``.
-    measurements : Tensor
-        Measurement sequence with shape ``(T, M)``.
-    x0 : Tensor
-        Prior mean with shape ``(D,)``.
-    p0 : Tensor
-        Prior covariance with shape ``(D, D)``.
-    control_bias : Tensor or None, optional
-        Optional per-interval additive bias with shape ``(T-1, D)``.
-
-    Returns
-    -------
-    tuple of Tensor
-        Filtered means, filtered covariances, one-step predicted means, and
-        one-step predicted covariances.
-    """
-    t_steps = measurements.shape[0]
-    dim = x0.shape[0]
-    means = torch.empty(t_steps, dim, dtype=x0.dtype, device=x0.device)
-    covs = torch.empty(t_steps, dim, dim, dtype=x0.dtype, device=x0.device)
-    pred_means = torch.empty(t_steps, dim, dtype=x0.dtype, device=x0.device)
-    pred_covs = torch.empty(t_steps, dim, dim, dtype=x0.dtype, device=x0.device)
-
-    x_prev = x0
-    p_prev = p0
-    eye = torch.eye(dim, dtype=x0.dtype, device=x0.device)
-    for t in range(t_steps):
-        if t == 0:
-            x_pred = x_prev
-            p_pred = p_prev
-        else:
-            bias = (
-                torch.zeros(dim, dtype=x0.dtype, device=x0.device)
-                if control_bias is None
-                else control_bias[t - 1]
-            )
-            x_pred = transition @ x_prev + bias
-            p_pred = transition @ p_prev @ transition.T + process_cov
-        pred_means[t] = x_pred
-        pred_covs[t] = p_pred
-
-        innov_cov = observation @ p_pred @ observation.T + observation_cov
-        gain = torch.linalg.solve(innov_cov, observation @ p_pred).T
-        innov = measurements[t] - observation @ x_pred
-        x_filt = x_pred + gain @ innov
-        p_filt = (eye - gain @ observation) @ p_pred
-        # Symmetrize for numerical hygiene.
-        p_filt = 0.5 * (p_filt + p_filt.T)
-        means[t] = x_filt
-        covs[t] = p_filt
-        x_prev = x_filt
-        p_prev = p_filt
-    return means, covs, pred_means, pred_covs
-
-
-def _rts_smooth(
-    *,
-    transition: Tensor,
-    filtered_means: Tensor,
-    filtered_covs: Tensor,
-    pred_means: Tensor,
-    pred_covs: Tensor,
-) -> tuple[Tensor, Tensor]:
-    """Rauch–Tung–Striebel smoother given forward-filter caches.
-
-    Parameters
-    ----------
-    transition : Tensor
-        Constant transition matrix used for smoother gains.
-    filtered_means : Tensor
-        Filtered means with shape ``(T, D)``.
-    filtered_covs : Tensor
-        Filtered covariances with shape ``(T, D, D)``.
-    pred_means : Tensor
-        One-step predicted means with shape ``(T, D)``.
-    pred_covs : Tensor
-        One-step predicted covariances with shape ``(T, D, D)``.
-
-    Returns
-    -------
-    tuple of Tensor
-        Smoothed means and covariances.
-    """
-    t_steps = filtered_means.shape[0]
-    means = filtered_means.clone()
-    covs = filtered_covs.clone()
-    for t in range(t_steps - 2, -1, -1):
-        # G = P_t F^T (P_{t+1}^-)^{-1}
-        gain = torch.linalg.solve(pred_covs[t + 1], transition @ filtered_covs[t].T).T
-        means[t] = filtered_means[t] + gain @ (means[t + 1] - pred_means[t + 1])
-        covs[t] = filtered_covs[t] + gain @ (covs[t + 1] - pred_covs[t + 1]) @ gain.T
-        covs[t] = 0.5 * (covs[t] + covs[t].T)
-    return means, covs
 
 
 class KoopmanObserver:
@@ -594,7 +404,7 @@ class KoopmanObserver:
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tensor:
-        """Approximate ``A`` by finite differences of ``_advance_latent``.
+        """Approximate ``A`` by finite differences of ``propagate_latent``.
 
         Parameters
         ----------
@@ -627,10 +437,12 @@ class KoopmanObserver:
         eps = 1e-4
         base = torch.zeros(n_nodes, d, dtype=dtype, device=device)
         with torch.no_grad():
-            f0 = self.model._advance_latent(
+            f0 = propagate_latent(
+                self.model.koopman,
                 base,
                 control=control,
-                delta_t=delta,
+                delta_t=self.model.resolve_delta_t(delta),
+                default_delta_t=self.model.time_step,
                 edge_index=edge_index,
                 edge_weight=edge_weight,
             ).reshape(-1)
@@ -638,10 +450,12 @@ class KoopmanObserver:
             for j in range(state_dim):
                 pert = base.reshape(-1).clone()
                 pert[j] += eps
-                f1 = self.model._advance_latent(
+                f1 = propagate_latent(
+                    self.model.koopman,
                     pert.reshape(n_nodes, d),
                     control=control,
-                    delta_t=delta,
+                    delta_t=self.model.resolve_delta_t(delta),
+                    default_delta_t=self.model.time_step,
                     edge_index=edge_index,
                     edge_weight=edge_weight,
                 ).reshape(-1)
@@ -685,14 +499,18 @@ class KoopmanObserver:
             snap = sequence[t]
             z0 = torch.zeros(n_nodes, d, dtype=dtype, device=device)
             with torch.no_grad():
-                z1 = self.model._advance_latent(
+                z1 = propagate_latent(
+                    self.model.koopman,
                     z0,
                     control=control,
-                    delta_t=resolve_pair_delta_t(
-                        sequence,
-                        t,
-                        default_time_step=float(self.model.time_step),
+                    delta_t=self.model.resolve_delta_t(
+                        resolve_pair_delta_t(
+                            sequence,
+                            t,
+                            default_time_step=float(self.model.time_step),
+                        )
                     ),
+                    default_delta_t=self.model.time_step,
                     edge_index=snap.edge_index,
                     edge_weight=snapshot_edge_weight(snap),
                 )
@@ -885,8 +703,3 @@ class KoopmanObserver:
             device=y.device,
         )
         return y, h_mat, r_mat
-
-
-# Re-export helper used by tests for the synthetic linear reference check.
-reference_kalman_filter = _reference_kalman_filter
-rts_smooth = _rts_smooth

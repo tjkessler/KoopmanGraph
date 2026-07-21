@@ -5,6 +5,83 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0] - 2026-07-18
+
+### Added
+
+- Deep-ensemble forecasting under ``koopman_graph.uq`` with empirical
+  predictive intervals, coverage measurement, and format-1 member
+  serialization.
+- Linear-Gaussian latent uncertainty propagation with optional Kalman
+  refinement via ``LatentGaussianKoopmanUQ``.
+- Continuous ``koopman_parameterization="auxiliary_spectral"``: Lusch-style
+  state-dependent block-diagonal generators via ``generator_at(z)`` /
+  ``instantaneous_spectrum(z)``, configurable auxiliary-network depth, and
+  controlled advance support.
+- Physics-informed graph-gradient, graph-curvature, and polynomial observable
+  presets; fit-time ``LieConsistencyLoss`` / ``PDEResidualLoss`` composition
+  through ``ExtraLosses`` and ``LossWeights``.
+- Drop-in ``SAGEEncoder`` / ``SAGEDecoder`` (GraphSAGE) and
+  ``DiffConvEncoder`` / ``DiffConvDecoder`` (DCRNN-style bidirectional
+  diffusion convolution) under ``koopman_graph.nn``, promoted to the root
+  ``__all__`` façade with format-1 checkpoint types ``sage`` / ``diffconv``
+  (default ``diffusion_steps=2``). See notebook
+  ``examples/09_topology_ablation.ipynb`` encoder-zoo section and citations
+  Hamilton2017GraphSAGE / Li2018DCRNN.
+- ``GraphTransformerEncoder`` / ``GraphTransformerDecoder`` peers based on
+  PyG ``TransformerConv``, including optional scalar edge conditioning and
+  format-1 checkpoint reconstruction.
+- RBF and kernel dictionaries for ``EDMDBaseline``, including Gaussian and
+  polynomial Gram regression with documented quadratic scaling limits.
+- ``KoopmanSparsityLoss`` and ``WorstCaseReconstructionLoss`` training terms;
+  the latter is an empirical robust objective, not a generalization
+  certificate.
+- Hierarchical TopK/SAG forecasting under ``koopman_graph.hierarchical`` with
+  coarse Koopman evolution, scatter unpooling, multi-resolution prediction,
+  control pooling, and format-1 sidecar serialization.
+- Tutorial coverage for auxiliary spectra, uncertainty
+  quantification, hierarchical forecasting, and sparse latent operators.
+
+### Changed
+
+- **Breaking:** moved fifteen specialized root exports to capability modules
+  (no root aliases). Root ``__all__`` retains exactly twenty core-workflow
+  names (model, encoder/decoder family including delay, operators including
+  graph, ``GraphSnapshotSequence`` / ``MultiTrajectory``, ``KoopmanSpectrum``
+  / ``compute_spectrum``, ``__version__``). Import baselines, primary losses,
+  ``FitHistory`` / ``LossWeights``, ``RecursiveKoopmanAdapter``,
+  ``GraphKoopmanEnv``, temporal-split helpers, and ``evaluate_forecast`` /
+  ``EvaluationResult`` from their capability packages.
+- **Breaking (power-user):** ``TrainingLossBreakdown`` is no longer exported
+  from ``koopman_graph.training``; import the internal frozen snapshot from
+  ``koopman_graph.training.history`` when needed. ``FitHistory``,
+  ``LossWeights``, and ``mean_training_loss_breakdown`` remain on the
+  training package surface.
+- Slimmed repository ``README.md`` into a JOSS-oriented landing page; detailed
+  feature inventory, dataset catalog, and notebook gallery now live under
+  Sphinx (`capabilities` / `tutorials`) with architecture and showcase figures
+  in `docs/source/_static/`.
+- `koopman_graph.graph_utils` is now a shallow capability package
+  (`topology` / `propagation` peers) with the same import surface
+  (`from koopman_graph.graph_utils import …`). No numerical or public-API
+  signature changes.
+- Symmetric normalized Laplacian now uses the pseudoinverse form
+  `L_sym = P - Â` (Chung / Wikipedia): isolated nodes map to zeros under
+  `graph_laplacian_features` and are unchanged under
+  `normalized_step_operator`. On graphs with no isolates this matches the
+  previous `I - Â` behavior. No checkpoint `FORMAT_VERSION` bump.
+- Checkpoint schema reset: `FORMAT_VERSION` is now `1` for the current full
+  architecture config. New saves write `format_version: 1`. Previously
+  published format-2 checkpoints and sparse historical format-1 payloads are
+  rejected (no silent migration). Future incompatible changes bump
+  `FORMAT_VERSION` and add an explicit migration branch.
+- Expanded the documented architecture contract for the v0.5.0 API tiers:
+  SAGE/DiffConv/Transformer encoder-decoder pairs are root-façade peers, while
+  uncertainty, hierarchy, physics-residual, and sparsity helpers remain
+  capability-module or power-user APIs.
+
 ## [0.4.0] - 2026-07-17
 
 ### Added
@@ -20,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Checkpoint `format_version` remains 2; Phase 10 fields (`koopman_kind`, `control_mode`, `bilinear_rank`, `n_delays`) serialize with safe defaults for older v2 loads
+- v0.4.0 fields (`koopman_kind`, `control_mode`, `bilinear_rank`, `n_delays`) serialize as part of the checkpoint config (see Unreleased for the later format-1 schema reset)
 - README, Sphinx docs, and JOSS paper draft updated for the expanded forecasting, control, and estimation surface
 
 ## [0.3.0] - 2026-07-16
@@ -50,7 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed compatibility shims for former top-level `encoder` / `decoder` / `gnn` / `operator` / `continuous` modules (use `nn` / `operators`)
 - Frozen result types for fit/adaptation history and related training breakdowns
 - EDMD reconstruction matrix renamed for clarity (`reconstruction_matrix`)
-- Tutorial notebooks updated for continuous-time, stability, adaptation, physics-informed, RL, and spectrum workflows; claim↔result alignment on IEEE 118, METR-LA, epidemic, RL, and physics-informed examples
+- Tutorial notebooks updated for continuous-time, stability, adaptation, physics-informed, RL, and spectrum workflows, with scoped findings for IEEE 118, METR-LA, epidemic, RL, and physics-informed examples
 
 ### Fixed
 
@@ -88,6 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.5.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.5.0
 [0.4.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.4.0
 [0.3.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.3.0
 [0.2.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.2.0

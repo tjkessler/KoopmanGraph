@@ -77,15 +77,16 @@ After PyTorch and PyG are installed, install KoopmanGraph from PyPI:
 
    pip install koopman-graph
 
-Pin a specific release when reproducing results:
+Pin a specific release when reproducing results (use a published PyPI
+version such as ``0.4.0`` until ``0.5.0`` is uploaded):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.3.0
+   pip install koopman-graph==0.4.0
 
 Releases are published automatically when a maintainer creates a GitHub Release
-(see ``CONTRIBUTING.md`` in the repository). Until the first release is published,
-use the editable install from source above.
+(see ``CONTRIBUTING.md`` in the repository). For the latest in-tree development
+checkout, use the editable install from source above.
 
 Verify
 ------

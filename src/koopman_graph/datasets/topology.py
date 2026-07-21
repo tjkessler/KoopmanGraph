@@ -1,4 +1,10 @@
-"""Typed topology payloads for cached graph benchmarks."""
+"""Dataset topology helpers: shared edge builders and typed load payloads.
+
+Provides bidirectional path/ring ``edge_index`` constructors used by synthetic
+and nonlinear benchmarks, plus :class:`TopologyPayload` for cached
+``load_topology`` APIs. Import builders from this module rather than
+duplicating private copies in peer dataset modules.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,57 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import torch
 from torch import Tensor
+
+
+def path_edge_index(num_nodes: int) -> Tensor:
+    """Build bidirectional path-graph edges.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the path.
+
+    Returns
+    -------
+    Tensor
+        Edge index with shape ``(2, num_edges)``.
+    """
+    if num_nodes < 2:
+        return torch.zeros((2, 0), dtype=torch.long)
+
+    src: list[int] = []
+    dst: list[int] = []
+    for node in range(num_nodes - 1):
+        src.extend([node, node + 1])
+        dst.extend([node + 1, node])
+    return torch.tensor([src, dst], dtype=torch.long)
+
+
+def ring_edge_index(num_nodes: int) -> Tensor:
+    """Build bidirectional ring-graph edges.
+
+    Parameters
+    ----------
+    num_nodes : int
+        Number of nodes in the ring.
+
+    Returns
+    -------
+    Tensor
+        Edge index with shape ``(2, num_edges)``.
+    """
+    if num_nodes < 2:
+        return torch.zeros((2, 0), dtype=torch.long)
+
+    src: list[int] = []
+    dst: list[int] = []
+    for node in range(num_nodes):
+        nxt = (node + 1) % num_nodes
+        src.extend([node, nxt])
+        dst.extend([nxt, node])
+    return torch.tensor([src, dst], dtype=torch.long)
 
 
 @dataclass(frozen=True)

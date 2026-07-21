@@ -10,9 +10,9 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from koopman_graph.baselines.base import (
-    _check_initial_graph,
-    _copy_topology,
-    _require_static_topology,
+    check_initial_graph,
+    copy_topology,
+    require_static_topology,
 )
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight, snapshot_to_device
@@ -175,7 +175,8 @@ class GNNForecasterBaseline(nn.Module, ABC):
         Parameters
         ----------
         history : Tensor
-            History with shape ``(history_len, num_nodes, in_channels)``.
+            History with shape ``(history_len, num_nodes, in_channels)`` or a
+            batched stack ``(batch, history_len, num_nodes, in_channels)``.
         edge_index : Tensor
             Graph connectivity.
         edge_weight : Tensor or None, optional
@@ -184,7 +185,8 @@ class GNNForecasterBaseline(nn.Module, ABC):
         Returns
         -------
         Tensor
-            Next-step features with shape ``(num_nodes, out_channels)``.
+            Next-step features with shape ``(num_nodes, out_channels)`` or
+            ``(batch, num_nodes, out_channels)`` when ``history`` is batched.
         """
 
     def fit(
@@ -208,6 +210,8 @@ class GNNForecasterBaseline(nn.Module, ABC):
             Adam learning rate. Default is ``1e-3``.
         batch_size : int or None, optional
             Mini-batch size over sliding windows. ``None`` uses full-batch.
+            Each batch is forwarded in one vectorized :meth:`predict_next`
+            call (not a Python loop over windows).
         device : torch.device, str, or None, optional
             Training device. Defaults to the module parameter device.
 
@@ -223,7 +227,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
             dimensions do not match the constructor.
         """
         resolved = resolve_sequence(sequence)
-        _require_static_topology(resolved)
+        require_static_topology(resolved)
         if resolved.num_timesteps < self.history_len + 1:
             msg = (
                 f"{type(self).__name__}.fit requires at least "
@@ -256,21 +260,32 @@ class GNNForecasterBaseline(nn.Module, ABC):
         if edge_weight is not None:
             edge_weight = edge_weight.to(train_device)
 
-        windows: list[tuple[Tensor, Tensor]] = []
-        for start in range(0, resolved.num_timesteps - self.history_len):
-            history = features[start : start + self.history_len]
-            target = features[start + self.history_len]
-            if self.out_channels != self.in_channels:
-                msg = (
-                    "out_channels must equal in_channels for autoregressive "
-                    f"training, got {self.out_channels} vs {self.in_channels}"
-                )
-                raise ValueError(msg)
-            windows.append((history, target))
+        if self.out_channels != self.in_channels:
+            msg = (
+                "out_channels must equal in_channels for autoregressive "
+                f"training, got {self.out_channels} vs {self.in_channels}"
+            )
+            raise ValueError(msg)
+
+        # (n_windows, history_len, N, C) and (n_windows, N, C)
+        histories = torch.stack(
+            [
+                features[start : start + self.history_len]
+                for start in range(0, resolved.num_timesteps - self.history_len)
+            ],
+            dim=0,
+        )
+        targets = torch.stack(
+            [
+                features[start + self.history_len]
+                for start in range(0, resolved.num_timesteps - self.history_len)
+            ],
+            dim=0,
+        )
 
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         self.train()
-        n_windows = len(windows)
+        n_windows = histories.shape[0]
         effective_batch = (
             n_windows if batch_size is None else min(batch_size, n_windows)
         )
@@ -282,12 +297,12 @@ class GNNForecasterBaseline(nn.Module, ABC):
             permutation = torch.randperm(n_windows, device=train_device)
             for batch_start in range(0, n_windows, effective_batch):
                 indices = permutation[batch_start : batch_start + effective_batch]
-                loss = features.new_zeros(())
-                for index in indices.tolist():
-                    history, target = windows[index]
-                    prediction = self.predict_next(history, edge_index, edge_weight)
-                    loss = loss + nn.functional.mse_loss(prediction, target)
-                loss = loss / len(indices)
+                prediction = self.predict_next(
+                    histories[indices],
+                    edge_index,
+                    edge_weight,
+                )
+                loss = nn.functional.mse_loss(prediction, targets[indices])
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -295,7 +310,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
         self.num_nodes = resolved.num_nodes
         self._topology = {
             key: value.detach().cpu()
-            for key, value in _copy_topology(resolved[0]).items()
+            for key, value in copy_topology(resolved[0]).items()
         }
         self._fitted = True
         self.eval()
@@ -348,7 +363,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
             )
             raise ValueError(msg)
         assert self.num_nodes is not None  # guarded by _check_fitted
-        _check_initial_graph(
+        check_initial_graph(
             initial_graph,
             num_nodes=self.num_nodes,
             in_channels=self.in_channels,
@@ -359,7 +374,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
         edge_index = graph.edge_index
         edge_weight = snapshot_edge_weight(graph)
         history = graph.x.unsqueeze(0).repeat(self.history_len, 1, 1)
-        topology = _copy_topology(initial_graph)
+        topology = copy_topology(initial_graph)
 
         predictions: list[Data] = []
         was_training = self.training

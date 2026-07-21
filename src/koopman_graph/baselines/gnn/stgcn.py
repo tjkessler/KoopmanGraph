@@ -224,7 +224,8 @@ class STGCNBaseline(GNNForecasterBaseline):
         Parameters
         ----------
         history : Tensor
-            History with shape ``(history_len, num_nodes, in_channels)``.
+            History with shape ``(history_len, num_nodes, in_channels)`` or
+            ``(batch, history_len, num_nodes, in_channels)``.
         edge_index : Tensor
             Graph connectivity.
         edge_weight : Tensor or None, optional
@@ -233,11 +234,23 @@ class STGCNBaseline(GNNForecasterBaseline):
         Returns
         -------
         Tensor
-            Next-step features with shape ``(num_nodes, out_channels)``.
+            Next-step features with shape ``(num_nodes, out_channels)`` or
+            ``(batch, num_nodes, out_channels)`` when ``history`` is batched.
         """
-        # (1, C, N, T)
-        x = history.permute(2, 1, 0).unsqueeze(0)
+        squeeze = history.dim() == 3
+        if squeeze:
+            history = history.unsqueeze(0)
+        elif history.dim() != 4:
+            msg = (
+                "history must have shape (history_len, N, C) or "
+                f"(batch, history_len, N, C), got {tuple(history.shape)}"
+            )
+            raise ValueError(msg)
+        # (B, C, N, T)
+        x = history.permute(0, 3, 2, 1)
         for block in self.blocks:
             x = block(x, edge_index, edge_weight)
         x = self.readout(x)
-        return x[0, :, :, -1].transpose(0, 1).contiguous()
+        # (B, N, C)
+        out = x[:, :, :, -1].transpose(1, 2).contiguous()
+        return out[0] if squeeze else out

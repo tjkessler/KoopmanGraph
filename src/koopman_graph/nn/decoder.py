@@ -5,9 +5,14 @@ from __future__ import annotations
 from koopman_graph.nn.gnn import (
     ActivationName,
     BaseGNNModule,
+    build_diff_convs,
     build_gat_convs,
     build_gcn_convs,
+    build_sage_convs,
+    build_transformer_convs,
+    validate_diffusion_steps,
     validate_gat_attention,
+    validate_optional_edge_dim,
     validate_positive_dims,
 )
 
@@ -175,5 +180,254 @@ class GATDecoder(BaseGNNModule):
                 num_layers,
                 heads=heads,
                 dropout=dropout,
+            ),
+        )
+
+
+class SAGEDecoder(BaseGNNModule):
+    """GraphSAGE decoder that maps latent node features back to physical space.
+
+    Constructor arguments mirror :class:`~koopman_graph.nn.encoder.SAGEEncoder`
+    with I/O dimensions swapped. Scalar ``edge_weight`` is accepted for API
+    symmetry with :class:`~koopman_graph.nn.decoder.GNNDecoder` but ignored.
+
+    Attributes
+    ----------
+    latent_dim : int
+        Input latent dimension per node.
+    hidden_channels : int
+        Hidden SAGE channel width.
+    out_channels : int
+        Output physical feature dimension per node.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_channels: int,
+        out_channels: int,
+        *,
+        num_layers: int = 2,
+        activation: ActivationName = "relu",
+    ) -> None:
+        """Initialize the GraphSAGE decoder stack.
+
+        Parameters
+        ----------
+        latent_dim : int
+            Input latent dimension per node.
+        hidden_channels : int
+            Hidden SAGE channel width for intermediate layers.
+        out_channels : int
+            Output physical feature dimension per node.
+        num_layers : int, optional
+            Number of SAGE layers. Default is ``2``.
+        activation : {"relu", "sigmoid", "tanh"}, optional
+            Hidden-layer activation. Default is ``"relu"``.
+
+        Raises
+        ------
+        ValueError
+            If any dimension argument is not positive.
+        """
+        validate_positive_dims(
+            latent_dim=latent_dim,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            num_layers=num_layers,
+        )
+
+        self.latent_dim = latent_dim
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+
+        super().__init__(
+            input_channels=latent_dim,
+            input_dim_name="latent_dim",
+            num_layers=num_layers,
+            activation=activation,
+            convs=build_sage_convs(
+                latent_dim,
+                hidden_channels,
+                out_channels,
+                num_layers,
+            ),
+        )
+
+
+class DiffConvDecoder(BaseGNNModule):
+    """Diffusion-convolution decoder for directional spatial reconstruction.
+
+    Constructor arguments mirror
+    :class:`~koopman_graph.nn.encoder.DiffConvEncoder` with I/O dimensions
+    swapped. Asymmetric ``edge_weight`` values are consumed by each
+    :class:`~koopman_graph.nn.gnn.DiffusionConv` layer.
+
+    Attributes
+    ----------
+    latent_dim : int
+        Input latent dimension per node.
+    hidden_channels : int
+        Hidden DiffConv channel width.
+    out_channels : int
+        Output physical feature dimension per node.
+    diffusion_steps : int
+        Number of forward/backward random-walk hops per layer.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_channels: int,
+        out_channels: int,
+        *,
+        num_layers: int = 2,
+        activation: ActivationName = "relu",
+        diffusion_steps: int = 2,
+    ) -> None:
+        """Initialize the DiffConv decoder stack.
+
+        Parameters
+        ----------
+        latent_dim : int
+            Input latent dimension per node.
+        hidden_channels : int
+            Hidden DiffConv channel width for intermediate layers.
+        out_channels : int
+            Output physical feature dimension per node.
+        num_layers : int, optional
+            Number of DiffConv layers. Default is ``2``.
+        activation : {"relu", "sigmoid", "tanh"}, optional
+            Hidden-layer activation. Default is ``"relu"``.
+        diffusion_steps : int, optional
+            Number of forward/backward random-walk hops (excluding identity).
+            Default is ``2``.
+
+        Raises
+        ------
+        ValueError
+            If any dimension argument is not positive or
+            ``diffusion_steps < 1``.
+        """
+        validate_positive_dims(
+            latent_dim=latent_dim,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            num_layers=num_layers,
+        )
+        validate_diffusion_steps(diffusion_steps)
+
+        self.latent_dim = latent_dim
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.diffusion_steps = diffusion_steps
+
+        super().__init__(
+            input_channels=latent_dim,
+            input_dim_name="latent_dim",
+            num_layers=num_layers,
+            activation=activation,
+            convs=build_diff_convs(
+                latent_dim,
+                hidden_channels,
+                out_channels,
+                num_layers,
+                diffusion_steps=diffusion_steps,
+            ),
+        )
+
+
+class GraphTransformerDecoder(BaseGNNModule):
+    """Graph Transformer decoder for attention-based reconstruction.
+
+    Constructor arguments mirror
+    :class:`~koopman_graph.nn.encoder.GraphTransformerEncoder` with I/O
+    dimensions swapped. Compute cost scales with edges × heads similarly to
+    the encoder; prefer GCN/DiffConv when local mixing is enough.
+
+    Attributes
+    ----------
+    latent_dim : int
+        Input latent dimension per node.
+    hidden_channels : int
+        Hidden Transformer channel width.
+    out_channels : int
+        Output physical feature dimension per node.
+    heads : int
+        Number of attention heads per layer.
+    dropout : float
+        Dropout probability inside attention.
+    edge_dim : int or None
+        Edge feature width, or ``None`` when edge conditioning is disabled.
+    """
+
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_channels: int,
+        out_channels: int,
+        *,
+        num_layers: int = 2,
+        activation: ActivationName = "relu",
+        heads: int = 1,
+        dropout: float = 0.0,
+        edge_dim: int | None = None,
+    ) -> None:
+        """Initialize the graph Transformer decoder stack.
+
+        Parameters
+        ----------
+        latent_dim : int
+            Input latent dimension per node.
+        hidden_channels : int
+            Hidden Transformer channel width for intermediate layers.
+        out_channels : int
+            Output physical feature dimension per node.
+        num_layers : int, optional
+            Number of Transformer layers. Default is ``2``.
+        activation : {"relu", "sigmoid", "tanh"}, optional
+            Hidden-layer activation. Default is ``"relu"``.
+        heads : int, optional
+            Number of attention heads per layer. Default is ``1``.
+        dropout : float, optional
+            Dropout probability inside attention. Default is ``0.0``.
+        edge_dim : int or None, optional
+            Edge feature width for optional conditioning. Default is ``None``.
+
+        Raises
+        ------
+        ValueError
+            If any dimension argument is not positive, ``heads < 1``,
+            ``dropout`` is outside ``[0, 1]``, or ``edge_dim`` is invalid.
+        """
+        validate_positive_dims(
+            latent_dim=latent_dim,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            num_layers=num_layers,
+        )
+        validate_gat_attention(heads=heads, dropout=dropout)
+        validate_optional_edge_dim(edge_dim)
+
+        self.latent_dim = latent_dim
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.dropout = dropout
+        self.edge_dim = edge_dim
+
+        super().__init__(
+            input_channels=latent_dim,
+            input_dim_name="latent_dim",
+            num_layers=num_layers,
+            activation=activation,
+            convs=build_transformer_convs(
+                latent_dim,
+                hidden_channels,
+                out_channels,
+                num_layers,
+                heads=heads,
+                dropout=dropout,
+                edge_dim=edge_dim,
             ),
         )

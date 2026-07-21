@@ -543,3 +543,82 @@ def test_koopman_operator_satisfies_contract() -> None:
     assert torch.allclose(op.bound_metric(), op.spectral_radius())
     assert torch.allclose(op.advance(z), op(z))
     assert torch.allclose(op.inverse_advance(op.advance(z)), z, atol=1e-5)
+
+
+def test_operator_peers_have_no_private_cross_module_imports() -> None:
+    """Operator peers must not import leading-``_`` symbols across modules."""
+    import ast
+    from pathlib import Path
+
+    operators_root = (
+        Path(__file__).resolve().parents[1] / "src" / "koopman_graph" / "operators"
+    )
+    peer_paths = [
+        operators_root / "discrete.py",
+        operators_root / "continuous.py",
+        operators_root / "graph.py",
+        operators_root / "auxiliary_spectral.py",
+        operators_root / "control.py",
+        operators_root / "__init__.py",
+    ]
+    private_imports: list[str] = []
+    for path in peer_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.startswith("koopman_graph.operators"):
+                continue
+            for alias in node.names:
+                if alias.name.startswith("_"):
+                    private_imports.append(f"{path.name}:{node.module}.{alias.name}")
+    assert private_imports == []
+
+
+def test_operators_do_not_import_analysis() -> None:
+    """Operators must not depend on analysis (eager or lazy)."""
+    import ast
+    from pathlib import Path
+
+    operators_root = (
+        Path(__file__).resolve().parents[1] / "src" / "koopman_graph" / "operators"
+    )
+    analysis_imports: list[str] = []
+    for path in sorted(operators_root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "koopman_graph.analysis" or alias.name.startswith(
+                        "koopman_graph.analysis."
+                    ):
+                        analysis_imports.append(f"{path.name}:{alias.name}")
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and (
+                    node.module == "koopman_graph.analysis"
+                    or node.module.startswith("koopman_graph.analysis.")
+                )
+            ):
+                analysis_imports.append(f"{path.name}:{node.module}")
+    assert analysis_imports == []
+
+
+def test_contract_structural_helpers_are_exported() -> None:
+    """Verify shared structural helpers are non-private package exports."""
+    from koopman_graph.operators import (
+        bounded_diagonal,
+        safe_diagonal_inverse,
+        strict_diagonal_values,
+    )
+
+    raw = torch.tensor([0.5, 1.0, -1.0])
+    diag = bounded_diagonal(raw, max_radius=0.9)
+    assert diag.shape == (3, 3)
+    assert torch.all(diag.diag().abs() <= 0.9 + 1e-6)
+    values = strict_diagonal_values(raw, max_spectral_radius=0.95)
+    assert values.shape == (3,)
+    inv = safe_diagonal_inverse(values)
+    assert inv.shape == (3, 3)
+    assert torch.allclose(inv.diag() * values, torch.ones(3), atol=1e-5)

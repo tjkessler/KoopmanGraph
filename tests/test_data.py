@@ -16,7 +16,7 @@ from koopman_graph.data import (
     resolve_sequence,
     temporal_split,
 )
-from koopman_graph.data.containers import _snapshots_have_dynamic_topology
+from koopman_graph.data.validation import snapshots_have_dynamic_topology
 
 
 def test_construct_from_data_list(
@@ -389,11 +389,11 @@ def test_snapshots_collection_independent_of_input_list(
 
 
 def test_as_tensor_converts_dtype() -> None:
-    """Verify ``_as_tensor`` converts tensor dtype when requested."""
-    from koopman_graph.data.containers import _as_tensor
+    """Verify ``as_tensor`` converts tensor dtype when requested."""
+    from koopman_graph.data.validation import as_tensor
 
     value = torch.randn(2, 3, dtype=torch.float64)
-    converted = _as_tensor(value, dtype=torch.float32)
+    converted = as_tensor(value, dtype=torch.float32)
     assert converted.dtype == torch.float32
     assert torch.equal(converted, value.to(dtype=torch.float32))
 
@@ -603,7 +603,7 @@ def test_per_node_control_inputs_node_mismatch_raises(
 
 def test_snapshots_have_dynamic_topology_empty_list() -> None:
     """Verify the dynamic-topology probe returns ``False`` for empty input."""
-    assert not _snapshots_have_dynamic_topology([])
+    assert not snapshots_have_dynamic_topology([])
 
 
 def test_temporal_split_rejects_invalid_minimums(
@@ -858,3 +858,45 @@ def test_sequence_slice_preserves_observation_masks(
     sequence = GraphSnapshotSequence(snapshots, observation_masks=masks)
     window = sequence.slice(1, 4)
     assert torch.equal(window.observation_masks, masks[1:4])
+
+
+def test_data_package_does_not_import_nn() -> None:
+    """``koopman_graph.data`` must not import ``koopman_graph.nn`` (eager/lazy)."""
+    import ast
+    from pathlib import Path
+
+    data_root = Path(__file__).resolve().parents[1] / "src" / "koopman_graph" / "data"
+    nn_imports: list[str] = []
+    for path in sorted(data_root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "koopman_graph.nn" or alias.name.startswith(
+                        "koopman_graph.nn."
+                    ):
+                        nn_imports.append(f"{path.name}:{alias.name}")
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and (
+                    node.module == "koopman_graph.nn"
+                    or node.module.startswith("koopman_graph.nn.")
+                )
+            ):
+                nn_imports.append(f"{path.name}:{node.module}")
+    assert nn_imports == []
+
+
+def test_delay_windows_helpers_owned_by_data() -> None:
+    """Delay-window helpers live on ``data.delay_windows`` and re-export from nn."""
+    import koopman_graph.data.delay_windows as delay_windows
+    import koopman_graph.nn.delay as nn_delay
+
+    for name in (
+        "apply_observation_mask_to_features",
+        "flatten_delay_window",
+        "history_from_snapshots",
+        "stack_delay_features",
+    ):
+        assert getattr(nn_delay, name) is getattr(delay_windows, name)

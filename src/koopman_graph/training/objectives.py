@@ -1,483 +1,208 @@
-"""Training-side objective composition over loss primitives.
+"""Training-side objective orchestration over pair and extra peers.
 
-Private helpers stay module-local. Public helpers re-exported from
-:mod:`koopman_graph.training`.
+Owns eigenvalue / rollout composition and
+:func:`compute_training_loss`. Pair reconstruction/consistency helpers live in
+:mod:`~koopman_graph.training.pair_objectives`; Lie / PDE / sparsity /
+worst-case helpers live in :mod:`~koopman_graph.training.extra_objectives`.
+Public pair helpers are re-exported here so existing deep-import monkeypatches
+against this module remain stable.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
 import torch
-from torch import Tensor, nn
-from torch_geometric.data import Data
+from torch import Tensor
 
-from koopman_graph.data import (
-    GraphSnapshotSequence,
-    resolve_pair_delta_t,
-)
-from koopman_graph.graph_utils import propagate_latent
+from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.graph_utils import snapshot_edge_weight
 from koopman_graph.losses import (
-    BackwardConsistencyLoss,
     EigenvalueRegularizationLoss,
-    ForwardConsistencyLoss,
-    masked_mse_loss,
     rollout_multi_start_loss,
     rollout_sequence_loss,
 )
 from koopman_graph.operators import GraphKoopmanOperator
 from koopman_graph.protocols import TrainableKoopmanModel
-from koopman_graph.training.history import LossWeights, TrainingLossBreakdown
+from koopman_graph.training.extra_objectives import (
+    compute_lie_consistency_loss,
+    compute_pde_residual_loss,
+    compute_sparsity_loss,
+    compute_worst_case_reconstruction_loss,
+)
+from koopman_graph.training.history import (
+    ExtraLosses,
+    LossWeights,
+    TrainingLossBreakdown,
+)
+from koopman_graph.training.pair_objectives import (
+    compute_backward_consistency_sequence_loss,
+    compute_forward_consistency_sequence_loss,
+    compute_sequence_loss,
+    one_step_loss,
+)
 
-_FORWARD_CONSISTENCY_LOSS = ForwardConsistencyLoss()
-_BACKWARD_CONSISTENCY_LOSS = BackwardConsistencyLoss()
 _EIGENVALUE_REGULARIZATION_LOSS = EigenvalueRegularizationLoss()
 
-PairLossFn = Callable[[TrainableKoopmanModel, GraphSnapshotSequence, int], Tensor]
 
-
-def _model_default_delta_t(model: TrainableKoopmanModel) -> float:
-    """Return the model-backed continuous default interval.
-
-    Uses :meth:`~koopman_graph.protocols.TrainableKoopmanModel.resolve_delta_t`
-    so training matches the model forward/env policy.
+def _topologies_equal(
+    edge_index_a: Tensor,
+    edge_weight_a: Tensor | None,
+    edge_index_b: Tensor,
+    edge_weight_b: Tensor | None,
+) -> bool:
+    """Return whether two topology payloads are numerically identical.
 
     Parameters
     ----------
-    model : TrainableKoopmanModel
-        Trainable model exposing ``resolve_delta_t``.
+    edge_index_a : Tensor
+        First edge index.
+    edge_weight_a : Tensor or None
+        First optional edge weights.
+    edge_index_b : Tensor
+        Second edge index.
+    edge_weight_b : Tensor or None
+        Second optional edge weights.
 
     Returns
     -------
-    float
-        Default continuous integration interval.
+    bool
+        ``True`` when indices match and weights match (including both absent).
     """
-    return float(model.resolve_delta_t(None))
+    if not torch.equal(edge_index_a, edge_index_b):
+        return False
+    if (edge_weight_a is None) != (edge_weight_b is None):
+        return False
+    if edge_weight_a is None:
+        return True
+    assert edge_weight_b is not None
+    return torch.allclose(edge_weight_a, edge_weight_b, equal_nan=True)
 
 
-def _encode_at(
+def _graph_eigenvalue_regularization_over_sequence(
     model: TrainableKoopmanModel,
     sequence: GraphSnapshotSequence,
-    index: int,
 ) -> Tensor:
-    """Encode with delay history when the model exposes ``encode_at``.
+    """Average graph dense/ODO eigenvalue hinges over pair-target topologies.
+
+    Static sequences evaluate the effective operator once. Dynamic sequences
+    average the hinge over each forward-consistency pair target
+    (``sequence[t + 1]``), reusing cached penalties for identical topologies.
 
     Parameters
     ----------
     model : TrainableKoopmanModel
-        Trainable model; may implement ``encode_at(sequence, index)``.
+        Model whose ``koopman`` is a :class:`GraphKoopmanOperator`.
     sequence : GraphSnapshotSequence
-        Source trajectory.
-    index : int
-        Timestep to encode (window end).
+        Training window or trajectory supplying topology.
 
     Returns
     -------
     Tensor
-        Latent node features.
-    """
-    encode_at = getattr(model, "encode_at", None)
-    if callable(encode_at):
-        return encode_at(sequence, index)
-    return model.encode(sequence[index])
-
-
-def one_step_loss(
-    model: TrainableKoopmanModel,
-    snapshot_t: Data,
-    snapshot_t1: Data,
-    *,
-    control: Tensor | None = None,
-    delta_t: float | Tensor | None = None,
-    target_mask: Tensor | None = None,
-) -> Tensor:
-    """Compute one-step MSE between model prediction and the next snapshot.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    snapshot_t : Data
-        Graph snapshot at time ``t``.
-    snapshot_t1 : Data
-        Graph snapshot at time ``t+1`` (prediction target).
-    control : Tensor or None, optional
-        Control input driving the transition from ``t`` to ``t+1``.
-    delta_t : float, Tensor, or None, optional
-        Integration interval for continuous-time models.
-    target_mask : Tensor or None, optional
-        Boolean node mask with shape ``(num_nodes,)``. When provided, the loss
-        averages only over observed nodes at the target snapshot.
-
-    Returns
-    -------
-    Tensor
-        Scalar mean-squared error loss.
-    """
-    prediction = model(snapshot_t, control=control, delta_t=delta_t)
-    target = snapshot_t1.x
-    if target_mask is None:
-        return nn.functional.mse_loss(prediction, target)
-    return masked_mse_loss(prediction, target, target_mask)
-
-
-def _pair_control(sequence: GraphSnapshotSequence, timestep: int) -> Tensor | None:
-    """Return the control input for transition ``timestep -> timestep + 1``.
-
-    Parameters
-    ----------
-    sequence : GraphSnapshotSequence
-        Snapshot sequence that may carry controls.
-    timestep : int
-        Index of the source snapshot in the transition pair.
-
-    Returns
-    -------
-    Tensor or None
-        Control tensor when present, otherwise ``None``.
-    """
-    if not sequence.has_controls:
-        return None
-    return sequence.control_at(timestep)
-
-
-def _forward_consistency_pair(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-    timestep: int,
-) -> Tensor:
-    """Compute forward consistency loss for one consecutive snapshot pair.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence
-        Snapshot sequence containing the consecutive pair.
-    timestep : int
-        Index of the source snapshot ``t`` in the pair ``(t, t+1)``.
-
-    Returns
-    -------
-    Tensor
-        Scalar forward consistency loss for the pair.
-    """
-    snapshot_t1 = sequence[timestep + 1]
-    z_t = _encode_at(model, sequence, timestep)
-    z_t1 = _encode_at(model, sequence, timestep + 1)
-    default_delta_t = _model_default_delta_t(model)
-    delta_t = resolve_pair_delta_t(
-        sequence,
-        timestep,
-        default_time_step=default_delta_t,
-    )
-    control = _pair_control(sequence, timestep)
-    pair_mask = (
-        sequence.pair_observation_mask(timestep)
-        if sequence.has_observation_masks
-        else None
-    )
-    # Align with rollout decode policy: advance under the target snapshot topology.
-    edge_index = snapshot_t1.edge_index
-    edge_weight = getattr(snapshot_t1, "edge_weight", None)
-    return _FORWARD_CONSISTENCY_LOSS(
-        z_t,
-        z_t1,
-        model.koopman,
-        control=control,
-        delta_t=delta_t,
-        default_delta_t=default_delta_t,
-        mask=pair_mask,
-        edge_index=edge_index,
-        edge_weight=edge_weight,
-    )
-
-
-def _backward_consistency_pair(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-    timestep: int,
-    *,
-    inverse_matrix: Tensor | None = None,
-) -> Tensor:
-    """Compute backward consistency loss for one consecutive snapshot pair.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence
-        Snapshot sequence containing the consecutive pair.
-    timestep : int
-        Index of the source snapshot ``t`` in the pair ``(t, t+1)``.
-    inverse_matrix : Tensor or None, optional
-        Precomputed dense inverse matrix reused across pair evaluations.
-
-    Returns
-    -------
-    Tensor
-        Scalar backward consistency loss for the pair.
-    """
-    snapshot_t1 = sequence[timestep + 1]
-    z_t = _encode_at(model, sequence, timestep)
-    z_t1 = _encode_at(model, sequence, timestep + 1)
-    default_delta_t = _model_default_delta_t(model)
-    delta_t = resolve_pair_delta_t(
-        sequence,
-        timestep,
-        default_time_step=default_delta_t,
-    )
-    control = _pair_control(sequence, timestep)
-    pair_mask = (
-        sequence.pair_observation_mask(timestep)
-        if sequence.has_observation_masks
-        else None
-    )
-    edge_index = snapshot_t1.edge_index
-    edge_weight = getattr(snapshot_t1, "edge_weight", None)
-    return _BACKWARD_CONSISTENCY_LOSS(
-        z_t,
-        z_t1,
-        model.koopman,
-        control=control,
-        inverse_matrix=inverse_matrix,
-        delta_t=delta_t,
-        default_delta_t=default_delta_t,
-        mask=pair_mask,
-        edge_index=edge_index,
-        edge_weight=edge_weight,
-    )
-
-
-def _mean_pair_sequence_loss(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-    pair_fn: PairLossFn,
-) -> Tensor:
-    """Average a pair-wise loss function over consecutive snapshots.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model passed through to ``pair_fn``.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Time-ordered snapshots with at least two timesteps.
-    pair_fn : callable
-        Function mapping ``(model, snapshot_t, snapshot_t1)`` to a scalar loss.
-
-    Returns
-    -------
-    Tensor
-        Scalar average loss over all consecutive pairs.
+        Scalar mean eigenvalue hinge.
 
     Raises
     ------
     ValueError
-        If ``sequence`` contains fewer than two snapshots.
+        If ``sequence`` has fewer than two snapshots.
     """
     if sequence.num_timesteps < 2:
-        msg = "GraphSnapshotSequence must contain at least 2 snapshots for training"
+        msg = (
+            "GraphSnapshotSequence must contain at least 2 snapshots for "
+            "graph eigenvalue regularization"
+        )
         raise ValueError(msg)
 
-    total_loss = torch.zeros((), device=next(model.parameters()).device)
-    num_pairs = sequence.num_timesteps - 1
-    for t in range(num_pairs):
-        total_loss = total_loss + pair_fn(model, sequence, t)
-    return total_loss / num_pairs
-
-
-def _one_step_pair(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-    timestep: int,
-) -> Tensor:
-    """Compute one-step loss for snapshot pair ``(timestep, timestep + 1)``.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model implementing a single-step forward pass.
-    sequence : GraphSnapshotSequence
-        Snapshot sequence that may carry control inputs.
-    timestep : int
-        Index of the source snapshot in the transition pair.
-
-    Returns
-    -------
-    Tensor
-        Scalar one-step reconstruction loss.
-    """
-    target_mask = None
-    if sequence.has_observation_masks:
-        target_mask = sequence.observation_mask_at(timestep + 1)
-
-    n_delays = int(getattr(model, "n_delays", 1))
-    if n_delays > 1 and callable(getattr(model, "encode_at", None)):
-        snapshot_t = sequence[timestep]
-        snapshot_t1 = sequence[timestep + 1]
-        z = _encode_at(model, sequence, timestep)
-        default_delta_t = _model_default_delta_t(model)
-        delta_t = resolve_pair_delta_t(
-            sequence,
-            timestep,
-            default_time_step=default_delta_t,
-        )
-        z_next = propagate_latent(
+    num_nodes = sequence.num_nodes
+    if not sequence.is_dynamic_topology:
+        return _EIGENVALUE_REGULARIZATION_LOSS(
             model.koopman,
-            z,
-            control=_pair_control(sequence, timestep),
-            delta_t=delta_t,
-            default_delta_t=default_delta_t,
-            edge_index=snapshot_t1.edge_index,
-            edge_weight=getattr(snapshot_t1, "edge_weight", None),
+            dynamics_mode=model.dynamics_mode,
+            edge_index=sequence.edge_index,
+            num_nodes=num_nodes,
+            edge_weight=sequence.edge_weight,
         )
-        prediction = model.decoder(
-            z_next,
-            snapshot_t.edge_index,
-            getattr(snapshot_t, "edge_weight", None),
-        )
-        target = snapshot_t1.x
-        if target_mask is None:
-            return nn.functional.mse_loss(prediction, target)
-        return masked_mse_loss(prediction, target, target_mask)
 
-    return one_step_loss(
-        model,
-        sequence[timestep],
-        sequence[timestep + 1],
-        control=_pair_control(sequence, timestep),
-        delta_t=resolve_pair_delta_t(
-            sequence,
-            timestep,
-            default_time_step=_model_default_delta_t(model),
-        ),
-        target_mask=target_mask,
-    )
-
-
-def compute_sequence_loss(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-) -> Tensor:
-    """Average one-step prediction loss over consecutive snapshot pairs.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model implementing a single-step forward pass.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Time-ordered snapshots with at least two timesteps.
-
-    Returns
-    -------
-    Tensor
-        Scalar average loss over all consecutive pairs.
-
-    Raises
-    ------
-    ValueError
-        If ``sequence`` contains fewer than two snapshots.
-    """
-    return _mean_pair_sequence_loss(model, sequence, _one_step_pair)
-
-
-def compute_forward_consistency_sequence_loss(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-) -> Tensor:
-    """Average forward consistency loss over consecutive snapshot pairs.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Time-ordered snapshots with at least two timesteps.
-
-    Returns
-    -------
-    Tensor
-        Scalar average forward consistency loss.
-
-    Raises
-    ------
-    ValueError
-        If ``sequence`` contains fewer than two snapshots.
-    """
-    return _mean_pair_sequence_loss(
-        model,
-        sequence,
-        _forward_consistency_pair,
-    )
-
-
-def compute_backward_consistency_sequence_loss(
-    model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-) -> Tensor:
-    """Average backward consistency loss over consecutive snapshot pairs.
-
-    Parameters
-    ----------
-    model : TrainableKoopmanModel
-        Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Time-ordered snapshots with at least two timesteps.
-
-    Returns
-    -------
-    Tensor
-        Scalar average backward consistency loss.
-
-    Raises
-    ------
-    ValueError
-        If ``sequence`` contains fewer than two snapshots.
-    """
-    if sequence.num_timesteps < 2:
-        msg = "GraphSnapshotSequence must contain at least 2 snapshots for training"
-        raise ValueError(msg)
-
-    # Optional built-in optimization: precompute ``K^{-1}`` once per sequence when
-    # the operator exposes ``dense_inverse_matrix`` and does not need topology
-    # (networked operators invert the effective ``N·d`` map per pair instead).
-    inverse_matrix = None
-    if (
-        model.dynamics_mode == "discrete"
-        and model.koopman.parameterization == "dense"
-        and not isinstance(model.koopman, GraphKoopmanOperator)
-    ):
-        dense_inverse = getattr(model.koopman, "dense_inverse_matrix", None)
-        if callable(dense_inverse):
-            inverse_matrix = dense_inverse()
-
-    total_loss = torch.zeros((), device=next(model.parameters()).device)
     num_pairs = sequence.num_timesteps - 1
+    device = next(model.parameters()).device
+    total = torch.zeros((), device=device)
+    cache: list[tuple[Tensor, Tensor | None, Tensor]] = []
     for t in range(num_pairs):
-        total_loss = total_loss + _backward_consistency_pair(
-            model,
-            sequence,
-            t,
-            inverse_matrix=inverse_matrix,
-        )
-    return total_loss / num_pairs
+        snapshot = sequence[t + 1]
+        edge_index = snapshot.edge_index
+        edge_weight = snapshot_edge_weight(snapshot)
+        cached: Tensor | None = None
+        for cached_index, cached_weight, cached_penalty in cache:
+            if _topologies_equal(
+                edge_index,
+                edge_weight,
+                cached_index,
+                cached_weight,
+            ):
+                cached = cached_penalty
+                break
+        if cached is None:
+            penalty = _EIGENVALUE_REGULARIZATION_LOSS(
+                model.koopman,
+                dynamics_mode=model.dynamics_mode,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                edge_weight=edge_weight,
+            )
+            cache.append((edge_index, edge_weight, penalty))
+        else:
+            penalty = cached
+        total = total + penalty
+    return total / num_pairs
 
 
-def compute_eigenvalue_regularization_loss(model: TrainableKoopmanModel) -> Tensor:
+def compute_eigenvalue_regularization_loss(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence | None = None,
+) -> Tensor:
     """Compute the eigenvalue hinge penalty for the model Koopman operator.
 
+    Ordinary / custom operators use the per-node contract matrix (or structural
+    ``bound_metric``). For :class:`~koopman_graph.operators.GraphKoopmanOperator`
+    dense/ODO modes, regularizes the topology-coupled effective operator:
+    pass ``sequence`` so training can resolve pair/window topology. Structural
+    graph modes still use factor-level ``bound_metric`` and do not require
+    topology (they are **not** whole-network certificates).
+
     Parameters
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
+    sequence : GraphSnapshotSequence or None, optional
+        Trajectory or window providing topology for graph dense/ODO
+        regularization. Required when ``model.koopman`` is a dense/ODO
+        :class:`~koopman_graph.operators.GraphKoopmanOperator`.
 
     Returns
     -------
     Tensor
         Scalar eigenvalue regularization loss.
+
+    Raises
+    ------
+    ValueError
+        If a graph dense/ODO operator is regularized without ``sequence``.
     """
+    koopman = model.koopman
+    if isinstance(koopman, GraphKoopmanOperator) and koopman.parameterization in {
+        "dense",
+        "odo",
+    }:
+        if sequence is None:
+            msg = (
+                "sequence is required for eigenvalue regularization of "
+                "GraphKoopmanOperator dense/odo modes (topology-coupled "
+                "effective operator); pass the training sequence/window"
+            )
+            raise ValueError(msg)
+        return _graph_eigenvalue_regularization_over_sequence(model, sequence)
     return _EIGENVALUE_REGULARIZATION_LOSS(
-        model.koopman,
+        koopman,
         dynamics_mode=model.dynamics_mode,
     )
 
@@ -527,6 +252,7 @@ def compute_training_loss(
     sequence: GraphSnapshotSequence,
     loss_weights: LossWeights,
     *,
+    extra_losses: ExtraLosses | None = None,
     rollout_horizon: int | None = None,
     rollout_start_indices: Sequence[int] | None = None,
 ) -> TrainingLossBreakdown:
@@ -540,6 +266,9 @@ def compute_training_loss(
         Time-ordered snapshots with at least two timesteps.
     loss_weights : :class:`~koopman_graph.training.LossWeights`
         Weights for reconstruction, forward, backward, and rollout terms.
+    extra_losses : :class:`~koopman_graph.training.ExtraLosses` or None, optional
+        Fit-time vector-field and PDE-residual callables. Required when the
+        corresponding ``lie`` or ``pde`` weight is non-zero.
     rollout_horizon : int or None, optional
         Number of rollout steps when ``loss_weights.rollout`` is non-zero.
         Defaults to ``sequence.num_timesteps - 1``.
@@ -552,10 +281,45 @@ def compute_training_loss(
         Unweighted per-term losses and the weighted total.
     """
     device = next(model.parameters()).device
-    reconstruction = compute_sequence_loss(model, sequence)
-    forward = compute_forward_consistency_sequence_loss(model, sequence)
-    backward = compute_backward_consistency_sequence_loss(model, sequence)
-    eigenvalue = compute_eigenvalue_regularization_loss(model)
+
+    if loss_weights.reconstruction != 0.0:
+        reconstruction = compute_sequence_loss(model, sequence)
+    else:
+        reconstruction = torch.zeros((), device=device)
+
+    if loss_weights.forward != 0.0:
+        forward = compute_forward_consistency_sequence_loss(model, sequence)
+    else:
+        forward = torch.zeros((), device=device)
+
+    if loss_weights.backward != 0.0:
+        backward = compute_backward_consistency_sequence_loss(model, sequence)
+    else:
+        backward = torch.zeros((), device=device)
+
+    if loss_weights.eigenvalue != 0.0:
+        eigenvalue = compute_eigenvalue_regularization_loss(model, sequence)
+    else:
+        eigenvalue = torch.zeros((), device=device)
+
+    lie = compute_lie_consistency_loss(
+        model,
+        sequence,
+        weight=loss_weights.lie,
+        extra_losses=extra_losses,
+    )
+    pde = compute_pde_residual_loss(
+        model,
+        sequence,
+        weight=loss_weights.pde,
+        extra_losses=extra_losses,
+    )
+    sparsity = compute_sparsity_loss(model, weight=loss_weights.sparsity)
+    worst_case = compute_worst_case_reconstruction_loss(
+        model,
+        sequence,
+        weight=loss_weights.worst_case,
+    )
 
     if loss_weights.rollout != 0.0:
         horizon = (
@@ -577,6 +341,10 @@ def compute_training_loss(
         + loss_weights.backward * backward
         + loss_weights.rollout * rollout
         + loss_weights.eigenvalue * eigenvalue
+        + loss_weights.lie * lie
+        + loss_weights.pde * pde
+        + loss_weights.sparsity * sparsity
+        + loss_weights.worst_case * worst_case
     )
     return TrainingLossBreakdown(
         reconstruction=reconstruction,
@@ -584,5 +352,20 @@ def compute_training_loss(
         backward=backward,
         rollout=rollout,
         eigenvalue=eigenvalue,
+        lie=lie,
+        pde=pde,
+        sparsity=sparsity,
+        worst_case=worst_case,
         total=total,
     )
+
+
+__all__ = [
+    "compute_backward_consistency_sequence_loss",
+    "compute_eigenvalue_regularization_loss",
+    "compute_forward_consistency_sequence_loss",
+    "compute_rollout_loss",
+    "compute_sequence_loss",
+    "compute_training_loss",
+    "one_step_loss",
+]

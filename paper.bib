@@ -24,11 +24,23 @@
   url = {https://proceedings.mlr.press/v211/dey23a.html}
 }
 
+@article{Brunton2016SINDy,
+  author = {Brunton, Steven L. and Proctor, Joshua L. and Kutz, J. Nathan},
+  title = {Discovering Governing Equations from Data by Sparse Identification of Nonlinear Dynamical Systems},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume = {113},
+  number = {15},
+  pages = {3932--3937},
+  year = {2016},
+  doi = {10.1073/pnas.1517384113}
+}
+
 @inproceedings{Fey/Lenssen/2019,
   title = {Fast Graph Representation Learning with {PyTorch Geometric}},
   author = {Fey, Matthias and Lenssen, Jan E.},
   booktitle = {ICLR Workshop on Representation Learning on Graphs and Manifolds},
-  year = {2019}
+  year = {2019},
+  url = {https://arxiv.org/abs/1903.02428}
 }
 
 @article{koopman1931,
@@ -52,6 +64,38 @@
   doi = {10.1038/s41467-018-07210-0}
 }
 
+@misc{Liu2022PIKN,
+  author = {Liu, Yuying and Sholokhov, Aleksei and Mansour, Hassan and Nabi, Saleh},
+  title = {Physics-Informed {Koopman} Network},
+  year = {2022},
+  eprint = {2211.09419},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG},
+  doi = {10.48550/arXiv.2211.09419}
+}
+
+@article{Raissi2019PINN,
+  author = {Raissi, Maziar and Perdikaris, Paris and Karniadakis, George Em},
+  title = {Physics-informed neural networks: A deep learning framework for solving forward and inverse problems involving nonlinear partial differential equations},
+  journal = {Journal of Computational Physics},
+  volume = {378},
+  pages = {686--707},
+  year = {2019},
+  doi = {10.1016/j.jcp.2018.10.045}
+}
+
+@inproceedings{Minoza2026SPIKE,
+  author = {Mi{\~n}oza, Jose Marie Antonio},
+  title = {{SPIKE}: Sparse {Koopman} Regularization for Physics-Informed Neural Networks},
+  booktitle = {Conference on Parsimony and Learning},
+  series = {Proceedings of Machine Learning Research},
+  volume = {328},
+  pages = {164--191},
+  year = {2026},
+  publisher = {PMLR},
+  url = {https://proceedings.mlr.press/v328/minoza26a.html}
+}
+
 @article{Mezic2021,
   author = {Mezi{\'c}, Igor},
   title = {Koopman operator, geometry, and learning of dynamical systems},
@@ -59,7 +103,9 @@
   volume = {68},
   number = {7},
   pages = {1087--1105},
-  year = {2021}
+  year = {2021},
+  doi = {10.1090/noti2306},
+  url = {https://doi.org/10.1090/noti2306}
 }
 
 @article{Mezic2022,
@@ -201,6 +247,28 @@
   doi = {10.1007/s00332-015-9258-5}
 }
 
+@article{Williams2015KernelDMD,
+  author = {Williams, Matthew O. and Rowley, Clarence W. and Kevrekidis, Ioannis G.},
+  title = {A Kernel-Based Method for Data-Driven {Koopman} Spectral Analysis},
+  journal = {Journal of Computational Dynamics},
+  volume = {2},
+  number = {2},
+  pages = {247--265},
+  year = {2015},
+  doi = {10.3934/jcd.2015005}
+}
+
+@article{Klus2018TransferOperator,
+  author = {Klus, Stefan and N{\"u}ske, Feliks and Koltai, P{\'e}ter and Wu, Hao and Kevrekidis, Ioannis and Sch{\"u}tte, Christof and No{\'e}, Frank},
+  title = {Data-Driven Model Reduction and Transfer Operator Approximation},
+  journal = {Journal of Nonlinear Science},
+  volume = {28},
+  number = {3},
+  pages = {985--1010},
+  year = {2018},
+  doi = {10.1007/s00332-017-9437-7}
+}
+
 @inproceedings{Yu2018STGCN,
   author = {Yu, Bing and Yin, Haoteng and Zhu, Zhanxing},
   title = {Spatio-Temporal Graph Convolutional Networks: A Deep Learning Framework for Traffic Forecasting},
@@ -216,6 +284,42 @@
   booktitle = {International Conference on Learning Representations ({ICLR})},
   year = {2018},
   url = {https://openreview.net/forum?id=SJiHXGWAZ}
+}
+
+@inproceedings{Hamilton2017GraphSAGE,
+  author = {Hamilton, William L. and Ying, Rex and Leskovec, Jure},
+  title = {Inductive Representation Learning on Large Graphs},
+  booktitle = {Advances in Neural Information Processing Systems ({NeurIPS})},
+  year = {2017},
+  url = {https://proceedings.neurips.cc/paper/2017/hash/5dd9db5e033da9c6fb5ba83c7a7ebea9-Abstract.html}
+}
+
+@article{Zhang2026PKGCN,
+  author = {Zhang, X. and Wang, Z. and Liu, F. and Yao, B.},
+  title = {{P-K-GCN}: Physics-augmented {Koopman}-enhanced Graph Convolutional Network for Deep Spatiotemporal Super-resolution},
+  journal = {arXiv preprint arXiv:2606.19303},
+  year = {2026},
+  eprint = {2606.19303},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.LG},
+  note = {Coarse-to-fine super-resolution precedent; related but not identical to coarse-level hierarchical forecasting}
+}
+
+@inproceedings{Vaswani2017Attention,
+  author = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  title = {Attention Is All You Need},
+  booktitle = {Advances in Neural Information Processing Systems ({NeurIPS})},
+  year = {2017},
+  url = {https://papers.nips.cc/paper/7181-attention-is-all-you-need}
+}
+
+@inproceedings{Shi2021MaskedLabel,
+  author = {Shi, Yunsheng and Huang, Zhengjie and Feng, Shikun and Zhong, Hui and Wang, Wenjin and Sun, Yu},
+  title = {Masked Label Prediction: Unified Message Passing Model for Semi-Supervised Classification},
+  booktitle = {Proceedings of the Thirtieth International Joint Conference on Artificial Intelligence ({IJCAI-21})},
+  pages = {1548--1554},
+  year = {2021},
+  doi = {10.24963/ijcai.2021/214}
 }
 
 @inproceedings{Wu2019WaveNet,

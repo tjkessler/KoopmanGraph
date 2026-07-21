@@ -9,68 +9,22 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.graph_utils import resolve_edge_index, resolve_edge_weight
-from koopman_graph.spectrum_types import KoopmanSpectrum
+from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from koopman_graph.model import GraphKoopmanModel
 
-
-def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
-    """Compute the sorted spectrum and continuous-time mode characteristics.
-
-    Parameters
-    ----------
-    operator : Tensor
-        Square discrete-time Koopman matrix with shape
-        ``(latent_dim, latent_dim)``.
-    time_step : float
-        Positive physical duration represented by one operator step.
-
-    Returns
-    -------
-    KoopmanSpectrum
-        Eigenpairs sorted by descending magnitude, plus growth rates and
-        frequencies converted using ``time_step``.
-
-    Raises
-    ------
-    ValueError
-        If ``operator`` is not a non-empty square matrix or ``time_step`` is
-        not positive.
-    TypeError
-        If ``operator`` is not floating-point or complex.
-    """
-    if operator.ndim != 2 or operator.shape[0] != operator.shape[1]:
-        msg = f"operator must be a square matrix, got shape {tuple(operator.shape)}"
-        raise ValueError(msg)
-    if operator.shape[0] == 0:
-        raise ValueError("operator must be non-empty")
-    if time_step <= 0:
-        msg = f"time_step must be positive, got {time_step}"
-        raise ValueError(msg)
-    if not (operator.is_floating_point() or operator.is_complex()):
-        msg = f"operator must be floating-point or complex, got {operator.dtype}"
-        raise TypeError(msg)
-
-    eigenvalues, eigenvectors = torch.linalg.eig(operator)
-    magnitudes = eigenvalues.abs()
-    order = torch.argsort(magnitudes, descending=True)
-    eigenvalues = eigenvalues[order]
-    eigenvectors = eigenvectors[:, order]
-    magnitudes = magnitudes[order]
-
-    growth_rates = torch.log(magnitudes) / time_step
-    frequencies = torch.angle(eigenvalues) / (2 * torch.pi * time_step)
-    return KoopmanSpectrum(
-        eigenvalues=eigenvalues,
-        eigenvectors=eigenvectors,
-        magnitudes=magnitudes,
-        growth_rates=growth_rates,
-        frequencies=frequencies,
-        time_step=float(time_step),
-    )
+# Discrete spectrum assembly lives on the neutral ``spectrum_types`` leaf so
+# operators can call it without importing this analysis package. Re-export for
+# the public ``koopman_graph.analysis.compute_spectrum`` surface.
+__all__ = [
+    "compute_generator_spectrum",
+    "compute_spectrum",
+    "decode_mode_shapes",
+    "discrete_spectrum_at_delta_t",
+]
 
 
 def compute_generator_spectrum(generator: Tensor) -> KoopmanSpectrum:
@@ -173,6 +127,8 @@ def decode_mode_shapes(
     Hard-typed to :class:`~koopman_graph.model.GraphKoopmanModel` because it
     needs ``encode`` / ``decode`` and a GNN decoder. Spectrum-only comparisons
     use :func:`~koopman_graph.analysis.dynamical_similarity` instead.
+    For ``koopman="graph"``, topology is taken from the reference graph and
+    forwarded into :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum`.
 
     Parameters
     ----------
@@ -196,21 +152,38 @@ def decode_mode_shapes(
     Raises
     ------
     ValueError
-        If ``perturbation`` is not positive or a mode index is out of range.
+        If ``perturbation`` is not positive, a mode index is out of range, or
+        a graph model is missing resolvable topology.
     """
     if perturbation <= 0:
         msg = f"perturbation must be positive, got {perturbation}"
         raise ValueError(msg)
 
-    spectrum = model.spectrum()
+    edges = resolve_edge_index(x_or_data, edge_index)
+    edge_weight = resolve_edge_weight(x_or_data, None)
+    if model.uses_graph_koopman:
+        if isinstance(x_or_data, Data):
+            num_nodes = (
+                int(x_or_data.num_nodes)
+                if x_or_data.num_nodes is not None
+                else int(x_or_data.x.size(0))
+            )
+        else:
+            # Feature tensor ``(N, F)`` or delay window ``(..., N, F)``.
+            num_nodes = int(x_or_data.shape[-2])
+        spectrum = model.spectrum(
+            edge_index=edges,
+            num_nodes=num_nodes,
+            edge_weight=edge_weight,
+        )
+    else:
+        spectrum = model.spectrum()
     latent_dim = spectrum.eigenvalues.numel()
     indices = list(range(latent_dim)) if mode_indices is None else list(mode_indices)
     if any(index < 0 or index >= latent_dim for index in indices):
         msg = f"mode_indices must be between 0 and {latent_dim - 1}, got {indices}"
         raise ValueError(msg)
 
-    edges = resolve_edge_index(x_or_data, edge_index)
-    edge_weight = resolve_edge_weight(x_or_data, None)
     was_training = model.training
     model.eval()
     try:
@@ -318,6 +291,9 @@ def _decode_real_direction(
     Tensor
         Real node-feature response.
     """
+    if direction.numel() == latent.numel() and direction.shape != latent.shape:
+        # Networked spectrum eigenvectors are ``(N·d,)``; reshape to node layout.
+        direction = direction.reshape_as(latent)
     if not torch.count_nonzero(direction):
         return torch.zeros(
             (latent.shape[0], model.decoder.out_channels),

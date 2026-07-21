@@ -6,18 +6,23 @@ Capability layout
     :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` and
     :class:`~koopman_graph.adaptation.AdaptationStepResult` for recursive
     least-squares operator updates.
+``kalman``
+    :class:`~koopman_graph.adaptation.FilterResult` plus reference Kalman /
+    RTS numerics (``reference_kalman_filter``, ``rts_smooth``).
+``impute``
+    Heuristic ``graph_diffuse_impute`` neighbor-average warm-start.
 ``observer``
-    :class:`~koopman_graph.adaptation.KoopmanObserver` and
-    :class:`~koopman_graph.adaptation.FilterResult` for Kalman filtering /
-    smoothing / imputation under ``observation_masks``.
+    :class:`~koopman_graph.adaptation.KoopmanObserver` façade for Kalman
+    filtering / smoothing / imputation under ``observation_masks``.
 
-``RecursiveKoopmanAdapter`` remains on the root façade. Observer types are
-power-user imports from this package (not newly promoted into
-``koopman_graph.__all__``).
+RLS and observer types (``RecursiveKoopmanAdapter``, ``AdaptationStepResult``,
+``KoopmanObserver``, ``FilterResult``, and related helpers) are available from
+this package and are intentionally omitted from root ``koopman_graph.__all__``
+(thin façade; capability-module imports only).
 """
 
+from koopman_graph.adaptation.kalman import FilterResult
 from koopman_graph.adaptation.observer import (
-    FilterResult,
     KoopmanObserver,
     ObservationModel,
 )

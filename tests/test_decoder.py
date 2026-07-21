@@ -5,7 +5,17 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph.model import GraphKoopmanModel
-from koopman_graph.nn import GATDecoder, GATEncoder, GNNDecoder
+from koopman_graph.nn import (
+    DiffConvDecoder,
+    DiffConvEncoder,
+    GATDecoder,
+    GATEncoder,
+    GNNDecoder,
+    GraphTransformerDecoder,
+    GraphTransformerEncoder,
+    SAGEDecoder,
+    SAGEEncoder,
+)
 
 
 def test_forward_with_data_object(synthetic_graph: Data) -> None:
@@ -288,6 +298,142 @@ def test_gat_encoder_decoder_pairing(synthetic_graph: Data) -> None:
     assert out.shape == synthetic_graph.x.shape
     loss = out.sum()
     loss.backward()
+    for param in model.parameters():
+        assert param.grad is not None
+        assert torch.isfinite(param.grad).all()
+
+
+def test_sage_decoder_forward_and_export(synthetic_graph: Data) -> None:
+    """Verify SAGE decoder shapes and root export."""
+    z = torch.randn(5, 4)
+    decoder = SAGEDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    assert decoder(z, synthetic_graph.edge_index).shape == (5, 3)
+    from koopman_graph import SAGEDecoder as Exported
+
+    assert Exported is SAGEDecoder
+
+
+@pytest.mark.parametrize("activation", ["relu", "sigmoid", "tanh"])
+def test_sage_decoder_activation_options(
+    activation: str, synthetic_graph: Data
+) -> None:
+    """Verify SAGE decoder activations produce finite outputs."""
+    z = torch.randn(5, 4)
+    decoder = SAGEDecoder(
+        latent_dim=4,
+        hidden_channels=8,
+        out_channels=3,
+        activation=activation,  # type: ignore[arg-type]
+    )
+    out = decoder(z, synthetic_graph.edge_index)
+    assert torch.isfinite(out).all()
+
+
+def test_diffconv_decoder_forward_weights_and_export(
+    synthetic_graph: Data,
+) -> None:
+    """Verify DiffConv decoder respects edge weights and is root-exported."""
+    z = torch.randn(5, 4)
+    decoder = DiffConvDecoder(
+        latent_dim=4,
+        hidden_channels=8,
+        out_channels=3,
+        diffusion_steps=2,
+    )
+    assert decoder(z, synthetic_graph.edge_index).shape == (5, 3)
+    edge_index = torch.tensor(
+        [[0, 1, 1, 2], [1, 0, 2, 1]],
+        dtype=torch.long,
+    )
+    latent = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]])
+    edge_weight = torch.tensor([1.0, 0.1, 2.0, 0.5])
+    single = DiffConvDecoder(
+        latent_dim=2,
+        hidden_channels=4,
+        out_channels=2,
+        num_layers=1,
+        diffusion_steps=1,
+    )
+    single.eval()
+    assert not torch.allclose(
+        single(latent, edge_index),
+        single(latent, edge_index, edge_weight),
+    )
+    from koopman_graph import DiffConvDecoder as Exported
+
+    assert Exported is DiffConvDecoder
+
+
+def test_sage_and_diffconv_end_to_end_models(synthetic_graph: Data) -> None:
+    """Verify SAGE/DiffConv encoder-decoder pairs compose in the model."""
+    for encoder, decoder in (
+        (
+            SAGEEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+            SAGEDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        ),
+        (
+            DiffConvEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+            DiffConvDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        ),
+    ):
+        model = GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=4,
+            time_step=0.1,
+        )
+        out = model(synthetic_graph)
+        assert out.shape == synthetic_graph.x.shape
+        out.sum().backward()
+        for param in model.parameters():
+            assert param.grad is not None
+            assert torch.isfinite(param.grad).all()
+
+
+def test_transformer_decoder_forward_edge_dim_and_export(
+    synthetic_graph: Data,
+) -> None:
+    """Verify Transformer decoder shapes, edge_dim, and root export."""
+    z = torch.randn(5, 4)
+    decoder = GraphTransformerDecoder(
+        latent_dim=4, hidden_channels=8, out_channels=3, heads=2
+    )
+    assert decoder(z, synthetic_graph.edge_index).shape == (5, 3)
+    edge_index = torch.tensor([[0, 1, 1, 0], [1, 0, 0, 1]], dtype=torch.long)
+    latent = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    edge_weight = torch.tensor([2.0, 0.5, 0.5, 2.0])
+    conditioned = GraphTransformerDecoder(
+        latent_dim=2,
+        hidden_channels=4,
+        out_channels=2,
+        num_layers=1,
+        edge_dim=1,
+    )
+    conditioned.eval()
+    assert not torch.allclose(
+        conditioned(latent, edge_index, edge_weight),
+        conditioned(latent, edge_index, torch.tensor([0.1, 3.0, 3.0, 0.1])),
+    )
+    from koopman_graph import GraphTransformerDecoder as Exported
+
+    assert Exported is GraphTransformerDecoder
+
+
+def test_transformer_end_to_end_model(synthetic_graph: Data) -> None:
+    """Verify Transformer encoder-decoder pair composes in the model."""
+    model = GraphKoopmanModel(
+        encoder=GraphTransformerEncoder(
+            in_channels=3, hidden_channels=8, latent_dim=4, heads=2
+        ),
+        decoder=GraphTransformerDecoder(
+            latent_dim=4, hidden_channels=8, out_channels=3, heads=2
+        ),
+        latent_dim=4,
+        time_step=0.1,
+    )
+    out = model(synthetic_graph)
+    assert out.shape == synthetic_graph.x.shape
+    out.sum().backward()
     for param in model.parameters():
         assert param.grad is not None
         assert torch.isfinite(param.grad).all()
