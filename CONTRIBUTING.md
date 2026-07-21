@@ -151,8 +151,8 @@ Before opening a pull request, run the same checks enforced in
 ruff check src/ tests/
 ruff format --check src/ tests/
 
-# Tests with coverage gate
-pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
+# Tests with coverage gate (matches the CI 3.12 job; use -n auto for speed)
+pytest tests/ -n auto --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
 With uv after `uv sync --extra dev`:
@@ -160,7 +160,7 @@ With uv after `uv sync --extra dev`:
 ```bash
 uv run ruff check src/ tests/
 uv run ruff format --check src/ tests/
-uv run pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
+uv run pytest tests/ -n auto --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
 To auto-fix lint issues and apply formatting:
@@ -225,22 +225,27 @@ docstring updates (see [Documentation](#documentation)).
    - Related issue links (if applicable)
    - Confirmation that tests and lint pass locally
    - Documentation updates when the public API changes
-5. **Address review feedback** and ensure CI passes on Python 3.10, 3.11, and 3.12.
+5. **Address review feedback** and ensure CI passes (see required `ci` check;
+   the matrix covers Python 3.10 and 3.12 when tests run).
 
 Maintainers may request changes before merging. We aim to review pull requests
 in a timely manner and appreciate clear descriptions and test coverage.
 
 ### Required status checks (maintainers)
 
-Branch protection on `main` is configured through GitHub
-(**Settings → Branches → Branch protection rules**), not through committed files.
-The following checks from [`ci.yml`](.github/workflows/ci.yml) should be marked
-as **required** before merge:
+Branch protection on `main` is configured through a GitHub ruleset
+(**Settings → Rules → Rulesets**), not through committed files.
+Mark the aggregator check from [`ci.yml`](.github/workflows/ci.yml) as
+**required** before merge:
 
-- `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest, Ruff lint/format, and the
-  90% coverage gate across supported Python versions
-- `notebooks` — tutorial nbmake smoke tests (Python 3.12, parallel with the
-  test matrix)
+- `ci` — succeeds when path-selected jobs (`lint`, `test`, `notebooks`,
+  `docs`) succeed or are intentionally skipped; fails if any selected job fails
+
+Individual jobs still appear on the workflow run for diagnosis:
+
+- `lint` — Ruff via `uvx` (no full torch install)
+- `test (3.10)`, `test (3.12)` — pytest with `pytest-xdist`; coverage gate on 3.12 only
+- `notebooks` — tutorial nbmake smoke tests (Python 3.12)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))

@@ -9,11 +9,11 @@ on:
       - "tests/**"
       - "examples/**"
       - "docs/**"
+      - "README.md"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
-  # Always run on PRs so required status checks on main can be satisfied
-  # for docs-only / config-only changes as well as code changes.
+      - ".pre-commit-config.yaml"
   pull_request:
     branches: [main]
 
@@ -22,12 +22,79 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      lint: ${{ steps.filter.outputs.lint }}
+      test: ${{ steps.filter.outputs.test }}
+      notebooks: ${{ steps.filter.outputs.notebooks }}
+      docs: ${{ steps.filter.outputs.docs }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            lint:
+              - 'src/**'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - '.pre-commit-config.yaml'
+            test:
+              - 'src/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            notebooks:
+              - 'examples/**'
+              - 'src/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+            docs:
+              - 'docs/**'
+              - 'README.md'
+              - 'src/**'
+              - 'pyproject.toml'
+            workflow:
+              - '.github/workflows/ci.yml'
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Lint with Ruff
+        run: |
+          uvx ruff check src/ tests/
+          uvx ruff format --check src/ tests/
+
   test:
+    name: test (${{ matrix.python-version }})
+    needs: changes
+    if: needs.changes.outputs.test == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - python-version: "3.10"
+            coverage: "false"
+          - python-version: "3.12"
+            coverage: "true"
 
     steps:
       - uses: actions/checkout@v7
@@ -37,20 +104,26 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra rl
-
-      - name: Lint with Ruff
-        run: |
-          uv run ruff check src/ tests/
-          uv run ruff format --check src/ tests/
+        run: uv sync --frozen --extra dev --extra rl
 
       - name: Run tests
-        run: uv run pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+        if: matrix.coverage != 'true'
+        run: uv run --no-sync pytest tests/ -n auto
+
+      - name: Run tests with coverage
+        if: matrix.coverage == 'true'
+        run: >
+          uv run --no-sync pytest tests/ -n auto
+          --cov=koopman_graph
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-fail-under=90
 
       - name: Upload coverage reports to Codecov
-        if: matrix.python-version == '3.12'
+        if: matrix.coverage == 'true'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -58,6 +131,8 @@ jobs:
           fail_ci_if_error: false
 
   notebooks:
+    needs: changes
+    if: needs.changes.outputs.notebooks == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -67,9 +142,10 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra rl
+        run: uv sync --frozen --extra dev --extra rl
 
       - name: Execute tutorial notebooks
         env:
@@ -77,9 +153,11 @@ jobs:
           OMP_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
-        run: uv run pytest --nbmake examples/ -v -n 4 --durations=25
+        run: uv run --no-sync pytest --nbmake examples/ -n 4 --durations=25
 
   docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -89,9 +167,37 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra docs
+        run: uv sync --frozen --extra docs
 
       - name: Build Sphinx documentation
-        run: uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
+        run: uv run --no-sync sphinx-build -b html -W --keep-going docs/source docs/build/html
+
+  # Single required check for branch protection. Individual jobs may be skipped
+  # by path filters; this aggregator still reports success when skips are expected.
+  ci:
+    name: ci
+    needs: [changes, lint, test, notebooks, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CI jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          if needs["changes"]["result"] != "success":
+              sys.exit("changes job did not succeed")
+          for job in ("lint", "test", "notebooks", "docs"):
+              result = needs[job]["result"]
+              if result not in ("success", "skipped"):
+                  sys.exit(f"{job} failed with result={result}")
+          print("CI OK")
+          PY
