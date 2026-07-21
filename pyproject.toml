@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "koopman-graph"
 dynamic = ["version"]
-description = "Graph Neural Networks with Koopman operator theory for spatiotemporal graph dynamics"
+description = "Topology-aware Koopman autoencoders for forecasting and analyzing networked dynamics"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

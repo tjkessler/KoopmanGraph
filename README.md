@@ -6,7 +6,7 @@
 
 # KoopmanGraph
 
-**Graph Neural Networks with Koopman operator theory for spatiotemporal graph dynamics**
+**Topology-aware Koopman autoencoders for forecasting and analyzing networked dynamics**
 
 [![Tests](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21468449.svg)](https://doi.org/10.5281/zenodo.21468449)
