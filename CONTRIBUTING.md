@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to **KoopmanGraph**. This project
 aims to provide a well-tested, documented, and reproducible open-source library
-for spatiotemporal graph dynamics using Koopman operator theory. Community
+for topology-aware Koopman autoencoders on networked dynamical systems. Community
 contributions—bug reports, documentation improvements, tests, and new
 features—are welcome and help keep the project well-tested, documented, and
 reproducible for the research community.

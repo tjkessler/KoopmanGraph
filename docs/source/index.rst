@@ -1,11 +1,11 @@
 KoopmanGraph
 ============
 
-**KoopmanGraph** integrates Graph Neural Networks with Koopman operator theory
-for spatiotemporal graph dynamics. The library lifts node features into a
-latent space with topology-aware encoders, advances state via a learned
-finite-dimensional Koopman operator, and decodes predictions back to physical
-node features.
+**KoopmanGraph** is a PyTorch Geometric library for learning topology-aware
+Koopman autoencoders on graphs. GNN encoders lift node features into a latent
+space, a learned linear operator advances those states, and a matching decoder
+reconstructs physical node features for multi-step forecasting and spectral
+analysis.
 
 Version **0.5.0** adds ensemble and latent-Gaussian uncertainty, auxiliary
 state-dependent continuous generators, physics-residual and sparsity losses,

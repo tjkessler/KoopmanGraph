@@ -1,6 +1,6 @@
 {
-  "title": "KoopmanGraph: Graph Neural Networks with Koopman Operator Theory",
-  "description": "A PyTorch Geometric library integrating Graph Neural Networks with Koopman operator theory for topology-aware modeling of spatiotemporal graph dynamics.",
+  "title": "KoopmanGraph: Topology-Aware Koopman Autoencoders for Networked Dynamics",
+  "description": "A PyTorch Geometric library for topology-aware Koopman autoencoders on graphs: GNN lifting and decoding with a learned linear latent operator for forecasting and analyzing networked dynamical systems.",
   "upload_type": "software",
   "access_right": "open",
   "license": "Apache-2.0",
