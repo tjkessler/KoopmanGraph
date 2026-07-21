@@ -73,10 +73,7 @@ class _DiffusionConv(nn.Module):
                 out = out + (support @ x) @ weight
             return out + self.bias
         if x.dim() != 3:
-            msg = (
-                "x must have shape (N, C) or (batch, N, C), "
-                f"got {tuple(x.shape)}"
-            )
+            msg = f"x must have shape (N, C) or (batch, N, C), got {tuple(x.shape)}"
             raise ValueError(msg)
         out = x.new_zeros(x.shape[0], x.shape[1], self.weights.shape[-1])
         for support, weight in zip(supports, self.weights, strict=True):

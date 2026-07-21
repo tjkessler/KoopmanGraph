@@ -331,8 +331,7 @@ def anisotropic_advection_step(
         raise ValueError(msg)
     if state.ndim != 2:
         msg = (
-            "state must be 2D (num_nodes, in_channels), "
-            f"got shape {tuple(state.shape)}"
+            f"state must be 2D (num_nodes, in_channels), got shape {tuple(state.shape)}"
         )
         raise ValueError(msg)
     expected_nodes = num_rows * num_cols
@@ -351,8 +350,7 @@ def anisotropic_advection_step(
         raise ValueError(msg)
     if west_weight + north_weight >= 1.0:
         msg = (
-            f"west_weight + north_weight must be < 1, got "
-            f"{west_weight + north_weight}"
+            f"west_weight + north_weight must be < 1, got {west_weight + north_weight}"
         )
         raise ValueError(msg)
     return _anisotropic_advection_step(
