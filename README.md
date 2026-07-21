@@ -38,7 +38,7 @@ KoopmanGraph bridges that gap with GNN lifting/decoding, an inspectable Koopman 
 The library sits in the consistent Koopman autoencoder lineage and is **not claimed as a new theoretical contribution**; it packages topology-aware lifting, linear latent evolution, and analysis tooling for networked dynamical systems.
 
 <p align="center">
-  <img src="docs/source/_static/architecture-overview.svg" alt="Encode → linear Koopman advance → decode architecture" width="820"/>
+  <img src="https://raw.githubusercontent.com/tjkessler/KoopmanGraph/main/docs/source/_static/architecture-overview.svg" alt="Encode → linear Koopman advance → decode architecture" width="820"/>
 </p>
 
 ## Highlights
