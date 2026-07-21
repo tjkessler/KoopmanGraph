@@ -9,11 +9,11 @@ on:
       - "tests/**"
       - "examples/**"
       - "docs/**"
+      - "README.md"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
-  # Always run on PRs so required status checks on main can be satisfied
-  # for docs-only / config-only changes as well as code changes.
+      - ".pre-commit-config.yaml"
   pull_request:
     branches: [main]
 
@@ -22,12 +22,118 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      lint: ${{ steps.filter.outputs.lint }}
+      test: ${{ steps.filter.outputs.test }}
+      notebooks: ${{ steps.filter.outputs.notebooks }}
+      docs: ${{ steps.filter.outputs.docs }}
+      workflow: ${{ steps.filter.outputs.workflow }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python3 <<'PY'
+          import os
+          import subprocess
+          from pathlib import PurePosixPath
+
+          event = os.environ["EVENT_NAME"]
+          head = os.environ["HEAD_SHA"]
+          before = os.environ.get("BEFORE_SHA", "")
+          base = os.environ.get("BASE_SHA", "")
+
+          if event == "pull_request":
+              range_spec = f"{base}...{head}"
+              files = subprocess.check_output(
+                  ["git", "diff", "--name-only", range_spec], text=True
+              ).splitlines()
+          elif before and before != "0" * 40:
+              files = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{before}...{head}"], text=True
+              ).splitlines()
+          else:
+              files = subprocess.check_output(
+                  ["git", "show", "--name-only", "--pretty=", head], text=True
+              ).splitlines()
+
+          files = [f for f in files if f]
+
+          def hit(*prefixes_or_names: str) -> bool:
+              for path in files:
+                  posix = PurePosixPath(path)
+                  for spec in prefixes_or_names:
+                      if spec.endswith("/"):
+                          if path == spec[:-1] or path.startswith(spec):
+                              return True
+                      elif "/" not in spec:
+                          if posix.name == spec or path == spec:
+                              return True
+                      else:
+                          if path == spec or path.startswith(spec + "/"):
+                              return True
+              return False
+
+          def emit(name: str, value: bool) -> None:
+              text = "true" if value else "false"
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+                  fh.write(f"{name}={text}\n")
+              print(f"{name}={text}")
+
+          lint = hit("src/", "tests/", "pyproject.toml", ".pre-commit-config.yaml")
+          test = hit("src/", "tests/", "scripts/", "pyproject.toml", "uv.lock")
+          notebooks = hit("examples/", "src/", "pyproject.toml", "uv.lock")
+          docs = hit("docs/", "README.md", "src/", "pyproject.toml")
+          workflow = hit(".github/workflows/ci.yml")
+
+          emit("lint", lint)
+          emit("test", test)
+          emit("notebooks", notebooks)
+          emit("docs", docs)
+          emit("workflow", workflow)
+          PY
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Lint with Ruff
+        run: |
+          uvx ruff check src/ tests/
+          uvx ruff format --check src/ tests/
+
   test:
+    name: test (${{ matrix.python-version }})
+    needs: changes
+    if: needs.changes.outputs.test == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        include:
+          - python-version: "3.10"
+            coverage: "false"
+          - python-version: "3.12"
+            coverage: "true"
 
     steps:
       - uses: actions/checkout@v7
@@ -37,28 +143,113 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra rl
-
-      - name: Lint with Ruff
-        run: |
-          uv run ruff check src/ tests/
-          uv run ruff format --check src/ tests/
+        run: uv sync --frozen --extra dev --extra rl
 
       - name: Run tests
-        run: uv run pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-report=xml --cov-fail-under=90
+        if: matrix.coverage != 'true'
+        env:
+          # Avoid BLAS/PyTorch oversubscription under pytest-xdist.
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          TORCH_NUM_THREADS: "1"
+        run: uv run --no-sync pytest tests/ -n auto
+
+      - name: Run tests with coverage
+        if: matrix.coverage == 'true'
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          TORCH_NUM_THREADS: "1"
+        run: >
+          uv run --no-sync pytest tests/ -n auto
+          --cov=koopman_graph
+          --cov-report=term-missing
+          --cov-report=xml
+          --cov-fail-under=90
 
       - name: Upload coverage reports to Codecov
-        if: matrix.python-version == '3.12'
+        if: matrix.coverage == 'true'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
           fail_ci_if_error: false
 
-  notebooks:
+  notebook-plan:
+    name: notebook-plan
+    needs: changes
+    if: needs.changes.outputs.notebooks == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select notebook matrix
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+
+          # PR smoke: representative coverage across core APIs (not every tutorial).
+          smoke = {
+              "include": [
+                  {
+                      "shard": "smoke",
+                      "pattern": " ".join(
+                          [
+                              "examples/01_synthetic_graph.ipynb",
+                              "examples/02_ieee118_bus.ipynb",
+                              "examples/07_koopman_spectrum.ipynb",
+                              "examples/09_topology_ablation.ipynb",
+                              "examples/10_advanced_training.ipynb",
+                              "examples/12_irregular_sampling_continuous_time.ipynb",
+                              "examples/15_closed_loop_voltage_control_rl.ipynb",
+                              "examples/19_bilinear_control_koopman.ipynb",
+                              "examples/22_gnn_forecaster_comparison.ipynb",
+                              "examples/23_hierarchical_multiresolution.ipynb",
+                          ]
+                      ),
+                  }
+              ]
+          }
+          # Push to main: full suite, sharded for wall-clock.
+          full = {
+              "include": [
+                  {
+                      "shard": "01-13",
+                      "pattern": (
+                          "examples/0[1-9]_*.ipynb examples/1[0-3]_*.ipynb"
+                      ),
+                  },
+                  {
+                      "shard": "14-26",
+                      "pattern": (
+                          "examples/1[4-9]_*.ipynb examples/2[0-6]_*.ipynb"
+                      ),
+                  },
+              ]
+          }
+          matrix = smoke if os.environ["EVENT_NAME"] == "pull_request" else full
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+          print(json.dumps(matrix, indent=2))
+          PY
+
+  notebooks:
+    name: notebooks (${{ matrix.shard }})
+    needs: [changes, notebook-plan]
+    if: needs.notebook-plan.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.notebook-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -67,19 +258,23 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra rl
+        run: uv sync --frozen --extra dev --extra rl
 
       - name: Execute tutorial notebooks
         env:
-          # Limit BLAS/OpenMP oversubscription when notebooks run in parallel.
+          # Limit BLAS/OpenMP/PyTorch oversubscription when notebooks run in parallel.
           OMP_NUM_THREADS: "1"
           MKL_NUM_THREADS: "1"
           OPENBLAS_NUM_THREADS: "1"
-        run: uv run pytest --nbmake examples/ -v -n 4 --durations=25
+          TORCH_NUM_THREADS: "1"
+        run: uv run --no-sync pytest --nbmake ${{ matrix.pattern }} -n 4 --durations=25
 
   docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -89,9 +284,37 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra docs
+        run: uv sync --frozen --extra docs
 
       - name: Build Sphinx documentation
-        run: uv run sphinx-build -b html -W --keep-going docs/source docs/build/html
+        run: uv run --no-sync sphinx-build -b html -W --keep-going docs/source docs/build/html
+
+  # Single required check for branch protection. Individual jobs may be skipped
+  # by path filters; this aggregator still reports success when skips are expected.
+  ci:
+    name: ci
+    needs: [changes, lint, test, notebook-plan, notebooks, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify CI jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          if needs["changes"]["result"] != "success":
+              sys.exit("changes job did not succeed")
+          for job in ("lint", "test", "notebook-plan", "notebooks", "docs"):
+              result = needs[job]["result"]
+              if result not in ("success", "skipped"):
+                  sys.exit(f"{job} failed with result={result}")
+          print("CI OK")
+          PY

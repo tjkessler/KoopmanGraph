@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (README, CONTRIBUTING, installation guide, FAQ); added ``[tool.uv]`` CPU
   PyTorch index defaults, committed ``uv.lock``, and switched CI to
   ``astral-sh/setup-uv``.
+- Speed up CI: path-filtered jobs (shell/`git` detection; no third-party
+  filter action — repo Actions allowlist), separate Ruff/`uvx` lint job, drop
+  the Python 3.11 matrix leg, parallelize pytest with ``-n auto``, collect
+  coverage only on 3.12, use ``uv sync --frozen`` / ``uv run --no-sync``,
+  pin BLAS/PyTorch thread counts under xdist, shard notebook jobs on ``main``,
+  run a 10-notebook PR smoke subset (full suite on push to ``main``), and
+  require the aggregator ``ci`` check instead of every leaf job.
+
 
 ## [0.5.0] - 2026-07-18
 
