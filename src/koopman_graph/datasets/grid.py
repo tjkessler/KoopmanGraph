@@ -239,7 +239,28 @@ def _anisotropic_advection_step(
     west_weight: float,
     north_weight: float,
 ) -> Tensor:
-    """Apply one noiseless anisotropic advection step (no parameter checks)."""
+    """Apply one noiseless anisotropic advection step (no parameter checks).
+
+    Parameters
+    ----------
+    state : Tensor
+        Node features with shape ``(num_rows * num_cols, in_channels)``.
+    num_rows : int
+        Grid height.
+    num_cols : int
+        Grid width.
+    decay_rate : float
+        Self-retention factor in ``(0, 1)``.
+    west_weight : float
+        Relative influence of the western neighbor.
+    north_weight : float
+        Relative influence of the northern neighbor.
+
+    Returns
+    -------
+    Tensor
+        Updated node features with the same shape as ``state``.
+    """
     in_channels = state.shape[1]
     dtype = state.dtype
     updated = decay_rate * state
