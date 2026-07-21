@@ -228,7 +228,7 @@ For ``"odo"``, :meth:`~koopman_graph.operators.KoopmanOperator.bound_metric`
 reports the **diagonal-factor** bound, not the true spectrum of assembled
 ``K`` / ``L``. Use :meth:`~koopman_graph.operators.KoopmanOperator.spectral_radius`
 or :meth:`~koopman_graph.operators.ContinuousKoopmanOperator.max_real_part`
-for ``\\max |\\lambda_i|`` / ``\\max \\operatorname{Re}(\\lambda_i)`` via
+for :math:`\max |\lambda_i|` / :math:`\max \operatorname{Re}(\lambda_i)` via
 ``eigvals``. See ``examples/08_loss_stability.ipynb`` (soft modes) and
 ``examples/11_long_horizon_stability.ipynb`` (structural modes).
 
