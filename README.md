@@ -58,9 +58,10 @@ Requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), 
 
 ```bash
 pip install koopman-graph
+# or: uv pip install koopman-graph
 ```
 
-See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for editable installs, docs builds, and platform-specific wheels. Release notes: [CHANGELOG.md](CHANGELOG.md).
+See the [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html) for editable installs, `uv` workflows, docs builds, and platform-specific wheels. Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quickstart
 

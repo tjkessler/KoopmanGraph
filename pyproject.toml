@@ -102,3 +102,14 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+# uv defaults to official CPU wheels (matches CI). For CUDA / ROCm / XPU, use
+# `uv pip install torch --torch-backend=auto` (or a specific backend) and see
+# https://docs.astral.sh/uv/guides/integration/pytorch/ — or override sources.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]

@@ -16,10 +16,13 @@ incompatible or source-built stack.
    `PyTorch Get Started <https://pytorch.org/get-started/locally/>`_ selector.
 2. Install matching PyG wheels from the
    `PyG installation guide <https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html>`_.
-3. Install KoopmanGraph (``pip install koopman-graph`` or an editable clone).
+3. Install KoopmanGraph (``pip install koopman-graph``,
+   ``uv pip install koopman-graph``, or an editable clone / ``uv sync``).
 
-If ``pip`` tries to compile extensions or cannot find wheels, re-check that the
-installed ``torch`` version and CUDA tag match the PyG wheel index you used.
+If the installer tries to compile extensions or cannot find wheels, re-check
+that the installed ``torch`` version and CUDA tag match the PyG wheel index you
+used. With uv, ``uv pip install torch --torch-backend=auto`` (or a specific
+backend) helps pick a matching PyTorch index; see :doc:`installation`.
 
 CUDA vs CPU mismatches
 ----------------------
@@ -45,9 +48,14 @@ From a clone of the repository:
    pip install -e ".[dev]"       # tests, Ruff, pre-commit
    pip install -e ".[docs]"      # Sphinx documentation build
 
+   # uv equivalents:
+   uv sync                       # runtime package only (CPU torch by default)
+   uv sync --extra dev
+   uv sync --extra docs
+
 Use ``.[dev]`` for local testing and ``.[docs]`` before ``cd docs && make html``.
 The ``[dev]`` and ``[docs]`` extras do not replace the PyTorch / PyG prerequisite
-order above.
+order above when you need a non-default (non-CPU) accelerator.
 
 Import paths after 0.5
 ----------------------

@@ -82,9 +82,9 @@ KoopmanGraph requires:
 | PyTorch Geometric | ≥ 2.6 |
 
 Install **PyTorch** and **PyTorch Geometric** before installing KoopmanGraph so
-pip can resolve compatible wheels for your platform. See the
+your installer can resolve compatible wheels for your platform. See the
 [installation guide](https://koopmangraph.readthedocs.io/en/latest/installation.html)
-for platform-specific instructions.
+for platform-specific instructions (pip and [uv](https://docs.astral.sh/uv/)).
 
 ### Clone and install
 
@@ -94,6 +94,22 @@ cd KoopmanGraph
 pip install -e ".[dev]"
 ```
 
+With [uv](https://docs.astral.sh/uv/) (creates `.venv`, uses the repo’s CPU
+PyTorch index by default via `[tool.uv]` in `pyproject.toml`):
+
+```bash
+git clone https://github.com/tjkessler/KoopmanGraph.git
+cd KoopmanGraph
+uv sync --extra dev
+uv run pytest
+```
+
+For CUDA / ROCm / XPU instead of the default CPU wheels, install PyTorch with
+`uv pip` backend selection first (see Astral’s
+[Using uv with PyTorch](https://docs.astral.sh/uv/guides/integration/pytorch/)
+guide), then sync without replacing that torch build—or use
+`uv pip install -e ".[dev]"` after `uv venv`.
+
 The `[dev]` extra installs pytest, pytest-cov, Ruff, and pre-commit.
 
 ### Optional: documentation dependencies
@@ -102,6 +118,7 @@ To build Sphinx documentation locally:
 
 ```bash
 pip install -e ".[docs]"
+# or: uv sync --extra docs
 cd docs && make html
 ```
 
@@ -113,6 +130,7 @@ Install hooks so Ruff and basic file checks run before each commit:
 
 ```bash
 pre-commit install
+# or: uv run pre-commit install
 ```
 
 Run hooks on all files without committing:
@@ -135,6 +153,14 @@ ruff format --check src/ tests/
 
 # Tests with coverage gate
 pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
+```
+
+With uv after `uv sync --extra dev`:
+
+```bash
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv run pytest tests/ -v --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
 ```
 
 To auto-fix lint issues and apply formatting:
