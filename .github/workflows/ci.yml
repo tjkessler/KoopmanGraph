@@ -180,19 +180,76 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
-  notebooks:
-    name: notebooks (${{ matrix.shard }})
+  notebook-plan:
+    name: notebook-plan
     needs: changes
     if: needs.changes.outputs.notebooks == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Select notebook matrix
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+
+          # PR smoke: representative coverage across core APIs (not every tutorial).
+          smoke = {
+              "include": [
+                  {
+                      "shard": "smoke",
+                      "pattern": " ".join(
+                          [
+                              "examples/01_synthetic_graph.ipynb",
+                              "examples/02_ieee118_bus.ipynb",
+                              "examples/07_koopman_spectrum.ipynb",
+                              "examples/09_topology_ablation.ipynb",
+                              "examples/10_advanced_training.ipynb",
+                              "examples/12_irregular_sampling_continuous_time.ipynb",
+                              "examples/15_closed_loop_voltage_control_rl.ipynb",
+                              "examples/19_bilinear_control_koopman.ipynb",
+                              "examples/22_gnn_forecaster_comparison.ipynb",
+                              "examples/23_hierarchical_multiresolution.ipynb",
+                          ]
+                      ),
+                  }
+              ]
+          }
+          # Push to main: full suite, sharded for wall-clock.
+          full = {
+              "include": [
+                  {
+                      "shard": "01-13",
+                      "pattern": (
+                          "examples/0[1-9]_*.ipynb examples/1[0-3]_*.ipynb"
+                      ),
+                  },
+                  {
+                      "shard": "14-26",
+                      "pattern": (
+                          "examples/1[4-9]_*.ipynb examples/2[0-6]_*.ipynb"
+                      ),
+                  },
+              ]
+          }
+          matrix = smoke if os.environ["EVENT_NAME"] == "pull_request" else full
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+          print(json.dumps(matrix, indent=2))
+          PY
+
+  notebooks:
+    name: notebooks (${{ matrix.shard }})
+    needs: [changes, notebook-plan]
+    if: needs.notebook-plan.result == 'success'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - shard: "01-13"
-            pattern: "examples/0[1-9]_*.ipynb examples/1[0-3]_*.ipynb"
-          - shard: "14-26"
-            pattern: "examples/1[4-9]_*.ipynb examples/2[0-6]_*.ipynb"
+      matrix: ${{ fromJSON(needs.notebook-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
 
@@ -239,7 +296,7 @@ jobs:
   # by path filters; this aggregator still reports success when skips are expected.
   ci:
     name: ci
-    needs: [changes, lint, test, notebooks, docs]
+    needs: [changes, lint, test, notebook-plan, notebooks, docs]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -255,7 +312,7 @@ jobs:
           needs = json.loads(os.environ["NEEDS_JSON"])
           if needs["changes"]["result"] != "success":
               sys.exit("changes job did not succeed")
-          for job in ("lint", "test", "notebooks", "docs"):
+          for job in ("lint", "test", "notebook-plan", "notebooks", "docs"):
               result = needs[job]["result"]
               if result not in ("success", "skipped"):
                   sys.exit(f"{job} failed with result={result}")
