@@ -165,7 +165,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
-[0.5.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.4.0...main
+[0.5.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.5.0
 [0.4.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.4.0
 [0.3.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.3.0
 [0.2.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.2.0
