@@ -49,7 +49,7 @@ Forecasting and training
 * Consistency losses (forward / backward), optional eigenvalue regularization,
   fit-time PIKN-style Lie / PINN-style PDE residual terms, optional
   :math:`L_1` / smoothed :math:`L_p` Koopman sparsity, and an optional
-  worst-case (:math:`L_\\infty`-style) reconstruction term (robust training
+  worst-case (:math:`L_{\infty}`\-style) reconstruction term (robust training
   only — not a generalization bound)
 * LR schedulers, per-term loss history, ``MultiTrajectory`` fit, and
   windowed mini-batching
