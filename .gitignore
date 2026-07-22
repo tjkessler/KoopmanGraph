@@ -222,5 +222,11 @@ __marimo__/
 _project_proposal.pdf
 .DS_Store
 scripts/count_joss_words.py
+
+# Maintainer-local (not part of the published package)
+AGENTS.md
+CLAUDE.md
+.github/copilot-instructions.md
 .cursor/
-.local/
+docs/blueprint/
+docs/MATHEMATICS_VERIFICATION.md
