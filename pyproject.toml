@@ -57,7 +57,7 @@ docs = [
 ]
 rl = [
     "gymnasium>=1.0.0",
-    "stable-baselines3>=2.3.0",
+    "stable-baselines3>=2.9.0",
 ]
 
 [project.urls]
