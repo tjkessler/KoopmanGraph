@@ -18,19 +18,66 @@ from koopman_graph.data import (
     GraphSnapshotSequence,
     resolve_pair_delta_t,
 )
-from koopman_graph.graph_utils import propagate_latent
+from koopman_graph.graph_utils import (
+    propagate_latent,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
+)
 from koopman_graph.losses import (
     BackwardConsistencyLoss,
     ForwardConsistencyLoss,
     masked_mse_loss,
 )
-from koopman_graph.operators import GraphKoopmanOperator
+from koopman_graph.nn import HypergraphDecoder
+from koopman_graph.operators import (
+    GlobalLocalKoopmanOperator,
+    GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
+)
+from koopman_graph.operators.global_local import stack_latent_window
 from koopman_graph.protocols import TrainableKoopmanModel
 
 _FORWARD_CONSISTENCY_LOSS = ForwardConsistencyLoss()
 _BACKWARD_CONSISTENCY_LOSS = BackwardConsistencyLoss()
 
 PairLossFn = Callable[[TrainableKoopmanModel, GraphSnapshotSequence, int], Tensor]
+
+
+def teacher_forced_latent_window(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    timestep: int,
+) -> Tensor | None:
+    """Build a teacher-forced latent window for global/local operators.
+
+    Encodes snapshots ``[t-w+1, …, t]`` (left-padded by the earliest available
+    encoding) when ``model.koopman`` is a
+    :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`. Returns
+    ``None`` for other operator kinds.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Trainable model with an encoder.
+    sequence : GraphSnapshotSequence
+        Source trajectory.
+    timestep : int
+        Index ``t`` of the state being advanced.
+
+    Returns
+    -------
+    Tensor or None
+        Window with shape ``(w, ..., d)``, or ``None``.
+    """
+    koopman = model.koopman
+    if not isinstance(koopman, GlobalLocalKoopmanOperator):
+        return None
+    window = koopman.local_window
+    start = max(0, timestep - window + 1)
+    frames = [
+        _encode_at(model, sequence, index) for index in range(start, timestep + 1)
+    ]
+    return stack_latent_window(frames[:-1], window=window, current=frames[-1])
 
 
 def model_default_delta_t(model: TrainableKoopmanModel) -> float:
@@ -224,6 +271,9 @@ def _forward_consistency_pair(
         mask=pair_mask,
         edge_index=edge_index,
         edge_weight=edge_weight,
+        hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
+        hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
+        latent_window=teacher_forced_latent_window(model, sequence, timestep),
     )
 
 
@@ -280,6 +330,8 @@ def _backward_consistency_pair(
         mask=pair_mask,
         edge_index=edge_index,
         edge_weight=edge_weight,
+        hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
+        hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
     )
 
 
@@ -309,7 +361,11 @@ def _one_step_pair(
         target_mask = sequence.observation_mask_at(timestep + 1)
 
     n_delays = int(getattr(model, "n_delays", 1))
-    if n_delays > 1 and callable(getattr(model, "encode_at", None)):
+    uses_global_local = isinstance(model.koopman, GlobalLocalKoopmanOperator)
+    use_encode_path = uses_global_local or (
+        n_delays > 1 and callable(getattr(model, "encode_at", None))
+    )
+    if use_encode_path:
         snapshot_t = sequence[timestep]
         snapshot_t1 = sequence[timestep + 1]
         z = _encode_at(model, sequence, timestep)
@@ -327,12 +383,26 @@ def _one_step_pair(
             default_delta_t=default_delta_t,
             edge_index=snapshot_t1.edge_index,
             edge_weight=getattr(snapshot_t1, "edge_weight", None),
+            hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
+            hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
+            latent_window=teacher_forced_latent_window(model, sequence, timestep),
         )
-        prediction = model.decoder(
-            z_next,
-            snapshot_t.edge_index,
-            getattr(snapshot_t, "edge_weight", None),
-        )
+        if isinstance(model.decoder, HypergraphDecoder):
+            hyperedge_index = snapshot_hyperedge_index(snapshot_t)
+            if hyperedge_index is None:
+                msg = "HypergraphDecoder requires hyperedge_index on training snapshots"
+                raise ValueError(msg)
+            prediction = model.decoder(
+                z_next,
+                hyperedge_index,
+                snapshot_hyperedge_weight(snapshot_t),
+            )
+        else:
+            prediction = model.decoder(
+                z_next,
+                snapshot_t.edge_index,
+                getattr(snapshot_t, "edge_weight", None),
+            )
         target = snapshot_t1.x
         if target_mask is None:
             return nn.functional.mse_loss(prediction, target)
@@ -442,7 +512,10 @@ def compute_backward_consistency_sequence_loss(
     if (
         model.dynamics_mode == "discrete"
         and model.koopman.parameterization == "dense"
-        and not isinstance(model.koopman, GraphKoopmanOperator)
+        and not isinstance(
+            model.koopman,
+            (GraphKoopmanOperator, HypergraphKoopmanOperator),
+        )
     ):
         dense_inverse = getattr(model.koopman, "dense_inverse_matrix", None)
         if callable(dense_inverse):

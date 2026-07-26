@@ -10,10 +10,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from torch import Tensor
+from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data.validation import require_no_hyperedges
+from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
 from koopman_graph.training import (
     EarlyStoppingMonitor,
     TrainingInput,
@@ -22,6 +24,70 @@ from koopman_graph.training import (
     resolve_training_sequences,
     resolve_validation_sequences,
 )
+
+
+def uses_hypergraph_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
+    """Return whether encoder and decoder are a matched hypergraph pair.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder module.
+    decoder : nn.Module
+        Model decoder module.
+
+    Returns
+    -------
+    bool
+        ``True`` when both modules are hypergraph peers.
+
+    Raises
+    ------
+    ValueError
+        If exactly one of encoder/decoder is a hypergraph peer.
+    """
+    enc_hyper = isinstance(encoder, HypergraphEncoder)
+    dec_hyper = isinstance(decoder, HypergraphDecoder)
+    if enc_hyper != dec_hyper:
+        msg = (
+            "HypergraphEncoder and HypergraphDecoder must be used together "
+            f"(got encoder={type(encoder).__name__}, "
+            f"decoder={type(decoder).__name__})"
+        )
+        raise ValueError(msg)
+    return enc_hyper and dec_hyper
+
+
+def validate_sequence_hyperedges(
+    sequence: GraphSnapshotSequence,
+    *,
+    allow_hyperedges: bool,
+) -> None:
+    """Enforce hyperedge policy for a training or validation sequence.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence
+        Candidate fit/validation trajectory.
+    allow_hyperedges : bool
+        When ``True``, require static hyperedge incidence; when ``False``,
+        reject hyperedge-carrying sequences.
+
+    Raises
+    ------
+    ValueError
+        If the sequence violates the requested hyperedge policy.
+    """
+    if allow_hyperedges:
+        if not sequence.has_hyperedges:
+            msg = (
+                "HypergraphEncoder / HypergraphDecoder require a "
+                "hyperedge-carrying GraphSnapshotSequence "
+                "(set hyperedge_index on each snapshot)"
+            )
+            raise ValueError(msg)
+        return
+    require_no_hyperedges(sequence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +216,7 @@ def prepare_fit_inputs(
     epochs: int = 100,
     early_stopping_patience: int | None = None,
     early_stopping_monitor: EarlyStoppingMonitor = "auto",
+    allow_hyperedges: bool = False,
 ) -> PreparedFitInputs:
     """Validate ``fit`` inputs and resolve training / validation sequences.
 
@@ -167,6 +234,10 @@ def prepare_fit_inputs(
         When set, must be ``>= 1``.
     early_stopping_monitor : {"auto", "train", "val"}, optional
         Early-stopping monitor mode. Default is ``"auto"``.
+    allow_hyperedges : bool, optional
+        When ``True``, require hyperedge-carrying sequences (hypergraph
+        encoder/decoder). When ``False``, reject hyperedge incidence.
+        Default is ``False``.
 
     Returns
     -------
@@ -176,8 +247,9 @@ def prepare_fit_inputs(
     Raises
     ------
     ValueError
-        If epoch / patience bounds fail, controls disagree, or fewer than two
-        snapshots are provided for training or validation.
+        If epoch / patience bounds fail, controls disagree, hyperedge policy
+        fails, or fewer than two snapshots are provided for training or
+        validation.
     """
     if epochs < 1:
         msg = f"epochs must be >= 1, got {epochs}"
@@ -195,6 +267,10 @@ def prepare_fit_inputs(
             control_dim=control_dim,
             sequence=sequence,
         )
+        validate_sequence_hyperedges(
+            sequence,
+            allow_hyperedges=allow_hyperedges,
+        )
         if sequence.num_timesteps < 2:
             msg = "data_sequence must contain at least 2 snapshots for training"
             raise ValueError(msg)
@@ -208,6 +284,10 @@ def prepare_fit_inputs(
             validate_sequence_controls(
                 control_dim=control_dim,
                 sequence=sequence,
+            )
+            validate_sequence_hyperedges(
+                sequence,
+                allow_hyperedges=allow_hyperedges,
             )
             if sequence.num_timesteps < 2:
                 msg = (

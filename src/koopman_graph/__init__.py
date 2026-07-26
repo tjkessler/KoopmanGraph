@@ -8,18 +8,30 @@ Public API
     Topology-aware GNN encoders (GCN, GAT, GraphSAGE, DiffConv).
 ``GraphTransformerEncoder``
     Graph Transformer encoder (PyG ``TransformerConv``; edges×heads cost).
+``HypergraphEncoder``
+    Hypergraph encoder (PyG ``HypergraphConv``; static hyperedge incidence).
 ``DelayEmbeddingEncoder``
     Hankel / delay-coordinate wrapper around a sized base encoder.
 ``GNNDecoder``, ``GATDecoder``, ``SAGEDecoder``, ``DiffConvDecoder``
     Matching GNN decoders for physical reconstruction.
 ``GraphTransformerDecoder``
     Graph Transformer decoder peer.
+``HypergraphDecoder``
+    Hypergraph decoder peer.
 ``KoopmanOperator``
     Learnable finite-dimensional Koopman matrix.
 ``ContinuousKoopmanOperator``
     Continuous-time Koopman generator integrated via matrix exponentials.
 ``GraphKoopmanOperator``
     Discrete networked Koopman step with self/neighbor coupling via ``edge_index``.
+``HypergraphKoopmanOperator``
+    Discrete hyperedge-coupled Koopman step via ``hyperedge_index``.
+``GlobalLocalKoopmanOperator``
+    Discrete global backbone plus low-rank local window correction
+    (``koopman="global_local"``).
+``ContinuousGraphKoopmanOperator``
+    Continuous networked generator via ``koopman="graph"`` + continuous
+    (or ``koopman="continuous_graph"``).
 ``GraphSnapshotSequence``, ``MultiTrajectory``
     Container and explicit multi-trajectory wrapper for graph snapshots.
     ``TemporalSplit``, ``temporal_split``, ``WindowSampler``, and
@@ -46,8 +58,9 @@ Physics-informed helpers such as ``graph_laplacian_features`` live in
 :mod:`koopman_graph.observables`. Power-user modules such as
 :mod:`koopman_graph.graph_utils`, :mod:`koopman_graph.nn`,
 :mod:`koopman_graph.protocols`, :mod:`koopman_graph.spectrum_types`, and
-:mod:`koopman_graph.uq` (deep ensembles / optional ``predict_interval``), and
-:mod:`koopman_graph.hierarchical` (TopK / SAG pool → coarse Koopman → unpool)
+:mod:`koopman_graph.uq` (deep ensembles / optional ``predict_interval``),
+:mod:`koopman_graph.hierarchical` (TopK / SAG pool → coarse Koopman → unpool),
+and :mod:`koopman_graph.mpc` (receding-horizon Koopman-MPC; ``[mpc]`` extra)
 are importable but intentionally omitted from ``__all__`` (encoder/decoder/delay
 and operator *classes*, including ``DelayEmbeddingEncoder`` and
 ``GraphKoopmanOperator``, remain root-stable). See the architecture docs for
@@ -67,16 +80,22 @@ from koopman_graph.nn import (
     GNNEncoder,
     GraphTransformerDecoder,
     GraphTransformerEncoder,
+    HypergraphDecoder,
+    HypergraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
 )
 from koopman_graph.operators import (
+    ContinuousGraphKoopmanOperator,
     ContinuousKoopmanOperator,
+    GlobalLocalKoopmanOperator,
     GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
     KoopmanOperator,
 )
 
 __all__ = [
+    "ContinuousGraphKoopmanOperator",
     "ContinuousKoopmanOperator",
     "DelayEmbeddingEncoder",
     "DiffConvDecoder",
@@ -85,11 +104,15 @@ __all__ = [
     "GATEncoder",
     "GNNDecoder",
     "GNNEncoder",
+    "GlobalLocalKoopmanOperator",
     "GraphKoopmanModel",
     "GraphKoopmanOperator",
     "GraphSnapshotSequence",
     "GraphTransformerDecoder",
     "GraphTransformerEncoder",
+    "HypergraphDecoder",
+    "HypergraphEncoder",
+    "HypergraphKoopmanOperator",
     "KoopmanOperator",
     "KoopmanSpectrum",
     "MultiTrajectory",
@@ -98,4 +121,4 @@ __all__ = [
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

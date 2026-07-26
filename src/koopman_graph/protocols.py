@@ -19,7 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.operators import DynamicsMode, KoopmanOperatorContract
+from koopman_graph.operators.contract import DynamicsMode, KoopmanOperatorContract
 from koopman_graph.spectrum_types import KoopmanSpectrum
 
 # ``DynamicsMode`` is defined next to ``Parameterization`` in
@@ -309,9 +309,10 @@ class TrainableKoopmanModel(ForecastModel, Protocol):
     Notes
     -----
     :class:`~koopman_graph.env.GraphKoopmanEnv` and checkpoint serialization
-    remain hard-typed to :class:`~koopman_graph.model.GraphKoopmanModel`
-    because they reconstruct architecture configs and reach encoder/decoder
-    internals. This Protocol is intentionally **not** in ``__all__``.
+    annotate against :class:`ModeShapeModel` / structural checks and reconstruct
+    via ``importlib`` so they do not import ``koopman_graph.model`` at module
+    load (keeps the import graph acyclic). This Protocol is intentionally
+    **not** in ``__all__``.
     """
 
     encoder: nn.Module
@@ -423,3 +424,128 @@ class TrainableKoopmanModel(ForecastModel, Protocol):
 # Subclassing ``@runtime_checkable`` ForecastModel would otherwise keep
 # isinstance enabled; Module-stored submodules make those checks unreliable.
 TrainableKoopmanModel._is_runtime_protocol = False  # type: ignore[attr-defined]
+
+
+@runtime_checkable
+class ModeShapeModel(Protocol):
+    """Encode/decode/spectrum surface for analysis and observer helpers.
+
+    Satisfied by :class:`~koopman_graph.model.GraphKoopmanModel`. Kept free of
+    concrete ``model`` imports so analysis / adaptation modules do not create
+    an inventory edge into the estimator package.
+
+    Notes
+    -----
+    Runtime ``isinstance`` is disabled (see ``_is_runtime_protocol`` below).
+    Prefer structural checks or static typing.
+    """
+
+    decoder: nn.Module
+    koopman: KoopmanOperatorContract
+    training: bool
+    latent_dim: int
+    time_step: float
+    control_dim: int
+    uses_graph_koopman: bool
+    uses_continuous_graph_koopman: bool
+
+    def spectrum(self, *args: Any, **kwargs: Any) -> KoopmanSpectrum:
+        """Return the learned operator spectrum.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            Implementer-specific options (for example continuous-mode
+            ``delta_t``).
+
+        Returns
+        -------
+        KoopmanSpectrum
+            Eigendecomposition and continuous-time mode characteristics.
+        """
+        ...
+
+    def encode(
+        self,
+        x_or_data: Tensor | Data,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+    ) -> Tensor:
+        """Lift graph node features into the Koopman latent space.
+
+        Parameters
+        ----------
+        x_or_data : Tensor or Data
+            Node features or a PyG ``Data`` snapshot.
+        edge_index : Tensor or None, optional
+            Edge index required when ``x_or_data`` is a tensor.
+        edge_weight : Tensor or None, optional
+            Optional scalar edge weights for tensor input.
+
+        Returns
+        -------
+        Tensor
+            Latent node features.
+        """
+        ...
+
+    def resolve_delta_t(
+        self,
+        delta_t: float | Tensor | None = None,
+    ) -> float | Tensor:
+        """Resolve the continuous integration interval.
+
+        Parameters
+        ----------
+        delta_t : float, Tensor, or None, optional
+            Explicit interval. When ``None``, returns the model default.
+
+        Returns
+        -------
+        float or Tensor
+            Resolved integration interval.
+        """
+        ...
+
+    def train(self, mode: bool = True) -> Any:
+        """Set training mode (``nn.Module`` façade).
+
+        Parameters
+        ----------
+        mode : bool, optional
+            If ``True``, enable training mode. Default is ``True``.
+
+        Returns
+        -------
+        Any
+            Typically ``self``.
+        """
+        ...
+
+    def eval(self) -> Any:
+        """Set evaluation mode (``nn.Module`` façade).
+
+        Returns
+        -------
+        Any
+            Typically ``self``.
+        """
+        ...
+
+    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        """Yield trainable parameters (``nn.Module`` façade).
+
+        Parameters
+        ----------
+        recurse : bool, optional
+            If ``True``, include submodule parameters. Default is ``True``.
+
+        Returns
+        -------
+        Iterator of Parameter
+            Trainable parameter iterator.
+        """
+        ...
+
+
+ModeShapeModel._is_runtime_protocol = False  # type: ignore[attr-defined]

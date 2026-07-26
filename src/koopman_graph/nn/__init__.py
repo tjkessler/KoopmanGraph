@@ -4,8 +4,8 @@ Capability layout
 -----------------
 ``gnn``
     Shared :class:`~koopman_graph.nn.gnn.BaseGNNModule`, activation typing,
-    validators, and GCN/GAT/SAGE/DiffConv/Transformer convolution builders
-    (power-user).
+    validators, and GCN/GAT/SAGE/DiffConv/Transformer/Hypergraph convolution
+    builders (power-user).
 ``encoder``
     :class:`~koopman_graph.nn.encoder.GNNEncoder` /
     :class:`~koopman_graph.nn.encoder.GATEncoder` /
@@ -18,9 +18,15 @@ Capability layout
     :class:`~koopman_graph.nn.decoder.SAGEDecoder` /
     :class:`~koopman_graph.nn.decoder.DiffConvDecoder` /
     :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`.
+``hypergraph``
+    :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
+    :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`.
 ``delay``
     :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` Hankel wrapper and
     delay-window helpers.
+``adaptive_topology``
+    :class:`~koopman_graph.nn.adaptive_topology.AdaptiveAdjacency` self-adaptive
+    pairwise adjacency (Graph WaveNet construction; power-user).
 
 The package itself is power-user; encoder/decoder classes remain in the root
 ``koopman_graph.__all__`` façade. Prefer
@@ -28,6 +34,10 @@ The package itself is power-user; encoder/decoder classes remain in the root
 ``from koopman_graph.nn import …`` for power-user imports.
 """
 
+from koopman_graph.nn.adaptive_topology import (
+    DEFAULT_TOPOLOGY_EMBEDDING_DIM,
+    AdaptiveAdjacency,
+)
 from koopman_graph.nn.decoder import (
     DiffConvDecoder,
     GATDecoder,
@@ -50,6 +60,7 @@ from koopman_graph.nn.gnn import (
     build_diff_convs,
     build_gat_convs,
     build_gcn_convs,
+    build_hypergraph_convs,
     build_sage_convs,
     build_transformer_convs,
     validate_diffusion_steps,
@@ -57,10 +68,17 @@ from koopman_graph.nn.gnn import (
     validate_optional_edge_dim,
     validate_positive_dims,
 )
+from koopman_graph.nn.hypergraph import (
+    HypergraphDecoder,
+    HypergraphEncoder,
+    bind_hypergraph_decoder,
+)
 
 __all__ = [
     "ActivationName",
+    "AdaptiveAdjacency",
     "BaseGNNModule",
+    "DEFAULT_TOPOLOGY_EMBEDDING_DIM",
     "DelayEmbeddingEncoder",
     "DiffConvDecoder",
     "DiffConvEncoder",
@@ -71,11 +89,15 @@ __all__ = [
     "GNNEncoder",
     "GraphTransformerDecoder",
     "GraphTransformerEncoder",
+    "HypergraphDecoder",
+    "HypergraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "bind_hypergraph_decoder",
     "build_diff_convs",
     "build_gat_convs",
     "build_gcn_convs",
+    "build_hypergraph_convs",
     "build_sage_convs",
     "build_transformer_convs",
     "validate_diffusion_steps",

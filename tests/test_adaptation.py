@@ -452,7 +452,7 @@ def _linear_latent_sequence(
 
 
 def test_koopman_observer_matches_reference_kf_fully_observed() -> None:
-    """Fully observed linear latent system should match a textbook KF."""
+    """Fully observed linear latent KF matches textbook predict/update (ẑ ← K_t)."""
     from koopman_graph.adaptation import KoopmanObserver
     from koopman_graph.adaptation.kalman import reference_kalman_filter
 

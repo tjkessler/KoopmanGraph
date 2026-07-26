@@ -17,15 +17,16 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.graph_utils import snapshot_edge_weight
 
 
 def require_static_topology(sequence: GraphSnapshotSequence) -> None:
-    """Reject dynamic-topology sequences for classical baselines.
+    """Reject dynamic-topology or hyperedge sequences for classical baselines.
 
     Classical DMD-family baselines flatten node states and copy only the
     initial graph topology onto predictions. Fitting on time-varying edges
-    would silently ignore topology changes.
+    or hyperedge incidence would silently ignore that structure.
 
     Parameters
     ----------
@@ -35,7 +36,8 @@ def require_static_topology(sequence: GraphSnapshotSequence) -> None:
     Raises
     ------
     ValueError
-        If ``sequence.is_dynamic_topology`` is ``True``.
+        If ``sequence.is_dynamic_topology`` is ``True`` or the sequence
+        carries ``hyperedge_index``.
     """
     if sequence.is_dynamic_topology:
         msg = (
@@ -43,6 +45,7 @@ def require_static_topology(sequence: GraphSnapshotSequence) -> None:
             "got a sequence with is_dynamic_topology=True"
         )
         raise ValueError(msg)
+    require_no_hyperedges(sequence)
 
 
 def flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:

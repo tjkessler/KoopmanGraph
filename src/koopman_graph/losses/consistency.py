@@ -48,6 +48,9 @@ class ForwardConsistencyLoss(nn.Module):
         mask: Tensor | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
+        latent_window: Tensor | None = None,
     ) -> Tensor:
         """Compute forward consistency loss between consecutive latent states.
 
@@ -72,9 +75,15 @@ class ForwardConsistencyLoss(nn.Module):
             Optional boolean node mask with shape ``(num_nodes,)``. When set,
             MSE is averaged over observed nodes only.
         edge_index : Tensor or None, optional
-            Topology for networked operators (ignored by per-node operators).
+            Topology for networked graph operators (ignored by per-node).
         edge_weight : Tensor or None, optional
-            Optional edge weights for networked operators.
+            Optional edge weights for networked graph operators.
+        hyperedge_index : Tensor or None, optional
+            Incidence for hypergraph operators.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights.
+        latent_window : Tensor or None, optional
+            Latent history for global/local operators.
 
         Returns
         -------
@@ -89,6 +98,9 @@ class ForwardConsistencyLoss(nn.Module):
             default_delta_t=default_delta_t,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
+            latent_window=latent_window,
         )
         if mask is None:
             return nn.functional.mse_loss(z_pred, z_t1)
@@ -145,6 +157,8 @@ class BackwardConsistencyLoss(nn.Module):
         mask: Tensor | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
     ) -> Tensor:
         """Compute backward consistency loss between consecutive latent states.
 
@@ -173,9 +187,13 @@ class BackwardConsistencyLoss(nn.Module):
             Optional boolean node mask with shape ``(num_nodes,)``. When set,
             MSE is averaged over observed nodes only.
         edge_index : Tensor or None, optional
-            Topology for networked operators (ignored by per-node operators).
+            Topology for networked graph operators (ignored by per-node).
         edge_weight : Tensor or None, optional
-            Optional edge weights for networked operators.
+            Optional edge weights for networked graph operators.
+        hyperedge_index : Tensor or None, optional
+            Incidence for hypergraph operators.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights.
 
         Returns
         -------
@@ -192,6 +210,8 @@ class BackwardConsistencyLoss(nn.Module):
             default_delta_t=default_delta_t,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
         )
         if mask is None:
             return nn.functional.mse_loss(z_recovered, z_t)

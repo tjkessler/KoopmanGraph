@@ -1,12 +1,23 @@
-"""Fixed-length temporal window sampling for multi-sequence training."""
+"""Temporal and neighbor-subgraph window sampling for training.
+
+``WindowSampler`` yields fixed-length temporal windows over full graphs.
+``NeighborWindowSampler`` adds PyG ``k_hop_subgraph`` spatial sampling so
+large static graphs can train on subgraph windows. Sampled-subgraph training
+is an approximation (loss over induced subgraphs, not the full graph);
+``predict`` / ``evaluate`` remain full-graph.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 
 import torch
+from torch import Tensor
+from torch_geometric.data import Data
+from torch_geometric.utils import k_hop_subgraph
 
 from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.graph_utils import snapshot_edge_weight
 
 
 class WindowSampler:
@@ -168,3 +179,380 @@ class WindowSampler:
             A batch of fixed-length temporal windows.
         """
         return self.iter_epoch(0)
+
+
+def _require_static_pairwise_graph(sequence: GraphSnapshotSequence) -> None:
+    """Reject sequences unsupported by neighbor-subgraph sampling.
+
+    Parameters
+    ----------
+
+    sequence : GraphSnapshotSequence
+        See the function signature / summary for ``sequence``.
+
+    Returns
+    -------
+
+    None
+        See summary line.
+
+    Raises
+    ------
+
+    ValueError
+        Raised when inputs are invalid."""
+    if sequence.is_dynamic_topology:
+        msg = (
+            "NeighborWindowSampler requires static pairwise topology; "
+            "dynamic-topology sequences are not supported"
+        )
+        raise ValueError(msg)
+    if sequence.has_hyperedges:
+        msg = "NeighborWindowSampler does not support hyperedge-carrying sequences"
+        raise ValueError(msg)
+
+
+def induce_neighbor_subgraph_sequence(
+    sequence: GraphSnapshotSequence,
+    *,
+    seed_nodes: Tensor,
+    num_hops: int,
+) -> GraphSnapshotSequence:
+    """Return a remapped k-hop subgraph sequence for a static graph window.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence
+        Temporal window with static pairwise topology (no hyperedges).
+    seed_nodes : Tensor
+        Seed node indices in the original graph (1D long tensor).
+    num_hops : int
+        Number of hops for :func:`~torch_geometric.utils.k_hop_subgraph`.
+
+    Returns
+    -------
+    GraphSnapshotSequence
+        Window with remapped node indices ``0 .. n_sub - 1`` and induced edges.
+
+    Raises
+    ------
+    ValueError
+        If the sequence has dynamic topology or hyperedges.
+    """
+    _require_static_pairwise_graph(sequence)
+    num_nodes = sequence.num_nodes
+    edge_index = sequence.edge_index
+    subset, sub_edge_index, _, edge_mask = k_hop_subgraph(
+        seed_nodes,
+        num_hops,
+        edge_index,
+        relabel_nodes=True,
+        num_nodes=num_nodes,
+    )
+
+    snapshots: list[Data] = []
+    for timestep in range(sequence.num_timesteps):
+        snapshot = sequence[timestep]
+        fields: dict[str, Tensor] = {
+            "x": snapshot.x[subset],
+            "edge_index": sub_edge_index,
+        }
+        weight = snapshot_edge_weight(snapshot)
+        if weight is not None:
+            fields["edge_weight"] = weight[edge_mask]
+        snapshots.append(Data(**fields))
+
+    control_inputs = sequence.control_inputs
+    if control_inputs is not None and control_inputs.ndim == 3:
+        control_inputs = control_inputs[:, subset, :]
+
+    observation_masks = sequence.observation_masks
+    if observation_masks is not None:
+        observation_masks = observation_masks[:, subset]
+
+    return GraphSnapshotSequence(
+        snapshots,
+        control_inputs=control_inputs,
+        timestamps=sequence.timestamps,
+        observation_masks=observation_masks,
+    )
+
+
+class NeighborWindowSampler:
+    """Sample temporal windows on k-hop subgraphs of a static large graph.
+
+    Combines :class:`WindowSampler`-style temporal origins with PyG
+    :func:`~torch_geometric.utils.k_hop_subgraph` spatial sampling. Each
+    yielded window uses a freshly sampled seed set (seeded by ``seed`` and
+    epoch / window index). Training losses therefore see **sampled** topology;
+    eigenvalue regularization on graph operators is likewise an approximation
+    over the induced subgraph. Full-graph ``predict`` / ``evaluate`` are
+    unchanged.
+
+    Parameters
+    ----------
+    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+        Source trajectories (static pairwise topology only).
+    window_length : int
+        Number of snapshots per temporal window (``>= 2``).
+    num_nodes : int
+        Number of seed nodes sampled per window (before hop expansion).
+    num_hops : int, optional
+        Hop radius for subgraph expansion. Default is ``2``.
+    batch_size : int, optional
+        Windows per yielded batch. Default is ``8``.
+    windows_per_epoch : int or None, optional
+        Cap on windows per epoch. ``None`` uses every valid temporal origin.
+    shuffle : bool, optional
+        Shuffle temporal origins each epoch. Default is ``True``.
+    seed : int or None, optional
+        Base seed for origin shuffle and seed-node sampling.
+    """
+
+    def __init__(
+        self,
+        sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+        *,
+        window_length: int,
+        num_nodes: int,
+        num_hops: int = 2,
+        batch_size: int = 8,
+        windows_per_epoch: int | None = None,
+        shuffle: bool = True,
+        seed: int | None = None,
+    ) -> None:
+        """Initialize a neighbor-subgraph temporal window sampler.
+
+        Parameters
+        ----------
+        sequences : GraphSnapshotSequence | Sequence[GraphSnapshotSequence]
+            See signature.
+        window_length : int
+            See signature.
+        num_nodes : int
+            See signature.
+        num_hops : int
+            See signature.
+        batch_size : int
+            See signature.
+        windows_per_epoch : int | None
+            See signature.
+        shuffle : bool
+            See signature.
+        seed : int | None
+            See signature.
+
+        Returns
+        -------
+        None
+            See summary line.
+
+        Raises
+        ------
+        ValueError
+            Raised when inputs are invalid."""
+        if num_nodes < 1:
+            msg = f"num_nodes must be >= 1, got {num_nodes}"
+            raise ValueError(msg)
+        if num_hops < 0:
+            msg = f"num_hops must be >= 0, got {num_hops}"
+            raise ValueError(msg)
+
+        self._temporal = WindowSampler(
+            sequences,
+            window_length=window_length,
+            batch_size=batch_size,
+            windows_per_epoch=windows_per_epoch,
+            shuffle=shuffle,
+            seed=seed,
+        )
+        for sequence in self._temporal.sequences:
+            _require_static_pairwise_graph(sequence)
+
+        self.num_nodes = num_nodes
+        self.num_hops = num_hops
+
+    @property
+    def sequences(self) -> list[GraphSnapshotSequence]:
+        """Source trajectories (shared with the inner temporal sampler).
+
+        Returns
+        -------
+        list[GraphSnapshotSequence]
+            See summary line."""
+        return self._temporal.sequences
+
+    @sequences.setter
+    def sequences(self, value: list[GraphSnapshotSequence]) -> None:
+        """Replace source trajectories after device placement.
+
+        Parameters
+        ----------
+
+        value : list[GraphSnapshotSequence]
+            See the function signature / summary for ``value``.
+
+        Returns
+        -------
+
+        None
+            See summary line."""
+        self._temporal.sequences = value
+
+    @property
+    def window_length(self) -> int:
+        """Temporal window length.
+
+        Returns
+        -------
+        int
+            See summary line."""
+        return self._temporal.window_length
+
+    @property
+    def batch_size(self) -> int:
+        """Windows per yielded batch.
+
+        Returns
+        -------
+        int
+            See summary line."""
+        return self._temporal.batch_size
+
+    @property
+    def windows_per_epoch(self) -> int | None:
+        """Optional cap on windows per epoch.
+
+        Returns
+        -------
+        int | None
+            See summary line."""
+        return self._temporal.windows_per_epoch
+
+    @property
+    def shuffle(self) -> bool:
+        """Whether temporal origins are shuffled each epoch.
+
+        Returns
+        -------
+        bool
+            See summary line."""
+        return self._temporal.shuffle
+
+    @property
+    def seed(self) -> int | None:
+        """Base RNG seed.
+
+        Returns
+        -------
+        int | None
+            See summary line."""
+        return self._temporal.seed
+
+    @property
+    def num_windows(self) -> int:
+        """Return the number of valid temporal window origins.
+
+        Returns
+        -------
+        int
+            See summary line."""
+        return self._temporal.num_windows
+
+    def _seed_generator(self, *, epoch: int, window_index: int) -> torch.Generator:
+        """Build a generator for one window's seed-node draw.
+
+        Parameters
+        ----------
+
+        epoch : int
+            See the function signature / summary for ``epoch``.
+        window_index : int
+            See the function signature / summary for ``window_index``.
+
+        Returns
+        -------
+
+        torch.Generator
+            See summary line."""
+        generator = torch.Generator()
+        base = 0 if self.seed is None else self.seed
+        # Mix epoch and window index; keep within signed 64-bit range.
+        mixed = (base + 1_000_003 * epoch + 9_701 * window_index) % (2**63 - 1)
+        generator.manual_seed(int(mixed))
+        return generator
+
+    def _subgraph_window(
+        self,
+        window: GraphSnapshotSequence,
+        *,
+        epoch: int,
+        window_index: int,
+    ) -> GraphSnapshotSequence:
+        """Sample seeds and induce a k-hop subgraph for one temporal window.
+
+        Parameters
+        ----------
+
+        window : GraphSnapshotSequence
+            See the function signature / summary for ``window``.
+        epoch : int
+            See the function signature / summary for ``epoch``.
+        window_index : int
+            See the function signature / summary for ``window_index``.
+
+        Returns
+        -------
+
+        GraphSnapshotSequence
+            See summary line."""
+        graph_nodes = window.num_nodes
+        n_seeds = min(self.num_nodes, graph_nodes)
+        generator = self._seed_generator(epoch=epoch, window_index=window_index)
+        seed_nodes = torch.randperm(graph_nodes, generator=generator)[:n_seeds]
+        return induce_neighbor_subgraph_sequence(
+            window,
+            seed_nodes=seed_nodes,
+            num_hops=self.num_hops,
+        )
+
+    def iter_epoch(
+        self,
+        epoch: int = 0,
+    ) -> Iterator[list[GraphSnapshotSequence]]:
+        """Yield batches of neighbor-sampled temporal windows.
+
+        Parameters
+        ----------
+        epoch : int, optional
+            Zero-based epoch index. Default is ``0``.
+
+        Yields
+        ------
+        list of GraphSnapshotSequence
+            Batch of subgraph windows with remapped node indices.
+        """
+        window_index = 0
+        for batch in self._temporal.iter_epoch(epoch):
+            sampled_batch = [
+                self._subgraph_window(
+                    window,
+                    epoch=epoch,
+                    window_index=window_index + offset,
+                )
+                for offset, window in enumerate(batch)
+            ]
+            window_index += len(batch)
+            yield sampled_batch
+
+    def __iter__(self) -> Iterator[list[GraphSnapshotSequence]]:
+        """Yield the epoch-zero batch sequence.
+
+        Returns
+        -------
+        Iterator[list[GraphSnapshotSequence]]
+            See summary line."""
+        return self.iter_epoch(0)
+
+
+WindowLikeSampler = WindowSampler | NeighborWindowSampler

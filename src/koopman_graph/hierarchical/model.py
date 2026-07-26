@@ -43,11 +43,17 @@ _WRAPPER_NAME = "wrapper.pt"
 def _encoder_in_channels(model: GraphKoopmanModel) -> int:
     """Infer scoring / unpool feature width from the composed encoder.
 
+    Parameters
+    ----------
+
+    model : GraphKoopmanModel
+        See the function signature / summary for ``model``.
+
     Returns
     -------
+
     int
-        Positive encoder input width.
-    """
+        Positive encoder input width."""
     encoder = model.encoder
     in_channels = getattr(encoder, "in_channels", None)
     if isinstance(in_channels, int) and in_channels > 0:
@@ -62,11 +68,17 @@ def _encoder_in_channels(model: GraphKoopmanModel) -> int:
 def _encoder_out_channels(model: GraphKoopmanModel) -> int:
     """Return the decoded feature width used for unpooling.
 
+    Parameters
+    ----------
+
+    model : GraphKoopmanModel
+        See the function signature / summary for ``model``.
+
     Returns
     -------
+
     int
-        Positive decoder output width.
-    """
+        Positive decoder output width."""
     decoder = model.decoder
     out_channels = getattr(decoder, "out_channels", None)
     if isinstance(out_channels, int) and out_channels > 0:
@@ -111,10 +123,24 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     ) -> None:
         """Store the composed model and build pool / unpool modules.
 
+        Parameters
+        ----------
+
+        model : GraphKoopmanModel
+            See the function signature / summary for ``model``.
+        pool_ratios : Sequence[float]
+            See the function signature / summary for ``pool_ratios``.
+        pooling : PoolingKind
+            See the function signature / summary for ``pooling``.
+        in_channels : int | None
+            See the function signature / summary for ``in_channels``.
+        refine_unpool : bool
+            See the function signature / summary for ``refine_unpool``.
+
         Notes
         -----
-        Constructor parameters are documented on the class.
-        """
+
+        Constructor parameters are documented on the class."""
         super().__init__()
         if len(pool_ratios) == 0:
             msg = "pool_ratios must contain at least one ratio"
@@ -245,11 +271,17 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     def _perms(self, steps: Sequence[PoolStep]) -> list[Tensor]:
         """Extract fine-to-coarse node permutations.
 
+        Parameters
+        ----------
+
+        steps : Sequence[PoolStep]
+            See the function signature / summary for ``steps``.
+
         Returns
         -------
+
         list of Tensor
-            One permutation per pooling level.
-        """
+            One permutation per pooling level."""
         return [step.perm for step in steps]
 
     def _pool_controls(
@@ -259,11 +291,19 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     ) -> list[Tensor] | None:
         """Pool global or per-node controls through the permutation chain.
 
+        Parameters
+        ----------
+
+        controls : Sequence[Tensor] | None
+            See the function signature / summary for ``controls``.
+        steps : Sequence[PoolStep]
+            See the function signature / summary for ``steps``.
+
         Returns
         -------
+
         list of Tensor or None
-            Coarse controls, or ``None`` when controls are absent.
-        """
+            Coarse controls, or ``None`` when controls are absent."""
         if controls is None:
             return None
         perms = self._perms(steps)
@@ -272,11 +312,17 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     def _resolve_resolution(self, resolution: ResolutionArg) -> int:
         """Return how many unpool steps to apply from the coarse end.
 
+        Parameters
+        ----------
+
+        resolution : ResolutionArg
+            See the function signature / summary for ``resolution``.
+
         Returns
         -------
+
         int
-            Number of unpooling levels.
-        """
+            Number of unpooling levels."""
         if resolution == "coarse":
             return 0
         if resolution == "fine":
@@ -306,11 +352,23 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         effective matrix uses the coarse ``edge_index`` / node count — never
         report ``K_self`` alone as the networked spectrum.
 
+        Parameters
+        ----------
+
+        reference_graph : Tensor | Data
+            See the function signature / summary for ``reference_graph``.
+        edge_index : Tensor | None
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        delta_t : float | None
+            See the function signature / summary for ``delta_t``.
+
         Returns
         -------
+
         Any
-            Spectrum result returned by the composed model.
-        """
+            Spectrum result returned by the composed model."""
         coarse, _steps = self.pool_down(
             reference_graph, edge_index=edge_index, edge_weight=edge_weight
         )
@@ -429,11 +487,17 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     ) -> tuple[GraphSnapshotSequence, list[list[PoolStep]]]:
         """Pool every snapshot and retain per-step metadata.
 
+        Parameters
+        ----------
+
+        sequence : GraphSnapshotSequence
+            See the function signature / summary for ``sequence``.
+
         Returns
         -------
+
         tuple
-            Coarse sequence and pooling metadata for every snapshot.
-        """
+            Coarse sequence and pooling metadata for every snapshot."""
         coarse_snaps: list[Data] = []
         all_steps: list[list[PoolStep]] = []
         for snap in sequence:
@@ -473,10 +537,22 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     ) -> None:
         """Train scatter-unpool refine layers to reconstruct fine features.
 
+        Parameters
+        ----------
+
+        sequence : GraphSnapshotSequence
+            See the function signature / summary for ``sequence``.
+        all_steps : Sequence[Sequence[PoolStep]]
+            See the function signature / summary for ``all_steps``.
+        epochs : int
+            See the function signature / summary for ``epochs``.
+        lr : float
+            See the function signature / summary for ``lr``.
+
         Notes
         -----
-        A non-positive epoch count leaves the refine layers unchanged.
-        """
+
+        A non-positive epoch count leaves the refine layers unchanged."""
         if epochs <= 0 or len(self.unpool_layers) == 0:
             return
         params = [p for layer in self.unpool_layers for p in layer.parameters()]

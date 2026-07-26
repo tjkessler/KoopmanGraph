@@ -81,7 +81,7 @@ def test_dmd_baseline_exactly_recovers_linear_dynamics(
 def test_dmd_baseline_preserves_prediction_topology(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify predictions keep graph shape and optional edge weights."""
+    """DMD predictions keep graph shape; fitted K matrix advances flattened states."""
     operator = torch.diag(torch.tensor([0.9, 1.1], dtype=torch.float64))
     edge_weight = torch.arange(synthetic_edge_index.shape[1], dtype=torch.float64)
     sequence = _sequence_from_states(
@@ -547,7 +547,7 @@ def test_edmd_baseline_rejects_invalid_polynomial_degree() -> None:
 def test_edmd_baseline_degree_one_matches_dmd(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify degree-1 EDMD reduces to identity observables."""
+    """Degree-1 EDMD dictionary is identity; fitted K matches DMD matrix."""
     sequence = _linear_fit_sequence(synthetic_edge_index)
 
     baseline = EDMDBaseline(polynomial_degree=1).fit(sequence)

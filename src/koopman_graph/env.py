@@ -18,7 +18,7 @@ extra.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,14 +26,13 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.graph_utils import (
     advance_and_decode,
     snapshot_edge_weight,
     snapshot_to_device,
 )
-
-if TYPE_CHECKING:
-    from koopman_graph.model import GraphKoopmanModel
+from koopman_graph.protocols import ModeShapeModel
 
 try:
     import gymnasium as gym
@@ -182,7 +181,7 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
 
     def __init__(
         self,
-        model: GraphKoopmanModel,
+        model: ModeShapeModel,
         reference_sequence: GraphSnapshotSequence,
         reward_fn: RewardFn,
         *,
@@ -198,21 +197,54 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
 
         See the class docstring for parameter descriptions.
 
+        Parameters
+        ----------
+
+        model : GraphKoopmanModel
+            See the function signature / summary for ``model``.
+        reference_sequence : GraphSnapshotSequence
+            See the function signature / summary for ``reference_sequence``.
+        reward_fn : RewardFn
+            See the function signature / summary for ``reward_fn``.
+        control_low : float | Sequence[float]
+            See the function signature / summary for ``control_low``.
+        control_high : float | Sequence[float]
+            See the function signature / summary for ``control_high``.
+        max_episode_steps : int
+            See the function signature / summary for ``max_episode_steps``.
+        start_index : int | None
+            See the function signature / summary for ``start_index``.
+        random_start : bool
+            See the function signature / summary for ``random_start``.
+        delta_t : float | None
+            See the function signature / summary for ``delta_t``.
+        device : torch.device | str | None
+            See the function signature / summary for ``device``.
+
         Raises
         ------
+
         TypeError
             If ``model`` is not a :class:`~koopman_graph.model.GraphKoopmanModel`.
         ValueError
             If ``control_dim`` is zero, ``reference_sequence`` has dynamic
             topology, or arguments are invalid.
         ImportError
-            If Gymnasium is not installed.
-        """
+            If Gymnasium is not installed."""
         _require_gymnasium()
-        from koopman_graph.model import GraphKoopmanModel as _GraphKoopmanModel
-
-        if not isinstance(model, _GraphKoopmanModel):
-            msg = "model must be a GraphKoopmanModel instance"
+        # Duck-type against the ModeShapeModel / trainable façade surface so
+        # ``env`` does not import ``koopman_graph.model`` (import cycle).
+        required = (
+            "encode",
+            "decoder",
+            "koopman",
+            "control_dim",
+            "latent_dim",
+            "time_step",
+            "resolve_delta_t",
+        )
+        if not all(hasattr(model, name) for name in required):
+            msg = "model must provide GraphKoopmanModel encode/decode/koopman surface"
             raise TypeError(msg)
         if model.control_dim <= 0:
             msg = "GraphKoopmanEnv requires model.control_dim > 0"
@@ -227,6 +259,7 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
                 "(topology is held from the reset snapshot for the episode)"
             )
             raise ValueError(msg)
+        require_no_hyperedges(reference_sequence)
         if max_episode_steps < 1:
             msg = f"max_episode_steps must be >= 1, got {max_episode_steps}"
             raise ValueError(msg)

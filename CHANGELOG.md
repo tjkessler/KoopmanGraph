@@ -7,8 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-25
+
+### Added
+
+- Hypergraph encode / decode / operator path: optional
+  ``hyperedge_index`` / ``hyperedge_weight`` on
+  ``GraphSnapshotSequence``, root ``HypergraphEncoder`` /
+  ``HypergraphDecoder``, and ``HypergraphKoopmanOperator``
+  (``koopman="hypergraph"``).
+- Self-adaptive pairwise topology via ``AdaptiveAdjacency`` and
+  ``learn_topology="self_adaptive"``.
+- Large-graph training aids: ``sparsity="block_diagonal"`` for graph /
+  continuous-graph operators and neighbor-sampling mini-batches.
+- ``GlobalLocalKoopmanOperator`` (``koopman="global_local"``) and
+  ``ContinuousGraphKoopmanOperator`` (continuous networked generator;
+  dense ``N·d`` cost caveat documented).
+- Symmetry-adapted orbit ties for ``K_self``
+  (``koopman_auto_orbits`` / ``koopman_orbit_partition``) behind the
+  optional ``[symmetry]`` extra (``networkx``).
+- Analysis helpers: SINDy sparse identification, Koopman spectral
+  clustering, and DMD-style coupling estimation under
+  ``koopman_graph.analysis``.
+- Split / ACI conformal prediction via ``ConformalKoopmanUQ``.
+- Receding-horizon ``KoopmanMPC`` under ``koopman_graph.mpc`` with the
+  optional ``[mpc]`` (OSQP) extra and conformal constraint tightening.
+- PEMS traffic and SocioPatterns contact-epidemic dataset loaders,
+  download scripts, and FAIR dataset cards (``docs/source/data.rst``).
+- Tutorials ``examples/27``–``36`` covering the surfaces above.
+- Optional extras ``[mpc]`` and ``[symmetry]``; core
+  ``import koopman_graph`` remains free of those dependencies
+  (fail-at-call guided ``ImportError``).
+- ``h5py`` in the ``[dev]`` extra so METR-LA / PEMS teaching-cache tests run
+  in CI; ``[mpc]`` lists ``scipy`` directly (QP sparse matrices).
+
 ### Changed
 
+- Extended format-1 checkpoint schema in place with keys for
+  ``sparsity``, ``learn_topology``, ``topology_embedding_dim``,
+  ``symmetry``, and global/local window fields. ``FORMAT_VERSION``
+  stays ``1`` through 0.x (reject incomplete payloads; no migration).
+- Expanded root ``__all__`` to twenty-five core-workflow names
+  (hypergraph encoder/decoder plus the three new operator classes);
+  other 0.6.0 surfaces remain capability-module imports.
 - Documented [uv](https://docs.astral.sh/uv/) install paths alongside pip
   (README, CONTRIBUTING, installation guide, FAQ); added ``[tool.uv]`` CPU
   PyTorch index defaults, committed ``uv.lock``, and switched CI to
@@ -20,6 +61,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin BLAS/PyTorch thread counts under xdist, shard notebook jobs on ``main``,
   run a 10-notebook PR smoke subset (full suite on push to ``main``), and
   require the aggregator ``ci`` check instead of every leaf job.
+- Moved ``discrete_spectrum_at_delta_t`` onto the neutral
+  ``koopman_graph.spectrum_types`` leaf so the model façade no longer imports
+  ``koopman_graph.analysis`` for spectrum assembly (still re-exported from
+  ``koopman_graph.analysis``).
+- Expanded ``docs/source/architecture.rst`` for the v0.6.0 capability map,
+  peer inventories (``operators.orbit_ties``, ``data.sequence_types``,
+  ``training.loop.bind_pending_orbit_ties``), and wrapper-local UQ /
+  hierarchy persistence patterns.
+- Regenerated ``uv.lock`` so ``[mpc]`` / ``[symmetry]`` resolve under
+  ``uv sync --frozen``; CI and the release verify job install those extras.
+- METR-LA / PEMS-BAY ``--fetch`` always verifies SHA256 (pinned digests for
+  the default HuggingFace mirrors; ``--expected-sha256`` required for
+  non-default ``--h5-url``).
+- Release workflow runs lint, tests (coverage floor), and Sphinx ``-W`` before
+  PyPI publish.
+- ``SECURITY.md`` documents the trust boundary for ``torch.load`` checkpoints
+  and ``*.pt`` teaching caches.
+
+### Breaking
+
+- **Checkpoints:** 0.5.0 (and earlier) format-1 saves that omit the new
+  required keys are rejected with a clear re-save error. Retrain or
+  re-save under 0.6.0; there is no silent migration while the package
+  is pre-1.0. Historical format-2 payloads remain unsupported.
 
 
 ## [0.5.0] - 2026-07-18
@@ -180,6 +245,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.6.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.6.0
 [0.5.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.5.0
 [0.4.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.4.0
 [0.3.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.3.0

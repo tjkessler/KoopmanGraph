@@ -12,20 +12,27 @@ import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.analysis import (
-    compute_generator_spectrum,
-    discrete_spectrum_at_delta_t,
-)
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
     hold_last_topology_at,
     pack_rollout_snapshots,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
 )
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
-from koopman_graph.operators import GraphKoopmanOperator
+from koopman_graph.operators import (
+    ContinuousGraphKoopmanOperator,
+    GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
+)
 from koopman_graph.operators.contract import KoopmanOperatorContract
-from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
+from koopman_graph.spectrum_types import (
+    KoopmanSpectrum,
+    compute_generator_spectrum,
+    compute_spectrum,
+    discrete_spectrum_at_delta_t,
+)
 
 from .timing import resolve_time_increments, validate_uniform_discrete_increments
 from .validation import validate_controls
@@ -46,6 +53,10 @@ def compute_model_spectrum(
     edge_index: Tensor | None = None,
     num_nodes: int | None = None,
     edge_weight: Tensor | None = None,
+    uses_hypergraph_koopman: bool = False,
+    uses_continuous_graph_koopman: bool = False,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
 ) -> KoopmanSpectrum:
     """Analyze the active Koopman operator spectrum for a model configuration.
 
@@ -63,6 +74,12 @@ def compute_model_spectrum(
         Continuous integration horizon for generator → discrete spectrum.
     edge_index, num_nodes, edge_weight
         Topology arguments required for networked graph operators.
+    uses_hypergraph_koopman : bool, optional
+        Whether ``koopman`` is a :class:`HypergraphKoopmanOperator`.
+    uses_continuous_graph_koopman : bool, optional
+        Whether ``koopman`` is a :class:`ContinuousGraphKoopmanOperator`.
+    hyperedge_index, hyperedge_weight
+        Topology arguments required for hypergraph operators.
 
     Returns
     -------
@@ -72,9 +89,40 @@ def compute_model_spectrum(
     Raises
     ------
     ValueError
-        If graph-operator topology is missing or continuous
+        If networked-operator topology is missing or continuous
         ``auxiliary_spectral`` spectrum is requested.
     """
+    if uses_continuous_graph_koopman:
+        if edge_index is None or num_nodes is None:
+            msg = (
+                "edge_index and num_nodes are required for "
+                "GraphKoopmanModel.spectrum when koopman='continuous_graph' "
+                "(topology-coupled effective generator); the per-node "
+                "contract matrix L_self is not a substitute"
+            )
+            raise ValueError(msg)
+        assert isinstance(koopman, ContinuousGraphKoopmanOperator)
+        return koopman.spectrum(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+        )
+    if uses_hypergraph_koopman:
+        if hyperedge_index is None or num_nodes is None:
+            msg = (
+                "hyperedge_index and num_nodes are required for "
+                "GraphKoopmanModel.spectrum when koopman='hypergraph' "
+                "(topology-coupled effective operator); the per-node "
+                "contract matrix K_self is not a substitute"
+            )
+            raise ValueError(msg)
+        assert isinstance(koopman, HypergraphKoopmanOperator)
+        return koopman.spectrum(
+            hyperedge_index,
+            num_nodes,
+            hyperedge_weight=hyperedge_weight,
+            time_step=time_step,
+        )
     if uses_graph_koopman:
         if edge_index is None or num_nodes is None:
             msg = (
@@ -122,6 +170,8 @@ def latent_decode_rollout(
     future_topologies: Sequence[Data] | None = None,
     step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
     history: Sequence[Data] | None = None,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
 ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
     """Autoregressively advance latent state and decode for multiple steps.
 
@@ -141,10 +191,14 @@ def latent_decode_rollout(
         Soft-default integration interval when ``step_deltas`` is omitted.
     edge_index, edge_weight, controls, future_topologies, step_deltas, history
         Same semantics as :meth:`GraphKoopmanModel.predict` / ``_rollout``.
+    hyperedge_index, hyperedge_weight
+        Static hyperedge incidence for hypergraph operators. When omitted and
+        ``x_or_data`` is a ``Data`` snapshot, incidence is read from the
+        snapshot fields.
 
     Returns
     -------
-    list of tuple[Tensor, Tensor, Tensor or None]
+    list of tuple[Tensor, Tensor, Tensor | None]
         For each step, decoded prediction, ``edge_index``, and optional
         ``edge_weight`` used for decoding.
 
@@ -168,6 +222,10 @@ def latent_decode_rollout(
         edge_weight=edge_weight,
         history=history,
     )
+    if hyperedge_index is None and isinstance(x_or_data, Data):
+        hyperedge_index = snapshot_hyperedge_index(x_or_data)
+        if hyperedge_weight is None:
+            hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
 
     control_at = None if controls is None else (lambda step: controls[step])
     delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
@@ -184,6 +242,8 @@ def latent_decode_rollout(
         control_at=control_at,
         delta_t_at=delta_t_at,
         default_delta_t=default_delta_t,
+        hyperedge_index=hyperedge_index,
+        hyperedge_weight=hyperedge_weight,
     )
 
 
@@ -203,6 +263,7 @@ def predict_snapshots(
 
     Parameters
     ----------
+
     model
         Module whose ``training`` flag is toggled around the rollout.
     rollout_fn
@@ -210,12 +271,24 @@ def predict_snapshots(
     initial_graph, steps, edge_index, edge_weight, controls, future_topologies,
     history
         Forwarded to ``rollout_fn``.
+    initial_graph : Tensor | Data
+        See the function signature / summary for ``initial_graph``.
+    steps : int
+        See the function signature / summary for ``steps``.
+    edge_index : Tensor | None
+        See the function signature / summary for ``edge_index``.
+    edge_weight : Tensor | None
+        See the function signature / summary for ``edge_weight``.
+    controls : Sequence[Tensor] | None
+        See the function signature / summary for ``controls``.
+    future_topologies : Sequence[Data] | None
+        See the function signature / summary for ``future_topologies``.
 
     Returns
     -------
+
     list of Data
-        Packed forecast snapshots.
-    """
+        Packed forecast snapshots."""
     was_training = model.training
     model.eval()
     try:
@@ -252,6 +325,7 @@ def predict_at_snapshots(
 
     Parameters
     ----------
+
     model
         Module whose ``training`` flag is toggled around the rollout.
     rollout_fn
@@ -265,12 +339,22 @@ def predict_at_snapshots(
     query_times, step_deltas, edge_index, edge_weight, controls,
     future_topologies
         Same semantics as :meth:`GraphKoopmanModel.predict_at`.
+    query_times : Sequence[float] | Sequence[Tensor] | None
+        See the function signature / summary for ``query_times``.
+    step_deltas : Sequence[float] | Sequence[Tensor] | None
+        See the function signature / summary for ``step_deltas``.
+    edge_index : Tensor | None
+        See the function signature / summary for ``edge_index``.
+    edge_weight : Tensor | None
+        See the function signature / summary for ``edge_weight``.
+    controls : Sequence[Tensor] | None
+        See the function signature / summary for ``controls``.
 
     Returns
     -------
+
     list of Data
-        Predicted snapshots, one per query interval.
-    """
+        Predicted snapshots, one per query interval."""
     increments = resolve_time_increments(
         query_times=query_times,
         step_deltas=step_deltas,

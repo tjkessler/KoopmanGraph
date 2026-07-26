@@ -20,9 +20,14 @@ from koopman_graph.data.validation import (
     validate_observation_masks,
     validate_shared_topology,
     validate_snapshot_metadata,
+    validate_static_hyperedges,
     validate_timestamps,
 )
-from koopman_graph.graph_utils import snapshot_edge_weight
+from koopman_graph.graph_utils import (
+    snapshot_edge_weight,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
+)
 
 
 class GraphSnapshotSequence:
@@ -32,11 +37,15 @@ class GraphSnapshotSequence:
     ``edge_weight``, node count, and feature dimension. Set
     ``allow_dynamic_topology=True`` to permit per-snapshot ``edge_index`` while
     still requiring a fixed node count and feature dimension. Optional
-    :attr:`control_inputs` store exogenous inputs ``u_t`` applied when
-    advancing from snapshot ``t`` to ``t+1`` (global ``(T, C)`` or per-node
-    ``(T, N, C)``). Not every consumer supports both layouts: neural model /
-    adaptation preserve per-node rows; :class:`~koopman_graph.env.GraphKoopmanEnv`
-    and :class:`~koopman_graph.baselines.DMDcBaseline` are global-only (see
+    ``hyperedge_index`` / ``hyperedge_weight`` on each ``Data`` snapshot carry
+    a PyG bipartite hyperedge incidence (row 0 = nodes, row 1 = hyperedges);
+    when present they must be identical across timesteps (static hyperedges
+    only). Optional :attr:`control_inputs` store exogenous inputs ``u_t``
+    applied when advancing from snapshot ``t`` to ``t+1`` (global ``(T, C)``
+    or per-node ``(T, N, C)``). Not every consumer supports both layouts:
+    neural model / adaptation preserve per-node rows;
+    :class:`~koopman_graph.env.GraphKoopmanEnv` and
+    :class:`~koopman_graph.baselines.DMDcBaseline` are global-only (see
     architecture control layout capability matrix). Optional
     :attr:`observation_masks` mark which nodes are measured at each timestep
     (``True`` = observed). When masks are present, training and evaluation
@@ -56,13 +65,14 @@ class GraphSnapshotSequence:
     Notes
     -----
     Read-only views of sequence metadata are exposed as :attr:`snapshots`,
-    :attr:`edge_index`, :attr:`edge_weight`, :attr:`is_dynamic_topology`,
-    :attr:`control_inputs`, :attr:`has_controls`, :attr:`control_dim`,
-    :attr:`timestamps`, :attr:`has_timestamps`, :attr:`observation_masks`,
-    :attr:`has_observation_masks`, and :attr:`num_nodes`,
-    :attr:`edge_index` and :attr:`edge_weight` properties are only defined for
-    static-topology sequences; use ``sequence[t].edge_index`` when
-    :attr:`is_dynamic_topology` is ``True``.
+    :attr:`edge_index`, :attr:`edge_weight`, :attr:`hyperedge_index`,
+    :attr:`hyperedge_weight`, :attr:`has_hyperedges`,
+    :attr:`is_dynamic_topology`, :attr:`control_inputs`, :attr:`has_controls`,
+    :attr:`control_dim`, :attr:`timestamps`, :attr:`has_timestamps`,
+    :attr:`observation_masks`, :attr:`has_observation_masks`, and
+    :attr:`num_nodes`. :attr:`edge_index` and :attr:`edge_weight` properties
+    are only defined for static-topology sequences; use
+    ``sequence[t].edge_index`` when :attr:`is_dynamic_topology` is ``True``.
     """
 
     def __init__(
@@ -104,6 +114,7 @@ class GraphSnapshotSequence:
             validate_snapshot_metadata(snapshot_list)
         else:
             validate_shared_topology(snapshot_list)
+        validate_static_hyperedges(snapshot_list)
         if control_inputs is not None:
             validate_control_inputs(
                 control_inputs,
@@ -139,6 +150,8 @@ class GraphSnapshotSequence:
         edge_index: ArrayLike,
         *,
         edge_weight: ArrayLike | None = None,
+        hyperedge_index: ArrayLike | None = None,
+        hyperedge_weight: ArrayLike | None = None,
         control_inputs: ArrayLike | None = None,
         timestamps: ArrayLike | None = None,
         observation_masks: ArrayLike | None = None,
@@ -155,6 +168,12 @@ class GraphSnapshotSequence:
         edge_weight : array-like, optional
             Shared scalar edge weights with shape ``(num_edges,)``. When
             provided, attached to every snapshot.
+        hyperedge_index : array-like, optional
+            Shared PyG bipartite hyperedge incidence with shape ``(2, nnz)``
+            (row 0 = nodes, row 1 = hyperedges).
+        hyperedge_weight : array-like, optional
+            Shared hyperedge weights with shape ``(num_hyperedges,)``.
+            Requires ``hyperedge_index``.
         control_inputs : array-like, optional
             Per-timestep control inputs with shape ``(num_timesteps,
             control_dim)`` or ``(num_timesteps, num_nodes, control_dim)``.
@@ -176,13 +195,15 @@ class GraphSnapshotSequence:
         Raises
         ------
         ValueError
-            If ``node_features``, ``edge_index``, or ``edge_weight`` have
-            invalid shape.
+            If ``node_features``, ``edge_index``, ``edge_weight``, or hyperedge
+            fields have invalid shape.
         """
         built = build_snapshots_from_arrays(
             node_features,
             edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
             control_inputs=control_inputs,
             timestamps=timestamps,
             observation_masks=observation_masks,
@@ -349,14 +370,21 @@ class GraphSnapshotSequence:
 
         Parameters
         ----------
+
         index : int
             Source snapshot index for the transition pair.
 
+        Returns
+        -------
+
+        Tensor
+            See summary line.
+
         Raises
         ------
+
         ValueError
-            If timestamps are absent or ``index`` is out of range.
-        """
+            If timestamps are absent or ``index`` is out of range."""
         if self._timestamps is None:
             msg = "sequence does not contain timestamps"
             raise ValueError(msg)
@@ -573,6 +601,42 @@ class GraphSnapshotSequence:
             )
             raise ValueError(msg)
         return snapshot_edge_weight(self._snapshots[0])
+
+    @property
+    def has_hyperedges(self) -> bool:
+        """Return whether snapshots carry a hyperedge incidence.
+
+        Returns
+        -------
+        bool
+            ``True`` when snapshot 0 has ``hyperedge_index`` (validated as
+            shared across the sequence at construction).
+        """
+        return snapshot_hyperedge_index(self._snapshots[0]) is not None
+
+    @property
+    def hyperedge_index(self) -> Tensor | None:
+        """Return the shared hyperedge incidence when present.
+
+        Returns
+        -------
+        Tensor or None
+            Bipartite incidence with shape ``(2, nnz)``, or ``None`` when the
+            sequence has no hyperedges.
+        """
+        return snapshot_hyperedge_index(self._snapshots[0])
+
+    @property
+    def hyperedge_weight(self) -> Tensor | None:
+        """Return the shared hyperedge weights when present.
+
+        Returns
+        -------
+        Tensor or None
+            Weights with shape ``(num_hyperedges,)``, or ``None`` when
+            unweighted or when hyperedges are absent.
+        """
+        return snapshot_hyperedge_weight(self._snapshots[0])
 
     @property
     def num_nodes(self) -> int:

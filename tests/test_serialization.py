@@ -55,6 +55,13 @@ def _format1_config(
         "physics": None,
         "encoder": encoder,
         "decoder": decoder,
+        "sparsity": "dense",
+        "learn_topology": None,
+        "topology_embedding_dim": None,
+        "symmetry": None,
+        "local_window": None,
+        "local_rank": None,
+        "local_hidden_dims": None,
     }
     config.update(overrides)
     return config
@@ -273,6 +280,13 @@ def test_save_checkpoint_uses_current_format_version(
         "bilinear_rank",
         "n_delays",
         "physics",
+        "sparsity",
+        "learn_topology",
+        "topology_embedding_dim",
+        "symmetry",
+        "local_window",
+        "local_rank",
+        "local_hidden_dims",
     }
 
 
@@ -280,7 +294,7 @@ def test_load_retired_format2_checkpoint_rejected(
     graph_koopman_model: GraphKoopmanModel,
     tmp_path: Path,
 ) -> None:
-    """Verify previously published format_version 2 checkpoints are rejected."""
+    """Verify format_version 2 stays unsupported in the beta (format 1 only)."""
     path = tmp_path / "retired_v2.pt"
     torch.save(
         {
@@ -331,7 +345,7 @@ def test_load_sparse_historical_format1_checkpoint_rejected(
         },
         path,
     )
-    with pytest.raises(ValueError, match="missing required format_version 1 fields"):
+    with pytest.raises(ValueError, match="Deprecated checkpoint schema"):
         load_checkpoint(path)
 
 
@@ -777,3 +791,160 @@ def test_transformer_encoder_decoder_checkpoint_round_trip(
     assert loaded.encoder.heads == 2
     assert loaded.encoder.edge_dim == 1
     assert loaded.decoder.edge_dim == 1
+
+
+def test_build_model_config_includes_placeholder_keys(
+    graph_koopman_model: GraphKoopmanModel,
+) -> None:
+    """New format-1 saves always write sparsity / topology / symmetry keys."""
+    config = build_model_config(graph_koopman_model)
+    assert config["sparsity"] == "dense"
+    assert config["learn_topology"] is None
+    assert config["symmetry"] is None
+    assert config["local_window"] is None
+    assert config["local_rank"] is None
+    assert config["local_hidden_dims"] is None
+
+
+def test_load_rejects_pre_placeholder_format1_schema(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Older complete format-1 payloads missing new keys are deprecated."""
+    config = build_model_config(graph_koopman_model)
+    del config["sparsity"]
+    del config["learn_topology"]
+    del config["symmetry"]
+    path = tmp_path / "pre_placeholder.pt"
+    torch.save(
+        {
+            "format_version": 1,
+            "package_version": "0.5.0",
+            "config": config,
+            "state_dict": graph_koopman_model.state_dict(),
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="Deprecated checkpoint schema"):
+        load_checkpoint(path)
+
+
+def test_continuous_graph_kind_reconstructs_under_format1() -> None:
+    """Format-1 reconstruct accepts kind continuous_graph (no longer reserved)."""
+    config = _format1_config(
+        encoder={
+            "type": "gcn",
+            "in_channels": 3,
+            "hidden_channels": 8,
+            "latent_dim": 4,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+        decoder={
+            "type": "gcn",
+            "latent_dim": 4,
+            "hidden_channels": 8,
+            "out_channels": 3,
+            "num_layers": 2,
+            "activation": "relu",
+        },
+        koopman_kind="continuous_graph",
+        dynamics_mode="continuous",
+    )
+    model = reconstruct_model(config)
+    assert model.koopman_kind == "continuous_graph"
+    assert model.dynamics_mode == "continuous"
+
+
+def test_hypergraph_format1_round_trip(
+    scaling_sequence: GraphSnapshotSequence,
+    tmp_path: Path,
+) -> None:
+    """Hypergraph encoder/decoder/operator round-trip under format 1."""
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+
+    # Build a tiny hyperedge-carrying sequence on the scaling fixture topology.
+    edge_index = scaling_sequence[0].edge_index
+    hyperedge_index = torch.tensor(
+        [
+            [0, 1, 1, 2, 2, 3, 3, 4],
+            [0, 0, 1, 1, 2, 2, 3, 3],
+        ],
+        dtype=torch.long,
+    )
+    x = torch.stack([snap.x for snap in scaling_sequence.snapshots[:4]])
+    sequence = GraphSnapshotSequence.from_arrays(
+        x,
+        edge_index,
+        hyperedge_index=hyperedge_index,
+    )
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(3, 8, 4),
+        decoder=HypergraphDecoder(4, 8, 3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="hypergraph",
+        control_dim=1,
+        control_mode="bilinear",
+        bilinear_rank=1,
+    )
+    # Attach dummy controls for fit.
+    controls = torch.randn(sequence.num_timesteps, 1)
+    sequence = GraphSnapshotSequence.from_arrays(
+        x,
+        edge_index,
+        hyperedge_index=hyperedge_index,
+        control_inputs=controls,
+    )
+    model.fit(sequence, epochs=1)
+    config = build_model_config(model)
+    assert config["koopman_kind"] == "hypergraph"
+    assert config["encoder"]["type"] == "hyper_enc"
+    assert config["decoder"]["type"] == "hyper_dec"
+    assert config["control_mode"] == "bilinear"
+    assert config["bilinear_rank"] == 1
+    assert config["sparsity"] == "dense"
+
+    path = tmp_path / "hypergraph.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman_kind == "hypergraph"
+    assert isinstance(loaded.encoder, HypergraphEncoder)
+    assert isinstance(loaded.decoder, HypergraphDecoder)
+    assert loaded.control_mode == "bilinear"
+    assert loaded.bilinear_rank == 1
+    preds = model.predict(sequence[0], steps=2, controls=[controls[0], controls[1]])
+    loaded_preds = loaded.predict(
+        sequence[0], steps=2, controls=[controls[0], controls[1]]
+    )
+    for a, b in zip(preds, loaded_preds, strict=True):
+        torch.testing.assert_close(a.x, b.x)
+
+
+def test_hypergraph_operator_delay_round_trip(tmp_path: Path) -> None:
+    """Format-1 round-trip keeps n_delays with GCN + hypergraph operator."""
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    hyperedge_index = torch.tensor([[0, 1, 1, 2], [0, 0, 1, 1]], dtype=torch.long)
+    x = torch.randn(5, 3, 2)
+    sequence = GraphSnapshotSequence.from_arrays(
+        x,
+        edge_index,
+        hyperedge_index=hyperedge_index,
+    )
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=4, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=2),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hypergraph",
+        n_delays=2,
+    )
+    model.fit(sequence, epochs=1)
+    config = build_model_config(model)
+    assert config["n_delays"] == 2
+    assert config["koopman_kind"] == "hypergraph"
+    path = tmp_path / "hyper_delay.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.n_delays == 2
+    assert loaded.koopman_kind == "hypergraph"

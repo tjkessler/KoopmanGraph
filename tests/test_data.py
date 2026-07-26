@@ -900,3 +900,74 @@ def test_delay_windows_helpers_owned_by_data() -> None:
         "stack_delay_features",
     ):
         assert getattr(nn_delay, name) is getattr(delay_windows, name)
+
+
+def test_neighbor_window_sampler_induces_remapped_subgraph(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampling remaps nodes and preserves feature width."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    features = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).unsqueeze(0)
+    features = features.expand(4, -1, -1).contiguous()
+    sequence = GraphSnapshotSequence.from_arrays(features, synthetic_edge_index)
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=1,
+        shuffle=False,
+        seed=0,
+    )
+    batch = next(iter(sampler.iter_epoch(0)))
+    window = batch[0]
+    assert window.num_timesteps == 2
+    assert window.num_nodes <= 5
+    assert window[0].x.shape[-1] == 3
+    assert int(window.edge_index.max()) < window.num_nodes
+    # Remapped indices are contiguous from 0.
+    assert int(window.edge_index.min()) >= 0
+
+
+def test_neighbor_window_sampler_seeded_determinism(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Seeded neighbor sampling is repeatable for the same epoch."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(4, 5, 2),
+        synthetic_edge_index,
+    )
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=4,
+        seed=11,
+    )
+    first = [w[0].x.clone() for batch in sampler.iter_epoch(0) for w in batch]
+    second = [w[0].x.clone() for batch in sampler.iter_epoch(0) for w in batch]
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
+
+
+def test_neighbor_window_sampler_rejects_hyperedges(
+    synthetic_hypergraph_edge_index: torch.Tensor,
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hyperedge sequences are rejected by the neighbor sampler."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(3, 4, 2),
+        synthetic_hypergraph_edge_index,
+        hyperedge_index=synthetic_hyperedge_index,
+    )
+    with pytest.raises(ValueError, match="hyperedge"):
+        NeighborWindowSampler(
+            sequence,
+            window_length=2,
+            num_nodes=2,
+        )

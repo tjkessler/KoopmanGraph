@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -12,21 +12,42 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch_geometric.data import Data
 
-from koopman_graph.adaptation import AdaptationStepResult, RecursiveKoopmanAdapter
-from koopman_graph.data import GraphSnapshotSequence, RolloutStartIndices
+from koopman_graph.adaptation.rls import AdaptationStepResult, RecursiveKoopmanAdapter
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    RolloutStartIndices,
+    WindowLikeSampler,
+)
 from koopman_graph.graph_utils import (
+    OrbitMethod,
     propagate_latent,
     resolve_delta_t,
     resolve_edge_index,
     resolve_edge_weight,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
 )
 from koopman_graph.metrics import EvaluationResult
+from koopman_graph.nn import (
+    DEFAULT_TOPOLOGY_EMBEDDING_DIM,
+    AdaptiveAdjacency,
+    DelayEmbeddingEncoder,
+    HypergraphDecoder,
+    HypergraphEncoder,
+    bind_hypergraph_decoder,
+)
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
     PhysicsPosition,
 )
-from koopman_graph.operators import GraphKoopmanOperator, InitMode, Parameterization
+from koopman_graph.operators import (
+    ContinuousGraphKoopmanOperator,
+    GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
+    InitMode,
+    Parameterization,
+)
 from koopman_graph.operators.control import ControlMode
 from koopman_graph.protocols import DynamicsMode
 from koopman_graph.spectrum_types import KoopmanSpectrum
@@ -54,6 +75,8 @@ from .factory import (
     DEFAULT_CONTROL_MODE,
     DEFAULT_KOOPMAN_INIT_MODE,
     DEFAULT_KOOPMAN_INIT_SCALE,
+    DEFAULT_KOOPMAN_LOCAL_RANK,
+    DEFAULT_KOOPMAN_LOCAL_WINDOW,
     DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
     DEFAULT_KOOPMAN_PARAMETERIZATION,
     Decoder,
@@ -79,10 +102,7 @@ from .online_adaptation import (
     freeze_modules,
     run_adapt_step,
 )
-from .validation import prepare_fit_inputs
-
-if TYPE_CHECKING:
-    from koopman_graph.env import GraphKoopmanEnv
+from .validation import prepare_fit_inputs, uses_hypergraph_modules
 
 
 class GraphKoopmanModel(nn.Module):
@@ -142,6 +162,13 @@ class GraphKoopmanModel(nn.Module):
         koopman_parameterization: Parameterization = DEFAULT_KOOPMAN_PARAMETERIZATION,
         koopman_max_spectral_radius: float = DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
         koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
+        koopman_sparsity: str = "dense",
+        koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
+        koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
+        koopman_local_hidden_dims: Sequence[int] | None = None,
+        koopman_orbit_partition: Sequence[Sequence[int]] | None = None,
+        koopman_auto_orbits: bool = False,
+        koopman_orbit_method: OrbitMethod = "auto",
         control_dim: int = 0,
         control_mode: ControlMode = DEFAULT_CONTROL_MODE,
         bilinear_rank: int | None = DEFAULT_BILINEAR_RANK,
@@ -150,6 +177,8 @@ class GraphKoopmanModel(nn.Module):
         physics_dim: int = 0,
         physics_position: PhysicsPosition = PHYSICS_POSITION,
         n_delays: int = 1,
+        learn_topology: str | None = None,
+        topology_embedding_dim: int = DEFAULT_TOPOLOGY_EMBEDDING_DIM,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
@@ -209,6 +238,30 @@ class GraphKoopmanModel(nn.Module):
             Hidden widths for ``koopman_parameterization="auxiliary_spectral"``
             (default ``(64, 64)``). Must stay default / ``None`` when injecting
             ``koopman=...``.
+        koopman_sparsity : {"dense", "block_diagonal", "distributed"}, optional
+            Realization mode for networked operators (``koopman="graph"`` /
+            ``"hypergraph"``). Only ``"dense"`` is implemented today; other
+            values are rejected by the operator constructors. Ignored for
+            per-node operators (must remain ``"dense"``). Default is
+            ``"dense"``.
+        koopman_local_window : int, optional
+            Latent history length for ``koopman="global_local"`` (default
+            ``4``). Must stay default when not using global/local.
+        koopman_local_rank : int, optional
+            Low-rank size of the local correction (default ``2``).
+        koopman_local_hidden_dims : sequence of int or None, optional
+            Local MLP hidden widths (default ``(32,)``).
+        koopman_orbit_partition : sequence of sequence of int or None, optional
+            Explicit node-orbit partition for symmetry-adapted
+            ``koopman="graph"`` / ``"hypergraph"`` (ties ``K_self`` within
+            each orbit). Overrides ``koopman_auto_orbits`` when set.
+        koopman_auto_orbits : bool, optional
+            When ``True``, bind orbits from topology on first advance
+            (requires the ``[symmetry]`` extra for non-identity partitions).
+            Graph/hypergraph only. Default ``False``.
+        koopman_orbit_method : {"auto", "exact"}, optional
+            Orbit backend when ``koopman_auto_orbits`` is enabled. Default
+            ``"auto"``.
         control_dim : int, optional
             Dimension of exogenous control inputs. When ``0``, the model is
             uncontrolled. Default is ``0``. Must match ``koopman.control_dim``
@@ -252,6 +305,14 @@ class GraphKoopmanModel(nn.Module):
             provided observation history **once**, then advances in latent
             space (decoded rollouts are **not** fed back as delay coordinates
             by default).
+        learn_topology : {"self_adaptive"} or None, optional
+            When ``"self_adaptive"``, replace pairwise ``edge_index`` /
+            ``edge_weight`` for encode / decode / graph advance / spectrum with
+            a learned Graph WaveNet adjacency. Hyperedge incidence is unchanged.
+            Default ``None`` is a numerical no-op.
+        topology_embedding_dim : int, optional
+            Embedding width ``k`` for ``learn_topology="self_adaptive"``.
+            Default ``8``. Ignored when ``learn_topology`` is ``None``.
 
         Raises
         ------
@@ -261,8 +322,7 @@ class GraphKoopmanModel(nn.Module):
             inconsistent, encoder/decoder latent dimensions do not match the
             effective hybrid layout, an injected operator conflicts with
             factory kwargs or dimensions, ``dynamics_mode`` disagrees with a
-            built-in injected operator type, or ``koopman="graph"`` is
-            requested in continuous mode.
+            built-in injected operator type, or ``learn_topology`` is invalid.
         TypeError
             If ``koopman`` is provided but is not a string kind or ``nn.Module``.
         """
@@ -279,6 +339,13 @@ class GraphKoopmanModel(nn.Module):
             koopman_parameterization=koopman_parameterization,
             koopman_max_spectral_radius=koopman_max_spectral_radius,
             koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
+            koopman_sparsity=koopman_sparsity,
+            koopman_local_window=koopman_local_window,
+            koopman_local_rank=koopman_local_rank,
+            koopman_local_hidden_dims=koopman_local_hidden_dims,
+            koopman_orbit_partition=koopman_orbit_partition,
+            koopman_auto_orbits=koopman_auto_orbits,
+            koopman_orbit_method=koopman_orbit_method,
             control_dim=control_dim,
             control_mode=control_mode,
             bilinear_rank=bilinear_rank,
@@ -289,6 +356,24 @@ class GraphKoopmanModel(nn.Module):
             n_delays=n_delays,
         )
         apply_resolved_components(self, components)
+        if learn_topology is not None and learn_topology != "self_adaptive":
+            msg = (
+                "learn_topology must be None or 'self_adaptive', "
+                f"got {learn_topology!r}"
+            )
+            raise ValueError(msg)
+        if topology_embedding_dim < 1:
+            msg = (
+                f"topology_embedding_dim must be positive, got {topology_embedding_dim}"
+            )
+            raise ValueError(msg)
+        self.learn_topology = learn_topology
+        self.topology_embedding_dim = topology_embedding_dim
+        self.adaptive_topology: AdaptiveAdjacency | None
+        if learn_topology == "self_adaptive":
+            self.adaptive_topology = AdaptiveAdjacency(topology_embedding_dim)
+        else:
+            self.adaptive_topology = None
 
     @property
     def uses_graph_koopman(self) -> bool:
@@ -301,6 +386,163 @@ class GraphKoopmanModel(nn.Module):
             :class:`~koopman_graph.operators.GraphKoopmanOperator`.
         """
         return isinstance(self.koopman, GraphKoopmanOperator)
+
+    @property
+    def uses_hypergraph_koopman(self) -> bool:
+        """Return whether latent advance uses the hyperedge-coupled operator.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`koopman` is a
+            :class:`~koopman_graph.operators.HypergraphKoopmanOperator`.
+        """
+        return isinstance(self.koopman, HypergraphKoopmanOperator)
+
+    @property
+    def uses_continuous_graph_koopman(self) -> bool:
+        """Return whether latent advance uses the continuous networked operator.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`koopman` is a
+            :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`.
+        """
+        return isinstance(self.koopman, ContinuousGraphKoopmanOperator)
+
+    @property
+    def learns_pairwise_topology(self) -> bool:
+        """Return whether pairwise edges are replaced by learned adjacency.
+
+        Notes
+        -----
+        Hypergraph encode / operator paths keep exogenous hyperedge incidence;
+        this flag is still ``True`` when ``learn_topology`` is enabled so the
+        ``AdaptiveAdjacency`` module trains and serializes.
+
+        Returns
+        -------
+        bool
+            See summary line."""
+        return self.adaptive_topology is not None
+
+    def _uses_hypergraph_encode(self) -> bool:
+        """Return whether the active encoder consumes hyperedge incidence.
+
+        Returns
+        -------
+        bool
+            See summary line."""
+        encoder = self.encoder
+        if isinstance(encoder, DelayEmbeddingEncoder):
+            encoder = encoder.base_encoder
+        return isinstance(encoder, HypergraphEncoder)
+
+    def materialize_learned_topology(
+        self,
+        x_or_data: Tensor | Data,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+        *,
+        num_nodes: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Return learned dense-COO topology, binding ``N`` on first use.
+
+        Parameters
+        ----------
+        x_or_data : Tensor or Data
+            Reference graph used to infer ``N`` and device when needed.
+        edge_index, edge_weight
+            Unused when learning is enabled (replace semantics); accepted for
+            call-site symmetry.
+        num_nodes : int or None, optional
+            Explicit node count. Inferred from ``x_or_data`` when omitted.
+
+        Returns
+        -------
+        tuple of Tensor
+            Learned ``edge_index`` ``(2, N²)`` and ``edge_weight`` ``(N²,)``.
+
+        Raises
+        ------
+        RuntimeError
+            If adaptive topology is not enabled.
+        ValueError
+            If ``num_nodes`` cannot be inferred or conflicts with a prior bind.
+        """
+        del edge_index, edge_weight  # replace semantics: exogenous pairwise unused
+        if self.adaptive_topology is None:
+            msg = "materialize_learned_topology requires learn_topology='self_adaptive'"
+            raise RuntimeError(msg)
+        if num_nodes is None:
+            if isinstance(x_or_data, Data):
+                num_nodes = (
+                    int(x_or_data.num_nodes)
+                    if x_or_data.num_nodes is not None
+                    else int(x_or_data.x.size(0))
+                )
+                device = x_or_data.x.device
+            elif isinstance(x_or_data, Tensor):
+                num_nodes = int(x_or_data.shape[-2])
+                device = x_or_data.device
+            else:
+                msg = "num_nodes is required when x_or_data has no node axis"
+                raise ValueError(msg)
+        elif isinstance(x_or_data, (Data, Tensor)):
+            device = (
+                x_or_data.x.device if isinstance(x_or_data, Data) else x_or_data.device
+            )
+        else:
+            device = None
+        self.adaptive_topology.set_num_nodes(num_nodes, device=device)
+        return self.adaptive_topology.materialize()
+
+    def resolve_pairwise_topology(
+        self,
+        x_or_data: Tensor | Data,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+        *,
+        num_nodes: int | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Resolve pairwise topology, replacing with learned Â when enabled.
+
+        Parameters
+        ----------
+
+        x_or_data : Tensor | Data
+            See the function signature / summary for ``x_or_data``.
+        edge_index : Tensor | None
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        num_nodes : int | None
+            See the function signature / summary for ``num_nodes``.
+
+        Returns
+        -------
+
+        tuple[Tensor, Tensor | None]
+            See summary line.
+
+        Notes
+        -----
+
+        Hypergraph encode paths keep exogenous topology (hyperedges are not
+        rewritten). Otherwise ``learn_topology="self_adaptive"`` replaces the
+        supplied pairwise edges."""
+        if self.learns_pairwise_topology and not self._uses_hypergraph_encode():
+            return self.materialize_learned_topology(
+                x_or_data,
+                edge_index,
+                edge_weight,
+                num_nodes=num_nodes,
+            )
+        return (
+            resolve_edge_index(x_or_data, edge_index),
+            resolve_edge_weight(x_or_data, edge_weight),
+        )
 
     @property
     def is_continuous(self) -> bool:
@@ -345,14 +587,37 @@ class GraphKoopmanModel(nn.Module):
         delta_t: float | Tensor | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
+        latent_window: Tensor | None = None,
     ) -> Tensor:
         """Advance latent states with the active Koopman operator.
 
+        Parameters
+        ----------
+
+        z : Tensor
+            See the function signature / summary for ``z``.
+        control : Tensor | None
+            See the function signature / summary for ``control``.
+        delta_t : float | Tensor | None
+            See the function signature / summary for ``delta_t``.
+        edge_index : Tensor | None
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        hyperedge_index : Tensor | None
+            See the function signature / summary for ``hyperedge_index``.
+        hyperedge_weight : Tensor | None
+            See the function signature / summary for ``hyperedge_weight``.
+        latent_window : Tensor | None
+            See the function signature / summary for ``latent_window``.
+
         Returns
         -------
+
         Tensor
-            Advanced latent states.
-        """
+            Advanced latent states."""
         return propagate_latent(
             self.koopman,
             z,
@@ -361,6 +626,9 @@ class GraphKoopmanModel(nn.Module):
             default_delta_t=self.time_step,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
+            latent_window=latent_window,
         )
 
     def spectrum(
@@ -370,6 +638,8 @@ class GraphKoopmanModel(nn.Module):
         edge_index: Tensor | None = None,
         num_nodes: int | None = None,
         edge_weight: Tensor | None = None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
     ) -> KoopmanSpectrum:
         """Analyze the learned Koopman operator spectrum.
 
@@ -381,23 +651,33 @@ class GraphKoopmanModel(nn.Module):
 
         For ``koopman="graph"``, analyzes the topology-coupled effective
         operator ``I⊗K_self + Â⊗K_nbr`` and **requires** ``edge_index`` and
-        ``num_nodes`` matching the topology used for propagation. Missing
-        topology raises rather than silently returning the ``K_self`` spectrum.
-        Classical DMD-family baselines take no ``spectrum`` kwargs.
+        ``num_nodes``. For continuous networked models
+        (``koopman="continuous_graph"`` or ``koopman="graph"`` with
+        ``dynamics_mode="continuous"``), analyzes ``I⊗L_self + Â⊗L_nbr`` with
+        the same topology requirements. For ``koopman="hypergraph"``, analyzes
+        ``I⊗K_self + Ĥ⊗K_hedge`` and **requires** ``hyperedge_index`` and
+        ``num_nodes``. Missing topology raises rather than silently returning
+        the self-term spectrum.
 
         Parameters
         ----------
         delta_t : float or None, optional
             Continuous integration horizon for generator → discrete spectrum.
-            Ignored for discrete / graph operators.
+            Ignored for discrete / graph / hypergraph operators.
         edge_index : Tensor or None, optional
             Topology for networked graph operators. Required when
-            :attr:`uses_graph_koopman` is ``True``.
+            :attr:`uses_graph_koopman` or
+            :attr:`uses_continuous_graph_koopman` is ``True``.
         num_nodes : int or None, optional
             Node count ``N`` for the effective ``N·d`` operator. Required when
-            :attr:`uses_graph_koopman` is ``True``.
+            a networked operator is active.
         edge_weight : Tensor or None, optional
             Optional edge weights with the same semantics as latent advance.
+        hyperedge_index : Tensor or None, optional
+            Incidence for hypergraph operators. Required when
+            :attr:`uses_hypergraph_koopman` is ``True``.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights.
 
         Returns
         -------
@@ -407,18 +687,38 @@ class GraphKoopmanModel(nn.Module):
         Raises
         ------
         ValueError
-            If a graph operator is active and ``edge_index`` or ``num_nodes``
-            is missing.
+            If a networked operator is active and required topology arguments
+            are missing.
         """
+        if (
+            self.learns_pairwise_topology
+            and not self.uses_hypergraph_koopman
+            and (self.uses_graph_koopman or self.uses_continuous_graph_koopman)
+        ):
+            if num_nodes is None:
+                msg = (
+                    "num_nodes is required for spectrum when "
+                    "learn_topology='self_adaptive' (materialize learned Â)"
+                )
+                raise ValueError(msg)
+            if self.adaptive_topology is None:
+                msg = "adaptive_topology module missing"
+                raise RuntimeError(msg)
+            self.adaptive_topology.set_num_nodes(num_nodes)
+            edge_index, edge_weight = self.adaptive_topology.materialize()
         return compute_model_spectrum(
             self.koopman,
             uses_graph_koopman=self.uses_graph_koopman,
+            uses_hypergraph_koopman=self.uses_hypergraph_koopman,
+            uses_continuous_graph_koopman=self.uses_continuous_graph_koopman,
             is_continuous=self.is_continuous,
             time_step=self.time_step,
             delta_t=delta_t,
             edge_index=edge_index,
             num_nodes=num_nodes,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
         )
 
     def encode(
@@ -453,6 +753,14 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Latent node features with shape ``(num_nodes, latent_dim)``.
         """
+        replace = self.learns_pairwise_topology and not self._uses_hypergraph_encode()
+        if replace:
+            edge_index, edge_weight = self.materialize_learned_topology(
+                x_or_data, edge_index, edge_weight
+            )
+        elif self.adaptive_topology is not None:
+            # Bind N for hypergraph peers (incidence stays exogenous).
+            self.materialize_learned_topology(x_or_data, edge_index, edge_weight)
         return encode_features(
             self.encoder,
             x_or_data,
@@ -461,6 +769,7 @@ class GraphKoopmanModel(nn.Module):
             physics_lifting_fn=self.physics_lifting_fn,
             physics_dim=self.physics_dim,
             physics_position=self.physics_position,
+            prefer_explicit_topology=replace,
         )
 
     def encode_rollout_origin(
@@ -493,7 +802,7 @@ class GraphKoopmanModel(nn.Module):
             Encoded latent ``z``, resolved ``edge_index``, and optional
             ``edge_weight`` at the rollout origin.
         """
-        return encode_rollout_origin_helper(
+        z, edge_resolved, weight_resolved = encode_rollout_origin_helper(
             self.encode,
             n_delays=self.n_delays,
             x_or_data=x_or_data,
@@ -501,6 +810,11 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             history=history,
         )
+        if self.learns_pairwise_topology and not self._uses_hypergraph_encode():
+            edge_resolved, weight_resolved = self.materialize_learned_topology(
+                x_or_data, edge_index, edge_weight
+            )
+        return z, edge_resolved, weight_resolved
 
     def encode_at(
         self,
@@ -702,9 +1016,10 @@ class GraphKoopmanModel(nn.Module):
             Destination checkpoint file (``.pt``). Parent directories are
             created when missing.
         """
-        from koopman_graph.serialization import save_checkpoint
+        import importlib
 
-        save_checkpoint(self, path)
+        serialization = importlib.import_module("koopman_graph.serialization")
+        serialization.save_checkpoint(self, path)
 
     @classmethod
     def load(
@@ -734,9 +1049,10 @@ class GraphKoopmanModel(nn.Module):
         GraphKoopmanModel
             Ready-to-use model in evaluation mode.
         """
-        from koopman_graph.serialization import load_checkpoint
+        import importlib
 
-        return load_checkpoint(
+        serialization = importlib.import_module("koopman_graph.serialization")
+        return serialization.load_checkpoint(
             path,
             map_location=map_location,
             physics_lifting_fn=physics_lifting_fn,
@@ -778,8 +1094,15 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Predicted node features of shape ``(num_nodes, out_channels)``.
         """
-        edge_index = resolve_edge_index(x_or_data, edge_index)
-        edge_weight = resolve_edge_weight(x_or_data, edge_weight)
+        edge_index, edge_weight = self.resolve_pairwise_topology(
+            x_or_data, edge_index, edge_weight
+        )
+        if isinstance(x_or_data, Data):
+            hyperedge_index = snapshot_hyperedge_index(x_or_data)
+            hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
+        else:
+            hyperedge_index = None
+            hyperedge_weight = None
         z = self.encode(x_or_data, edge_index, edge_weight)
         z_next = self._advance_latent(
             z,
@@ -787,7 +1110,14 @@ class GraphKoopmanModel(nn.Module):
             delta_t=delta_t,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
         )
+        if isinstance(self.decoder, HypergraphDecoder):
+            if hyperedge_index is None:
+                msg = "HypergraphDecoder requires hyperedge_index on Data input"
+                raise ValueError(msg)
+            return self.decoder(z_next, hyperedge_index, hyperedge_weight)
         return self.decoder(z_next, edge_index, edge_weight)
 
     def _rollout(
@@ -848,9 +1178,39 @@ class GraphKoopmanModel(nn.Module):
             If ``steps < 1`` or controls are missing/invalid for a controlled
             model.
         """
+        decoder_fn: Any = self.decoder
+        if isinstance(self.decoder, HypergraphDecoder):
+            if isinstance(x_or_data, Data):
+                hyperedge_index = snapshot_hyperedge_index(x_or_data)
+                hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
+            else:
+                resolved_index = resolve_edge_index(x_or_data, edge_index)
+                hyperedge_index = resolved_index
+                hyperedge_weight = resolve_edge_weight(x_or_data, edge_weight)
+            if hyperedge_index is None:
+                msg = (
+                    "HypergraphDecoder rollout requires hyperedge_index on "
+                    "the origin graph"
+                )
+                raise ValueError(msg)
+            decoder_fn = bind_hypergraph_decoder(
+                self.decoder,
+                hyperedge_index,
+                hyperedge_weight,
+            )
+        # Static learned Â: ignore dynamic future pairwise topologies.
+        rollout_futures = (
+            None
+            if self.learns_pairwise_topology and not self._uses_hypergraph_encode()
+            else future_topologies
+        )
+        if self.learns_pairwise_topology and not self._uses_hypergraph_encode():
+            edge_index, edge_weight = self.materialize_learned_topology(
+                x_or_data, edge_index, edge_weight
+            )
         return latent_decode_rollout(
             self.koopman,
-            self.decoder,
+            decoder_fn,
             self.encode_rollout_origin,
             x_or_data=x_or_data,
             steps=steps,
@@ -859,7 +1219,7 @@ class GraphKoopmanModel(nn.Module):
             edge_index=edge_index,
             edge_weight=edge_weight,
             controls=controls,
-            future_topologies=future_topologies,
+            future_topologies=rollout_futures,
             step_deltas=step_deltas,
             history=history,
         )
@@ -1052,6 +1412,7 @@ class GraphKoopmanModel(nn.Module):
         batch_size: int = 8,
         windows_per_epoch: int | None = None,
         window_seed: int | None = None,
+        sampler: WindowLikeSampler | None = None,
         max_grad_norm: float | None = None,
         early_stopping_patience: int | None = None,
         early_stopping_min_delta: float = 0.0,
@@ -1140,7 +1501,8 @@ Data
         window_length : int or None, optional
             Fixed number of snapshots per training window. When set, enables
             mini-batch training with multiple optimizer steps per epoch.
-            ``None`` preserves full-sequence single-step training.
+            ``None`` preserves full-sequence single-step training. Mutually
+            exclusive with ``sampler``.
         batch_size : int, optional
             Number of temporal windows averaged per optimizer step. Used only
             when ``window_length`` is set. Default is ``8``.
@@ -1149,6 +1511,11 @@ Data
             window across all trajectories.
         window_seed : int or None, optional
             Base seed for reproducible epoch-specific window shuffling.
+        sampler : WindowSampler, NeighborWindowSampler, or None, optional
+            Pre-built temporal or neighbor-subgraph window sampler. When set,
+            use instead of ``window_length``. Neighbor sampling trains on
+            induced subgraphs (approximation); ``predict`` / ``evaluate`` stay
+            full-graph.
         max_grad_norm : float or None, optional
             When set, clip the global gradient norm before each optimizer step.
         early_stopping_patience : int or None, optional
@@ -1199,6 +1566,10 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             epochs=epochs,
             early_stopping_patience=early_stopping_patience,
             early_stopping_monitor=early_stopping_monitor,
+            allow_hyperedges=(
+                uses_hypergraph_modules(self.encoder, self.decoder)
+                or self.uses_hypergraph_koopman
+            ),
         )
         return run_fit_loop(
             self,
@@ -1219,6 +1590,7 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             batch_size=batch_size,
             windows_per_epoch=windows_per_epoch,
             window_seed=window_seed,
+            sampler=sampler,
             max_grad_norm=max_grad_norm,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
@@ -1241,7 +1613,7 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         random_start: bool = True,
         delta_t: float | None = None,
         device: torch.device | str | None = None,
-    ) -> GraphKoopmanEnv:
+    ) -> Any:
         """Build a Gymnasium environment for latent-space closed-loop control.
 
         Freezes encoder and decoder parameters so RL interacts only through the
@@ -1287,7 +1659,10 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         ImportError
             If Gymnasium is not installed.
         """
-        from koopman_graph.env import GraphKoopmanEnv
+        import importlib
+
+        env_mod = importlib.import_module("koopman_graph.env")
+        GraphKoopmanEnv = env_mod.GraphKoopmanEnv
 
         if self.control_dim <= 0:
             msg = "to_latent_env requires control_dim > 0"

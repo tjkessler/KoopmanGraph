@@ -31,6 +31,213 @@ def snapshot_edge_weight(snapshot: Data) -> Tensor | None:
     return edge_weight
 
 
+def snapshot_hyperedge_index(snapshot: Data) -> Tensor | None:
+    """Return optional hyperedge incidence index attached to a snapshot.
+
+    Parameters
+    ----------
+    snapshot : Data
+        Graph snapshot that may carry ``hyperedge_index``.
+
+    Returns
+    -------
+    Tensor or None
+        Bipartite incidence with shape ``(2, nnz)`` (row 0 = node indices,
+        row 1 = hyperedge indices), or ``None`` when absent.
+    """
+    hyperedge_index = getattr(snapshot, "hyperedge_index", None)
+    if hyperedge_index is None:
+        return None
+    return hyperedge_index
+
+
+def snapshot_hyperedge_weight(snapshot: Data) -> Tensor | None:
+    """Return optional hyperedge weights attached to a snapshot.
+
+    Parameters
+    ----------
+    snapshot : Data
+        Graph snapshot that may carry ``hyperedge_weight``.
+
+    Returns
+    -------
+    Tensor or None
+        Weights with shape ``(num_hyperedges,)``, or ``None`` when absent.
+    """
+    hyperedge_weight = getattr(snapshot, "hyperedge_weight", None)
+    if hyperedge_weight is None:
+        return None
+    return hyperedge_weight
+
+
+def dense_hyperedge_normalized_adjacency(
+    hyperedge_index: Tensor,
+    *,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Assemble dense Zhou incidence-normalized hypergraph adjacency ``Ĥ``.
+
+    For incidence matrix ``B ∈ {0,1}^{N×M}`` (nodes × hyperedges), hyperedge
+    weights ``W_e = diag(w)``, node degrees ``D_v = diag(B w)``, and hyperedge
+    degrees ``D_e = diag(Bᵀ 1)`` (hyperedge sizes),
+
+    .. math::
+
+        \\hat{H}
+        = D_v^{-1/2} B W_e D_e^{-1} B^{\\top} D_v^{-1/2}.
+
+    Isolated nodes (never appearing in ``hyperedge_index``) receive a zero
+    row/column via the same ``d ↦ d^{-1/2}`` with non-finite → ``0`` convention
+    used for ``Â``. Singleton hyperedges are retained (degree 1).
+
+    Parameters
+    ----------
+    hyperedge_index : Tensor
+        Bipartite incidence with shape ``(2, nnz)``: row 0 = node indices,
+        row 1 = hyperedge indices (PyG ``HypergraphConv`` convention).
+    num_nodes : int
+        Number of graph nodes ``N``.
+    hyperedge_weight : Tensor or None, optional
+        Non-negative hyperedge weights with shape ``(num_hyperedges,)``.
+        Defaults to ones.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    device : torch.device or None, optional
+        Device for the computation. Defaults to ``hyperedge_index.device``.
+
+    Returns
+    -------
+    Tensor
+        Dense adjacency with shape ``(num_nodes, num_nodes)``.
+
+    Raises
+    ------
+    ValueError
+        If ``hyperedge_index`` has invalid shape or ``num_nodes`` is invalid.
+    """
+    if num_nodes < 0:
+        msg = f"num_nodes must be >= 0, got {num_nodes}"
+        raise ValueError(msg)
+    if hyperedge_index.ndim != 2 or hyperedge_index.shape[0] != 2:
+        msg = (
+            "hyperedge_index must have shape (2, nnz), "
+            f"got {tuple(hyperedge_index.shape)}"
+        )
+        raise ValueError(msg)
+
+    resolved_device = device if device is not None else hyperedge_index.device
+    if hyperedge_index.numel() == 0 or num_nodes == 0:
+        return torch.zeros(
+            (num_nodes, num_nodes),
+            dtype=dtype,
+            device=resolved_device,
+        )
+
+    node_idx = hyperedge_index[0].to(device=resolved_device)
+    hedge_idx = hyperedge_index[1].to(device=resolved_device)
+    num_hyperedges = int(hedge_idx.max().item()) + 1
+
+    incidence = torch.zeros(
+        (num_nodes, num_hyperedges),
+        dtype=dtype,
+        device=resolved_device,
+    )
+    ones = torch.ones(node_idx.size(0), dtype=dtype, device=resolved_device)
+    incidence.index_put_((node_idx, hedge_idx), ones, accumulate=True)
+    # Cap multi-entries at 1 for a Boolean incidence (duplicate (node, hedge)
+    # pairs should not inflate degree).
+    incidence = incidence.clamp(max=1)
+
+    if hyperedge_weight is None:
+        weights = torch.ones(num_hyperedges, dtype=dtype, device=resolved_device)
+    else:
+        weights = hyperedge_weight.to(dtype=dtype, device=resolved_device)
+        if weights.ndim != 1 or weights.shape[0] != num_hyperedges:
+            msg = (
+                "hyperedge_weight must have shape "
+                f"(num_hyperedges={num_hyperedges},), "
+                f"got {tuple(weights.shape)}"
+            )
+            raise ValueError(msg)
+
+    node_degree = incidence @ weights
+    hyperedge_degree = incidence.sum(dim=0)
+
+    deg_v_inv_sqrt = node_degree.pow(-0.5)
+    deg_v_inv_sqrt = torch.where(
+        torch.isfinite(deg_v_inv_sqrt),
+        deg_v_inv_sqrt,
+        torch.zeros_like(deg_v_inv_sqrt),
+    )
+    deg_e_inv = hyperedge_degree.pow(-1.0)
+    deg_e_inv = torch.where(
+        torch.isfinite(deg_e_inv),
+        deg_e_inv,
+        torch.zeros_like(deg_e_inv),
+    )
+
+    # Ĥ = D_v^{-1/2} B W_e D_e^{-1} Bᵀ D_v^{-1/2}
+    scaled = incidence * weights.unsqueeze(0) * deg_e_inv.unsqueeze(0)
+    mid = scaled @ incidence.transpose(0, 1)
+    return deg_v_inv_sqrt.unsqueeze(1) * mid * deg_v_inv_sqrt.unsqueeze(0)
+
+
+# Design / blueprint alias for the Zhou incidence-normalized operator.
+hyperedge_normalized_incidence_weights = dense_hyperedge_normalized_adjacency
+
+
+def hyperedge_normalized_adjacency_matvec(
+    hyperedge_index: Tensor,
+    x: Tensor,
+    *,
+    hyperedge_weight: Tensor | None = None,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply Zhou ``Ĥ`` to node features.
+
+    Assembles dense ``Ĥ`` via
+    :func:`dense_hyperedge_normalized_adjacency` and returns ``Ĥ @ x``.
+    Suitable for modest ``N`` (same dense-operator ceiling as
+    :meth:`~koopman_graph.operators.HypergraphKoopmanOperator.effective_matrix`).
+
+    Parameters
+    ----------
+    hyperedge_index : Tensor
+        Bipartite incidence with shape ``(2, nnz)``.
+    x : Tensor
+        Node features with shape ``(num_nodes, feature_dim)``.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights with shape ``(num_hyperedges,)``.
+    num_nodes : int or None, optional
+        Number of nodes. Inferred from ``x`` when omitted.
+
+    Returns
+    -------
+    Tensor
+        Transformed features with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2D.
+    """
+    if x.dim() != 2:
+        msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    node_count = num_nodes if num_nodes is not None else x.size(0)
+    hat = dense_hyperedge_normalized_adjacency(
+        hyperedge_index,
+        num_nodes=node_count,
+        hyperedge_weight=hyperedge_weight,
+        dtype=x.dtype,
+        device=x.device,
+    )
+    return hat @ x
+
+
 def node_degrees(
     edge_index: Tensor,
     *,
@@ -455,7 +662,11 @@ def resolve_graph_inputs(
 
 
 def snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
-    """Move a graph snapshot to a target device, preserving edge weights.
+    """Move a graph snapshot to a target device, preserving topology fields.
+
+    Copies ``x``, ``edge_index``, optional ``edge_weight``, and optional
+    hyperedge incidence (``hyperedge_index`` / ``hyperedge_weight``) when
+    present.
 
     Parameters
     ----------
@@ -476,4 +687,10 @@ def snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
     edge_weight = snapshot_edge_weight(snapshot)
     if edge_weight is not None:
         fields["edge_weight"] = edge_weight.to(device)
+    hyperedge_index = snapshot_hyperedge_index(snapshot)
+    if hyperedge_index is not None:
+        fields["hyperedge_index"] = hyperedge_index.to(device)
+    hyperedge_weight = snapshot_hyperedge_weight(snapshot)
+    if hyperedge_weight is not None:
+        fields["hyperedge_weight"] = hyperedge_weight.to(device)
     return Data(**fields)

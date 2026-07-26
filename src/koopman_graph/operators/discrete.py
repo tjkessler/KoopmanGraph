@@ -688,11 +688,17 @@ class KoopmanOperator(nn.Module):
     def _assemble_matrix(self) -> Tensor:
         """Assemble ``K`` for the active non-dense parameterization.
 
+        Returns
+        -------
+
+        Tensor
+            See summary line.
+
         Notes
         -----
+
         Thin wrapper that delegates to the shared discrete parameterization
-        helpers for the active mode.
-        """
+        helpers for the active mode."""
         assemblers = {
             "odo": self._assemble_odo_matrix,
             "schur": self._assemble_schur_matrix,

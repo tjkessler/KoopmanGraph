@@ -124,7 +124,7 @@ def test_isolated_node_normalized_adjacency_has_zero_row() -> None:
 
 
 def test_no_isolate_laplacian_reduces_to_i_minus_adj() -> None:
-    """On fully positive-degree graphs, L_sym equals I - Â."""
+    """On fully positive-degree graphs, L_sym matrix equals I - Â."""
     edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
     num_nodes = 3
     x = torch.randn(3, 2)
@@ -376,15 +376,26 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "DecoderFn",
     "DeltaTAtFn",
     "KoopmanPropagator",
+    "OrbitMethod",
+    "OrbitPartition",
     "TopologyAtFn",
     "advance_and_decode",
+    "apply_orbit_self",
+    "assemble_orbit_self_blocks",
     "autoregressive_latent_rollout",
     "degree_support_mask",
+    "dense_hyperedge_normalized_adjacency",
     "dense_symmetric_normalized_adjacency",
     "dense_symmetric_normalized_laplacian",
     "hold_last_topology_at",
+    "hyperedge_normalized_adjacency_matvec",
+    "hyperedge_normalized_incidence_weights",
+    "hyperedge_two_section",
+    "identity_orbit_partition",
     "inverse_propagate_latent",
     "node_degrees",
+    "node_orbit_index",
+    "node_orbit_partition",
     "pack_rollout_snapshots",
     "propagate_latent",
     "resolve_delta_t",
@@ -392,11 +403,14 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "resolve_edge_weight",
     "resolve_graph_inputs",
     "snapshot_edge_weight",
+    "snapshot_hyperedge_index",
+    "snapshot_hyperedge_weight",
     "snapshot_to_device",
     "snapshot_topology_at",
     "symmetric_normalized_adjacency_edge_weights",
     "symmetric_normalized_adjacency_matvec",
     "symmetric_normalized_laplacian_matvec",
+    "validate_orbit_partition",
 )
 
 

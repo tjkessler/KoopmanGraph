@@ -94,7 +94,7 @@ def test_advance_at_zero_is_identity() -> None:
     "parameterization", ["dense", "odo", "schur", "dissipative", "lyapunov"]
 )
 def test_semigroup_property(parameterization: str) -> None:
-    """Verify advance(z, dt1+dt2) matches composed advances."""
+    """Semigroup: advance(z, Δt1+Δt2) equals composed matrix_exp advances."""
     op = ContinuousKoopmanOperator(4, parameterization=parameterization)  # type: ignore[arg-type]
     z = torch.randn(2, 4)
     dt1, dt2 = 0.07, 0.13

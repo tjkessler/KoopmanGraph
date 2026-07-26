@@ -7,6 +7,7 @@ from torch import Tensor, nn
 
 from koopman_graph.graph_utils import KoopmanPropagator
 from koopman_graph.operators.graph import GraphKoopmanOperator
+from koopman_graph.operators.hypergraph import HypergraphKoopmanOperator
 from koopman_graph.protocols import DynamicsMode
 
 
@@ -74,6 +75,8 @@ class EigenvalueRegularizationLoss(nn.Module):
         edge_index: Tensor | None = None,
         num_nodes: int | None = None,
         edge_weight: Tensor | None = None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
     ) -> Tensor:
         """Compute the stability eigenvalue hinge penalty.
 
@@ -91,9 +94,15 @@ class EigenvalueRegularizationLoss(nn.Module):
             for graph structural parameterizations.
         num_nodes : int or None, optional
             Node count ``N`` for the effective ``N·d`` operator. Required with
-            ``edge_index`` for graph dense/ODO.
+            topology for graph/hypergraph dense/ODO.
         edge_weight : Tensor or None, optional
             Optional edge weights with the same semantics as latent advance.
+        hyperedge_index : Tensor or None, optional
+            Incidence for
+            :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
+            dense/ODO modes.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights.
 
         Returns
         -------
@@ -103,8 +112,8 @@ class EigenvalueRegularizationLoss(nn.Module):
         Raises
         ------
         ValueError
-            If ``dynamics_mode`` is invalid, or a graph dense/ODO operator is
-            regularized without ``edge_index`` / ``num_nodes``.
+            If ``dynamics_mode`` is invalid, or a networked dense/ODO operator
+            is regularized without required topology arguments.
         """
         if dynamics_mode not in {"discrete", "continuous"}:
             msg = (
@@ -130,6 +139,8 @@ class EigenvalueRegularizationLoss(nn.Module):
             edge_index=edge_index,
             num_nodes=num_nodes,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
         )
         eigenvalues = torch.linalg.eigvals(matrix)
         if dynamics_mode == "continuous":
@@ -145,6 +156,8 @@ class EigenvalueRegularizationLoss(nn.Module):
         edge_index: Tensor | None,
         num_nodes: int | None,
         edge_weight: Tensor | None,
+        hyperedge_index: Tensor | None = None,
+        hyperedge_weight: Tensor | None = None,
     ) -> Tensor:
         """Return the matrix whose spectrum is regularized for dense/ODO.
 
@@ -155,20 +168,55 @@ class EigenvalueRegularizationLoss(nn.Module):
         edge_index : Tensor or None
             Topology for graph operators.
         num_nodes : int or None
-            Node count for graph operators.
+            Node count for networked operators.
         edge_weight : Tensor or None
             Optional edge weights for graph operators.
+        hyperedge_index : Tensor or None, optional
+            Incidence for hypergraph operators.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights.
 
         Returns
         -------
         Tensor
-            Per-node ``matrix`` or graph ``effective_matrix``.
+            Per-node ``matrix`` or networked ``effective_matrix``.
 
         Raises
         ------
         ValueError
-            If a graph operator is missing required topology arguments.
+            If a networked operator is missing required topology arguments.
         """
+        from koopman_graph.operators import ContinuousGraphKoopmanOperator
+
+        if isinstance(koopman, HypergraphKoopmanOperator):
+            if hyperedge_index is None or num_nodes is None:
+                msg = (
+                    "hyperedge_index and num_nodes are required for "
+                    "EigenvalueRegularizationLoss on HypergraphKoopmanOperator "
+                    "dense/odo modes (topology-coupled effective operator); "
+                    "the per-node contract matrix K_self is not a substitute"
+                )
+                raise ValueError(msg)
+            return koopman.effective_matrix(
+                hyperedge_index,
+                num_nodes,
+                hyperedge_weight=hyperedge_weight,
+            )
+        if isinstance(koopman, ContinuousGraphKoopmanOperator):
+            if edge_index is None or num_nodes is None:
+                msg = (
+                    "edge_index and num_nodes are required for "
+                    "EigenvalueRegularizationLoss on "
+                    "ContinuousGraphKoopmanOperator dense/odo modes "
+                    "(topology-coupled effective generator); the per-node "
+                    "contract matrix L_self is not a substitute"
+                )
+                raise ValueError(msg)
+            return koopman.effective_generator(
+                edge_index,
+                num_nodes,
+                edge_weight=edge_weight,
+            )
         if not isinstance(koopman, GraphKoopmanOperator):
             return koopman.matrix
         if edge_index is None or num_nodes is None:
@@ -280,6 +328,11 @@ class KoopmanSparsityLoss(nn.Module):
         if isinstance(koopman, GraphKoopmanOperator):
             return torch.cat(
                 (koopman.K_self.reshape(-1), koopman.K_nbr.reshape(-1)),
+                dim=0,
+            )
+        if isinstance(koopman, HypergraphKoopmanOperator):
+            return torch.cat(
+                (koopman.K_self.reshape(-1), koopman.K_hedge.reshape(-1)),
                 dim=0,
             )
         return koopman.matrix.reshape(-1)

@@ -42,6 +42,7 @@ def encode_features(
     physics_lifting_fn: PhysicsLiftingFn | None = None,
     physics_dim: int = 0,
     physics_position: PhysicsPosition,
+    prefer_explicit_topology: bool = False,
 ) -> Tensor:
     """Lift node features into the hybrid Koopman latent space.
 
@@ -61,6 +62,10 @@ def encode_features(
         Expected physics feature width when lifting is enabled.
     physics_position : {"prepend"}
         Where physics features sit relative to GNN embeddings.
+    prefer_explicit_topology : bool, optional
+        When ``True`` and ``edge_index`` is provided, use the explicit
+        pairwise topology even for ``Data`` input (learned-adjacency replace
+        path). Default ``False`` preserves ``Data.edge_index`` precedence.
 
     Returns
     -------
@@ -85,6 +90,40 @@ def encode_features(
             "unsupported; pass a Data snapshot or use encode_at"
         )
         raise ValueError(msg)
+
+    if prefer_explicit_topology and edge_index is not None:
+        if isinstance(x_or_data, Data):
+            features = x_or_data.x
+            z_gnn = encoder(features, edge_index, edge_weight)
+            if physics_lifting_fn is None:
+                return z_gnn
+            snapshot = as_data(x_or_data, edge_index, edge_weight)
+            physics_features = physics_lifting_fn(snapshot)
+            validate_physics_output(
+                physics_features,
+                physics_dim=physics_dim,
+                num_nodes=z_gnn.size(0),
+            )
+            return concatenate_observables(
+                physics_features,
+                z_gnn,
+                position=physics_position,
+            )
+        z_gnn = encoder(x_or_data, edge_index, edge_weight)
+        if physics_lifting_fn is None:
+            return z_gnn
+        snapshot = as_data(x_or_data, edge_index, edge_weight)
+        physics_features = physics_lifting_fn(snapshot)
+        validate_physics_output(
+            physics_features,
+            physics_dim=physics_dim,
+            num_nodes=z_gnn.size(0),
+        )
+        return concatenate_observables(
+            physics_features,
+            z_gnn,
+            position=physics_position,
+        )
 
     edge_index = resolve_edge_index(x_or_data, edge_index)
     edge_weight = resolve_edge_weight(x_or_data, edge_weight)

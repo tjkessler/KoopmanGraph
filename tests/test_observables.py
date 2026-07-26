@@ -84,7 +84,7 @@ def test_graph_laplacian_features_shape(small_snapshot: Data) -> None:
 
 
 def test_graph_gradient_and_curvature_presets_preserve_shape_and_isolates() -> None:
-    """Graph derivative presets preserve channels and map isolates to zero."""
+    """Graph gradient / curvature matrix lifting preserves channels; isolates → 0."""
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     snapshot = Data(
         x=torch.tensor([[0.0], [2.0], [7.0]]),
@@ -98,6 +98,18 @@ def test_graph_gradient_and_curvature_presets_preserve_shape_and_isolates() -> N
     assert curvature.shape == snapshot.x.shape
     assert torch.all(gradient >= 0)
     assert gradient[2].item() == pytest.approx(0.0)
+    assert curvature[2].item() == pytest.approx(0.0)
+
+
+def test_graph_curvature_features_biharmonic_isolate_smoke() -> None:
+    """Biharmonic curvature features ≈ L_sym² x; isolated nodes stay zero."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    snapshot = Data(
+        x=torch.tensor([[0.0], [2.0], [7.0]]),
+        edge_index=edge_index,
+    )
+    curvature = graph_curvature_features(snapshot)
+    assert curvature.shape == snapshot.x.shape
     assert curvature[2].item() == pytest.approx(0.0)
 
 

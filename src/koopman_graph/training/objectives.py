@@ -22,7 +22,11 @@ from koopman_graph.losses import (
     rollout_multi_start_loss,
     rollout_sequence_loss,
 )
-from koopman_graph.operators import GraphKoopmanOperator
+from koopman_graph.operators import (
+    ContinuousGraphKoopmanOperator,
+    GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
+)
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.extra_objectives import (
     compute_lie_consistency_loss,
@@ -201,6 +205,50 @@ def compute_eigenvalue_regularization_loss(
             )
             raise ValueError(msg)
         return _graph_eigenvalue_regularization_over_sequence(model, sequence)
+
+    if isinstance(
+        koopman, ContinuousGraphKoopmanOperator
+    ) and koopman.parameterization in {"dense", "odo"}:
+        if sequence is None:
+            msg = (
+                "sequence is required for eigenvalue regularization of "
+                "ContinuousGraphKoopmanOperator dense/odo modes "
+                "(topology-coupled effective generator); pass the training "
+                "sequence/window"
+            )
+            raise ValueError(msg)
+        return _EIGENVALUE_REGULARIZATION_LOSS(
+            koopman,
+            dynamics_mode=model.dynamics_mode,
+            edge_index=sequence.edge_index,
+            num_nodes=sequence.num_nodes,
+            edge_weight=sequence.edge_weight,
+        )
+
+    if isinstance(koopman, HypergraphKoopmanOperator) and koopman.parameterization in {
+        "dense",
+        "odo",
+    }:
+        if sequence is None:
+            msg = (
+                "sequence is required for eigenvalue regularization of "
+                "HypergraphKoopmanOperator dense/odo modes (topology-coupled "
+                "effective operator); pass the training sequence/window"
+            )
+            raise ValueError(msg)
+        if not sequence.has_hyperedges:
+            msg = (
+                "HypergraphKoopmanOperator eigenvalue regularization requires "
+                "a hyperedge-carrying sequence"
+            )
+            raise ValueError(msg)
+        return _EIGENVALUE_REGULARIZATION_LOSS(
+            koopman,
+            dynamics_mode=model.dynamics_mode,
+            hyperedge_index=sequence.hyperedge_index,
+            num_nodes=sequence.num_nodes,
+            hyperedge_weight=sequence.hyperedge_weight,
+        )
     return _EIGENVALUE_REGULARIZATION_LOSS(
         koopman,
         dynamics_mode=model.dynamics_mode,

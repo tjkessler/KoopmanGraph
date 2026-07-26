@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -18,9 +18,7 @@ from koopman_graph.operators import (
     GraphKoopmanOperator,
     KoopmanOperator,
 )
-
-if TYPE_CHECKING:
-    from koopman_graph.model import GraphKoopmanModel
+from koopman_graph.protocols import ModeShapeModel
 
 ObservationModel = Literal["latent_encode", "decoder_jacobian"]
 
@@ -88,7 +86,7 @@ class KoopmanObserver:
 
     def __init__(
         self,
-        model: GraphKoopmanModel,
+        model: ModeShapeModel,
         *,
         process_noise: float = 1e-3,
         observation_noise: float = 1e-2,
@@ -101,7 +99,7 @@ class KoopmanObserver:
 
         Parameters
         ----------
-        model : GraphKoopmanModel
+        model : ModeShapeModel
             Fitted (or seeded) model providing encode / decode / Koopman step.
         process_noise : float, optional
             Isotropic process-noise scale ``q`` with ``Q = q I``. Default

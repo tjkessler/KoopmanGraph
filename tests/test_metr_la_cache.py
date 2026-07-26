@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
@@ -40,7 +41,7 @@ def test_download_sensor_ids_parses_remote_list() -> None:
     mock_response = MagicMock()
     mock_response.read.return_value = b"a,b,c"
     mock_response.__enter__.return_value = mock_response
-    with patch("koopman_graph.datasets.metr_la.urlopen", return_value=mock_response):
+    with patch("koopman_graph.datasets.download.urlopen", return_value=mock_response):
         sensor_ids = download_sensor_ids()
     assert sensor_ids == ["a", "b", "c"]
 
@@ -49,7 +50,7 @@ def test_download_sensor_ids_url_error_raises_oserror() -> None:
     """Verify network failures surface as OSError."""
     with (
         patch(
-            "koopman_graph.datasets.metr_la.urlopen",
+            "koopman_graph.datasets.download.urlopen",
             side_effect=URLError("network down"),
         ),
         pytest.raises(OSError, match="Failed to download METR-LA sensor IDs"),
@@ -62,7 +63,7 @@ def test_download_distances_csv_reads_remote_text() -> None:
     mock_response = MagicMock()
     mock_response.read.return_value = b"from,to,cost\na,b,1.0\n"
     mock_response.__enter__.return_value = mock_response
-    with patch("koopman_graph.datasets.metr_la.urlopen", return_value=mock_response):
+    with patch("koopman_graph.datasets.download.urlopen", return_value=mock_response):
         csv_text = download_distances_csv()
     assert "from,to,cost" in csv_text
 
@@ -71,7 +72,7 @@ def test_download_distances_csv_url_error_raises_oserror() -> None:
     """Verify distance download failures surface as OSError."""
     with (
         patch(
-            "koopman_graph.datasets.metr_la.urlopen",
+            "koopman_graph.datasets.download.urlopen",
             side_effect=URLError("network down"),
         ),
         pytest.raises(OSError, match="Failed to download METR-LA distances"),
@@ -286,6 +287,20 @@ def test_ensure_traffic_cache_builds_from_h5(tmp_path: Path) -> None:
     assert path.exists()
     payload = torch.load(path, weights_only=False)
     assert payload["speeds"].shape[0] == 3
+
+
+def test_ensure_traffic_cache_sha256_mismatch_raises(tmp_path: Path) -> None:
+    """Optional HDF5 digest is checked before cache construction."""
+    h5_path = tmp_path / "metr-la.h5"
+    h5_path.write_bytes(b"not-an-h5")
+    assert hashlib.sha256(h5_path.read_bytes()).hexdigest() != "0" * 64
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        ensure_traffic_cache(
+            tmp_path,
+            force=True,
+            h5_path=h5_path,
+            expected_h5_sha256="0" * 64,
+        )
 
 
 def test_load_traffic_cache_casts_tensor_dtypes(tmp_path: Path) -> None:

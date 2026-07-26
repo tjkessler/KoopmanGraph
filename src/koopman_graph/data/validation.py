@@ -14,11 +14,218 @@ import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.graph_utils import snapshot_edge_weight
+from koopman_graph.graph_utils import (
+    snapshot_edge_weight,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
+)
 
 ArrayLike = Tensor | np.ndarray
 
-ArrayLike = Tensor | np.ndarray
+
+def coerce_hyperedge_index(
+    hyperedge_index: ArrayLike,
+    *,
+    num_nodes: int,
+) -> Tensor:
+    """Coerce and validate a PyG bipartite hyperedge incidence index.
+
+    Parameters
+    ----------
+    hyperedge_index : array-like
+        Incidence with shape ``(2, nnz)``: row 0 node indices, row 1
+        hyperedge indices.
+    num_nodes : int
+        Number of nodes in the graph; used to bound node indices.
+
+    Returns
+    -------
+    Tensor
+        Long tensor with shape ``(2, nnz)``.
+
+    Raises
+    ------
+    ValueError
+        If shape is invalid or node indices are out of range.
+    """
+    edges = as_tensor(hyperedge_index, dtype=torch.long)
+    if edges.ndim != 2 or edges.shape[0] != 2:
+        msg = (
+            "hyperedge_index must have shape (2, nnz) with row 0 = nodes "
+            f"and row 1 = hyperedges, got {tuple(edges.shape)}"
+        )
+        raise ValueError(msg)
+    if edges.numel() == 0:
+        return edges
+    if int(edges[0].min().item()) < 0 or int(edges[0].max().item()) >= num_nodes:
+        msg = (
+            "hyperedge_index node indices must lie in "
+            f"[0, {num_nodes - 1}], got min={int(edges[0].min().item())}, "
+            f"max={int(edges[0].max().item())}"
+        )
+        raise ValueError(msg)
+    if int(edges[1].min().item()) < 0:
+        msg = (
+            "hyperedge_index hyperedge indices must be non-negative, "
+            f"got min={int(edges[1].min().item())}"
+        )
+        raise ValueError(msg)
+    return edges
+
+
+def coerce_hyperedge_weight(
+    hyperedge_weight: ArrayLike | None,
+    *,
+    hyperedge_index: Tensor,
+    dtype: torch.dtype,
+) -> Tensor | None:
+    """Coerce and validate optional per-hyperedge weights.
+
+    Parameters
+    ----------
+    hyperedge_weight : array-like or None
+        Weights with shape ``(num_hyperedges,)``, indexed by the distinct
+        hyperedge ids in ``hyperedge_index[1]``.
+    hyperedge_index : Tensor
+        Validated bipartite incidence with shape ``(2, nnz)``.
+    dtype : torch.dtype
+        Floating dtype for the returned weights.
+
+    Returns
+    -------
+    Tensor or None
+        Coerced weights, or ``None`` when ``hyperedge_weight`` is ``None``.
+
+    Raises
+    ------
+    ValueError
+        If weight shape does not match the number of hyperedges.
+    """
+    if hyperedge_weight is None:
+        return None
+    weights = as_tensor(hyperedge_weight, dtype=dtype)
+    if weights.ndim != 1:
+        msg = (
+            "hyperedge_weight must have shape (num_hyperedges,), "
+            f"got {tuple(weights.shape)}"
+        )
+        raise ValueError(msg)
+    if hyperedge_index.numel() == 0:
+        num_hyperedges = 0
+    else:
+        num_hyperedges = int(hyperedge_index[1].max().item()) + 1
+    if weights.shape[0] != num_hyperedges:
+        msg = (
+            f"hyperedge_weight length {weights.shape[0]} does not match "
+            f"num_hyperedges {num_hyperedges}"
+        )
+        raise ValueError(msg)
+    return weights
+
+
+def validate_static_hyperedges(snapshots: Sequence[Data]) -> None:
+    """Require shared (static) hyperedge incidence across snapshots.
+
+    When any snapshot carries ``hyperedge_index``, every snapshot must carry
+    the same incidence and optional ``hyperedge_weight``. Time-varying
+    hyperedges are rejected in this release.
+
+    Parameters
+    ----------
+    snapshots : sequence of Data
+        Graph snapshots to validate.
+
+    Raises
+    ------
+    ValueError
+        If hyperedge presence, indices, or weights differ across snapshots.
+    """
+    if not snapshots:
+        return
+
+    reference = snapshots[0]
+    ref_index = snapshot_hyperedge_index(reference)
+    ref_weight = snapshot_hyperedge_weight(reference)
+    has_hyperedges = ref_index is not None
+
+    for idx, snapshot in enumerate(snapshots[1:], start=1):
+        hyperedge_index = snapshot_hyperedge_index(snapshot)
+        hyperedge_weight = snapshot_hyperedge_weight(snapshot)
+        if has_hyperedges != (hyperedge_index is not None):
+            msg = (
+                f"Snapshot {idx} hyperedge_index presence does not match "
+                "snapshot 0; time-varying hyperedges are not supported"
+            )
+            raise ValueError(msg)
+        if not has_hyperedges:
+            continue
+        if not torch.equal(hyperedge_index, ref_index):
+            msg = (
+                f"Snapshot {idx} has a different hyperedge_index than "
+                "snapshot 0; time-varying hyperedges are not supported"
+            )
+            raise ValueError(msg)
+        if (ref_weight is None) != (hyperedge_weight is None):
+            msg = f"Snapshot {idx} hyperedge_weight presence does not match snapshot 0"
+            raise ValueError(msg)
+        if ref_weight is not None and not torch.allclose(
+            hyperedge_weight,
+            ref_weight,
+            equal_nan=True,
+        ):
+            msg = (
+                f"Snapshot {idx} has a different hyperedge_weight than "
+                "snapshot 0; time-varying hyperedges are not supported"
+            )
+            raise ValueError(msg)
+
+
+def sequence_has_hyperedges(snapshots: Sequence[Data]) -> bool:
+    """Return whether any snapshot carries a ``hyperedge_index``.
+
+    Parameters
+    ----------
+    snapshots : sequence of Data
+        Graph snapshots to inspect.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one snapshot has ``hyperedge_index``.
+    """
+    return any(snapshot_hyperedge_index(snapshot) is not None for snapshot in snapshots)
+
+
+def require_no_hyperedges(sequence: object) -> None:
+    """Reject hyperedge-carrying sequences for non-hypergraph consumers.
+
+    Classical baselines, :class:`~koopman_graph.env.GraphKoopmanEnv`, and the
+    current neural ``fit`` path do not consume ``hyperedge_index``. Passing a
+    hyperedge-carrying sequence would otherwise silently ignore the incidence.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence
+        Candidate sequence exposing :attr:`has_hyperedges`.
+
+    Raises
+    ------
+    ValueError
+        If ``sequence.has_hyperedges`` is ``True``.
+    """
+    has_hyperedges = getattr(sequence, "has_hyperedges", False)
+    if callable(has_hyperedges):
+        flagged = bool(has_hyperedges())
+    else:
+        flagged = bool(has_hyperedges)
+    if flagged:
+        msg = (
+            "this API does not support hyperedge-carrying sequences; "
+            "got hyperedge_index on one or more snapshots "
+            "(use a sequence without hyperedges, or a hypergraph-aware "
+            "encoder/operator when available)"
+        )
+        raise ValueError(msg)
 
 
 def as_tensor(value: ArrayLike, *, dtype: torch.dtype | None = None) -> Tensor:

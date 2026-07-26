@@ -6,14 +6,17 @@ import csv
 import io
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.request import urlopen
 
 import numpy as np
 import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.datasets.download import (
+    download_url_text,
+    resolve_cache_path,
+    verify_sha256,
+)
 from koopman_graph.datasets.topology import TopologyPayload
 
 DCRNN_SENSOR_GRAPH_BASE = (
@@ -24,11 +27,14 @@ DISTANCES_URL = f"{DCRNN_SENSOR_GRAPH_BASE}/distances_la_2012.csv"
 DEFAULT_H5_MIRROR_URL = (
     "https://huggingface.co/datasets/MintBruce/SkyTraffic/resolve/main/metr-la.h5"
 )
+# Content SHA256 of DEFAULT_H5_MIRROR_URL (HF LFS oid; verified 2026-07-25).
+DEFAULT_H5_SHA256 = "64784b76d6fb8ec9bff4b6decafb354da2bb37840468fdccee5044e511277c05"
 DCRNN_H5_GOOGLE_DRIVE = (
     "https://drive.google.com/open?id=10FOTa6HXPqX8Pf5WRoRwcFnW9BrNZEIX"
 )
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "metr_la"
 TRAFFIC_FILENAME = "traffic.pt"
+DEFAULT_H5_FILENAME = "metr-la.h5"
 NUM_SENSORS = 207
 IN_CHANNELS = 1
 # One weekday of 5-minute samples from a high-contrast congestion day
@@ -51,8 +57,11 @@ def _default_traffic_path(cache_dir: Path | None = None) -> Path:
     Path
         Path to ``traffic.pt`` inside the cache directory.
     """
-    root = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
-    return root / TRAFFIC_FILENAME
+    return resolve_cache_path(
+        cache_dir,
+        default_dir=DEFAULT_CACHE_DIR,
+        filename=TRAFFIC_FILENAME,
+    )
 
 
 def download_sensor_ids() -> list[str]:
@@ -63,12 +72,10 @@ def download_sensor_ids() -> list[str]:
     list of str
         Sensor identifiers in graph node order.
     """
-    try:
-        with urlopen(SENSOR_IDS_URL, timeout=60) as response:
-            text = response.read().decode("utf-8").strip()
-    except URLError as exc:
-        msg = f"Failed to download METR-LA sensor IDs from {SENSOR_IDS_URL}"
-        raise OSError(msg) from exc
+    text = download_url_text(
+        SENSOR_IDS_URL,
+        label="METR-LA sensor IDs",
+    ).strip()
     return text.split(",")
 
 
@@ -80,12 +87,7 @@ def download_distances_csv() -> str:
     str
         Raw CSV text with columns ``from``, ``to``, and ``cost``.
     """
-    try:
-        with urlopen(DISTANCES_URL, timeout=60) as response:
-            return response.read().decode("utf-8")
-    except URLError as exc:
-        msg = f"Failed to download METR-LA distances from {DISTANCES_URL}"
-        raise OSError(msg) from exc
+    return download_url_text(DISTANCES_URL, label="METR-LA distances")
 
 
 def build_adjacency_matrix(
@@ -391,6 +393,7 @@ def ensure_traffic_cache(
     num_timesteps: int = DEFAULT_NUM_TIMESTEPS,
     offset: int = DEFAULT_TIMESTEP_OFFSET,
     normalized_k: float = 0.1,
+    expected_h5_sha256: str | None = None,
 ) -> Path:
     """Download graph metadata and build the METR-LA traffic cache if needed.
 
@@ -412,6 +415,8 @@ def ensure_traffic_cache(
         tutorial cache).
     normalized_k : float, optional
         Adjacency sparsity threshold. Default is ``0.1``.
+    expected_h5_sha256 : str, optional
+        When provided, verify the local HDF5 digest before reading.
 
     Returns
     -------
@@ -425,11 +430,13 @@ def ensure_traffic_cache(
         if path.exists():
             return path
         msg = (
-            "METR-LA cache is missing. Provide --h5-path to "
-            "scripts/download_metr_la.py after downloading metr-la.h5 "
+            "METR-LA cache is missing. Provide --h5-path or --fetch to "
+            "scripts/download_metr_la.py after obtaining metr-la.h5 "
             "from the DCRNN release."
         )
         raise FileNotFoundError(msg)
+    if expected_h5_sha256 is not None:
+        verify_sha256(h5_path, expected_h5_sha256)
 
     sensor_ids = download_sensor_ids()
     speeds = read_h5_speed_window(h5_path, num_timesteps=num_timesteps, offset=offset)

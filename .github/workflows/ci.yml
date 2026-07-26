@@ -146,7 +146,9 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra rl
+        run: >
+          uv sync --frozen
+          --extra dev --extra rl --extra mpc --extra symmetry
 
       - name: Run tests
         if: matrix.coverage != 'true'
@@ -261,7 +263,9 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev --extra rl
+        run: >
+          uv sync --frozen
+          --extra dev --extra rl --extra mpc --extra symmetry
 
       - name: Execute tutorial notebooks
         env:

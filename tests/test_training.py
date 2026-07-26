@@ -473,9 +473,7 @@ def test_fit_no_nan_with_all_loss_terms_on_synthetic_benchmark(
     assert all(torch.isfinite(torch.tensor(value)).item() for value in history.loss)
 
 
-def test_fit_with_rollout_loss_on_synthetic_benchmark(
-    trainable_model: GraphKoopmanModel,
-) -> None:
+def test_fit_with_rollout_loss_on_synthetic_benchmark() -> None:
     """Verify rollout loss improves autoregressive prediction on the benchmark."""
     from koopman_graph.datasets import SyntheticDynamicGraphBenchmark
 
@@ -486,7 +484,9 @@ def test_fit_with_rollout_loss_on_synthetic_benchmark(
         seed=42,
         noise_std=0.01,
     )
+    # Seed before construction so encoder/decoder weights are reproducible.
     torch.manual_seed(0)
+    trainable_model = _make_trainable_model()
     history = trainable_model.fit(
         sequence,
         epochs=50,
@@ -1191,3 +1191,62 @@ def test_windowed_fit_applies_gradient_clipping(
             max_grad_norm=1.0,
         )
     assert clip.called
+
+
+def test_fit_neighbor_sampler_large_graph_smoke() -> None:
+    """Neighbor sampling trains on a ≥2000-node graph without full-graph windows."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    torch.manual_seed(0)
+    num_nodes = 2000
+    edges: list[list[int]] = []
+    for node in range(num_nodes - 1):
+        edges.extend([[node, node + 1], [node + 1, node]])
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    features = torch.randn(3, num_nodes, 2)
+    sequence = GraphSnapshotSequence.from_arrays(features, edge_index)
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=16,
+        num_hops=2,
+        batch_size=2,
+        windows_per_epoch=4,
+        seed=0,
+    )
+    # Subgraph windows stay far below full N in node count.
+    sample = next(iter(sampler.iter_epoch(0)))[0]
+    assert sample.num_nodes < 200
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(2, 8, 4, num_layers=1),
+        decoder=GNNDecoder(4, 8, 2, num_layers=1),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="graph",
+        koopman_sparsity="block_diagonal",
+    )
+    history = model.fit(sequence, epochs=1, sampler=sampler, lr=1e-2)
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))
+
+
+def test_fit_rejects_sampler_with_window_length(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """sampler and window_length are mutually exclusive."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sampler = NeighborWindowSampler(
+        scaling_sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+    )
+    with pytest.raises(ValueError, match="sampler or window_length"):
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            sampler=sampler,
+            window_length=2,
+        )

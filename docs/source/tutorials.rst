@@ -60,6 +60,12 @@ Forecasting and benchmarks
      - GraphKoopman vs STGCN / DCRNN / Graph WaveNet references
    * - `24_nonlinear_chaotic_benchmarks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_nonlinear_chaotic_benchmarks.ipynb>`_
      - Nonlinear/chaotic graph benchmarks vs linear vector DMD
+   * - `27_hypergraph_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/27_hypergraph_koopman.ipynb>`_
+     - Hypergraph vs pairwise GraphKoopman (SocioPatterns cache or synthetic fallback)
+   * - `28_adaptive_topology_learning.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/28_adaptive_topology_learning.ipynb>`_
+     - Given vs self-adaptive topology on PEMS-BAY (with DMD coupling diagnostic)
+   * - `29_large_graph_block_diagonal.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/29_large_graph_block_diagonal.ipynb>`_
+     - Block-diagonal sparsity + neighbor sampling on large PEMS / path graphs
 
 Analysis and stability
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -78,14 +84,20 @@ Analysis and stability
      - Loss weighting and soft stability regularization
    * - `26_sparse_interpretable_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/26_sparse_interpretable_operator.ipynb>`_
      - :math:`L_1` Koopman sparsity + worst-case reconstruction (latent :math:`K` sparsity ≠ physical adjacency)
+   * - `32_sindy_operator_identification.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/32_sindy_operator_identification.ipynb>`_
+     - Post-hoc SINDy on encoded latents (planted recovery + epidemic-ring caveat; vs notebook 26)
    * - `09_topology_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb>`_
      - Topology ablation + GCN/SAGE/DiffConv/Transformer encoder zoo on anisotropic advection
    * - `11_long_horizon_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb>`_
      - Structural stability parameterizations, long rollouts
    * - `16_spectral_similarity_anomalies.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb>`_
      - Spectral distance clustering and anomaly detection
+   * - `36_koopman_spectral_clustering.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/36_koopman_spectral_clustering.ipynb>`_
+     - Node communities from Koopman eigenmodes (ARI vs Laplacian; vs notebooks 07 / 16)
    * - `21_uncertainty_quantification.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/21_uncertainty_quantification.ipynb>`_
      - Deep-ensemble and latent-Gaussian predictive intervals (``koopman_graph.uq``)
+   * - `30_conformal_uncertainty.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/30_conformal_uncertainty.ipynb>`_
+     - Split / adaptive conformal intervals vs ensemble and latent-Gaussian UQ
    * - `23_hierarchical_multiresolution.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/23_hierarchical_multiresolution.ipynb>`_
      - Hierarchical TopK pool / unpool vs flat model (in-sample RMSE + spectrum; not P-K-GCN SR)
 
@@ -104,18 +116,26 @@ Control, observation, and advanced dynamics
      - Schedulers, rollout origins, multi-trajectory ``fit``
    * - `12_irregular_sampling_continuous_time.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/12_irregular_sampling_continuous_time.ipynb>`_
      - Continuous-time generator, irregular Δt, ``predict_at``
+   * - `34_continuous_networked_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/34_continuous_networked_operator.ipynb>`_
+     - Continuous ``koopman="graph"`` on irregular diffusion: ``predict_at``, :math:`L_{\mathrm{eff}}` spectrum, :math:`N\cdot d` cost caveat
    * - `20_continuous_spectrum_auxiliary_network.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/20_continuous_spectrum_auxiliary_network.ipynb>`_
      - Parametric continuous spectrum via auxiliary network (local linearity)
    * - `13_online_adaptation_topology_shock.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/13_online_adaptation_topology_shock.ipynb>`_
      - Recursive least-squares online adaptation under topology shock
+   * - `33_nonstationary_global_local.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/33_nonstationary_global_local.ipynb>`_
+     - Regime-switching: ``global_local`` vs global vs RLS (mechanism split; vs notebooks 13 / 20)
    * - `14_physics_informed_advection.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/14_physics_informed_advection.ipynb>`_
      - Hybrid physics observables on directional advection
    * - `15_closed_loop_voltage_control_rl.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/15_closed_loop_voltage_control_rl.ipynb>`_
      - Latent PPO on IEEE 118 Vm surrogate
+   * - `31_koopman_mpc_control.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/31_koopman_mpc_control.ipynb>`_
+     - Koopman-MPC reference tracking with input constraints and conformal tightening (vs notebook-15 PPO)
    * - `17_delay_embedding_partial_observability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/17_delay_embedding_partial_observability.ipynb>`_
      - Delay / Hankel encoder under partial observations
    * - `18_networked_koopman_dynamic_topology.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/18_networked_koopman_dynamic_topology.ipynb>`_
      - Networked ``koopman="graph"`` under mid-horizon rewiring
+   * - `35_symmetry_adapted_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/35_symmetry_adapted_operator.ipynb>`_
+     - Orbit-tied ``K_self`` on a KS ring (``[symmetry]``); params / spectra / sample-efficiency
    * - `19_bilinear_control_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/19_bilinear_control_koopman.ipynb>`_
      - Bilinear vs additive control (synthetic + SIR intervention)
    * - `25_kalman_koopman_state_estimation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/25_kalman_koopman_state_estimation.ipynb>`_

@@ -142,7 +142,7 @@ def test_download_matpower_case118_reads_remote_text() -> None:
     mock_response = MagicMock()
     mock_response.read.return_value = MINIMAL_MATPOWER.encode("utf-8")
     mock_response.__enter__.return_value = mock_response
-    with patch("koopman_graph.datasets.ieee118.urlopen", return_value=mock_response):
+    with patch("koopman_graph.datasets.download.urlopen", return_value=mock_response):
         text = download_matpower_case118()
     assert "mpc.baseMVA" in text
 
@@ -151,7 +151,7 @@ def test_download_matpower_case118_url_error_raises_oserror() -> None:
     """Verify network failures surface as OSError."""
     with (
         patch(
-            "koopman_graph.datasets.ieee118.urlopen",
+            "koopman_graph.datasets.download.urlopen",
             side_effect=URLError("network down"),
         ),
         pytest.raises(OSError, match="Failed to download MATPOWER"),

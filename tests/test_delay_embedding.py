@@ -46,6 +46,7 @@ def _make_sequence(
 
 
 def test_stack_delay_features_pads_and_masks_history() -> None:
+    """Delay / Hankel window stacks $x_{t-d:t}$ with zero-pad history mask."""
     sequence = _make_sequence(num_timesteps=5, in_channels=2)
     x_window, _edge_index, _weight, history_mask = stack_delay_features(
         sequence,

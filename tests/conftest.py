@@ -26,6 +26,45 @@ def synthetic_edge_index() -> torch.Tensor:
 
 
 @pytest.fixture
+def synthetic_hyperedge_index() -> torch.Tensor:
+    """Provide a tiny 4-node / 2-hyperedge bipartite incidence.
+
+    Hyperedge 0 covers nodes ``{0, 1, 2}``; hyperedge 1 covers ``{1, 2, 3}``.
+    Node 0–3 are all covered (no isolates in the 4-node support).
+
+    Returns
+    -------
+    Tensor
+        Incidence with shape ``(2, 6)`` (PyG bipartite convention).
+    """
+    return torch.tensor(
+        [
+            [0, 1, 2, 1, 2, 3],
+            [0, 0, 0, 1, 1, 1],
+        ],
+        dtype=torch.long,
+    )
+
+
+@pytest.fixture
+def synthetic_hypergraph_edge_index() -> torch.Tensor:
+    """Provide a path-graph pairwise topology for the 4-node hypergraph fixture.
+
+    Returns
+    -------
+    Tensor
+        Bidirectional path ``0↔1↔2↔3`` with shape ``(2, 6)``.
+    """
+    return torch.tensor(
+        [
+            [0, 1, 1, 2, 2, 3],
+            [1, 0, 2, 1, 3, 2],
+        ],
+        dtype=torch.long,
+    )
+
+
+@pytest.fixture
 def synthetic_graph(synthetic_edge_index: torch.Tensor) -> Data:
     """Provide a small graph with random 3-dimensional node features.
 

@@ -51,7 +51,7 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.graph_utils.topology import snapshot_edge_weight
-from koopman_graph.operators import KoopmanOperatorContract
+from koopman_graph.operators.contract import KoopmanOperatorContract
 
 # Single definition reused by losses, adaptation, and propagation helpers.
 KoopmanPropagator = KoopmanOperatorContract
@@ -93,21 +93,32 @@ def _topology_kwargs_for(
     *,
     edge_index: Tensor | None,
     edge_weight: Tensor | None,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
+    latent_window: Tensor | None = None,
 ) -> dict[str, Tensor | None]:
-    """Return topology kwargs accepted by ``method`` (ignore if unsupported).
+    """Return topology / window kwargs accepted by ``method``.
 
-    Built-in operators accept optional ``edge_index`` / ``edge_weight``. Older
-    custom injected operators may omit those parameters; skip them so Protocol
-    injection keeps working without forcing every stub to update.
+    Built-in operators accept optional ``edge_index`` / ``edge_weight`` and/or
+    ``hyperedge_index`` / ``hyperedge_weight``, and global/local operators
+    accept ``latent_window``. Older custom injected operators may omit those
+    parameters; skip them so Protocol injection keeps working without forcing
+    every stub to update.
 
     Parameters
     ----------
     method : callable
         ``advance`` or ``inverse_advance`` bound method.
     edge_index : Tensor or None
-        Topology to forward when supported.
+        Pairwise topology to forward when supported.
     edge_weight : Tensor or None
         Optional edge weights to forward when supported.
+    hyperedge_index : Tensor or None, optional
+        Hyperedge incidence to forward when supported.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights to forward when supported.
+    latent_window : Tensor or None, optional
+        Latent history window for global/local operators.
 
     Returns
     -------
@@ -118,12 +129,18 @@ def _topology_kwargs_for(
     accepts_var_kw = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in params.values()
     )
+    kwargs: dict[str, Tensor | None] = {}
     if accepts_var_kw or "edge_index" in params:
-        kwargs: dict[str, Tensor | None] = {"edge_index": edge_index}
+        kwargs["edge_index"] = edge_index
         if accepts_var_kw or "edge_weight" in params:
             kwargs["edge_weight"] = edge_weight
-        return kwargs
-    return {}
+    if accepts_var_kw or "hyperedge_index" in params:
+        kwargs["hyperedge_index"] = hyperedge_index
+        if accepts_var_kw or "hyperedge_weight" in params:
+            kwargs["hyperedge_weight"] = hyperedge_weight
+    if accepts_var_kw or "latent_window" in params:
+        kwargs["latent_window"] = latent_window
+    return kwargs
 
 
 def propagate_latent(
@@ -135,6 +152,9 @@ def propagate_latent(
     default_delta_t: float | Tensor = 1.0,
     edge_index: Tensor | None = None,
     edge_weight: Tensor | None = None,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
+    latent_window: Tensor | None = None,
 ) -> Tensor:
     """Advance latent states via the unified Koopman contract.
 
@@ -161,9 +181,15 @@ def propagate_latent(
         ``time_step`` should pass it here (see module ``delta_t`` default
         policy).
     edge_index : Tensor or None, optional
-        Graph topology for networked operators.
+        Graph topology for networked graph operators.
     edge_weight : Tensor or None, optional
-        Optional edge weights for networked operators.
+        Optional edge weights for networked graph operators.
+    hyperedge_index : Tensor or None, optional
+        Hyperedge incidence for hypergraph operators.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights for hypergraph operators.
+    latent_window : Tensor or None, optional
+        Latent history for global/local operators (cold-start when omitted).
 
     Returns
     -------
@@ -179,6 +205,9 @@ def propagate_latent(
             koopman.advance,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
+            latent_window=latent_window,
         ),
     )
 
@@ -193,6 +222,9 @@ def inverse_propagate_latent(
     inverse_matrix: Tensor | None = None,
     edge_index: Tensor | None = None,
     edge_weight: Tensor | None = None,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
+    latent_window: Tensor | None = None,
 ) -> Tensor:
     """Apply one inverse Koopman step via the unified contract.
 
@@ -203,6 +235,7 @@ def inverse_propagate_latent(
 
     Parameters
     ----------
+
     koopman : KoopmanOperatorContract
         Operator used for one inverse step.
     z : Tensor
@@ -220,12 +253,18 @@ def inverse_propagate_latent(
         Graph topology for networked operators.
     edge_weight : Tensor or None, optional
         Optional edge weights for networked operators.
+    hyperedge_index : Tensor | None
+        See the function signature / summary for ``hyperedge_index``.
+    hyperedge_weight : Tensor | None
+        See the function signature / summary for ``hyperedge_weight``.
+    latent_window : Tensor | None
+        See the function signature / summary for ``latent_window``.
 
     Returns
     -------
+
     Tensor
-        Recovered latent states.
-    """
+        Recovered latent states."""
     interval = resolve_delta_t(delta_t, default_delta_t=default_delta_t)
     return koopman.inverse_advance(
         z,
@@ -236,6 +275,9 @@ def inverse_propagate_latent(
             koopman.inverse_advance,
             edge_index=edge_index,
             edge_weight=edge_weight,
+            latent_window=latent_window,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
         ),
     )
 
@@ -250,11 +292,16 @@ def advance_and_decode(
     control: Tensor | None = None,
     delta_t: float | Tensor | None = None,
     default_delta_t: float | Tensor = 1.0,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
+    latent_window: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Advance latent state once and decode to physical node features.
 
-    Topology is passed to both the linear advance (networked operators) and
-    the decoder.
+    Pairwise topology is passed to both the linear advance (networked graph
+    operators) and the decoder. Static hyperedge incidence is forwarded to
+    hypergraph operators; decoders that need incidence should be bound by the
+    caller (see :func:`~koopman_graph.nn.hypergraph.bind_hypergraph_decoder`).
 
     Parameters
     ----------
@@ -274,6 +321,12 @@ def advance_and_decode(
         Explicit continuous-time integration interval.
     default_delta_t : float or Tensor, optional
         Fallback interval when ``delta_t is None`` in continuous mode.
+    hyperedge_index : Tensor or None, optional
+        Static bipartite incidence for hypergraph operators.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights for hypergraph operators.
+    latent_window : Tensor or None, optional
+        Latent history for global/local operators.
 
     Returns
     -------
@@ -288,6 +341,9 @@ def advance_and_decode(
         default_delta_t=default_delta_t,
         edge_index=edge_index,
         edge_weight=edge_weight,
+        hyperedge_index=hyperedge_index,
+        hyperedge_weight=hyperedge_weight,
+        latent_window=latent_window,
     )
     prediction = decoder(z_next, edge_index, edge_weight)
     return z_next, prediction
@@ -391,12 +447,17 @@ def autoregressive_latent_rollout(
     control_at: ControlAtFn | None = None,
     delta_t_at: DeltaTAtFn | None = None,
     default_delta_t: float | Tensor = 1.0,
+    hyperedge_index: Tensor | None = None,
+    hyperedge_weight: Tensor | None = None,
 ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
     """Run an autoregressive latent advance/decode loop.
 
     Shared primitive for inference and training rollouts. Callers encode the
     initial graph once, then supply per-step topology / control / ``delta_t``
     policies. See the module docstring for topology policy guidance.
+
+    Hyperedge incidence is static (not scheduled by ``topology_at``) and is
+    forwarded unchanged to each advance for hypergraph operators.
 
     Parameters
     ----------
@@ -419,6 +480,10 @@ def autoregressive_latent_rollout(
         step returns ``None``), ``default_delta_t`` is used.
     default_delta_t : float or Tensor, optional
         Fallback continuous integration interval.
+    hyperedge_index : Tensor or None, optional
+        Static bipartite incidence for hypergraph operators.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights for hypergraph operators.
 
     Returns
     -------
@@ -437,11 +502,23 @@ def autoregressive_latent_rollout(
 
     outputs: list[tuple[Tensor, Tensor, Tensor | None]] = []
     latent = z
+    history: list[Tensor] = []
+    accepts_window = "latent_window" in inspect.signature(koopman.advance).parameters
+    local_window = int(getattr(koopman, "local_window", 0) or 0)
     for step in range(steps):
         edge_index, edge_weight = topology_at(step)
         control = None if control_at is None else control_at(step)
         delta_t = None if delta_t_at is None else delta_t_at(step)
-        latent, prediction = advance_and_decode(
+        latent_window = None
+        if accepts_window and local_window > 0:
+            from koopman_graph.operators.global_local import stack_latent_window
+
+            latent_window = stack_latent_window(
+                history,
+                window=local_window,
+                current=latent,
+            )
+        next_latent, prediction = advance_and_decode(
             koopman,
             decoder,
             latent,
@@ -450,7 +527,14 @@ def autoregressive_latent_rollout(
             control=control,
             delta_t=delta_t,
             default_delta_t=default_delta_t,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
+            latent_window=latent_window,
         )
+        if accepts_window and local_window > 1:
+            history.append(latent)
+            history = history[-(local_window - 1) :]
+        latent = next_latent
         outputs.append((prediction, edge_index, edge_weight))
     return outputs
 

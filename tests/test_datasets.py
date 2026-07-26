@@ -11,6 +11,7 @@ import torch
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.datasets import (
     AnisotropicAdvectionGridBenchmark,
+    ContactEpidemicBenchmark,
     CylinderWakeBenchmark,
     EpidemicNetworkBenchmark,
     GridDynamicGraphBenchmark,
@@ -18,6 +19,8 @@ from koopman_graph.datasets import (
     KuramotoSivashinskyBenchmark,
     Lorenz96GraphBenchmark,
     MetrLaTrafficBenchmark,
+    PemsBayTrafficBenchmark,
+    PemsTrafficBenchmark,
     SyntheticDynamicGraphBenchmark,
     TopologyPayload,
 )
@@ -600,6 +603,23 @@ def test_advection_rejects_decay_rate_one_with_open_interval_message() -> None:
     """Verify advection rejects decay_rate=1.0 via the named open-interval validator."""
     with pytest.raises(ValueError, match=r"decay_rate must be in \(0, 1\)"):
         AnisotropicAdvectionGridBenchmark.generate(decay_rate=1.0)
+
+
+def test_pems_benchmarks_are_exported() -> None:
+    """Verify PEMS loaders are on the datasets package façade."""
+    assert PemsBayTrafficBenchmark.NUM_SENSORS == 325
+    assert PemsTrafficBenchmark("04").NUM_SENSORS == 307
+    assert PemsTrafficBenchmark.IN_CHANNELS == 1
+
+
+def test_contact_epidemic_benchmark_is_exported() -> None:
+    """Verify the contact-epidemic loader is on the datasets package façade."""
+    import koopman_graph.datasets as datasets_pkg
+
+    assert ContactEpidemicBenchmark.NUM_NODES == 242
+    assert ContactEpidemicBenchmark.IN_CHANNELS == 1
+    assert "ContactEpidemicBenchmark" in datasets_pkg.__all__
+    assert datasets_pkg.ContactEpidemicBenchmark is ContactEpidemicBenchmark
 
 
 def test_metr_la_load_sequence_returns_graph_snapshot_sequence() -> None:

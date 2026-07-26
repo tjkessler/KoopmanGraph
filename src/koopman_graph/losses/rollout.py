@@ -16,6 +16,7 @@ from koopman_graph.graph_utils import (
     snapshot_topology_at,
 )
 from koopman_graph.losses.reconstruction import masked_mse_loss
+from koopman_graph.nn import HypergraphDecoder, bind_hypergraph_decoder
 from koopman_graph.protocols import TrainableKoopmanModel
 
 
@@ -83,9 +84,22 @@ def rollout_sequence_loss(
     time_step = float(model.resolve_delta_t(None))
     targets = [sequence[start + step] for step in range(1, horizon + 1)]
 
+    decoder_fn = model.decoder
+    if isinstance(model.decoder, HypergraphDecoder):
+        hyperedge_index = sequence.hyperedge_index
+        if hyperedge_index is None:
+            msg = (
+                "HypergraphDecoder rollout loss requires a hyperedge-carrying sequence"
+            )
+            raise ValueError(msg)
+        decoder_fn = bind_hypergraph_decoder(
+            model.decoder,
+            hyperedge_index,
+            sequence.hyperedge_weight,
+        )
     rollout = autoregressive_latent_rollout(
         model.koopman,
-        model.decoder,
+        decoder_fn,
         z,
         steps=horizon,
         topology_at=snapshot_topology_at(targets),
@@ -100,6 +114,8 @@ def rollout_sequence_loss(
             default_time_step=time_step,
         ),
         default_delta_t=time_step,
+        hyperedge_index=sequence.hyperedge_index,
+        hyperedge_weight=sequence.hyperedge_weight,
     )
 
     total_loss = torch.zeros((), device=z.device)

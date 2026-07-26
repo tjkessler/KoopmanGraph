@@ -21,7 +21,9 @@ Parameterization = Literal[
 #: :mod:`koopman_graph.protocols` as :data:`~koopman_graph.protocols.DynamicsMode`.
 DynamicsMode = Literal["discrete", "continuous"]
 #: Built-in discrete factory kind for :class:`~koopman_graph.model.GraphKoopmanModel`.
-KoopmanKind = Literal["pernode", "graph"]
+KoopmanKind = Literal[
+    "pernode", "graph", "hypergraph", "global_local", "continuous_graph"
+]
 
 STABILITY_EPS_MARGIN = 1e-4
 DISSIPATIVE_MIN_EIGENVALUE = 1e-3

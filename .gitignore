@@ -222,11 +222,25 @@ __marimo__/
 _project_proposal.pdf
 .DS_Store
 scripts/count_joss_words.py
+# Private reviewer notes (never publish)
+REVIEWER_AUDIT_*.txt
+# One-off maintainer repair scripts (local only)
+scripts/_*.py
+scripts/_*.md
 
 # Maintainer-local (not part of the published package)
 AGENTS.md
 CLAUDE.md
 .github/copilot-instructions.md
 .cursor/
+.cursor-tmp/
 docs/blueprint/
 docs/MATHEMATICS_VERIFICATION.md
+
+# Large downloaded benchmark caches (rebuild via scripts/download_*.py).
+# Keep tracked teaching fixtures (traffic.pt / topology.pt / wake.pt) under
+# data/metr_la/, data/ieee118/, and data/cylinder_wake/; do not commit raw
+# DCRNN HDF5, PEMS, or contact dumps.
+data/metr_la/metr-la.h5
+data/pems*/
+data/contact_epidemic/

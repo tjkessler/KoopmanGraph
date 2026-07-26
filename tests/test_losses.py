@@ -932,7 +932,7 @@ def test_predict_and_rollout_loss_agree_on_static_topology(
 
 
 def test_lie_consistency_is_zero_for_exact_linear_vector_field() -> None:
-    """An identity observable exactly matches its continuous linear generator."""
+    """Lie consistency is 0 when f(x)=x and \\dot x = L x for generator matrix L."""
     generator = torch.tensor([[-0.2, 1.0], [-1.0, -0.2]])
     operator = ContinuousKoopmanOperator(2, init_mode="identity")
     with torch.no_grad():
@@ -1097,7 +1097,7 @@ def test_koopman_sparsity_loss_graph_targets_self_and_nbr_not_effective() -> Non
 
 
 def test_worst_case_reconstruction_loss_is_max_node_mse() -> None:
-    """Worst-case loss matches the max over per-node mean squared errors."""
+    """Worst-case reconstruction equals $\\max_i \\mathrm{MSE}_i(\\hat y, y)$."""
     prediction = torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]])
     target = torch.zeros_like(prediction)
     loss = WorstCaseReconstructionLoss()(prediction, target)
