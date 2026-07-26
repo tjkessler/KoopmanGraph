@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from math import ceil
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -219,7 +219,7 @@ class ConformalKoopmanUQ:
         alpha: float = 0.1,
         controls: Sequence[Sequence[Tensor] | None] | None = None,
         future_topologies: Sequence[Sequence[Data] | None] | None = None,
-    ) -> Self:
+    ) -> ConformalKoopmanUQ:
         """Estimate per-horizon conformal half-widths from held-out sequences.
 
         Parameters
@@ -440,7 +440,7 @@ class ConformalKoopmanUQ:
         }
         torch.save(payload, Path(path))
 
-    def load_calibration(self, path: str | Path) -> Self:
+    def load_calibration(self, path: str | Path) -> ConformalKoopmanUQ:
         """Load calibration quantiles saved by :meth:`save_calibration`.
 
         Parameters
