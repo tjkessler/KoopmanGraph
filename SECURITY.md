@@ -7,7 +7,7 @@ Security updates are provided for the **latest published release** of
 
 | Version lineage | Security updates |
 | --------------- | ---------------- |
-| Latest PyPI release (currently the 0.5.x line) | Supported |
+| Latest PyPI release (currently the 0.6.x line) | Supported |
 | Older published majors/minors | Not regularly backported |
 
 Check the installed version with:
