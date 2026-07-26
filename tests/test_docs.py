@@ -18,6 +18,11 @@ _NUMPY_SECTION = re.compile(
     re.M,
 )
 _NUMPY_UNDERLINE = re.compile(r"^\s*-{3,}\s*$", re.M)
+_SECTION_HEADER = re.compile(
+    r"^(Parameters|Returns|Raises|Yields|Attributes|Notes|Examples|"
+    r"See Also|References|Warnings)\s*\n\s*-{3,}\s*$",
+    re.M,
+)
 _DOC_ROOTS = (
     pathlib.Path(inspect.getfile(koopman_graph)).parent,
     pathlib.Path(__file__).resolve().parents[1] / "scripts",
@@ -34,6 +39,72 @@ def _has_numpy_style(doc: str) -> bool:
     )
 
 
+def _split_sections(doc: str) -> dict[str, str]:
+    matches = list(_SECTION_HEADER.finditer(doc))
+    if not matches:
+        return {}
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        name = match.group(1)
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(doc)
+        sections[name] = doc[start:end]
+    return sections
+
+
+def _param_names_in_section(section: str) -> set[str]:
+    """Collect parameter names from a NumPy Parameters section body.
+
+    Supports single names, comma-groups (including trailing commas / wrapped
+    continuation lines), and ``*args`` / ``**kwargs`` star prefixes.
+    """
+    names: set[str] = set()
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        # Description lines are indented ≥4 spaces in dedented docstrings.
+        if indent >= 4:
+            continue
+        # Names appear before the optional ``: type`` annotation.
+        head = line.split(":", 1)[0]
+        if not re.search(r"[A-Za-z_]", head):
+            continue
+        for match in re.finditer(r"\*{0,2}([A-Za-z_][\w]*)", head):
+            names.add(match.group(1))
+    return names
+
+
+def _arg_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    args = node.args
+    names: list[str] = []
+    for arg in [*args.posonlyargs, *args.args]:
+        if arg.arg in {"self", "cls"}:
+            continue
+        names.append(arg.arg)
+    if args.vararg is not None:
+        names.append(args.vararg.arg)
+    for arg in args.kwonlyargs:
+        names.append(arg.arg)
+    if args.kwarg is not None:
+        names.append(args.kwarg.arg)
+    return names
+
+
+def _returns_non_none(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    annotation = node.returns
+    if annotation is not None:
+        if isinstance(annotation, ast.Constant) and annotation.value is None:
+            return False
+        return not (isinstance(annotation, ast.Name) and annotation.id == "None")
+    for child in ast.walk(node):
+        if isinstance(child, ast.Return) and child.value is not None:
+            if isinstance(child.value, ast.Constant) and child.value.value is None:
+                continue
+            return True
+    return False
+
+
 def _assert_has_docstring(obj: object, qualname: str) -> None:
     doc = inspect.getdoc(obj)
     assert doc is not None and doc.strip(), f"{qualname} is missing a docstring"
@@ -41,27 +112,67 @@ def _assert_has_docstring(obj: object, qualname: str) -> None:
 
 
 def _iter_definitions(path: pathlib.Path) -> list[tuple[int, str, str, ast.AST]]:
+    """Yield every class / function / method, including nested definitions."""
     tree = ast.parse(path.read_text())
     items: list[tuple[int, str, str, ast.AST]] = []
 
-    def visit(node: ast.AST, parents: tuple[str, ...]) -> None:
+    def visit(
+        node: ast.AST,
+        parents: tuple[str, ...],
+        *,
+        in_class: bool,
+    ) -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             qualname = ".".join([*parents, node.name])
-            items.append((node.lineno, "function", qualname, node))
+            kind = "method" if in_class and len(parents) >= 2 else "function"
+            items.append((node.lineno, kind, qualname, node))
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    child_qualname = f"{qualname}.{child.name}"
-                    items.append((child.lineno, "function", child_qualname, child))
+                    # Nested defs are not methods even when defined inside a method.
+                    visit(child, (*parents, node.name), in_class=False)
+                elif isinstance(child, ast.ClassDef):
+                    visit(child, (*parents, node.name), in_class=True)
         elif isinstance(node, ast.ClassDef):
             qualname = ".".join([*parents, node.name])
             items.append((node.lineno, "class", qualname, node))
             for child in node.body:
-                visit(child, (*parents, node.name))
+                visit(child, (*parents, node.name), in_class=True)
 
     for top in tree.body:
-        visit(top, (path.stem,))
+        if isinstance(top, ast.ClassDef):
+            visit(top, (path.stem,), in_class=True)
+        elif isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            visit(top, (path.stem,), in_class=False)
 
     return items
+
+
+def _analyze_definition(kind: str, node: ast.AST, doc: str | None) -> list[str]:
+    issues: list[str] = []
+    if doc is None or not doc.strip():
+        return ["missing docstring"]
+    if not _has_numpy_style(doc):
+        return ["not NumPy-style"]
+    if kind == "class" or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return issues
+    sections = _split_sections(doc)
+    names = _arg_names(node)
+    if names:
+        if "Parameters" not in sections:
+            issues.append(f"missing Parameters section for {names}")
+        else:
+            documented = _param_names_in_section(sections["Parameters"])
+            missing = [name for name in names if name not in documented]
+            if missing:
+                issues.append(f"Parameters missing: {missing}")
+    if _returns_non_none(node):
+        if "Returns" not in sections and "Yields" not in sections:
+            issues.append("missing Returns/Yields section")
+        else:
+            body = sections.get("Returns") or sections.get("Yields") or ""
+            if not body.strip():
+                issues.append("empty Returns/Yields section")
+    return issues
 
 
 def test_package_exports_have_docstrings() -> None:
@@ -83,14 +194,15 @@ def test_source_definitions_have_numpy_docstrings() -> None:
     missing: list[str] = []
     for root in _DOC_ROOTS:
         for path in sorted(root.rglob("*.py")):
+            # Maintainer-only underscore helpers under scripts/ are not API.
+            if path.parent.name == "scripts" and path.name.startswith("_"):
+                continue
             for lineno, kind, qualname, node in _iter_definitions(path):
                 doc = ast.get_docstring(node)
                 rel = path.relative_to(_PROJECT_ROOT)
                 label = f"{rel}:{lineno} {kind} {qualname}"
-                if doc is None or not doc.strip():
-                    missing.append(f"{label}: missing docstring")
-                elif not _has_numpy_style(doc):
-                    missing.append(f"{label}: not NumPy-style")
+                for issue in _analyze_definition(kind, node, doc):
+                    missing.append(f"{label}: {issue}")
     assert not missing, "Docstring issues:\n" + "\n".join(missing)
 
 

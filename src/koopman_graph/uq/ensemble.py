@@ -23,6 +23,8 @@ from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
     hold_last_topology_at,
     pack_rollout_snapshots,
+    snapshot_hyperedge_index,
+    snapshot_hyperedge_weight,
 )
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
@@ -164,11 +166,31 @@ def _member_autoregressive_rollout(
     :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` directly
     instead of going through ``member.predict``.
 
+    Parameters
+    ----------
+
+    member : GraphKoopmanModel
+        See the function signature / summary for ``member``.
+    initial_graph : Tensor | Data
+        See the function signature / summary for ``initial_graph``.
+    steps : int
+        See the function signature / summary for ``steps``.
+    edge_index : Tensor | None
+        See the function signature / summary for ``edge_index``.
+    edge_weight : Tensor | None
+        See the function signature / summary for ``edge_weight``.
+    controls : Sequence[Tensor] | None
+        See the function signature / summary for ``controls``.
+    future_topologies : Sequence[Data] | None
+        See the function signature / summary for ``future_topologies``.
+    history : Sequence[Data] | None
+        See the function signature / summary for ``history``.
+
     Returns
     -------
+
     list[Data]
-        Decoded forecast snapshots for the requested horizon.
-    """
+        Decoded forecast snapshots for the requested horizon."""
     if steps < 1:
         msg = f"steps must be >= 1, got {steps}"
         raise ValueError(msg)
@@ -189,6 +211,16 @@ def _member_autoregressive_rollout(
                 edge_weight=edge_weight,
                 history=history,
             )
+            hyperedge_index = (
+                snapshot_hyperedge_index(initial_graph)
+                if isinstance(initial_graph, Data)
+                else None
+            )
+            hyperedge_weight = (
+                snapshot_hyperedge_weight(initial_graph)
+                if isinstance(initial_graph, Data)
+                else None
+            )
             control_at = None if controls is None else (lambda step: controls[step])
             rollout = autoregressive_latent_rollout(
                 member.koopman,
@@ -202,6 +234,8 @@ def _member_autoregressive_rollout(
                 ),
                 control_at=control_at,
                 default_delta_t=member.time_step,
+                hyperedge_index=hyperedge_index,
+                hyperedge_weight=hyperedge_weight,
             )
             return pack_rollout_snapshots(rollout)
     finally:

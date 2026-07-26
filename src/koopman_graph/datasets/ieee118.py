@@ -6,13 +6,12 @@ import math
 import re
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
-from urllib.request import urlopen
 
 import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.datasets.download import download_url_text, resolve_cache_path
 from koopman_graph.datasets.dynamics import (
     add_gaussian_noise,
     apply_laplacian_diffusion_step,
@@ -46,8 +45,11 @@ def _default_topology_path(cache_dir: Path | None = None) -> Path:
     Path
         Path to ``topology.pt`` inside the cache directory.
     """
-    root = cache_dir if cache_dir is not None else DEFAULT_CACHE_DIR
-    return root / TOPOLOGY_FILENAME
+    return resolve_cache_path(
+        cache_dir,
+        default_dir=DEFAULT_CACHE_DIR,
+        filename=TOPOLOGY_FILENAME,
+    )
 
 
 def _extract_matrix_block(text: str, field_name: str) -> str:
@@ -280,12 +282,10 @@ def download_matpower_case118() -> str:
     str
         Raw ``case118.m`` file contents.
     """
-    try:
-        with urlopen(MATPOWER_CASE118_URL, timeout=60) as response:
-            return response.read().decode("utf-8")
-    except URLError as exc:
-        msg = f"Failed to download MATPOWER case118 from {MATPOWER_CASE118_URL}"
-        raise OSError(msg) from exc
+    return download_url_text(
+        MATPOWER_CASE118_URL,
+        label="MATPOWER case118",
+    )
 
 
 def ensure_topology_cache(

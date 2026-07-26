@@ -7,13 +7,14 @@ space, a learned linear operator advances those states, and a matching decoder
 reconstructs physical node features for multi-step forecasting and spectral
 analysis.
 
-Version **0.5.0** adds ensemble and latent-Gaussian uncertainty, auxiliary
-state-dependent continuous generators, physics-residual and sparsity losses,
-SAGE/DiffConv/Transformer encoder-decoder pairs, kernel EDMD dictionaries,
-and hierarchical graph forecasting. These extend the existing
-discrete/continuous/networked operators, stability and control tools,
-baselines, and graph benchmarks. See :doc:`capabilities` for the full
-inventory and :doc:`architecture` for the public vs power-user API contract.
+Version **0.6.0** extends the library with hypergraph encode/decode/operators,
+self-adaptive topology, global/local and continuous networked operators,
+symmetry-adapted orbit ties, SINDy / spectral clustering / topology-estimation
+diagnostics, conformal UQ, and Koopman-MPC, on top of the v0.5.0 ensemble /
+latent-Gaussian UQ, auxiliary-spectral generators, physics-residual and
+sparsity losses, expanded GNN encoder zoo, and hierarchical forecasting.
+See :doc:`capabilities` for the full inventory and :doc:`architecture` for
+the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2
@@ -23,6 +24,7 @@ inventory and :doc:`architecture` for the public vs power-user API contract.
    quickstart
    faq
    capabilities
+   data
    tutorials
    architecture
    api

@@ -222,11 +222,27 @@ __marimo__/
 _project_proposal.pdf
 .DS_Store
 scripts/count_joss_words.py
+# Private reviewer notes (never publish)
+REVIEWER_AUDIT_*.txt
+# One-off maintainer repair scripts (local only)
+scripts/_*.py
+scripts/_*.md
 
 # Maintainer-local (not part of the published package)
 AGENTS.md
 CLAUDE.md
 .github/copilot-instructions.md
 .cursor/
+.cursor-tmp/
 docs/blueprint/
 docs/MATHEMATICS_VERIFICATION.md
+
+# Large / non-shipped benchmark downloads (rebuild via scripts/download_*.py).
+# Tracked teaching fixtures and source files under 50 MB may live under
+# data/metr_la/, data/ieee118/, data/cylinder_wake/, data/pems_bay/,
+# data/pems07/, and data/contact_epidemic/. Ignore oversized raw dumps and
+# PEMS variants that are not intentionally shipped.
+data/metr_la/metr-la.h5
+data/pems03/
+data/pems04/
+data/pems08/

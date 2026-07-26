@@ -19,6 +19,12 @@ Capability layout
     forecast with closed-form covariance propagation and optional Kalman
     refinement, plus :class:`~koopman_graph.uq.LatentGaussianForecast` and
     :func:`~koopman_graph.uq.propagate_gaussian_covariance`.
+``conformal``
+    :class:`~koopman_graph.uq.ConformalKoopmanUQ` split / adaptive (ACI)
+    conformal intervals returning
+    :class:`~koopman_graph.uq.PredictionInterval`. Calibration state is
+    wrapper-local (not model ``FORMAT_VERSION``). Marginal coverage
+    ``≥ 1 − α`` under exchangeability; prefer ACI under drift.
 
 Power-user module: import as ``koopman_graph.uq``. Types are intentionally
 omitted from root ``koopman_graph.__all__`` (see architecture docs).
@@ -42,6 +48,7 @@ from koopman_graph.uq.common import (
     quantile_levels,
     snapshot_with_features,
 )
+from koopman_graph.uq.conformal import ConformalKoopmanUQ
 from koopman_graph.uq.ensemble import (
     EnsembleGraphKoopmanModel,
     IntervalForecastModel,
@@ -55,6 +62,7 @@ from koopman_graph.uq.latent_gaussian import (
 )
 
 __all__ = [
+    "ConformalKoopmanUQ",
     "EnsembleGraphKoopmanModel",
     "IntervalForecastModel",
     "LatentGaussianForecast",

@@ -648,11 +648,21 @@ class ContinuousKoopmanOperator(nn.Module):
         :attr:`~koopman_graph.model.GraphKoopmanModel.time_step` via
         :meth:`~koopman_graph.model.GraphKoopmanModel.resolve_delta_t`.
 
+        Parameters
+        ----------
+
+        z : Tensor
+            See the function signature / summary for ``z``.
+        control : Tensor | None
+            See the function signature / summary for ``control``.
+        delta_t : float | Tensor
+            See the function signature / summary for ``delta_t``.
+
         Returns
         -------
+
         Tensor
-            Advanced latent states.
-        """
+            Advanced latent states."""
         return self.advance(z, delta_t, control=control)
 
     def reset_parameters(self) -> None:
@@ -841,11 +851,17 @@ class ContinuousKoopmanOperator(nn.Module):
     def _assemble_generator(self) -> Tensor:
         """Assemble ``L`` for the active parameterization.
 
+        Returns
+        -------
+
+        Tensor
+            See summary line.
+
         Notes
         -----
+
         Thin wrapper that delegates to the shared continuous parameterization
-        helpers for the active mode.
-        """
+        helpers for the active mode."""
         assemblers = {
             "odo": self._assemble_odo_generator,
             "schur": self._assemble_schur_generator,

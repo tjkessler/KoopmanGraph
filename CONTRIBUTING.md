@@ -296,7 +296,7 @@ Bump the version in a single place:
 
 ```python
 # src/koopman_graph/__init__.py
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 ```
 
 `pyproject.toml` reads this value dynamically at build time via
@@ -322,7 +322,7 @@ Future incompatible schema changes must bump ``FORMAT_VERSION``, extend
 are therefore outside the checkpoint path.
 
 Do not confuse checkpoint ``format_version`` with the package
-``__version__`` (for example ``0.5.0``).
+``__version__`` (for example ``0.6.0``).
 
 ### Maintainer release checklist
 

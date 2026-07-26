@@ -159,11 +159,23 @@ def advance_controlled(
     ) -> Tensor:
         """Advance one controlled Van Loan step for a fixed generator.
 
+        Parameters
+        ----------
+
+        state : Tensor
+            See the function signature / summary for ``state``.
+        dt : Tensor
+            See the function signature / summary for ``dt``.
+        u : Tensor
+            See the function signature / summary for ``u``.
+        generator : Tensor
+            See the function signature / summary for ``generator``.
+
         Returns
         -------
+
         Tensor
-            Latent state after the controlled interval.
-        """
+            Latent state after the controlled interval."""
         return advance_van_loan(
             state,
             dt,
@@ -403,11 +415,21 @@ def inverse_advance_bilinear(
     def _invert_one(state: Tensor, u: Tensor, effective: Tensor) -> Tensor:
         """Invert one bilinear Van Loan step for a fixed effective generator.
 
+        Parameters
+        ----------
+
+        state : Tensor
+            See the function signature / summary for ``state``.
+        u : Tensor
+            See the function signature / summary for ``u``.
+        effective : Tensor
+            See the function signature / summary for ``effective``.
+
         Returns
         -------
+
         Tensor
-            Latent state before the controlled interval.
-        """
+            Latent state before the controlled interval."""
         phi11, phi12 = van_loan_factors(effective, control_matrix, delta_t)
         if u.ndim == 1:
             offset = u @ phi12.T

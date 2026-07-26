@@ -14,9 +14,11 @@ from torch.optim.lr_scheduler import LRScheduler
 from koopman_graph.data import (
     GraphSnapshotSequence,
     RolloutStartIndices,
+    WindowLikeSampler,
     WindowSampler,
     resolve_rollout_start_indices,
 )
+from koopman_graph.graph_utils import snapshot_hyperedge_index
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
@@ -35,6 +37,7 @@ from koopman_graph.training.history import (
 from koopman_graph.training.schedules import resolve_loss_weights_for_epoch
 
 __all__ = [
+    "bind_pending_orbit_ties",
     "eval_one_epoch",
     "resolve_early_stopping_monitor",
     "resolve_lr_scheduler",
@@ -75,6 +78,45 @@ def resolve_early_stopping_monitor(
         msg = "early_stopping_monitor='val' requires validation_sequence"
         raise ValueError(msg)
     return monitor
+
+
+def bind_pending_orbit_ties(
+    model: nn.Module,
+    train_sequences: Sequence[GraphSnapshotSequence],
+) -> None:
+    """Bind ``auto_orbits`` from the first train snapshot before the optimizer.
+
+    Late binding during the first ``advance`` would allocate orbit ``K_self``
+    factors after :func:`torch.optim.Optimizer` construction, leaving those
+    parameters untrained. Call this before creating the optimizer whenever the
+    Koopman module supports orbit ties.
+
+    Parameters
+    ----------
+    model : nn.Module
+        Trainable model that may expose a ``koopman`` submodule with
+        :meth:`~koopman_graph.operators.orbit_ties.OrbitTiedSelfMixin.ensure_orbit_binding`
+        (when present).
+    train_sequences : sequence of GraphSnapshotSequence
+        Training trajectories already placed on the training device. The first
+        snapshot of the first sequence supplies topology.
+    """
+    if not train_sequences:
+        return
+    koopman = getattr(model, "koopman", None)
+    ensure = getattr(koopman, "ensure_orbit_binding", None)
+    if koopman is None or ensure is None:
+        return
+    if not bool(getattr(koopman, "auto_orbits", False)):
+        return
+    if getattr(koopman, "orbit_partition", None) is not None:
+        return
+    snapshot = train_sequences[0][0]
+    ensure(
+        int(snapshot.num_nodes),
+        edge_index=snapshot.edge_index,
+        hyperedge_index=snapshot_hyperedge_index(snapshot),
+    )
 
 
 def resolve_lr_scheduler(
@@ -156,6 +198,7 @@ def run_fit_loop(
     batch_size: int = 8,
     windows_per_epoch: int | None = None,
     window_seed: int | None = None,
+    sampler: WindowLikeSampler | None = None,
     max_grad_norm: float | None = None,
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
@@ -206,13 +249,18 @@ def run_fit_loop(
         Scheduler instance or ``optimizer -> scheduler`` factory.
     window_length : int or None, optional
         Fixed window length for mini-batch training; ``None`` uses full
-        sequences.
+        sequences. Mutually exclusive with ``sampler``.
     batch_size : int, optional
         Windows per optimizer step when windowed. Default is ``8``.
     windows_per_epoch : int or None, optional
         Cap on sampled windows per epoch.
     window_seed : int or None, optional
         Base seed for window shuffling.
+    sampler : WindowSampler, NeighborWindowSampler, or None, optional
+        Pre-built window sampler (temporal or neighbor-subgraph). When set,
+        ``window_length`` / ``batch_size`` / ``windows_per_epoch`` /
+        ``window_seed`` are ignored. Neighbor sampling is a training
+        approximation over induced subgraphs.
     max_grad_norm : float or None, optional
         Global gradient-norm clip before each optimizer step.
     early_stopping_patience : int or None, optional
@@ -238,10 +286,14 @@ def run_fit_loop(
     Raises
     ------
     ValueError
-        If ``early_stopping_monitor="val"`` without ``val_sequences``.
+        If ``early_stopping_monitor="val"`` without ``val_sequences``, or if
+        both ``sampler`` and ``window_length`` are provided.
     """
     if early_stopping_monitor == "val" and val_sequences is None:
         msg = 'early_stopping_monitor="val" requires val_sequences'
+        raise ValueError(msg)
+    if sampler is not None and window_length is not None:
+        msg = "pass sampler or window_length, not both"
         raise ValueError(msg)
 
     # Lazy import: avoid training → serialization → model edges at module load.
@@ -258,19 +310,27 @@ def run_fit_loop(
             sequence_to_device(sequence, train_device) for sequence in val_sequences
         ]
 
+    # Allocate orbit-tied K_self before Adam sees module.parameters().
+    bind_pending_orbit_ties(module, train_sequences)
+
     optim = optimizer(module.parameters(), lr=lr, **optimizer_kwargs)
     scheduler = resolve_lr_scheduler(lr_scheduler, optim)
-    window_sampler = (
-        None
-        if window_length is None
-        else WindowSampler(
+    window_sampler: WindowLikeSampler | None
+    if sampler is not None:
+        sampler.sequences = [
+            sequence_to_device(sequence, train_device) for sequence in sampler.sequences
+        ]
+        window_sampler = sampler
+    elif window_length is None:
+        window_sampler = None
+    else:
+        window_sampler = WindowSampler(
             train_sequences,
             window_length=window_length,
             batch_size=batch_size,
             windows_per_epoch=windows_per_epoch,
             seed=window_seed,
         )
-    )
     losses: list[float] = []
     reconstruction_losses: list[float] = []
     forward_losses: list[float] = []

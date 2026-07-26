@@ -90,11 +90,17 @@ def _is_identity_ratio(ratio: float | int) -> bool:
     ``1.0`` as an absolute count of one node. We therefore special-case full
     retention explicitly for the documented ``pool_ratios=(1.0,)`` no-op path.
 
+    Parameters
+    ----------
+
+    ratio : float | int
+        See the function signature / summary for ``ratio``.
+
     Returns
     -------
+
     bool
-        Whether the ratio requests full node retention.
-    """
+        Whether the ratio requests full node retention."""
     return float(ratio) >= 1.0
 
 

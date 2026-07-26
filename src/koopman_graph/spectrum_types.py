@@ -1,11 +1,12 @@
-"""Neutral value types and discrete spectrum assembly.
+"""Neutral value types and spectrum assembly helpers.
 
 Power-user module: importable as ``koopman_graph.spectrum_types``, documented
 in architecture docs, and **not** re-exported in package ``__all__``.
 :class:`KoopmanSpectrum` and :func:`compute_spectrum` are re-exported from
 :mod:`koopman_graph.analysis` and (for the type / discrete helper) the package
-root public surface. Operators import discrete spectrum assembly from here so
-they never depend on :mod:`koopman_graph.analysis`.
+root public surface. Operators, the model façade, and continuous-horizon
+helpers import spectrum assembly from here so they never depend on
+:mod:`koopman_graph.analysis`.
 """
 
 from __future__ import annotations
@@ -31,8 +32,9 @@ class KoopmanSpectrum:
       ``growth_rates = log(|lambda|) / time_step`` and
       ``frequencies = angle(lambda) / (2 * pi * time_step)``, with
       ``time_step`` equal to the discrete sampling interval.
-    - :func:`~koopman_graph.analysis.compute_generator_spectrum`
-      (continuous ``L``): ``growth_rates = Re(mu)`` and
+    - :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`
+      (continuous ``L``; also re-exported from
+      :mod:`koopman_graph.analysis`): ``growth_rates = Re(mu)`` and
       ``frequencies = Im(mu) / (2 * pi)``, with ``time_step`` set to ``1.0``
       as a placeholder (native continuous-time units).
 
@@ -157,3 +159,91 @@ def compute_spectrum(operator: Tensor, time_step: float) -> KoopmanSpectrum:
         frequencies=frequencies,
         time_step=float(time_step),
     )
+
+
+def compute_generator_spectrum(generator: Tensor) -> KoopmanSpectrum:
+    """Compute the sorted spectrum of a continuous-time Koopman generator.
+
+    Growth rates are the real parts of the eigenvalues; frequencies are the
+    imaginary parts scaled to cycles per unit time.
+
+    Neutral-leaf generator spectrum assembly used by continuous networked
+    operators and re-exported from :mod:`koopman_graph.analysis`.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Square generator matrix with shape ``(latent_dim, latent_dim)``.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Eigenpairs sorted by descending magnitude with native continuous-time
+        growth rates and frequencies.
+
+    Raises
+    ------
+    ValueError
+        If ``generator`` is not a non-empty square matrix.
+    TypeError
+        If ``generator`` is not floating-point or complex.
+    """
+    if generator.ndim != 2 or generator.shape[0] != generator.shape[1]:
+        msg = f"generator must be a square matrix, got shape {tuple(generator.shape)}"
+        raise ValueError(msg)
+    if generator.shape[0] == 0:
+        raise ValueError("generator must be non-empty")
+    if not (generator.is_floating_point() or generator.is_complex()):
+        msg = f"generator must be floating-point or complex, got {generator.dtype}"
+        raise TypeError(msg)
+
+    eigenvalues, eigenvectors = torch.linalg.eig(generator)
+    magnitudes = eigenvalues.abs()
+    order = torch.argsort(magnitudes, descending=True)
+    eigenvalues = eigenvalues[order]
+    eigenvectors = eigenvectors[:, order]
+    magnitudes = magnitudes[order]
+
+    growth_rates = eigenvalues.real
+    frequencies = eigenvalues.imag / (2 * torch.pi)
+    return KoopmanSpectrum(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        magnitudes=magnitudes,
+        growth_rates=growth_rates,
+        frequencies=frequencies,
+        time_step=1.0,
+    )
+
+
+def discrete_spectrum_at_delta_t(
+    generator: Tensor,
+    delta_t: float,
+) -> KoopmanSpectrum:
+    """Compute the spectrum of ``exp(L · Δt)`` for a generator ``L``.
+
+    Neutral-leaf continuous-to-discrete spectrum helper used by the model
+    façade and re-exported from :mod:`koopman_graph.analysis`.
+
+    Parameters
+    ----------
+    generator : Tensor
+        Continuous-time generator matrix.
+    delta_t : float
+        Integration interval.
+
+    Returns
+    -------
+    KoopmanSpectrum
+        Discrete-time spectrum at horizon ``delta_t``.
+
+    Raises
+    ------
+    ValueError
+        If ``delta_t`` is not positive.
+    """
+    if delta_t <= 0:
+        msg = f"delta_t must be positive, got {delta_t}"
+        raise ValueError(msg)
+    transition = torch.linalg.matrix_exp(generator * delta_t)
+    return compute_spectrum(transition, delta_t)

@@ -287,7 +287,7 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
 
 
 def test_propagate_gaussian_covariance_closed_form() -> None:
-    """``A P Aᵀ + Q`` matches a hand-computed dense recurrence."""
+    """Gaussian push-forward covariance ``A P A^⊤ + Q`` matches dense recurrence."""
     k_mat = torch.tensor([[0.5, 0.1], [0.0, 0.4]], dtype=torch.float64)
     p0 = torch.eye(2, dtype=torch.float64)
     q_scale = 0.01
@@ -394,6 +394,7 @@ def test_latent_gaussian_kalman_update_reduces_covariance() -> None:
 
 def test_latent_gaussian_predict_interval_shapes() -> None:
     """``predict_interval`` returns nested bounds and reports ``n_samples``."""
+    torch.manual_seed(0)
     model = _tiny_factory()
     sequence = SyntheticDynamicGraphBenchmark.generate(
         num_nodes=3,

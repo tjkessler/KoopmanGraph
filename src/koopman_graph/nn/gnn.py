@@ -10,7 +10,8 @@ Prefer :class:`~koopman_graph.nn.encoder.GNNEncoder` /
 :class:`~koopman_graph.nn.encoder.GATEncoder` /
 :class:`~koopman_graph.nn.encoder.SAGEEncoder` /
 :class:`~koopman_graph.nn.encoder.DiffConvEncoder` /
-:class:`~koopman_graph.nn.encoder.GraphTransformerEncoder` and the matching
+:class:`~koopman_graph.nn.encoder.GraphTransformerEncoder` /
+:class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` and the matching
 decoders for application code.
 """
 
@@ -21,7 +22,13 @@ from typing import Literal
 import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data
-from torch_geometric.nn import GATConv, GCNConv, SAGEConv, TransformerConv
+from torch_geometric.nn import (
+    GATConv,
+    GCNConv,
+    HypergraphConv,
+    SAGEConv,
+    TransformerConv,
+)
 
 from koopman_graph.graph_utils import resolve_graph_inputs
 
@@ -684,6 +691,41 @@ def build_diff_convs(
                 diffusion_steps=diffusion_steps,
             )
         )
+    return nn.ModuleList(convs)
+
+
+def build_hypergraph_convs(
+    in_channels: int,
+    hidden_channels: int,
+    out_channels: int,
+    num_layers: int,
+) -> nn.ModuleList:
+    """Build a stacked hypergraph convolution module list.
+
+    Parameters
+    ----------
+    in_channels : int
+        Input node feature dimension.
+    hidden_channels : int
+        Hidden channel width for intermediate layers.
+    out_channels : int
+        Output node feature dimension.
+    num_layers : int
+        Number of :class:`~torch_geometric.nn.HypergraphConv` layers.
+
+    Returns
+    -------
+    nn.ModuleList
+        Ordered hypergraph convolution layers.
+    """
+    convs: list[HypergraphConv] = []
+    if num_layers == 1:
+        convs.append(HypergraphConv(in_channels, out_channels))
+    else:
+        convs.append(HypergraphConv(in_channels, hidden_channels))
+        for _ in range(num_layers - 2):
+            convs.append(HypergraphConv(hidden_channels, hidden_channels))
+        convs.append(HypergraphConv(hidden_channels, out_channels))
     return nn.ModuleList(convs)
 
 

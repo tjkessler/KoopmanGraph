@@ -25,17 +25,7 @@ façade). Peer modules may be imported directly for power-user work; do not
 reach into leading-underscore helpers across module boundaries.
 """
 
+from koopman_graph.model.estimator import GraphKoopmanModel
 from koopman_graph.protocols import DynamicsMode
-
-from . import (
-    encoding,
-    estimator,
-    factory,
-    inference,
-    online_adaptation,
-    timing,
-    validation,
-)
-from .estimator import GraphKoopmanModel
 
 __all__ = ["GraphKoopmanModel"]

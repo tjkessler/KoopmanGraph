@@ -12,12 +12,14 @@ import torch
 from torch import Tensor
 
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.datasets.download import resolve_cache_path
 from koopman_graph.datasets.topology import TopologyPayload
 
 DEFAULT_WAKE_CACHE_DIR = Path(__file__).resolve().parents[3] / "data" / "cylinder_wake"
 DEFAULT_WAKE_NUM_NODES = 72
 DEFAULT_WAKE_NUM_TIMESTEPS = 120
 IN_CHANNELS_SCALAR = 1
+WAKE_FILENAME = "wake.pt"
 
 
 def _default_wake_path(cache_dir: Path | None = None) -> Path:
@@ -33,8 +35,11 @@ def _default_wake_path(cache_dir: Path | None = None) -> Path:
     Path
         Path to ``wake.pt``.
     """
-    root = cache_dir if cache_dir is not None else DEFAULT_WAKE_CACHE_DIR
-    return root / "wake.pt"
+    return resolve_cache_path(
+        cache_dir,
+        default_dir=DEFAULT_WAKE_CACHE_DIR,
+        filename=WAKE_FILENAME,
+    )
 
 
 def _cylinder_wake_mesh(

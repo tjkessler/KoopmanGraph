@@ -49,6 +49,7 @@ dev = [
     "ipykernel>=6.29.0",
     "pandas>=2.0.0",
     "gymnasium>=1.0.0",
+    "h5py>=3.10.0",
 ]
 docs = [
     "sphinx>=8.0.0",
@@ -58,6 +59,13 @@ docs = [
 rl = [
     "gymnasium>=1.0.0",
     "stable-baselines3>=2.3.0",
+]
+symmetry = [
+    "networkx>=3.0",
+]
+mpc = [
+    "osqp>=0.6.0",
+    "scipy>=1.11.0",
 ]
 
 [project.urls]

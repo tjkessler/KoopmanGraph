@@ -10,16 +10,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.data.validation import ArrayLike, as_tensor
-
-if TYPE_CHECKING:
-    from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.data.sequence_types import SnapshotSequenceLike
+from koopman_graph.data.validation import (
+    ArrayLike,
+    as_tensor,
+    coerce_hyperedge_index,
+    coerce_hyperedge_weight,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ def build_snapshots_from_arrays(
     edge_index: ArrayLike,
     *,
     edge_weight: ArrayLike | None = None,
+    hyperedge_index: ArrayLike | None = None,
+    hyperedge_weight: ArrayLike | None = None,
     control_inputs: ArrayLike | None = None,
     timestamps: ArrayLike | None = None,
     observation_masks: ArrayLike | None = None,
@@ -67,6 +71,13 @@ def build_snapshots_from_arrays(
         Shared edge index with shape ``(2, num_edges)``.
     edge_weight : array-like, optional
         Shared scalar edge weights with shape ``(num_edges,)``.
+    hyperedge_index : array-like, optional
+        Shared PyG bipartite hyperedge incidence with shape ``(2, nnz)``
+        (row 0 = nodes, row 1 = hyperedges). Attached to every snapshot when
+        provided.
+    hyperedge_weight : array-like, optional
+        Shared hyperedge weights with shape ``(num_hyperedges,)``. Requires
+        ``hyperedge_index``.
     control_inputs : array-like, optional
         Per-timestep control inputs with shape ``(num_timesteps,
         control_dim)`` or ``(num_timesteps, num_nodes, control_dim)``.
@@ -88,8 +99,9 @@ def build_snapshots_from_arrays(
     Raises
     ------
     ValueError
-        If ``node_features``, ``edge_index``, or ``edge_weight`` have
-        invalid shape.
+        If ``node_features``, ``edge_index``, ``edge_weight``, or hyperedge
+        fields have invalid shape, or ``hyperedge_weight`` is set without
+        ``hyperedge_index``.
     """
     features = as_tensor(node_features, dtype=dtype)
     edges = as_tensor(edge_index, dtype=torch.long)
@@ -125,19 +137,36 @@ def build_snapshots_from_arrays(
     if features.shape[0] < 1:
         msg = "node_features must contain at least one timestep"
         raise ValueError(msg)
+    if hyperedge_weight is not None and hyperedge_index is None:
+        msg = "hyperedge_weight requires hyperedge_index"
+        raise ValueError(msg)
+
+    hedges = None
+    hedge_weights = None
+    if hyperedge_index is not None:
+        hedges = coerce_hyperedge_index(
+            hyperedge_index,
+            num_nodes=int(features.shape[1]),
+        )
+        hedge_weights = coerce_hyperedge_weight(
+            hyperedge_weight,
+            hyperedge_index=hedges,
+            dtype=dtype,
+        )
 
     snapshots = []
     for t in range(features.shape[0]):
-        if weights is None:
-            snapshots.append(Data(x=features[t], edge_index=edges))
-        else:
-            snapshots.append(
-                Data(
-                    x=features[t],
-                    edge_index=edges,
-                    edge_weight=weights.clone(),
-                )
-            )
+        fields: dict[str, Tensor] = {
+            "x": features[t],
+            "edge_index": edges,
+        }
+        if weights is not None:
+            fields["edge_weight"] = weights.clone()
+        if hedges is not None:
+            fields["hyperedge_index"] = hedges.clone()
+        if hedge_weights is not None:
+            fields["hyperedge_weight"] = hedge_weights.clone()
+        snapshots.append(Data(**fields))
     return ConstructedSnapshots(
         snapshots=snapshots,
         control_inputs=controls,
@@ -272,7 +301,7 @@ def build_snapshots_from_dynamic_arrays(
 
 
 def build_windowed_snapshots(
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequenceLike,
     n_delays: int,
     *,
     stride: int = 1,
@@ -283,8 +312,8 @@ def build_windowed_snapshots(
 
     Parameters
     ----------
-    sequence : GraphSnapshotSequence
-        Source trajectory.
+    sequence : SnapshotSequenceLike
+        Source trajectory (typically a ``GraphSnapshotSequence``).
     n_delays : int
         Delay window length (must be >= 1).
     stride : int, optional

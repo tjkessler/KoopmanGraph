@@ -122,17 +122,28 @@ def van_loan_generator_from_discrete(
     where ``K = Phi11 = exp(L · Δt)`` and ``B_disc = Phi12.T`` (library row
     convention ``z @ K.T + u @ B_disc``).
 
+    Parameters
+    ----------
+
+    discrete_k : Tensor
+        See the function signature / summary for ``discrete_k``.
+    discrete_b : Tensor
+        See the function signature / summary for ``discrete_b``.
+    delta_t : float | Tensor
+        See the function signature / summary for ``delta_t``.
+
     Returns
     -------
+
     tuple[Tensor, Tensor]
         Continuous generator ``L`` and control ``B``.
 
     Notes
     -----
+
     Round-trip fidelity is typically within :data:`VAN_LOAN_WRITEBACK_ATOL`
     for moderate ``Δt`` when ``K(Δt)`` stays away from matrix-logarithm branch
-    cuts. Large or highly oscillatory intervals can degrade recovery.
-    """
+    cuts. Large or highly oscillatory intervals can degrade recovery."""
     latent_dim = discrete_k.shape[0]
     control_dim = discrete_b.shape[0]
     delta = float(torch.as_tensor(delta_t).item())

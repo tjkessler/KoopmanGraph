@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
 from torch import Tensor, nn
 
+from koopman_graph.graph_utils.symmetry import OrbitMethod
 from koopman_graph.operators.contract import (
     InitMode,
     Parameterization,
@@ -20,12 +22,13 @@ from koopman_graph.operators.control import (
     per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 GraphSparsity = Literal["dense", "block_diagonal", "distributed"]
 
 
-class GraphKoopmanOperator(nn.Module):
+class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     """Discrete Koopman step with self and neighbor coupling on the graph.
 
     Advances stacked node latents ``Z ∈ R^{N×d}`` via the linear map::
@@ -39,8 +42,9 @@ class GraphKoopmanOperator(nn.Module):
     where ``Â`` is the symmetric normalized adjacency
     ``D^{-1/2} A D^{-1/2}``. Unlike :class:`KoopmanOperator`, topology enters
     the **linear** step, so mid-horizon rewiring changes latent advance (not
-    only decode). Discrete-time only; continuous networked generators are out
-    of scope for this module.
+    only decode). Discrete-time only; for continuous networked generators use
+    :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
+    (``koopman="graph"`` + ``dynamics_mode="continuous"``).
 
     When ``K_nbr = 0``, the step reduces exactly to the per-node map
     ``Z @ K_self.T``.
@@ -54,8 +58,10 @@ class GraphKoopmanOperator(nn.Module):
     parameterization : Parameterization
         Shared soft/structural parameterization for ``K_self`` and ``K_nbr``.
     sparsity : {"dense", "block_diagonal", "distributed"}
-        Realization mode. Only ``"dense"`` (sparse message-passing matvec) is
-        implemented; other values are reserved and rejected.
+        Realization mode. ``"dense"`` and ``"block_diagonal"`` share the same
+        sparse forward matvec; they differ in ``inverse_advance`` (exact
+        ``N·d`` inverse vs approximate per-node Jacobi). ``"distributed"`` is
+        planned and not in 0.6.0.
     max_spectral_radius : float
         Stability bound forwarded to the factorized self/neighbor matrices.
     """
@@ -72,6 +78,9 @@ class GraphKoopmanOperator(nn.Module):
         control_mode: ControlMode = "additive",
         bilinear_rank: int | None = None,
         sparsity: GraphSparsity = "dense",
+        orbit_partition: Sequence[Sequence[int]] | None = None,
+        auto_orbits: bool = False,
+        orbit_method: OrbitMethod = "auto",
     ) -> None:
         """Initialize self and neighbor Koopman factors.
 
@@ -96,18 +105,33 @@ class GraphKoopmanOperator(nn.Module):
         bilinear_rank : int or None, optional
             Low-rank bilinear size when ``control_mode="bilinear"``.
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
-            Only ``"dense"`` is supported in this release.
+            ``"dense"`` (default) uses an exact dense ``inverse_advance``.
+            ``"block_diagonal"`` keeps the same forward advance and uses an
+            approximate per-node inverse. ``"distributed"`` is planned; not
+            in 0.6.0.
+        orbit_partition : sequence of sequence of int or None, optional
+            Explicit node-orbit partition tying ``K_self`` across orbit mates.
+            Overrides ``auto_orbits`` when provided.
+        auto_orbits : bool, optional
+            When ``True``, compute orbits from ``edge_index`` on first advance
+            (requires the ``[symmetry]`` extra for non-identity partitions).
+        orbit_method : {"auto", "exact"}, optional
+            Orbit backend for ``auto_orbits``. Default ``"auto"``.
 
         Raises
         ------
         ValueError
-            If ``sparsity`` is not ``"dense"`` or construction args are invalid.
+            If ``sparsity`` is ``"distributed"`` or otherwise unsupported, or
+            construction args are invalid.
         """
         super().__init__()
-        if sparsity != "dense":
+        if sparsity == "distributed":
+            msg = "GraphKoopmanOperator sparsity='distributed' is planned; not in 0.6.0"
+            raise ValueError(msg)
+        if sparsity not in {"dense", "block_diagonal"}:
             msg = (
-                "GraphKoopmanOperator sparsity modes "
-                f"{sparsity!r} are not implemented yet; use sparsity='dense'"
+                "GraphKoopmanOperator sparsity must be 'dense' or "
+                f"'block_diagonal', got {sparsity!r}"
             )
             raise ValueError(msg)
 
@@ -141,6 +165,11 @@ class GraphKoopmanOperator(nn.Module):
             control_dim=0,
         )
         self._reset_neighbor_parameters()
+        self._init_orbit_config(
+            orbit_partition=orbit_partition,
+            auto_orbits=auto_orbits,
+            orbit_method=orbit_method,
+        )
 
     def _reset_neighbor_parameters(self) -> None:
         """Initialize ``K_nbr`` near zero so the operator starts per-node-like.
@@ -174,15 +203,16 @@ class GraphKoopmanOperator(nn.Module):
         Delegates to the self/neighbor factor modules, then re-applies the
         near-zero neighbor initialization.
         """
-        self._self.reset_parameters()
-        if self.control_dim > 0:
-            self._self.reset_control_parameters()
+        self.reset_orbit_selves()
         self._nbr.reset_parameters()
         self._reset_neighbor_parameters()
 
     @property
     def K_self(self) -> Tensor:
         """Self-coupling matrix with shape ``(latent_dim, latent_dim)``.
+
+        When orbit-tied, returns the representative (orbit-0) self matrix; use
+        :meth:`tied_self_blocks` / :meth:`effective_matrix` for the full map.
 
         Returns
         -------
@@ -249,11 +279,19 @@ class GraphKoopmanOperator(nn.Module):
         bilinear_matrices : Tensor or None, optional
             Full-rank bilinear stack when ``control_mode="bilinear"``.
         """
-        self._self.set_dense_matrix(
-            k_self,
-            control_matrix=control_matrix,
-            bilinear_matrices=bilinear_matrices,
-        )
+        if self._orbit_selves is None:
+            self._self.set_dense_matrix(
+                k_self,
+                control_matrix=control_matrix,
+                bilinear_matrices=bilinear_matrices,
+            )
+        else:
+            for orbit_id, module in enumerate(self._orbit_selves):
+                module.set_dense_matrix(
+                    k_self,
+                    control_matrix=control_matrix if orbit_id == 0 else None,
+                    bilinear_matrices=bilinear_matrices if orbit_id == 0 else None,
+                )
         self._nbr.set_dense_matrix(k_nbr, control_matrix=None)
 
     def bound_metric(self) -> Tensor:
@@ -332,12 +370,17 @@ class GraphKoopmanOperator(nn.Module):
             If both ``k_self`` and ``k_self_blocks`` are set, or if
             ``k_self_blocks`` has the wrong shape.
         """
-        from koopman_graph.graph_utils import dense_symmetric_normalized_adjacency
+        from koopman_graph.graph_utils.topology import (
+            dense_symmetric_normalized_adjacency,
+        )
 
         if k_self is not None and k_self_blocks is not None:
             msg = "Pass at most one of k_self and k_self_blocks"
             raise ValueError(msg)
 
+        self.ensure_orbit_binding(num_nodes, edge_index=edge_index)
+        if k_self_blocks is None and k_self is None:
+            k_self_blocks = self.tied_self_blocks(num_nodes)
         self_matrix = self.K_self if k_self is None else k_self
         adj = dense_symmetric_normalized_adjacency(
             edge_index,
@@ -429,15 +472,18 @@ class GraphKoopmanOperator(nn.Module):
             )
             raise ValueError(msg)
 
-        from koopman_graph.graph_utils import symmetric_normalized_adjacency_matvec
+        from koopman_graph.graph_utils.topology import (
+            symmetric_normalized_adjacency_matvec,
+        )
 
+        self.ensure_orbit_binding(z.shape[0], edge_index=edge_index)
         neighbor = symmetric_normalized_adjacency_matvec(
             edge_index,
             z,
             edge_weight=edge_weight,
             num_nodes=z.shape[0],
         )
-        z_next = z @ self.K_self.T + neighbor @ self.K_nbr.T
+        z_next = self.apply_tied_self(z) + neighbor @ self.K_nbr.T
 
         if self.control_dim == 0:
             if control is not None:
@@ -504,16 +550,18 @@ class GraphKoopmanOperator(nn.Module):
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
     ) -> Tensor:
-        """Recover previous latents by inverting the effective ``N·d`` map.
+        """Recover previous latents from a networked forward step.
 
-        Dense inversion is used (suitable for modest ``N``). ``inverse_matrix``,
-        when provided, must be the effective ``(N·d, N·d)`` inverse for the
-        same topology and control; otherwise it is assembled on demand.
+        ``sparsity="dense"`` inverts the effective ``N·d`` map (exact;
+        suitable for modest ``N``). ``sparsity="block_diagonal"`` uses a
+        one-step Jacobi / per-node ``d×d`` approximate inverse (exact when
+        ``K_nbr = 0`` or the graph has no edges). ``inverse_matrix`` is
+        supported only for ``sparsity="dense"``.
 
         For ``control_mode="bilinear"``, global controls fold into a shared
         ``K_self`` override; per-node controls use node-specific bilinear self
         blocks plus the same ``Â ⊗ K_nbr`` neighbor coupling as forward
-        advance. Singular effective maps fall back to a pseudoinverse.
+        advance. Singular dense maps fall back to a pseudoinverse.
 
         Parameters
         ----------
@@ -525,7 +573,7 @@ class GraphKoopmanOperator(nn.Module):
             Control that drove the forward step (global ``(C,)`` or per-node
             ``(N, C)``).
         inverse_matrix : Tensor or None, optional
-            Optional precomputed effective inverse.
+            Optional precomputed effective inverse (``dense`` only).
         edge_index : Tensor or None, optional
             Required topology.
         edge_weight : Tensor or None, optional
@@ -535,7 +583,17 @@ class GraphKoopmanOperator(nn.Module):
         -------
         Tensor
             Recovered latents at ``t``.
+
+        Raises
+        ------
+        ValueError
+            If topology / shapes are invalid, or ``inverse_matrix`` is passed
+            with ``sparsity="block_diagonal"``.
         """
+        from koopman_graph.operators.graph_inverse import (
+            block_diagonal_graph_inverse_advance,
+        )
+
         _ = delta_t
         if edge_index is None:
             msg = "edge_index is required for GraphKoopmanOperator.inverse_advance"
@@ -558,39 +616,75 @@ class GraphKoopmanOperator(nn.Module):
             adjusted = z - offset
 
         num_nodes = z.shape[0]
-        if inverse_matrix is None:
-            k_self_override: Tensor | None = None
-            k_self_blocks: Tensor | None = None
-            if self.control_mode == "bilinear":
-                if control is None:
-                    msg = "control input is required when control_dim > 0"
-                    raise ValueError(msg)
-                coupling = self._self.bilinear_matrices()
-                if control.ndim == 1:
-                    k_self_override = effective_bilinear_matrix(
-                        self.K_self,
-                        control,
-                        coupling,
-                    )
-                elif control.ndim == 2:
-                    if control.shape[0] != num_nodes:
-                        msg = (
-                            f"Per-node control has {control.shape[0]} rows, "
-                            f"expected {num_nodes}"
-                        )
-                        raise ValueError(msg)
-                    k_self_blocks = per_node_effective_bilinear_matrices(
-                        self.K_self,
-                        control,
-                        coupling,
-                    )
-                else:
+
+        def _bilinear_self_factors() -> tuple[Tensor | None, Tensor | None]:
+            """Resolve shared / per-node bilinear self overrides.
+
+            Returns
+            -------
+            tuple[Tensor | None, Tensor | None]
+                See summary line.
+
+            Raises
+            ------
+            ValueError
+                Raised when inputs are invalid."""
+            if self.control_mode != "bilinear":
+                return None, None
+            if control is None:
+                msg = "control input is required when control_dim > 0"
+                raise ValueError(msg)
+            coupling = self._self.bilinear_matrices()
+            if control.ndim == 1:
+                return (
+                    effective_bilinear_matrix(self.K_self, control, coupling),
+                    None,
+                )
+            if control.ndim == 2:
+                if control.shape[0] != num_nodes:
                     msg = (
-                        "control input must have shape (control_dim,) for "
-                        "global control or (num_nodes, control_dim) for "
-                        f"per-node control, got {tuple(control.shape)}"
+                        f"Per-node control has {control.shape[0]} rows, "
+                        f"expected {num_nodes}"
                     )
                     raise ValueError(msg)
+                return (
+                    None,
+                    per_node_effective_bilinear_matrices(
+                        self.K_self,
+                        control,
+                        coupling,
+                    ),
+                )
+            msg = (
+                "control input must have shape (control_dim,) for "
+                "global control or (num_nodes, control_dim) for "
+                f"per-node control, got {tuple(control.shape)}"
+            )
+            raise ValueError(msg)
+
+        if self.sparsity == "block_diagonal":
+            if inverse_matrix is not None:
+                msg = (
+                    "inverse_matrix is only supported for "
+                    "GraphKoopmanOperator sparsity='dense'"
+                )
+                raise ValueError(msg)
+            k_self_override, k_self_blocks = _bilinear_self_factors()
+            if k_self_blocks is None and k_self_override is None:
+                k_self_blocks = self.tied_self_blocks(num_nodes)
+            return block_diagonal_graph_inverse_advance(
+                adjusted,
+                k_self=k_self_override if k_self_override is not None else self.K_self,
+                k_nbr=self.K_nbr,
+                edge_index=edge_index,
+                edge_weight=edge_weight,
+                k_self_blocks=k_self_blocks,
+            )
+
+        if inverse_matrix is None:
+            k_self_override, k_self_blocks = _bilinear_self_factors()
+            if k_self_blocks is None and k_self_override is None:
+                k_self_blocks = self.tied_self_blocks(num_nodes)
             effective = self.effective_matrix(
                 edge_index,
                 num_nodes,

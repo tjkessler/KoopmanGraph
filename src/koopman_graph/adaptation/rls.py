@@ -13,6 +13,7 @@ from torch import Tensor
 from koopman_graph.graph_utils import KoopmanPropagator
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
+    GlobalLocalKoopmanOperator,
     KoopmanOperator,
     matrix_log,
     van_loan_factors,
@@ -227,6 +228,14 @@ class RecursiveKoopmanAdapter:
             If ``koopman`` is not a supported operator type.
         """
         cls._validate_dense_parameterization(koopman)
+        if isinstance(koopman, GlobalLocalKoopmanOperator):
+            msg = (
+                "RecursiveKoopmanAdapter does not support "
+                "GlobalLocalKoopmanOperator (state-dependent local "
+                "correction). Use RLS on a dense per-node or continuous "
+                "operator, or keep global/local offline."
+            )
+            raise TypeError(msg)
         if isinstance(koopman, KoopmanOperator):
             initial_k = koopman.K.detach().cpu()
             initial_b = koopman.B.detach().cpu() if koopman.control_dim > 0 else None
@@ -263,11 +272,17 @@ class RecursiveKoopmanAdapter:
     def _validate_dense_parameterization(koopman: KoopmanPropagator) -> None:
         """Require dense parameterization for online write-back.
 
+        Parameters
+        ----------
+
+        koopman : KoopmanPropagator
+            See the function signature / summary for ``koopman``.
+
         Raises
         ------
+
         ValueError
-            If the operator is not densely parameterized.
-        """
+            If the operator is not densely parameterized."""
         if koopman.parameterization != "dense":
             msg = (
                 "Online adaptation requires dense Koopman parameterization; "
@@ -508,6 +523,14 @@ class RecursiveKoopmanAdapter:
             If ``koopman`` is not a supported operator type.
         """
         self._validate_dense_parameterization(koopman)
+        if isinstance(koopman, GlobalLocalKoopmanOperator):
+            msg = (
+                "RecursiveKoopmanAdapter does not support "
+                "GlobalLocalKoopmanOperator (state-dependent local "
+                "correction). Use RLS on a dense per-node or continuous "
+                "operator, or keep global/local offline."
+            )
+            raise TypeError(msg)
         if isinstance(koopman, KoopmanOperator):
             control = self.control_matrix
             koopman.set_dense_matrix(

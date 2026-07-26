@@ -46,9 +46,23 @@ Capability layout
 ``graph``
     :class:`~koopman_graph.operators.graph.GraphKoopmanOperator` (spatially
     coupled discrete advance).
+``graph_inverse``
+    Block-diagonal / Jacobi approximate ``inverse_advance`` helpers for
+    graph / hypergraph ``sparsity="block_diagonal"`` (no ``graph/`` subtree).
+``hypergraph``
+    :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
+    (hyperedge-coupled discrete advance; supports ``block_diagonal``).
+``global_local``
+    :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
+    (discrete global backbone + low-rank local window correction).
+``continuous_graph``
+    :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
+    (continuous networked generator; ``koopman="graph"`` + continuous or alias
+    ``koopman="continuous_graph"``).
 
 Prefer ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
-GraphKoopmanOperator`` or ``from koopman_graph.operators import …``.
+GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
+ContinuousGraphKoopmanOperator`` or ``from koopman_graph.operators import …``.
 """
 
 from koopman_graph.operators.auxiliary_spectral import (
@@ -65,6 +79,10 @@ from koopman_graph.operators.continuous import (
     matrix_log,
     van_loan_factors,
     van_loan_generator_from_discrete,
+)
+from koopman_graph.operators.continuous_graph import (
+    ContinuousGraphKoopmanOperator,
+    ContinuousGraphSparsity,
 )
 from koopman_graph.operators.contract import (
     DISSIPATIVE_MIN_EIGENVALUE,
@@ -85,18 +103,39 @@ from koopman_graph.operators.contract import (
 )
 from koopman_graph.operators.control import ControlMode
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.global_local import (
+    DEFAULT_LOCAL_HIDDEN_DIMS,
+    DEFAULT_LOCAL_RANK,
+    DEFAULT_LOCAL_WINDOW,
+    GlobalLocalKoopmanOperator,
+    normalize_local_hidden_dims,
+    pad_latent_window,
+    stack_latent_window,
+)
 from koopman_graph.operators.graph import GraphKoopmanOperator, GraphSparsity
+from koopman_graph.operators.hypergraph import (
+    HypergraphKoopmanOperator,
+    HypergraphSparsity,
+)
 
 __all__ = [
     "AuxiliarySpectralNetwork",
+    "ContinuousGraphKoopmanOperator",
+    "ContinuousGraphSparsity",
     "ContinuousKoopmanOperator",
     "ControlMode",
     "DEFAULT_AUXILIARY_HIDDEN_DIMS",
+    "DEFAULT_LOCAL_HIDDEN_DIMS",
+    "DEFAULT_LOCAL_RANK",
+    "DEFAULT_LOCAL_WINDOW",
     "DISSIPATIVE_MIN_EIGENVALUE",
     "DynamicsMode",
     "GeneratorParameterization",
+    "GlobalLocalKoopmanOperator",
     "GraphKoopmanOperator",
     "GraphSparsity",
+    "HypergraphKoopmanOperator",
+    "HypergraphSparsity",
     "InitMode",
     "KoopmanKind",
     "KoopmanOperator",
@@ -111,9 +150,12 @@ __all__ = [
     "cayley_orthogonal",
     "matrix_log",
     "normalize_auxiliary_hidden_dims",
+    "normalize_local_hidden_dims",
+    "pad_latent_window",
     "resolve_factory_stability_bound",
     "safe_diagonal_inverse",
     "spectral_output_dim",
+    "stack_latent_window",
     "strict_diagonal_values",
     "strict_spectral_bound",
     "van_loan_factors",

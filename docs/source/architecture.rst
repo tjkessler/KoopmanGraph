@@ -1,9 +1,10 @@
 Architecture and API layers
 ===========================
 
-This page is the maintainer-facing contract for how KoopmanGraph is structured.
-It exists so contributors do not reintroduce style drift across releases. Read
-it when changing package layout, exports, device handling, or shared helpers.
+This page is the maintainer-facing contract for how KoopmanGraph is structured
+(``ARCH-060``). It exists so contributors do not reintroduce style drift across
+releases. Read it when changing package layout, exports, device handling, or
+shared helpers.
 
 Design philosophy
 -----------------
@@ -108,6 +109,10 @@ validation / timing / encoding / inference / online_adaptation peers).
   ``inverse_propagate_latent``, ``advance_and_decode``,
   ``hold_last_topology_at``, ``snapshot_topology_at``,
   ``autoregressive_latent_rollout``, ``pack_rollout_snapshots``
+* ``symmetry`` — node-orbit partitions for symmetry-adapted operators
+  (``node_orbit_partition``, ``validate_orbit_partition``,
+  ``identity_orbit_partition``; requires the ``[symmetry]`` extra for
+  non-identity auto-orbits)
 
 Prefer ``from koopman_graph.graph_utils import …``. Do not import
 leading-underscore helpers across peer modules.
@@ -132,7 +137,12 @@ leading-underscore helpers across peer modules.
   ``resolve_training_sequences`` / ``resolve_validation_sequences``
 * ``loop`` — ``run_fit_loop`` plus early-stopping / LR-scheduler helpers
   (re-exports epoch helpers so fit-loop monkeypatches of
-  ``training.loop.train_one_epoch`` remain valid)
+  ``training.loop.train_one_epoch`` remain valid). Also hosts
+  ``bind_pending_orbit_ties``, a deep-import fit-start hook that binds
+  ``koopman_auto_orbits`` from the first training snapshot **before** the
+  optimizer is constructed so orbit ``K_self`` parameters are trained.
+  Prefer calling it only via ``run_fit_loop``; it is not a
+  :mod:`koopman_graph.training` package ``__all__`` export.
 
 Do not invent a ``training/objectives/`` or ``training/loop/`` subtree.
 Prefer ``from koopman_graph.training import …``. Do not import
@@ -177,9 +187,15 @@ power-user losses stay package imports outside root ``__all__``.
   import **down** into ``data``. :mod:`koopman_graph.data` must **not**
   import :mod:`koopman_graph.nn` (eager or lazy). Power-user submodule; not
   promoted on the package or root ``__all__``.
-* ``sampling`` — ``WindowSampler``
+* ``sampling`` — ``WindowSampler`` (full-graph temporal windows);
+  ``NeighborWindowSampler`` (k-hop subgraph windows for large static graphs;
+  training approximation only — package export, not root ``__all__``)
 * ``splits`` — ``TemporalSplit``, ``temporal_split``
 * ``rollout`` — ``resolve_rollout_start_indices`` and related type aliases
+* ``sequence_types`` — internal ``SnapshotSequenceLike`` Protocol used by
+  ``construction`` / ``delay_windows`` so those peers stay acyclic with
+  ``containers``. Not package-exported; do not promote to
+  :mod:`koopman_graph.data` ``__all__``.
 
 ``koopman_graph.operators`` package layout (peer discrete/continuous/networked):
 
@@ -247,6 +263,30 @@ power-user losses stay package imports outside root ``__all__``.
   remains continuous-surface owned).
 * ``graph`` — :class:`~koopman_graph.operators.graph.GraphKoopmanOperator`
   (discrete networked self/neighbor coupling; select via ``koopman="graph"``)
+* ``graph_inverse`` — block-diagonal / Jacobi approximate inverse helpers for
+  ``GraphKoopmanOperator`` / ``HypergraphKoopmanOperator`` with
+  ``sparsity="block_diagonal"`` (no ``operators/graph/`` subtree)
+* ``continuous_graph`` —
+  :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
+  (continuous networked generator ``I⊗L_self + Â⊗L_nbr``; select via
+  ``koopman="graph"`` + ``dynamics_mode="continuous"`` or
+  ``koopman="continuous_graph"``). Dense advance uses an ``N·d`` matrix
+  exponential; ``sparsity="block_diagonal"`` is the self-dominated
+  approximate path
+* ``hypergraph`` —
+  :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
+  (discrete hyperedge-coupled advance; select via ``koopman="hypergraph"``;
+  ``sparsity="block_diagonal"`` shares the Jacobi approximate inverse path)
+* ``global_local`` —
+  :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
+  (discrete global backbone ``K_g`` plus low-rank local window correction
+  ``K_ℓ``; select via ``koopman="global_local"``)
+* ``orbit_ties`` — shared ``OrbitTiedSelfMixin`` and
+  ``build_orbit_self_bank`` helpers for discrete ``koopman="graph"`` /
+  ``"hypergraph"`` orbit-tied ``K_self`` factors (two hosts only; not a
+  deep inheritance tree). Symmetry discovery stays in
+  :mod:`koopman_graph.graph_utils.symmetry`; fit-start auto-orbit binding
+  is orchestrated by ``training.loop.bind_pending_orbit_ties``.
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
@@ -256,8 +296,8 @@ operator classes). Former root modules ``koopman_graph.operator`` and
 PyG-style ``nn`` capability package, no ``conv/`` subtree):
 
 * ``gnn`` — :class:`~koopman_graph.nn.gnn.BaseGNNModule`, activation typing,
-  validators, GCN/GAT/SAGE/DiffConv/Transformer convolution builders
-  (power-user)
+  validators, GCN/GAT/SAGE/DiffConv/Transformer/Hypergraph convolution
+  builders (power-user)
 * ``encoder`` — :class:`~koopman_graph.nn.encoder.GNNEncoder` /
   :class:`~koopman_graph.nn.encoder.GATEncoder` /
   :class:`~koopman_graph.nn.encoder.SAGEEncoder` /
@@ -268,6 +308,9 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   :class:`~koopman_graph.nn.decoder.SAGEDecoder` /
   :class:`~koopman_graph.nn.decoder.DiffConvDecoder` /
   :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`
+* ``hypergraph`` — :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
+  :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
+  (PyG ``HypergraphConv``; static ``hyperedge_index`` / ``hyperedge_weight``)
 * ``delay`` — :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`
   delay-coordinate wrapper (compose with a base encoder sized as
   ``in_channels = n_delays * feature_dim``; optional
@@ -277,6 +320,19 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   ``history_from_snapshots``, ``apply_observation_mask_to_features``) are
   owned by :mod:`koopman_graph.data.delay_windows` and thin-re-exported
   here for stable ``nn.delay`` import paths.
+* ``adaptive_topology`` —
+  :class:`~koopman_graph.nn.adaptive_topology.AdaptiveAdjacency`
+  (Graph WaveNet self-adaptive adjacency ``softmax(ReLU(E₁E₂ᵀ))``; power-user
+  ``koopman_graph.nn`` export). Enable via
+  ``GraphKoopmanModel(learn_topology="self_adaptive",
+  topology_embedding_dim=k)`` (default ``k=8``). When enabled, the learned
+  dense COO adjacency **replaces** pairwise ``edge_index`` / ``edge_weight``
+  for encode, decode, networked graph / continuous-graph advance, and
+  spectrum (materialize the same ``Â``; ``N²`` edges — prefer modest ``N``).
+  Hyperedge incidence for hypergraph encode / operators stays exogenous.
+  Default ``learn_topology=None`` is a numerical no-op. Static per fit (node
+  count binds on first use). Framing: forecasting inductive bias, **not**
+  causal structure discovery.
 
 Prefer ``from koopman_graph.nn import …`` (or the root façade for public
 classes). Former root modules ``koopman_graph.encoder``,
@@ -285,24 +341,46 @@ Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
 ``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
-plotting):
+plotting / topology estimation / SINDy / clustering):
 
-* ``spectrum`` — re-exports neutral-leaf ``compute_spectrum``, plus
-  ``compute_generator_spectrum``, ``discrete_spectrum_at_delta_t``,
-  ``decode_mode_shapes``
+* ``spectrum`` — re-exports neutral-leaf ``compute_spectrum``,
+  ``compute_generator_spectrum``, and ``discrete_spectrum_at_delta_t``, plus
+  analysis-owned ``decode_mode_shapes``
 * ``similarity`` — ``spectrum_distance``, ``koopman_std``, ``resolve_spectrum``,
   ``dynamical_similarity``
 * ``anomaly`` — ``AnomalyDetectionResult``, ``calibrate_anomaly_threshold``,
   ``detect_anomaly``
 * ``plotting`` — ``plot_spectrum`` (discrete unit-disk / data-zoom complex-plane
   figures; Matplotlib call-site import)
+* ``topology_estimation`` —
+  :func:`~koopman_graph.analysis.estimate_coupling_from_snapshots` and
+  :class:`~koopman_graph.analysis.CouplingEstimate` (flattened DMD → ``N×N``
+  coupling magnitudes; diagnostics / warm-start aid — **not** causal
+  structure discovery). Rejects dynamic-topology and hyperedge sequences
+  like classical baselines.
+* ``sindy`` —
+  :func:`~koopman_graph.analysis.identify_sparse_dynamics` and frozen
+  :class:`~koopman_graph.analysis.SINDyReport` (STLSQ on polynomial /
+  graph-neighbor libraries over encoded per-node latents; discrete or
+  finite-difference derivative mode). Pure analysis — identifies the
+  **learned latent** dynamics, not physical ground-truth ODEs.
+* ``clustering`` —
+  :func:`~koopman_graph.analysis.koopman_spectral_clustering` and frozen
+  :class:`~koopman_graph.analysis.ClusteringResult` (seeded k-means on
+  leading Koopman mode embeddings; sign/ordering canonicalized by
+  magnitude-sorted ``|λ|`` and largest-magnitude positive pivot). Cluster
+  quality inherits operator / spectrum quality.
 
 :mod:`koopman_graph.spectrum_types` remains a **top-level neutral leaf** so
-:mod:`koopman_graph.protocols` and :mod:`koopman_graph.operators` never import
-heavy analysis code. It hosts :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`
-and discrete :func:`~koopman_graph.spectrum_types.compute_spectrum` assembly.
-Both are re-exported from :mod:`koopman_graph.analysis` (and ``KoopmanSpectrum`` /
-``compute_spectrum`` from the package root) for the public API.
+:mod:`koopman_graph.protocols`, :mod:`koopman_graph.operators`, and
+:mod:`koopman_graph.model` never import heavy analysis code for spectrum
+assembly. It hosts :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`,
+discrete :func:`~koopman_graph.spectrum_types.compute_spectrum`, continuous
+:func:`~koopman_graph.spectrum_types.compute_generator_spectrum`, and
+:func:`~koopman_graph.spectrum_types.discrete_spectrum_at_delta_t`.
+These are re-exported from :mod:`koopman_graph.analysis` (and
+``KoopmanSpectrum`` / ``compute_spectrum`` from the package root) for the
+public API.
 
 ``koopman_graph.baselines`` package layout (peer DMD-family methods behind
 :class:`~koopman_graph.baselines.ClassicalBaseline`, plus GNN forecasters):
@@ -405,7 +483,8 @@ triggers (see When to nest).
 Three-layer API regardless of folders
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Moving files must **not** change the layering contract above:
+Moving files must **not** change the layering contract above
+(``ARCH-020`` — public subpackages expose a curated ``__all__``):
 
 1. **Public façade** — symbols in package ``__all__`` / ``from koopman_graph
    import …``
@@ -414,6 +493,9 @@ Moving files must **not** change the layering contract above:
 3. **Private helpers** — leading-``_`` names, same-module only
 
 Folders are an organization tool; they do not create a fourth API tier.
+Internal peer modules may deep-import leaf modules (for example
+``operators.contract`` or ``graph_utils.topology``) to keep the import graph
+acyclic; external callers should still prefer package ``__init__`` re-exports.
 
 Compatibility contract
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -440,9 +522,9 @@ When splitting or nesting modules:
 Do not leave half-migrated import paths. Serialization type strings and
 checkpoint reconstruct rules stay intact unless a release explicitly bumps
 ``FORMAT_VERSION``. The current checkpoint baseline is ``FORMAT_VERSION`` 1
-(full schema). Future incompatible schema changes bump the constant, extend
-``SUPPORTED_FORMAT_VERSIONS``, and add a migration branch — they must not
-silently revive retired lineages.
+(full schema) through the 0.x beta; incomplete older payloads are deprecated
+and rejected rather than migrated. Formal multi-version checkpoint tracking
+begins at 1.0.
 
 API layers
 ----------
@@ -471,7 +553,7 @@ code stays valid; capability packages
 alternate import paths. Do not silently demote either without a separately
 versioned breaking migration.
 
-**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 20):
+**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 25):
 
 * :class:`~koopman_graph.model.GraphKoopmanModel`
 * :class:`~koopman_graph.nn.encoder.GNNEncoder`,
@@ -479,16 +561,21 @@ versioned breaking migration.
   :class:`~koopman_graph.nn.encoder.SAGEEncoder`,
   :class:`~koopman_graph.nn.encoder.DiffConvEncoder`,
   :class:`~koopman_graph.nn.encoder.GraphTransformerEncoder`,
+  :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder`,
   :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`,
   :class:`~koopman_graph.nn.decoder.GNNDecoder`,
   :class:`~koopman_graph.nn.decoder.GATDecoder`,
   :class:`~koopman_graph.nn.decoder.SAGEDecoder`,
   :class:`~koopman_graph.nn.decoder.DiffConvDecoder`,
-  :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`
+  :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`,
+  :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
   (also via :mod:`koopman_graph.nn`)
 * :class:`~koopman_graph.operators.KoopmanOperator`,
   :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
-  :class:`~koopman_graph.operators.GraphKoopmanOperator`
+  :class:`~koopman_graph.operators.GraphKoopmanOperator`,
+  :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`,
+  :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
+  :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`
 * Data I/O for ``fit``: :class:`~koopman_graph.data.GraphSnapshotSequence`,
   :class:`~koopman_graph.data.MultiTrajectory`
 * Primary spectrum entrypoints:
@@ -520,10 +607,12 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
   ``discrete_spectrum_at_delta_t``, ``decode_mode_shapes``,
   ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
   ``detect_anomaly``, ``calibrate_anomaly_threshold``,
-  ``AnomalyDetectionResult``
+  ``AnomalyDetectionResult``, ``estimate_coupling_from_snapshots``,
+  ``CouplingEstimate``, ``identify_sparse_dynamics``, ``SINDyReport``,
+  ``koopman_spectral_clustering``, ``ClusteringResult``
 * :mod:`koopman_graph.observables` — ``graph_laplacian_features``
 * :mod:`koopman_graph.uq` — ``EnsembleGraphKoopmanModel``,
-  ``LatentGaussianKoopmanUQ``
+  ``LatentGaussianKoopmanUQ``, ``ConformalKoopmanUQ``
 * :mod:`koopman_graph.hierarchical` —
   ``HierarchicalGraphKoopmanModel``
 
@@ -567,6 +656,19 @@ Examples:
   :func:`~koopman_graph.datasets.topology.ring_edge_index`) and
   :class:`~koopman_graph.datasets.TopologyPayload` for cached load APIs
   (not in root ``__all__``; import from the module or package as needed)
+* :mod:`koopman_graph.datasets.download` — shared HTTP fetch and integrity
+  helpers
+  (:func:`~koopman_graph.datasets.download.download_url_bytes`,
+  :func:`~koopman_graph.datasets.download.download_url_text`,
+  :func:`~koopman_graph.datasets.download.download_url_to_path`,
+  :func:`~koopman_graph.datasets.download.verify_sha256`,
+  :func:`~koopman_graph.datasets.download.verify_sha256_bytes`,
+  :func:`~koopman_graph.datasets.download.resolve_cache_path`) used by
+  cached telemetry loaders and ``scripts/download_*.py`` (power-user; not in
+  root ``__all__``)
+* :mod:`koopman_graph.datasets.cache_cli` — shared argparse helpers for
+  teaching-cache acquisition scripts (``--cache-dir``, ``--force``,
+  ``--fetch``, ``--print-acquisition``; power-user; not in root ``__all__``)
 * :mod:`koopman_graph.graph_utils` — capability package for shared
   graph-input resolution, latent propagation, and symmetric-normalized
   adjacency / Laplacian helpers (``topology`` / ``propagation`` peers; not
@@ -577,9 +679,12 @@ Examples:
   encoder/decoder/delay *classes* remain in ``__all__``. Peers import from
   ``nn.gnn`` only (no encoder↔decoder inversion).
 * :mod:`koopman_graph.spectrum_types` — neutral
-  :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` value type and
-  discrete :func:`~koopman_graph.spectrum_types.compute_spectrum` assembly
-  (re-exported from :mod:`koopman_graph.analysis` and the package root)
+  :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` value type plus
+  discrete / generator / ``Δt`` spectrum assembly helpers
+  (``compute_spectrum``, ``compute_generator_spectrum``,
+  ``discrete_spectrum_at_delta_t``; re-exported from
+  :mod:`koopman_graph.analysis` and, for the type / discrete helper, the
+  package root)
 * :class:`~koopman_graph.operators.KoopmanOperatorContract` — shared Protocol for
   discrete and continuous operators (``matrix``, ``advance``,
   ``inverse_advance``, ``bound_metric``); importable from
@@ -635,6 +740,11 @@ omitted from ``__all__``.
   imports discrete spectrum assembly from
   :mod:`koopman_graph.spectrum_types` and must **not** import
   :mod:`koopman_graph.analysis` (eager or lazy).
+* :mod:`koopman_graph.model` (spectrum helpers in ``model.inference``)
+  imports :func:`~koopman_graph.spectrum_types.discrete_spectrum_at_delta_t`
+  from the same neutral leaf and must **not** import
+  :mod:`koopman_graph.analysis` for spectrum assembly (eager or lazy).
+  Mode-shape decoding stays analysis-owned and hard-typed separately.
 * :mod:`koopman_graph.data` must **not** import :mod:`koopman_graph.nn`
   (eager or lazy). Delay-window stacking / flattening / observation-mask
   helpers live in :mod:`koopman_graph.data.delay_windows`;
@@ -756,7 +866,11 @@ Topology capability matrix
 
 Dynamic topology is first-class in the data container and neural model path,
 but not every consumer supports it. Callers must not assume silent freeze/flatten
-behavior:
+behavior. Optional static hyperedge incidence (``hyperedge_index`` /
+``hyperedge_weight`` on each ``Data`` snapshot; PyG bipartite format) is
+accepted by :class:`~koopman_graph.data.GraphSnapshotSequence`. Hypergraph
+encoder/decoder peers and ``koopman="hypergraph"`` consume the incidence;
+other consumers reject it:
 
 .. list-table::
    :header-rows: 1
@@ -776,6 +890,33 @@ behavior:
    * - Classical baselines (DMD / EDMD / DMDc)
      - **Rejected** at ``fit`` (flatten states; freeze initial edges on
        ``predict``)
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Surface
+     - Hyperedge incidence (``has_hyperedges=True``)
+   * - :class:`~koopman_graph.data.GraphSnapshotSequence`
+     - Supported as optional static fields on each snapshot (time-varying
+       hyperedges **rejected**); convenience accessors
+       :attr:`~koopman_graph.data.GraphSnapshotSequence.hyperedge_index` /
+       :attr:`~koopman_graph.data.GraphSnapshotSequence.hyperedge_weight`
+   * - Shared normalization
+     - :func:`~koopman_graph.graph_utils.dense_hyperedge_normalized_adjacency`
+       (Zhou ``Ĥ``; isolated nodes → zero rows)
+   * - :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
+       :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
+     - Supported: model ``fit`` / ``predict`` with a matched hypergraph
+       encoder/decoder pair
+   * - :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
+       (``koopman="hypergraph"``)
+     - Supported: discrete hyperedge-coupled advance; ``spectrum`` /
+       eigenvalue regularization require ``hyperedge_index`` (never
+       silently substitute ``K_self``)
+   * - Classical baselines / :class:`~koopman_graph.env.GraphKoopmanEnv` /
+       non-hypergraph encoder/decoder models without a hypergraph operator
+     - **Rejected** (hyperedge incidence would be silently ignored)
 
 Control layout capability matrix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -836,6 +977,18 @@ global spectral-radius certificate). Configure the auxiliary MLP via
 ``auxiliary_hidden_dims`` /
 ``koopman_auxiliary_hidden_dims`` (default ``(64, 64)``).
 
+**Global/local (discrete) state-dependent caveat.**
+:class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
+(``koopman="global_local"``) uses a shared backbone ``K_g`` plus a per-step
+low-rank correction ``K_ℓ(z_{t-w:t})``. ``matrix`` / ``spectral_radius`` /
+model ``spectrum`` report ``K_g`` only; the effective step operator is
+state-dependent and is **not** a single global certificate (same vocabulary
+precedent as continuous ``auxiliary_spectral``). Configure
+``koopman_local_window`` / ``koopman_local_rank`` /
+``koopman_local_hidden_dims`` (defaults ``4`` / ``2`` / ``(32,)``).
+``inverse_advance`` approximates with ``K_g`` only. Online RLS adaptation
+rejects this operator.
+
 Domain-specific names (``K`` / ``L``, ``forward`` / ``inverse_step``,
 ``spectral_radius`` / ``max_real_part``) remain as thin aliases.
 ``spectral_radius`` and ``max_real_part`` always report the **true** spectrum
@@ -847,20 +1000,33 @@ stability section.
 ``KoopmanPropagator`` in :mod:`koopman_graph.graph_utils` is an alias of the
 Protocol and is the single typing surface for losses and adaptation.
 
-**Networked graph extension.**
-:class:`~koopman_graph.operators.GraphKoopmanOperator` also implements the
-contract, but ``matrix`` / ``K`` / ``spectral_radius`` refer to the **per-node
-self-term** ``K_self`` only. Topology-coupled spectral analysis uses the
-explicit helpers :meth:`~koopman_graph.operators.GraphKoopmanOperator.effective_matrix`
-and :meth:`~koopman_graph.operators.GraphKoopmanOperator.spectrum`, which
-assemble ``I_N ⊗ K_self + Â ⊗ K_nbr`` on a supplied ``edge_index`` /
-``edge_weight`` (same symmetric-normalized adjacency semantics as advance).
+**Networked graph / continuous-graph / hypergraph extension.**
+:class:`~koopman_graph.operators.GraphKoopmanOperator`,
+:class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`, and
+:class:`~koopman_graph.operators.HypergraphKoopmanOperator` also implement the
+contract, but ``matrix`` / ``K`` / ``L`` / ``spectral_radius`` /
+``max_real_part`` refer to the **per-node self-term** only. Topology-coupled
+spectral analysis uses the explicit helpers ``effective_matrix`` /
+``effective_generator`` / ``spectrum``:
+
+* Graph — assemble
+  :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
+  on a supplied ``edge_index`` / ``edge_weight`` (same symmetric-normalized
+  adjacency semantics as advance; package row-state latent layout).
+* Continuous graph — assemble ``I_N ⊗ L_self + Â ⊗ L_nbr``; advance applies
+  ``exp(L_eff Δt)``. Dense realization forms an ``N·d`` matrix exponential
+  (prefer modest ``N`` or ``sparsity="block_diagonal"`` for the self-dominated
+  approximation). Checkpoint kind is always ``continuous_graph`` (including
+  when selected via ``koopman="graph"`` + ``dynamics_mode="continuous"``).
+* Hypergraph — assemble ``I_N ⊗ K_self + Ĥ ⊗ K_hedge`` on a supplied
+  ``hyperedge_index`` / ``hyperedge_weight`` (Zhou ``Ĥ`` semantics as advance).
+
 :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum` requires those
-topology arguments when ``koopman="graph"`` and never silently substitutes
-``K_self``.
+topology arguments when ``koopman="graph"``, ``koopman="continuous_graph"``,
+or ``koopman="hypergraph"`` and never silently substitutes the self-term.
 :class:`~koopman_graph.losses.EigenvalueRegularizationLoss` follows the same
-split for graph operators: ``dense`` / ``odo`` hinge on
-``eigvals(effective_matrix)`` with required topology (training averages
+split: ``dense`` / ``odo`` hinge on ``eigvals`` of the topology-coupled
+effective map / generator with required topology (training averages
 pair-target topologies for dynamic sequences); structural modes keep
 factor-level ``bound_metric`` and must not be described as whole-network
 stability guarantees.
@@ -868,10 +1034,58 @@ stability guarantees.
 Bilinear ``inverse_advance`` matches the control capability matrix: global
 ``(C,)`` folds into a shared ``K_self`` override, while per-node ``(N, C)``
 uses node-specific bilinear self blocks plus the same ``Â ⊗ K_nbr`` neighbor
-coupling as forward advance. Inversion is dense in ``N·d`` (suitable for
-modest ``N``) and falls back to a pseudoinverse when the effective map is
-singular; callers should treat large-``N`` or near-singular bilinear
-inverses as numerically limited, not as a sparse/iterative solver API.
+coupling as forward advance.
+
+**Graph / hypergraph operator sparsity (``sparsity``).** Forward advance is
+always the sparse message-passing matvec (pairwise ``Â`` or Zhou ``Ĥ``).
+``inverse_advance`` and serialization differ:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 38 40
+
+   * - ``sparsity``
+     - ``inverse_advance``
+     - Notes
+   * - ``"dense"`` (default)
+     - Exact dense ``N·d`` inverse (pseudoinverse fallback)
+     - Suitable for modest ``N``; ``effective_matrix`` / ``spectrum`` still
+       assemble the dense map
+   * - ``"block_diagonal"``
+     - Approximate per-node ``d×d`` Jacobi inverse
+       (exact when the coupling factor is zero or the topology is empty —
+       ``K_nbr=0`` / no edges for graph; ``K_hedge=0`` / no hyperedges for
+       hypergraph)
+     - For backward-consistency / imputation at scale; **not** an exact
+       whole-network inverse. ``inverse_matrix=`` is rejected. Shared by
+       :class:`~koopman_graph.operators.GraphKoopmanOperator` and
+       :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
+   * - ``"distributed"``
+     - — (rejected)
+     - Planned; not in 0.6.0
+
+The stored checkpoint field is ``config.sparsity`` (format 1). Continuous-graph
+``block_diagonal`` remains the self-dominated advance / inverse shortcut
+documented under that peer (not the Jacobi path above).
+
+**Symmetry-adapted self factors (orbit ties).** Opt-in inductive bias for
+discrete ``koopman="graph"`` / ``"hypergraph"``: nodes in the same orbit
+share a ``K_self`` factor. Neighbor / hyperedge factors
+(``K_nbr`` / ``K_hedge``) stay shared and are **not** orbit-tied.
+Default (symmetry off) keeps today's single shared ``K_self``. Enable via
+factory kwargs ``koopman_orbit_partition=...`` (explicit) or
+``koopman_auto_orbits=True`` (bind from topology on first advance, and
+again at the start of ``fit`` before the optimizer is built so orbit
+``K_self`` parameters are trained; ``koopman_orbit_method="auto"|"exact"``).
+Explicit partitions always win over auto-detection. Hypergraph auto-orbits use the pairwise 2-section of
+``hyperedge_index``. Orbit finding uses ``networkx`` (Weisfeiler–Lehman
+approximate) or optional ``pynauty`` (exact) behind the ``[symmetry]``
+extra; when neither is available, ``node_orbit_partition`` warns and
+returns the identity partition (one orbit per node). Approximate
+automorphisms can mis-tie blocks — treat as an inductive bias, not a
+guarantee of the true automorphism group. Checkpoint field
+``config.symmetry`` is ``None`` or
+``{auto_orbits, orbit_partition, method}`` (format 1).
 
 Dynamics mode and stability-bound vocabulary
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -937,18 +1151,21 @@ when ``koopman`` is omitted.
   backward-consistency training optionally reuses a built-in
   ``dense_inverse_matrix()`` when present; operators without that helper
   still invert via ``inverse_advance`` (``inverse_matrix=None``).
-* **Built-in-only**: checkpoint ``save`` / ``load`` round-trips the three
-  serializable built-in operators —
+* **Built-in-only**: checkpoint ``save`` / ``load`` round-trips all
+  serializable built-in operator kinds —
   :class:`~koopman_graph.operators.KoopmanOperator`,
-  :class:`~koopman_graph.operators.ContinuousKoopmanOperator`, and
-  :class:`~koopman_graph.operators.GraphKoopmanOperator` (including
-  ``koopman_kind``, ``control_mode`` / ``bilinear_rank``, and ``n_delays``
-  factory metadata). RLS
+  :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
+  :class:`~koopman_graph.operators.GraphKoopmanOperator`,
+  :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
+  :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`, and
+  :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`
+  (including ``koopman_kind``, control / bilinear / sparsity / symmetry /
+  global-local factory metadata, and ``n_delays``). RLS
   :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` seed and
   write-back is a **narrower** surface: dense built-in discrete and
-  continuous operators only (not
-  :class:`~koopman_graph.operators.GraphKoopmanOperator`, and not custom
-  injections). Custom injected operators raise on save; reconstruct with
+  continuous operators only (not networked graph / hypergraph /
+  global-local / continuous-graph kinds, and not custom injections).
+  Custom injected operators raise on save; reconstruct with
   ``koopman=...`` after loading encoder/decoder state separately if needed.
 
 Factory and dimension rules:
@@ -995,7 +1212,8 @@ Optional dependencies and result types
 Optional extras
 ~~~~~~~~~~~~~~~
 
-Optional dependencies must **not** break importing ``koopman_graph``. Prefer
+Optional dependencies must **not** break importing ``koopman_graph``
+(``ARCH-050`` — heavy extras stay in declared adapter modules). Prefer
 **fail-at-call** with an ``ImportError`` that names the install extra or
 package:
 
@@ -1004,10 +1222,22 @@ package:
   :class:`~koopman_graph.env.GraphKoopmanEnv` can subclass ``gym.Env`` when
   present. Construction calls ``_require_gymnasium()`` and raises with
   ``pip install koopman-graph[rl]`` guidance when the extra is missing.
-* **Call-site import (e.g. ``h5py`` for METR-LA)** —
+* **Call-site import (``[symmetry]`` / ``networkx``)** —
+  :func:`~koopman_graph.graph_utils.node_orbit_partition` imports
+  ``networkx`` (and optionally ``pynauty``) at call time. Missing extras
+  fall back to the identity partition with a ``UserWarning`` and install
+  guidance (``pip install 'koopman-graph[symmetry]'``). Core imports stay
+  clean without the extra.
+* **Call-site import (``[mpc]`` / ``osqp``)** —
+  :class:`~koopman_graph.mpc.KoopmanMPC` imports ``osqp`` at solve time.
+  Missing extras raise ``ImportError`` with
+  ``pip install 'koopman-graph[mpc]'`` guidance. Core imports stay clean
+  without the extra.
+* **Call-site import (e.g. ``h5py`` for METR-LA / PEMS-BAY)** —
   import inside the function that needs the dependency and re-raise
   ``ImportError`` with install guidance (see
-  :mod:`koopman_graph.datasets.metr_la`).
+  :mod:`koopman_graph.datasets.metr_la` and
+  :mod:`koopman_graph.datasets.pems`).
 
 Do not fail at import of core modules for optional extras.
 
@@ -1111,6 +1341,13 @@ Façade vs functional training ownership
   (``train_one_epoch`` / ``train_windowed_epoch`` / ``eval_one_epoch``), early
   stopping, best-weight tracking, optional checkpoint writes, and history
   assembly. Prefer extending that helper over growing the model class.
+* **Neighbor-subgraph training** — pass
+  :class:`~koopman_graph.data.NeighborWindowSampler` via ``fit(..., sampler=...)``
+  (mutually exclusive with ``window_length``). Training losses (rollout,
+  consistency, graph-operator eigenvalue regularization) use the **sampled**
+  induced topology — document as an approximation for graphs too large to
+  train whole. ``predict`` / ``evaluate`` remain full-graph. Dynamic topology
+  and hyperedge sequences are rejected by the sampler.
 
 Online adaptation and state estimation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1187,8 +1424,11 @@ must call ``predict(data, steps)`` portably.
      - ``Tensor`` or ``Data``
      - Optional ``edge_*``, ``controls``, ``future_topologies``; ``controls``
        required when ``control_dim > 0``
-     - Optional ``delta_t`` in continuous mode; for ``koopman="graph"``,
-       required ``edge_index`` / ``num_nodes`` (optional ``edge_weight``)
+     - Optional ``delta_t`` in continuous mode; for ``koopman="graph"`` or
+       ``koopman="continuous_graph"``, required ``edge_index`` /
+       ``num_nodes`` (optional ``edge_weight``); for ``koopman="hypergraph"``,
+       required ``hyperedge_index`` / ``num_nodes`` (optional
+       ``hyperedge_weight``)
      - :class:`~koopman_graph.training.FitHistory`
    * - :class:`~koopman_graph.baselines.DMDBaseline`
      - ``Data`` only
@@ -1228,10 +1468,14 @@ concrete model classes. Documented call patterns:
   (``delta_t`` is forwarded only when ``spectrum`` accepts it; ignored for
   precomputed :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` values and
   classical baselines)
-* Networked graph models — pass the same ``edge_index`` / ``num_nodes`` /
-  ``edge_weight`` used for advance so
+* Networked graph / continuous-graph models — pass the same ``edge_index`` /
+  ``num_nodes`` / ``edge_weight`` used for advance so
   :func:`~koopman_graph.analysis.resolve_spectrum` builds the effective
-  operator (missing topology raises on ``koopman="graph"``)
+  operator / generator (missing topology raises on ``koopman="graph"`` or
+  ``koopman="continuous_graph"``)
+* Networked hypergraph models — pass the same ``hyperedge_index`` /
+  ``num_nodes`` / ``hyperedge_weight`` used for advance (missing topology
+  raises on ``koopman="hypergraph"``)
 
 :func:`~koopman_graph.analysis.resolve_spectrum` is the shared resolver.
 :func:`~koopman_graph.analysis.decode_mode_shapes` stays hard-typed to
@@ -1255,19 +1499,25 @@ Dataset factory idioms
   :class:`~koopman_graph.data.GraphSnapshotSequence` (synthetic path/ring,
   grid, IEEE 118 voltage/load diffusion). Prefer these classmethods in
   tutorials and application code.
-* **Real telemetry** — ``Benchmark.load_topology`` / ``load_sequence`` (METR-LA)
-  read cached downloaded artifacts. There is no ``generate`` because the
-  time series is observed, not simulated.
+* **Real telemetry** — ``Benchmark.load_topology`` / ``load_sequence``
+  (METR-LA, PEMS-BAY, PEMS03/04/07/08, SocioPatterns primary-school
+  contacts) read cached downloaded artifacts. There is no ``generate``
+  because the time series is observed, not simulated. PEMS and contact-
+  epidemic loaders follow the same cache idiom with fetch-script
+  acquisition and SHA256 verification; FAIR dataset cards live in
+  :doc:`data`. Contact-epidemic upstream data are CC-BY-NC-SA and must
+  not be bundled in the repository.
 
 **Seed defaults.** All simulated ``generate`` methods default ``seed=None``
 (unseeded RNG). Pass an explicit integer for reproducible runs; tutorial
 notebooks and quickstart examples use ``seed=42``.
 
-**Topology payloads.** IEEE 118 and METR-LA ``load_topology`` return a frozen
-:class:`~koopman_graph.datasets.TopologyPayload` (attribute access preferred).
-Mapping-style access (``payload["edge_index"]``) remains supported for existing
-notebooks. On-disk caches stay plain ``dict``; the typed payload is the public
-Python return type.
+**Topology payloads.** IEEE 118, METR-LA, PEMS, and contact-epidemic
+``load_topology`` return a frozen
+:class:`~koopman_graph.datasets.TopologyPayload` (attribute access
+preferred). Mapping-style access (``payload["edge_index"]``) remains supported
+for existing notebooks. On-disk caches stay plain ``dict``; the typed payload
+is the public Python return type.
 
 IEEE 118 also exposes a module-level ``load_topology`` free function used by
 download scripts; prefer ``IEEE118DynamicBenchmark.load_topology``.
@@ -1378,9 +1628,9 @@ Outcomes folded into the first public v0.3.0 cut:
 3. **Optional operator injection** — ``koopman=`` composes a custom
    :class:`~koopman_graph.operators.KoopmanOperatorContract` ``nn.Module``
    with Protocol-complete propagate / spectrum / eigenvalue paths;
-   checkpoints round-trip the three built-in operators while RLS seed /
-   write-back stays on the narrower discrete/continuous surface (see
-   Optional operator injection).
+   checkpoints round-trip all serializable built-in operator kinds while
+   RLS seed / write-back stays on the narrower discrete/continuous surface
+   (see Optional operator injection).
 4. **Classical baseline scaffolding** —
    :class:`~koopman_graph.baselines.ClassicalBaseline` ABC; EDMD stores
    ``reconstruction_matrix`` (not a GNN ``decoder``).
@@ -1407,7 +1657,7 @@ Outcomes folded into the first public v0.3.0 cut:
 * Layout policy plus ``training/``, ``data/``, ``operators/``, ``nn/``,
   ``analysis/``, ``baselines/``, ``losses/``, and ``model/`` capability
   packages; former deep-import shims removed; thin root ``__all__`` retaining the
-  twenty core-workflow names while baselines, primary losses, training
+  twenty-five core-workflow names while baselines, primary losses, training
   knobs, adaptation/env, temporal-split helpers, forecast-eval entrypoints,
   and metrics / analysis / data / adaptation / observables secondaries
   import from capability modules.
@@ -1442,13 +1692,18 @@ format-2 checkpoints are not loadable:
 Checkpoint schema baseline
 --------------------------
 
-``FORMAT_VERSION`` 1 is the current checkpoint schema. New saves write
-``format_version: 1`` with the full architecture config (dynamics mode,
-control / bilinear metadata, hybrid physics, delays, and built-in operator
-kinds). Loaders accept only supported versions (currently ``{1}``). Future
-incompatible changes bump ``FORMAT_VERSION`` and add an explicit migration
-branch in :mod:`koopman_graph.serialization`; they must not silently accept
-retired lineages.
+``FORMAT_VERSION`` 1 is the current checkpoint schema through the 0.x beta.
+New saves write ``format_version: 1`` with the full architecture config
+(dynamics mode, control / bilinear metadata, hybrid physics, delays,
+built-in operator kinds including ``hypergraph`` / ``global_local`` /
+``continuous_graph``, encoder/decoder type strings including ``hyper_enc`` /
+``hyper_dec``, keys ``sparsity`` / ``learn_topology`` /
+``topology_embedding_dim`` / ``symmetry``, and global/local config keys
+``local_window`` / ``local_rank`` / ``local_hidden_dims``). Loaders accept
+only ``{1}``. Incomplete or previously published incompatible format-1
+payloads are **deprecated** and rejected with a clear re-save error (no
+silent migration). Other ``format_version`` values remain unsupported.
+Formal multi-version checkpoint tracking and migration branches begin at 1.0.
 
 v0.5.0 capability architecture
 ------------------------------
@@ -1471,8 +1726,9 @@ sklearn-like façade, functional helpers, string-mode configuration). Do
      - Power-user
      - Compose :class:`~koopman_graph.model.GraphKoopmanModel`; reuse
        :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout`;
-       topology-required spectrum / regularization for ``koopman="graph"``;
-       format-1 checkpoints
+       topology-required spectrum / regularization for ``koopman="graph"`` /
+       ``koopman="continuous_graph"`` / ``koopman="hypergraph"``; format-1
+       checkpoints
    * - :mod:`koopman_graph.operators` (``auxiliary_spectral`` on continuous)
      - Power-user (string mode)
      - State-dependent ``generator_at(z)`` vocabulary distinct from fixed
@@ -1510,19 +1766,37 @@ sklearn-like façade, functional helpers, string-mode configuration). Do
      - Power-user
      - Optional path after ensembles; honest naming vs DPK / K²VAE; compose
        rather than subclass the primary model
+   * - :mod:`koopman_graph.uq` (conformal peer)
+     - Power-user
+     - :class:`~koopman_graph.uq.ConformalKoopmanUQ` composes a fitted
+       model; split + adaptive (ACI) calibration; returns shared
+       :class:`~koopman_graph.uq.PredictionInterval`; calibration state
+       is wrapper-local (not model ``FORMAT_VERSION``); marginal coverage
+       ``≥ 1 − α`` under exchangeability — approximate under temporal
+       dependence; prefer ACI under drift
    * - :mod:`koopman_graph.hierarchical` (capability module/package)
      - Power-user
      - Compose the primary model; spectrum / regularization use **pooled**
        topology; global and per-node controls retain documented semantics
        through pool/unpool; format-1 serialization
+   * - :mod:`koopman_graph.mpc` (capability package)
+     - Power-user
+     - :class:`~koopman_graph.mpc.KoopmanMPC` composes a fitted model;
+       additive discrete per-node operators only (bilinear / networked /
+       continuous rejected); plant state is mean latent; OSQP behind
+       ``[mpc]``; output constraints via local decoder Jacobian (local
+       guarantee); optional ``constraint_tightening=`` with calibrated
+       :class:`~koopman_graph.uq.ConformalKoopmanUQ` shrinks output boxes
+       only (inputs exact; calibrated margins, not a closed-loop
+       guarantee); off root ``__all__``
 
 **UQ and optional uncertainty**
 
-Reserve :mod:`koopman_graph.uq` for ensemble and probabilistic peers.
-Wrappers compose :class:`~koopman_graph.model.GraphKoopmanModel` and must not
-duplicate rollout implementation or invent a fifth architectural style.
-Keep UQ classes off root ``__all__`` unless an explicit public API decision
-promotes them.
+:mod:`koopman_graph.uq` hosts the landed ensemble, latent-Gaussian, and
+conformal peers. Wrappers compose :class:`~koopman_graph.model.GraphKoopmanModel`
+and must not duplicate rollout implementation or invent a fifth architectural
+style. Keep UQ classes off root ``__all__`` unless an explicit public API
+decision promotes them.
 
 Shared interval helpers and the public
 :class:`~koopman_graph.uq.PredictionInterval` result type live in
@@ -1530,10 +1804,13 @@ Shared interval helpers and the public
 :mod:`koopman_graph.uq`
 (:class:`~koopman_graph.uq.PredictionInterval`,
 :func:`~koopman_graph.uq.quantile_levels`,
-:func:`~koopman_graph.uq.snapshot_with_features`). Ensemble and
-latent-Gaussian peers must import those non-private symbols — never each
-other's leading-``_`` helpers and never each other's copy of the shared
-interval type. ``PredictionInterval.mean`` / ``.lower`` / ``.upper`` are
+:func:`~koopman_graph.uq.snapshot_with_features`). Ensemble,
+latent-Gaussian, and conformal peers must import those non-private symbols
+— never each other's leading-``_`` helpers and never each other's copy of
+the shared interval type.
+:class:`~koopman_graph.uq.ConformalKoopmanUQ` documents frequentist
+marginal coverage under exchangeability and recommends adaptive conformal
+inference (ACI) when residuals drift. ``PredictionInterval.mean`` / ``.lower`` / ``.upper`` are
 immutable ``tuple[Data, ...]`` sequences (borrowed ``Data`` mutability as
 for :class:`~koopman_graph.data.GraphSnapshotSequence`). Latent-Gaussian
 forecast scheduling reuses
@@ -1548,6 +1825,24 @@ those packing helpers from ``model.inference``. Closed-form Gaussian covariance
 updates may remain a distinct moment loop and need not call
 :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` when
 per-step decoding is inappropriate.
+
+**Wrapper-local persistence (UQ / hierarchy)**
+
+Wrapper state is **not** part of model ``FORMAT_VERSION`` checkpoints. Three
+intentional patterns coexist:
+
+* **Ensemble** — :meth:`~koopman_graph.uq.EnsembleGraphKoopmanModel.save` /
+  ``load`` write a directory with per-member ``.pt`` files plus
+  ``ensemble_manifest.json``.
+* **Hierarchical** — :meth:`~koopman_graph.hierarchical.HierarchicalGraphKoopmanModel.save`
+  / ``load`` write a directory with the wrapped model checkpoint, wrapper
+  weights, and ``hierarchical_manifest.json``.
+* **Conformal** — :meth:`~koopman_graph.uq.ConformalKoopmanUQ.save_calibration`
+  / ``load_calibration`` persist calibration quantiles to a single file
+  (wrapper-local; the underlying model is saved separately via
+  :meth:`~koopman_graph.model.GraphKoopmanModel.save`).
+
+Do not unify these into model checkpoints without an explicit schema decision.
 
 **Physics residual training**
 
@@ -1580,9 +1875,27 @@ would break existing classical and neural implementers).
 
 **Hierarchy**
 
-Hierarchical forecasting lives under a capability module (suggested
-``koopman_graph.hierarchical``), composing the primary workflow class.
-Keep the wrapper off root ``__all__`` by default.
+Hierarchical forecasting lives under
+:mod:`koopman_graph.hierarchical`, composing the primary workflow class.
+Keep the wrapper off root ``__all__`` by default. Directory + JSON-manifest
+persistence is documented with the other wrapper-local patterns under
+**Wrapper-local persistence (UQ / hierarchy)** above.
+
+**Koopman-MPC**
+
+:mod:`koopman_graph.mpc` provides receding-horizon control on additive
+latent dynamics (Korda & Mezić, Automatica 2018). The façade composes
+:class:`~koopman_graph.model.GraphKoopmanModel` and must not subclass it
+or invent a parallel plant API. In 0.6.0 the QP plant is the mean latent
+over nodes with a global control; output maps use a finite-difference
+decoder Jacobian and therefore give only local constraint guarantees.
+Keep ``KoopmanMPC`` off root ``__all__``. Optional
+``constraint_tightening=`` accepts a calibrated
+:class:`~koopman_graph.uq.ConformalKoopmanUQ` on the same model and
+shrinks output boxes by per-horizon half-widths (stage ``0`` unshrunk;
+stages ``1..H`` use ``quantiles[h-1]``; input bounds unchanged). Margins
+inherit conformal exchangeability caveats plus local linearization — they
+are statistically motivated, not a formal closed-loop guarantee.
 
 **Current package boundaries**
 
@@ -1594,6 +1907,109 @@ keeping a single :class:`~koopman_graph.model.GraphKoopmanModel` workflow
 surface.
 Keep :mod:`koopman_graph.observables` flat unless a later audit shows
 multi-concern or peer-growth criteria.
+
+v0.6.0 capability architecture
+------------------------------
+
+v0.6.0 extends the four styles (composition, sklearn-like façade, functional
+helpers, string-mode configuration) with higher-order topology, adaptive
+edges, non-stationary / continuous networked operators, symmetry-adapted
+orbit ties, analysis diagnostics (SINDy / spectral clustering / topology
+estimation), conformal UQ, and Koopman-MPC. Do **not** introduce a parallel
+model hierarchy or silently expand root ``__all__`` beyond the documented
+twenty-five core-workflow names (hypergraph encoder/decoder and the three
+new operator classes are the 0.6.0 root additions).
+
+**Shipped capability list**
+
+* Hypergraph encode / decode / operator
+  (:class:`~koopman_graph.nn.HypergraphEncoder`,
+  :class:`~koopman_graph.nn.HypergraphDecoder`,
+  :class:`~koopman_graph.operators.HypergraphKoopmanOperator`;
+  ``koopman="hypergraph"``)
+* Self-adaptive pairwise topology
+  (:class:`~koopman_graph.nn.AdaptiveAdjacency`;
+  ``learn_topology="self_adaptive"``)
+* Global/local discrete operator
+  (:class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`;
+  ``koopman="global_local"``)
+* Continuous networked generator
+  (:class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`;
+  ``koopman="graph"`` + ``dynamics_mode="continuous"`` or
+  ``koopman="continuous_graph"``; dense ``N·d`` matrix-exp cost caveat)
+* Symmetry-adapted orbit-tied ``K_self``
+  (``koopman_auto_orbits`` / ``koopman_orbit_partition``;
+  :mod:`koopman_graph.graph_utils.symmetry`; ``[symmetry]`` extra)
+* Analysis peers: :func:`~koopman_graph.analysis.identify_sparse_dynamics`,
+  :func:`~koopman_graph.analysis.koopman_spectral_clustering`,
+  :func:`~koopman_graph.analysis.estimate_coupling_from_snapshots`
+* :class:`~koopman_graph.uq.ConformalKoopmanUQ` (split + ACI)
+* :class:`~koopman_graph.mpc.KoopmanMPC` (``[mpc]`` / OSQP; optional conformal
+  tightening)
+* Datasets: PEMS variants and SocioPatterns contact-epidemic FAIR cards
+* Tutorials ``27``–``36`` covering the surfaces above
+
+**Capability and API-tier map (0.6.0 peers)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - Capability home
+     - API tier
+     - Contracts to preserve
+   * - :mod:`koopman_graph.nn.hypergraph`
+     - Public root façade
+     - Incidence ``hyperedge_index``; root
+       ``HypergraphEncoder`` / ``HypergraphDecoder``; format-1 type strings
+       ``hyper_enc`` / ``hyper_dec``
+   * - :mod:`koopman_graph.nn.adaptive_topology`
+     - Power-user (``nn``)
+     - ``learn_topology="self_adaptive"``; off root ``__all__``; pairwise
+       only (not hypergraph incidence learning)
+   * - :mod:`koopman_graph.operators.hypergraph`
+     - Public root façade
+     - ``koopman="hypergraph"``; effective spectrum requires incidence;
+       ``sparsity="dense"|"block_diagonal"`` (Jacobi approx inverse);
+       RLS rejected
+   * - :mod:`koopman_graph.operators.global_local`
+     - Public root façade
+     - Discrete only; ``matrix`` / ``spectrum`` report ``K_g``; RLS rejected;
+       window / rank / hidden-dims factory keys
+   * - :mod:`koopman_graph.operators.continuous_graph`
+     - Public root façade
+     - Checkpoint kind always ``continuous_graph``; dense ``N·d`` exp or
+       ``sparsity="block_diagonal"`` self-dominated approx
+   * - :mod:`koopman_graph.graph_utils.symmetry`
+     - Power-user
+     - ``[symmetry]`` (networkx) for ``method="auto"``; identity fallback
+       warns without backends; approximate orbits are an inductive bias
+   * - :mod:`koopman_graph.analysis` (SINDy / clustering / topology estimation)
+     - Power-user
+     - Learned-latent caveat for SINDy; ARI / operator-quality caveats for
+       clustering; coupling estimates are diagnostics
+   * - :mod:`koopman_graph.uq` (conformal)
+     - Power-user
+     - Same contracts as the v0.5.0 conformal row; wrapper-local calibration
+   * - :mod:`koopman_graph.mpc`
+     - Power-user
+     - Same contracts as the v0.5.0 MPC row; ``[mpc]`` extra
+
+**Optional extras inventory**
+
+* ``[mpc]`` — OSQP for :class:`~koopman_graph.mpc.KoopmanMPC`
+* ``[symmetry]`` — ``networkx`` for approximate node-orbit partitions
+* ``[rl]`` — Gymnasium / Stable-Baselines3 (unchanged)
+* ``[dev]`` / ``[docs]`` — tests and Sphinx (unchanged)
+
+**Checkpoint note (format-1 baseline)**
+
+0.6.0 continues the format-1 schema (see Checkpoint schema baseline above).
+Previously published incompatible format-1 payloads and historical format-2
+checkpoints remain rejected with a clear re-save error. New 0.6.0 fields
+(``symmetry``, ``learn_topology``, hypergraph / global-local /
+continuous-graph kinds, local-window keys) round-trip under format 1; loaders
+still accept only ``{1}``.
 
 Related documentation
 ---------------------

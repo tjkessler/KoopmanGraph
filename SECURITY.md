@@ -42,3 +42,17 @@ release notes mention.
 
 This channel is the same maintainer contact used for
 [Code of Conduct](CODE_OF_CONDUCT.md) enforcement.
+
+## Loading checkpoints and dataset caches
+
+Model checkpoints, conformal calibration files, hierarchical wrappers, and
+on-disk teaching caches (``*.pt``) are loaded with PyTorch
+``torch.load(..., weights_only=False)``. That API deserializes Python objects
+and can execute code from a malicious file.
+
+**Trust boundary:** only load checkpoints and cache artifacts that you created
+yourself or obtained from a source you trust. Do not load untrusted ``.pt`` /
+checkpoint files shared over the network or from unknown mirrors. Prefer
+rebuilding teaching caches with the repository download scripts (SHA256-verified
+where digests are pinned) rather than accepting third-party ``traffic.pt`` /
+``contact.pt`` blobs.

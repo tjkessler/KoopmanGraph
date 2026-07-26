@@ -88,6 +88,19 @@ To build documentation locally:
    pip install -e ".[docs]"
    cd docs && make html
 
+Optional extras for symmetry-adapted operators (node-orbit partitions via
+``networkx``; exact automorphisms need a separate ``pynauty`` install):
+
+.. code-block:: bash
+
+   pip install -e ".[symmetry]"
+
+Optional extras for Koopman model-predictive control (OSQP QP solver):
+
+.. code-block:: bash
+
+   pip install -e ".[mpc]"
+
 uv (project sync)
 ~~~~~~~~~~~~~~~~~
 
@@ -103,11 +116,13 @@ need a non-default accelerator; otherwise sync is enough for CPU development:
    uv sync --extra dev
    uv run pytest
 
-Documentation extras:
+Documentation and optional capability extras (``uv.lock`` includes ``mpc`` /
+``symmetry`` for frozen sync):
 
 .. code-block:: bash
 
    uv sync --extra docs
+   uv sync --extra mpc --extra symmetry
    cd docs && make html
 
 pip-compatible uv installs (after creating a venv) mirror the pip commands:
@@ -136,8 +151,8 @@ Pin a specific release when reproducing results:
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.5.0
-   # or: uv pip install koopman-graph==0.5.0
+   pip install koopman-graph==0.6.0
+   # or: uv pip install koopman-graph==0.6.0
 
 Releases are published automatically when a maintainer creates a GitHub Release
 (see ``CONTRIBUTING.md`` in the repository). For the latest in-tree development

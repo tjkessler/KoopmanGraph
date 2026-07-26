@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 from koopman_graph.data import (
     GraphSnapshotSequence,
     RolloutStartIndices,
-    WindowSampler,
+    WindowLikeSampler,
     resolve_rollout_start_indices,
 )
 from koopman_graph.protocols import TrainableKoopmanModel
@@ -39,6 +39,7 @@ def train_one_epoch(
 
     Parameters
     ----------
+
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
     sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
@@ -54,12 +55,14 @@ def train_one_epoch(
         Number of rollout steps when ``loss_weights.rollout`` is non-zero.
     rollout_start_indices : sequence of int or None, optional
         Rollout origin indices for this epoch.
+    extra_losses : ExtraLosses | None
+        See the function signature / summary for ``extra_losses``.
 
     Returns
     -------
+
     TrainingLossBreakdown
-        Mean loss breakdown across trajectories.
-    """
+        Mean loss breakdown across trajectories."""
     if isinstance(sequences, GraphSnapshotSequence):
         trajectory_list = [sequences]
     else:
@@ -88,7 +91,7 @@ def train_one_epoch(
 
 def train_windowed_epoch(
     model: TrainableKoopmanModel,
-    sampler: WindowSampler,
+    sampler: WindowLikeSampler,
     optimizer: Optimizer,
     loss_weights: LossWeights,
     *,
@@ -105,12 +108,16 @@ def train_windowed_epoch(
     Each batch averages its window losses before one optimizer step. The
     returned breakdown is weighted by the number of windows in each batch, so
     a smaller final batch does not receive disproportionate weight.
+    :class:`~koopman_graph.data.NeighborWindowSampler` windows carry induced
+    subgraph topology; losses (including graph-operator eigenvalue
+    regularization) are therefore subgraph approximations.
 
     Parameters
     ----------
+
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sampler : WindowSampler
+    sampler : WindowSampler or NeighborWindowSampler
         Window sampler defining trajectories, window size, and batch schedule.
     optimizer : Optimizer
         Optimizer updated once per yielded batch.
@@ -128,12 +135,14 @@ def train_windowed_epoch(
         Number of randomly sampled rollout origins.
     rollout_start_seed : int or None, optional
         Base seed for rollout-origin sampling.
+    extra_losses : ExtraLosses | None
+        See the function signature / summary for ``extra_losses``.
 
     Returns
     -------
+
     TrainingLossBreakdown
-        Window-weighted mean loss breakdown for the epoch.
-    """
+        Window-weighted mean loss breakdown for the epoch."""
     horizon = sampler.window_length - 1 if rollout_horizon is None else rollout_horizon
     reference_window = sampler.sequences[0].slice(0, sampler.window_length)
     starts = None
@@ -212,6 +221,7 @@ def eval_one_epoch(
 
     Parameters
     ----------
+
     model : TrainableKoopmanModel
         Model to evaluate.
     sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
@@ -222,12 +232,14 @@ def eval_one_epoch(
         Number of rollout steps when ``loss_weights.rollout`` is non-zero.
     rollout_start_indices : sequence of int or None, optional
         Rollout origin indices for this epoch.
+    extra_losses : ExtraLosses | None
+        See the function signature / summary for ``extra_losses``.
 
     Returns
     -------
+
     TrainingLossBreakdown
-        Mean loss breakdown across trajectories.
-    """
+        Mean loss breakdown across trajectories."""
     if isinstance(sequences, GraphSnapshotSequence):
         trajectory_list = [sequences]
     else:

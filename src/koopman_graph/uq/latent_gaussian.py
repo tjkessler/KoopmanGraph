@@ -170,10 +170,24 @@ class LatentGaussianKoopmanUQ:
     ) -> None:
         """Validate noise scales and store the composed model.
 
+        Parameters
+        ----------
+
+        model : GraphKoopmanModel
+            See the function signature / summary for ``model``.
+        process_noise : float
+            See the function signature / summary for ``process_noise``.
+        observation_noise : float
+            See the function signature / summary for ``observation_noise``.
+        initial_covariance : float
+            See the function signature / summary for ``initial_covariance``.
+        n_samples : int
+            See the function signature / summary for ``n_samples``.
+
         Notes
         -----
-        Constructor parameters are documented on the class.
-        """
+
+        Constructor parameters are documented on the class."""
         if process_noise <= 0.0:
             msg = f"process_noise must be positive, got {process_noise}"
             raise ValueError(msg)
@@ -272,11 +286,31 @@ class LatentGaussianKoopmanUQ:
     ) -> list[Data]:
         """Decode the latent-mean forecast.
 
+        Parameters
+        ----------
+
+        initial_graph : Tensor | Data
+            See the function signature / summary for ``initial_graph``.
+        steps : int
+            See the function signature / summary for ``steps``.
+        edge_index : Tensor | None
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        controls : Sequence[Tensor] | None
+            See the function signature / summary for ``controls``.
+        future_topologies : Sequence[Data] | None
+            See the function signature / summary for ``future_topologies``.
+        history : Sequence[Data] | None
+            See the function signature / summary for ``history``.
+        observations : Sequence[Data] | None
+            See the function signature / summary for ``observations``.
+
         Returns
         -------
+
         list of Data
-            Mean forecast snapshots using the model's topology contract.
-        """
+            Mean forecast snapshots using the model's topology contract."""
         interval = self.predict_interval(
             initial_graph,
             steps,
@@ -432,11 +466,31 @@ class LatentGaussianKoopmanUQ:
     ) -> LatentGaussianForecast:
         """Propagate latent moments while the caller manages evaluation mode.
 
+        Parameters
+        ----------
+
+        initial_graph : Tensor | Data
+            See the function signature / summary for ``initial_graph``.
+        steps : int
+            See the function signature / summary for ``steps``.
+        edge_index : Tensor | None
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        controls : Sequence[Tensor] | None
+            See the function signature / summary for ``controls``.
+        future_topologies : Sequence[Data] | None
+            See the function signature / summary for ``future_topologies``.
+        history : Sequence[Data] | None
+            See the function signature / summary for ``history``.
+        observations : Sequence[Data] | None
+            See the function signature / summary for ``observations``.
+
         Returns
         -------
+
         LatentGaussianForecast
-            Per-step latent means and covariances.
-        """
+            Per-step latent means and covariances."""
         device = next(self.model.parameters()).device
         dtype = next(self.model.parameters()).dtype
 
@@ -508,11 +562,29 @@ class LatentGaussianKoopmanUQ:
     ) -> tuple[Tensor, Tensor]:
         """Build transition and additive control bias on flattened state.
 
+        Parameters
+        ----------
+
+        n_nodes : int
+            See the function signature / summary for ``n_nodes``.
+        edge_index : Tensor
+            See the function signature / summary for ``edge_index``.
+        edge_weight : Tensor | None
+            See the function signature / summary for ``edge_weight``.
+        control : Tensor | None
+            See the function signature / summary for ``control``.
+        default_delta_t : float | Tensor
+            See the function signature / summary for ``default_delta_t``.
+        device : torch.device
+            See the function signature / summary for ``device``.
+        dtype : torch.dtype
+            See the function signature / summary for ``dtype``.
+
         Returns
         -------
+
         tuple of Tensor
-            Dense state transition and flattened additive bias.
-        """
+            Dense state transition and flattened additive bias."""
         koopman = self.model.koopman
         d = self.model.latent_dim
         state_dim = n_nodes * d
@@ -565,11 +637,25 @@ class LatentGaussianKoopmanUQ:
     ) -> tuple[Tensor, Tensor]:
         """Apply a Kalman update using an encoded latent measurement.
 
+        Parameters
+        ----------
+
+        mean : Tensor
+            See the function signature / summary for ``mean``.
+        cov : Tensor
+            See the function signature / summary for ``cov``.
+        observation : Data
+            See the function signature / summary for ``observation``.
+        device : torch.device
+            See the function signature / summary for ``device``.
+        dtype : torch.dtype
+            See the function signature / summary for ``dtype``.
+
         Returns
         -------
+
         tuple of Tensor
-            Updated latent mean and covariance.
-        """
+            Updated latent mean and covariance."""
         with torch.no_grad():
             z_meas = self.model.encode(observation).to(device=device, dtype=dtype)
         y = z_meas.reshape(-1)

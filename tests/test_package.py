@@ -16,6 +16,7 @@ _VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
 
 _RETAINED_ROOT = frozenset(
     {
+        "ContinuousGraphKoopmanOperator",
         "ContinuousKoopmanOperator",
         "DelayEmbeddingEncoder",
         "DiffConvDecoder",
@@ -24,11 +25,15 @@ _RETAINED_ROOT = frozenset(
         "GATEncoder",
         "GNNDecoder",
         "GNNEncoder",
+        "GlobalLocalKoopmanOperator",
         "GraphKoopmanModel",
         "GraphKoopmanOperator",
         "GraphSnapshotSequence",
         "GraphTransformerDecoder",
         "GraphTransformerEncoder",
+        "HypergraphDecoder",
+        "HypergraphEncoder",
+        "HypergraphKoopmanOperator",
         "KoopmanOperator",
         "KoopmanSpectrum",
         "MultiTrajectory",
@@ -288,6 +293,7 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
         "KoopmanObserver",
         "RecursiveKoopmanAdapter",
         "TemporalSplit",
+        "NeighborWindowSampler",
         "WindowSampler",
         "as_multi_trajectory",
         "graph_laplacian_features",
@@ -305,6 +311,7 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
         RecursiveKoopmanAdapter,
     )
     from koopman_graph.data import (
+        NeighborWindowSampler,
         TemporalSplit,
         WindowSampler,
         as_multi_trajectory,
@@ -318,6 +325,7 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
     assert KoopmanObserver is not None
     assert RecursiveKoopmanAdapter is not None
     assert TemporalSplit is not None
+    assert NeighborWindowSampler is not None
     assert WindowSampler is not None
     assert callable(as_multi_trajectory)
     assert callable(temporal_split)

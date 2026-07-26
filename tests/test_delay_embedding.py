@@ -46,6 +46,7 @@ def _make_sequence(
 
 
 def test_stack_delay_features_pads_and_masks_history() -> None:
+    """Delay / Hankel window stacks $x_{t-d:t}$ with zero-pad history mask."""
     sequence = _make_sequence(num_timesteps=5, in_channels=2)
     x_window, _edge_index, _weight, history_mask = stack_delay_features(
         sequence,
@@ -339,3 +340,211 @@ def test_delay_encoder_forward_paths_and_errors() -> None:
         encoder(torch.randn(4, 5), edge_index)
     with pytest.raises(ValueError, match="expected delay window"):
         encoder(torch.randn(4), edge_index)
+
+
+def test_encode_features_delay_window_validation() -> None:
+    """Delay-window tensors require topology and reject raw physics lifting."""
+    from koopman_graph.model.encoding import encode_features
+    from koopman_graph.observables import graph_laplacian_features
+
+    edge_index = _path_edge_index(4)
+    x_window = torch.randn(3, 4, 2)
+
+    def encoder(
+        x: torch.Tensor,
+        ei: torch.Tensor | None,
+        ew: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del ew
+        assert ei is not None
+        return x.new_zeros(x.shape[1], 4)
+
+    with pytest.raises(ValueError, match="edge_index is required"):
+        encode_features(
+            encoder,
+            x_window,
+            physics_position="prepend",
+        )
+    with pytest.raises(ValueError, match="physics-informed observables"):
+        encode_features(
+            encoder,
+            x_window,
+            edge_index=edge_index,
+            physics_lifting_fn=graph_laplacian_features,
+            physics_dim=2,
+            physics_position="prepend",
+        )
+
+    gnn_only = encode_features(
+        encoder,
+        x_window,
+        edge_index=edge_index,
+        physics_position="prepend",
+    )
+    assert gnn_only.shape == (4, 4)
+
+
+def test_encode_features_prefer_explicit_tensor_without_physics() -> None:
+    """Explicit topology on raw tensors skips physics concatenation."""
+    from koopman_graph.model.encoding import encode_features
+
+    features = torch.randn(4, 2)
+    override_edges = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
+
+    def encoder(
+        x: torch.Tensor,
+        ei: torch.Tensor | None,
+        ew: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del ew
+        assert ei is not None
+        assert ei.shape == override_edges.shape
+        return x.new_ones(x.shape[0], 3)
+
+    latent = encode_features(
+        encoder,
+        features,
+        edge_index=override_edges,
+        prefer_explicit_topology=True,
+        physics_position="prepend",
+    )
+    assert latent.shape == (4, 3)
+
+
+def test_encode_rollout_origin_delay_and_single_snapshot() -> None:
+    """Rollout origin builds delay windows or encodes a single snapshot."""
+    from koopman_graph.model.encoding import encode_rollout_origin
+
+    sequence = _make_sequence(num_timesteps=4, in_channels=2)
+    base = GNNEncoder(in_channels=6, hidden_channels=8, latent_dim=4)
+    delay_encoder = DelayEmbeddingEncoder(base, n_delays=3)
+
+    def encode(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_weight
+        if isinstance(x_or_data, Data):
+            return delay_encoder(x_or_data.x, x_or_data.edge_index)
+        return delay_encoder(x_or_data, edge_index)
+
+    def encode_single(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_index, edge_weight
+        if isinstance(x_or_data, Data):
+            num_nodes = int(x_or_data.num_nodes)
+            return torch.ones(num_nodes, 4)
+        return torch.ones(x_or_data.shape[0], 4)
+
+    z, edge_index, edge_weight = encode_rollout_origin(
+        encode,
+        n_delays=3,
+        x_or_data=sequence[2],
+        history=list(sequence[:2]),
+    )
+    assert z.shape == (4, 4)
+    assert edge_index.shape == sequence[0].edge_index.shape
+    assert edge_weight is None
+
+    z_single, edge_resolved, weight_resolved = encode_rollout_origin(
+        encode_single,
+        n_delays=1,
+        x_or_data=sequence[2],
+    )
+    assert z_single.shape == (4, 4)
+    assert torch.equal(edge_resolved, sequence[2].edge_index)
+    assert weight_resolved is None
+
+
+def test_encode_at_index_single_delay_masks_and_no_physics_delays() -> None:
+    """Single-delay masks observations; multi-delay skips physics when disabled."""
+    from koopman_graph.model.encoding import encode_at_index
+
+    masks = torch.ones(5, 4, dtype=torch.bool)
+    masks[2, 0] = False
+    sequence = _make_sequence(
+        num_timesteps=5,
+        in_channels=2,
+        observation_masks=masks,
+    )
+    base = GNNEncoder(in_channels=6, hidden_channels=8, latent_dim=4)
+    delay_encoder = DelayEmbeddingEncoder(base, n_delays=3)
+
+    def encode_single(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_index, edge_weight
+        if isinstance(x_or_data, Data):
+            num_nodes = int(x_or_data.num_nodes)
+            return torch.ones(num_nodes, 4)
+        return torch.ones(x_or_data.shape[0], 4)
+
+    def encode_window(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_weight
+        if isinstance(x_or_data, Data):
+            return delay_encoder(x_or_data.x, x_or_data.edge_index)
+        return delay_encoder(x_or_data, edge_index)
+
+    masked = encode_at_index(
+        delay_encoder,
+        encode_single,
+        sequence,
+        index=2,
+        n_delays=1,
+        zero_unobserved=True,
+        physics_position="prepend",
+    )
+    assert masked.shape == (4, 4)
+
+    unmasked = encode_at_index(
+        delay_encoder,
+        encode_window,
+        sequence,
+        index=2,
+        n_delays=3,
+        physics_lifting_fn=None,
+        physics_position="prepend",
+    )
+    assert unmasked.shape == (4, 4)
+
+
+def test_encode_at_index_hybrid_physics_with_delays() -> None:
+    """``encode_at_index`` prepends physics on the newest delay snapshot."""
+    from koopman_graph.model.encoding import encode_at_index
+    from koopman_graph.observables import graph_laplacian_features
+
+    sequence = _make_sequence(num_timesteps=5, in_channels=2)
+    base = GNNEncoder(in_channels=6, hidden_channels=8, latent_dim=4)
+    delay_encoder = DelayEmbeddingEncoder(base, n_delays=3)
+
+    def encode(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_weight
+        if isinstance(x_or_data, Data):
+            return delay_encoder(x_or_data.x, x_or_data.edge_index)
+        return delay_encoder(x_or_data, edge_index)
+
+    latent = encode_at_index(
+        delay_encoder,
+        encode,
+        sequence,
+        index=2,
+        n_delays=3,
+        physics_lifting_fn=graph_laplacian_features,
+        physics_dim=2,
+        physics_position="prepend",
+    )
+    assert latent.shape == (4, 6)

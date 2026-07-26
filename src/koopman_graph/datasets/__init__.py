@@ -45,6 +45,12 @@ IEEE118DynamicBenchmark
 MetrLaTrafficBenchmark
     METR-LA traffic-speed sensor graph with cached speed snapshots
     (``load_topology`` / ``load_sequence``).
+PemsBayTrafficBenchmark
+    PEMS-BAY traffic-speed sensor graph with cached speed snapshots
+    (``load_topology`` / ``load_sequence``; fetch-script + SHA256).
+PemsTrafficBenchmark
+    PEMS03/04/07/08 traffic-flow graphs with cached flow snapshots
+    (``variant=``; ``load_topology`` / ``load_sequence``; fetch-script + SHA256).
 EpidemicNetworkBenchmark
     Networked SIR epidemic on ring / small-world / custom contact graphs.
 Lorenz96GraphBenchmark
@@ -54,8 +60,13 @@ KuramotoSivashinskyBenchmark
 CylinderWakeBenchmark
     Cached Hopf/Stuart–Landau cylinder-wake teaching surrogate
     (``load_topology`` / ``load_sequence``).
+ContactEpidemicBenchmark
+    SocioPatterns primary-school face-to-face contacts with cached
+    intensity snapshots (``load_topology`` / ``load_sequence``; fetch-script
+    + SHA256; CC-BY-NC-SA — do not bundle).
 """
 
+from koopman_graph.datasets.contact_epidemic import ContactEpidemicBenchmark
 from koopman_graph.datasets.cylinder_wake import CylinderWakeBenchmark
 from koopman_graph.datasets.epidemic import EpidemicNetworkBenchmark
 from koopman_graph.datasets.grid import (
@@ -66,11 +77,13 @@ from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
 from koopman_graph.datasets.kuramoto_sivashinsky import KuramotoSivashinskyBenchmark
 from koopman_graph.datasets.lorenz96 import Lorenz96GraphBenchmark
 from koopman_graph.datasets.metr_la import MetrLaTrafficBenchmark
+from koopman_graph.datasets.pems import PemsBayTrafficBenchmark, PemsTrafficBenchmark
 from koopman_graph.datasets.synthetic import SyntheticDynamicGraphBenchmark
 from koopman_graph.datasets.topology import TopologyPayload
 
 __all__ = [
     "AnisotropicAdvectionGridBenchmark",
+    "ContactEpidemicBenchmark",
     "CylinderWakeBenchmark",
     "EpidemicNetworkBenchmark",
     "GridDynamicGraphBenchmark",
@@ -78,6 +91,8 @@ __all__ = [
     "KuramotoSivashinskyBenchmark",
     "Lorenz96GraphBenchmark",
     "MetrLaTrafficBenchmark",
+    "PemsBayTrafficBenchmark",
+    "PemsTrafficBenchmark",
     "SyntheticDynamicGraphBenchmark",
     "TopologyPayload",
 ]

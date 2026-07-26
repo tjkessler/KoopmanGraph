@@ -10,14 +10,12 @@ Owns Hankel-style stacking / flattening and observation-mask zeroing used by
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-if TYPE_CHECKING:
-    from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.data.sequence_types import SnapshotSequenceLike
 
 
 def apply_observation_mask_to_features(
@@ -53,7 +51,7 @@ def apply_observation_mask_to_features(
 
 
 def stack_delay_features(
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequenceLike,
     index: int,
     n_delays: int,
     *,
@@ -64,8 +62,8 @@ def stack_delay_features(
 
     Parameters
     ----------
-    sequence : GraphSnapshotSequence
-        Source trajectory.
+    sequence : SnapshotSequenceLike
+        Source trajectory (typically a ``GraphSnapshotSequence``).
     index : int
         Inclusive end index of the delay window.
     n_delays : int

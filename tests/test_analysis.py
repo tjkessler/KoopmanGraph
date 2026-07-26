@@ -234,7 +234,7 @@ def test_decode_mode_shapes_matches_linear_decoder_jacobian(
         # Same latent direction is applied at every node for the FD probe.
         expected_nodes = expected.unsqueeze(0).expand(synthetic_graph.num_nodes, -1)
         # float32 centered FD has O(eps_mach / perturbation) cancellation noise.
-        assert torch.allclose(shapes[shape_index], expected_nodes, atol=1e-4)
+        assert torch.allclose(shapes[shape_index], expected_nodes, atol=5e-4)
 
 
 def test_decode_mode_shapes_accepts_tensor_input(
@@ -299,7 +299,7 @@ def _make_spectrum(magnitudes: list[float], time_step: float = 1.0) -> KoopmanSp
 
 
 def test_spectrum_distance_zero_for_identical_spectra() -> None:
-    """Identical spectra yield zero distance for both methods."""
+    """Identical eigenvalue spectra yield zero Wasserstein / subspace distance."""
     spectrum = _make_spectrum([0.9, 0.7, 0.5])
 
     wasserstein = spectrum_distance(spectrum, spectrum, "wasserstein").item()

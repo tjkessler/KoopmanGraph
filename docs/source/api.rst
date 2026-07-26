@@ -63,6 +63,32 @@ thin-re-exported from this module for compatibility.
    :imported-members:
    :show-inheritance:
 
+Hypergraph Encoders / Decoders
+--------------------------------
+
+Higher-order incidence encoders and decoders
+(:class:`~koopman_graph.nn.HypergraphEncoder`,
+:class:`~koopman_graph.nn.HypergraphDecoder`) are root-stable ``__all__``
+members. Prefer ``from koopman_graph import HypergraphEncoder, HypergraphDecoder``
+with ``koopman="hypergraph"`` on the model. Pairwise GCN/GAT/SAGE peers remain
+under :mod:`koopman_graph.nn.encoder` / ``decoder``.
+
+.. automodule:: koopman_graph.nn.hypergraph
+   :members:
+   :show-inheritance:
+
+Adaptive Topology (power-user)
+------------------------------
+
+Self-adaptive pairwise adjacency
+(:class:`~koopman_graph.nn.AdaptiveAdjacency`) is enabled via
+``learn_topology="self_adaptive"`` on :class:`~koopman_graph.model.GraphKoopmanModel`.
+Import from :mod:`koopman_graph.nn` (not on the root façade).
+
+.. automodule:: koopman_graph.nn.adaptive_topology
+   :members:
+   :show-inheritance:
+
 Decoder
 -------
 
@@ -104,9 +130,11 @@ Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
 ``control``, ``discrete``, ``discrete_parameterizations``,
 ``discrete_propagation``, ``continuous``, ``continuous_van_loan``,
 ``continuous_parameterizations``, ``continuous_propagation``,
-``auxiliary_spectral``, ``graph``). Prefer
+``auxiliary_spectral``, ``graph``, ``hypergraph``, ``global_local``,
+``continuous_graph``). Prefer
 ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
-GraphKoopmanOperator`` (all three are root-stable ``__all__`` members) or
+GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
+ContinuousGraphKoopmanOperator`` (root-stable ``__all__`` members) or
 ``from koopman_graph.operators import …``. Former deep imports
 ``koopman_graph.operator`` / ``koopman_graph.continuous`` were removed in
 v0.3.0.
@@ -126,9 +154,13 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``discrete_spectrum_at_delta_t``, ``decode_mode_shapes``,
 ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
 ``detect_anomaly``, ``calibrate_anomaly_threshold``,
-``AnomalyDetectionResult``, ``plot_spectrum``) are imported from
-:mod:`koopman_graph.analysis` only. The helpers live in
-the ``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` submodules.
+``AnomalyDetectionResult``, ``plot_spectrum``,
+``identify_sparse_dynamics``, ``SINDyReport``,
+``koopman_spectral_clustering``, ``ClusteringResult``,
+``estimate_coupling_from_snapshots``, ``CouplingEstimate``) are imported from
+:mod:`koopman_graph.analysis` only. The helpers live in the ``spectrum`` /
+``similarity`` / ``anomaly`` / ``plotting`` / ``sindy`` / ``clustering`` /
+``topology_estimation`` submodules.
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
 
@@ -232,12 +264,12 @@ Shared Graph Utilities (power-user)
 -----------------------------------
 
 Documented internal helpers for graph-input resolution, Laplacian mathematics,
-and latent propagation. :mod:`koopman_graph.graph_utils` is a shallow
-capability package (``topology`` / ``propagation`` peers) whose ``__init__``
-re-exports the documented surface. Importable, but **not** part of the stable
-public façade (not in ``koopman_graph.__all__``). Use
-:meth:`~koopman_graph.model.GraphKoopmanModel.encode` when lifting snapshots.
-See :doc:`architecture`.
+latent propagation, and symmetry orbits. :mod:`koopman_graph.graph_utils` is a
+shallow capability package (``topology`` / ``propagation`` / ``symmetry``
+peers) whose ``__init__`` re-exports the documented surface. Importable, but
+**not** part of the stable public façade (not in ``koopman_graph.__all__``).
+Use :meth:`~koopman_graph.model.GraphKoopmanModel.encode` when lifting
+snapshots. See :doc:`architecture`.
 
 .. automodule:: koopman_graph.graph_utils
    :members:
@@ -249,6 +281,10 @@ See :doc:`architecture`.
    :show-inheritance:
 
 .. automodule:: koopman_graph.graph_utils.propagation
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.graph_utils.symmetry
    :members:
    :show-inheritance:
 
@@ -322,16 +358,21 @@ package.
 Uncertainty Quantification (power-user)
 ---------------------------------------
 
-Deep ensembles and latent-Gaussian forecast UQ live under
+Deep ensembles, latent-Gaussian forecast UQ, and conformal intervals live under
 :mod:`koopman_graph.uq` and are **not** on the root façade.
 :class:`~koopman_graph.uq.EnsembleGraphKoopmanModel` composes independently
 seeded :class:`~koopman_graph.model.GraphKoopmanModel` members
 (Lakshminarayanan et al., NeurIPS 2017).
 :class:`~koopman_graph.uq.LatentGaussianKoopmanUQ` propagates a Gaussian
 latent under the linear Koopman map with optional Kalman refinement
-(related to the Kalman half of K²VAE-style pipelines). Neither path is Deep
-Probabilistic Koopman (which predicts time-varying distribution parameters),
-and the Gaussian peer is **not** a full VAE + KalmanNet reimplementation.
+(related to the Kalman half of K²VAE-style pipelines).
+:class:`~koopman_graph.uq.ConformalKoopmanUQ` provides split and adaptive
+(ACI) conformal prediction intervals with the shared
+:class:`~koopman_graph.uq.PredictionInterval` type; marginal coverage
+``≥ 1 − α`` assumes exchangeability and is approximate under temporal
+dependence (prefer ACI under drift). Neither ensemble nor Gaussian path is
+Deep Probabilistic Koopman (time-varying distribution parameters), and the
+Gaussian peer is **not** a full VAE + KalmanNet reimplementation.
 
 .. automodule:: koopman_graph.uq
    :members:
@@ -365,6 +406,19 @@ root façade). Soft-imports Gymnasium so the module loads without the
    :members:
    :show-inheritance:
 
+Koopman-MPC
+-----------
+
+``KoopmanMPC`` is imported from :mod:`koopman_graph.mpc` (not on the root
+façade). OSQP is an optional ``[mpc]`` extra imported at solve time with
+install guidance when missing. Additive discrete control only in 0.6.0.
+Optional ``constraint_tightening=`` accepts a calibrated
+``ConformalKoopmanUQ`` to shrink output boxes by per-horizon half-widths.
+
+.. automodule:: koopman_graph.mpc
+   :members:
+   :show-inheritance:
+
 Serialization
 -------------
 
@@ -387,6 +441,14 @@ Datasets
    :members:
    :show-inheritance:
 
+.. automodule:: koopman_graph.datasets.download
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.cache_cli
+   :members:
+   :show-inheritance:
+
 .. automodule:: koopman_graph.datasets.synthetic
    :members:
    :show-inheritance:
@@ -400,6 +462,14 @@ Datasets
    :show-inheritance:
 
 .. automodule:: koopman_graph.datasets.metr_la
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.pems
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.contact_epidemic
    :members:
    :show-inheritance:
 

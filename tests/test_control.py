@@ -69,7 +69,7 @@ def _sequence_from_states(
 
 
 def test_koopman_operator_control_forward_and_inverse() -> None:
-    """Verify controlled forward and inverse steps are consistent."""
+    """Controlled step ``x_+ = x @ K^⊤ + u @ B`` inverts consistently."""
     operator = KoopmanOperator(3, control_dim=1, init_mode="identity")
     with torch.no_grad():
         operator._parameters["K"].copy_(torch.diag(torch.tensor([0.8, 0.9, 1.0])))
@@ -259,7 +259,7 @@ def test_controlled_model_serialization_round_trip(tmp_path: Path) -> None:
 
 
 def test_dmdc_baseline_recovers_controlled_linear_dynamics() -> None:
-    """Verify DMDc recovers known controlled flattened dynamics."""
+    """DMDc recovers ``x_{t+1} ≈ x_t @ K^⊤ + u_t @ B`` on synthetic controlled data."""
     edge_index = _two_node_edge_index()
     operator = torch.tensor(
         [[0.8, 0.1], [-0.2, 1.05]],
@@ -306,7 +306,7 @@ def test_ieee118_exposes_load_ramp_controls() -> None:
 
 
 def test_bilinear_operator_forward_inverse_and_gradients() -> None:
-    """Verify bilinear forward/inverse consistency and gradient flow."""
+    """Bilinear step ``x_+ = x @ K^⊤ + u @ B + Σ_i u_i (x @ N_i^⊤)`` and grads."""
     operator = KoopmanOperator(
         3,
         control_dim=2,

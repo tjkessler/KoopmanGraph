@@ -57,12 +57,31 @@ Use ``.[dev]`` for local testing and ``.[docs]`` before ``cd docs && make html``
 The ``[dev]`` and ``[docs]`` extras do not replace the PyTorch / PyG prerequisite
 order above when you need a non-default (non-CPU) accelerator.
 
-Import paths after 0.5
+Optional feature extras (0.6)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   pip install "koopman-graph[mpc]"        # OSQP for KoopmanMPC
+   pip install "koopman-graph[symmetry]"   # networkx for auto node orbits
+   pip install "koopman-graph[rl]"         # Gymnasium / Stable-Baselines3
+
+* **MPC:** ``from koopman_graph.mpc import KoopmanMPC``. Construction works
+  without OSQP; ``solve`` / ``rollout`` raise with install guidance if OSQP
+  is missing.
+* **Symmetry:** ``koopman_auto_orbits=True`` uses ``networkx``
+  (``method="auto"``). Without ``[symmetry]``, ``node_orbit_partition``
+  warns and returns the identity partition (no tying). Exact orbits need
+  optional ``pynauty`` separately.
+* See :doc:`installation` for the full extras table.
+
+Import paths after 0.6
 ----------------------
 
-Version **0.5** uses a thin root façade. Core workflow symbols remain
-``from koopman_graph import …`` (model, encoders/decoders including delay,
-operators including graph, snapshot containers, primary spectrum helpers,
+Version **0.6** keeps a thin root façade. Core workflow symbols remain
+``from koopman_graph import …`` (model; encoders/decoders including delay and
+hypergraph; operators including graph / hypergraph / global-local /
+continuous-graph; snapshot containers; primary spectrum helpers;
 ``__version__``).
 
 Specialized symbols are **capability-module imports only** (hard cut; no root
@@ -77,6 +96,13 @@ aliases), for example:
    from koopman_graph.env import GraphKoopmanEnv
    from koopman_graph.data import temporal_split, WindowSampler
    from koopman_graph.metrics import evaluate_forecast, EvaluationResult
+   from koopman_graph.uq import ConformalKoopmanUQ, EnsembleGraphKoopmanModel
+   from koopman_graph.mpc import KoopmanMPC
+   from koopman_graph.nn import AdaptiveAdjacency
+   from koopman_graph.analysis import (
+       identify_sparse_dynamics,
+       koopman_spectral_clustering,
+   )
 
 ``ImportError: cannot import name '…' from 'koopman_graph'`` for one of these
 names usually means the import should use the capability module. See the Keep-in

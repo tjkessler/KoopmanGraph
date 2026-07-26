@@ -340,7 +340,9 @@ Prepend domain features to the GNN latent with ``physics_preset`` or a custom
 ``"graph_gradient"``, ``"graph_curvature"``, and dynamic
 ``"polynomial(degree)"`` names such as ``"polynomial(3)"``; see
 :mod:`koopman_graph.observables`. Graph derivative presets use the shared
-pseudoinverse-normalized ``L_sym = P - Â`` contract, where isolates map to zero.
+pseudoinverse-normalized :math:`L_{\mathrm{sym}} = P - \widehat{A}` contract
+(biharmonic curvature uses :math:`L_{\mathrm{sym}}^2 x`), where isolates map
+to zero.
 Custom callables are not serialized — re-supply them on
 :meth:`~koopman_graph.model.GraphKoopmanModel.load`.
 

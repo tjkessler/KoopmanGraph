@@ -73,7 +73,7 @@ def test_two_node_coupled_linear_recovery() -> None:
 
 
 def test_forward_matches_dense_effective_matrix() -> None:
-    """Sparse message-passing forward matches dense Kronecker application."""
+    """Sparse message-passing forward matches dense Kronecker matrix application."""
     torch.manual_seed(1)
     num_nodes = 5
     latent_dim = 3
@@ -131,19 +131,23 @@ def test_model_factory_graph_kind() -> None:
     assert model.uses_graph_koopman
 
 
-def test_graph_rejected_in_continuous_mode() -> None:
-    """Networked factory kind is discrete-only."""
+def test_graph_in_continuous_mode_builds_continuous_graph() -> None:
+    """Factory koopman='graph' + continuous builds ContinuousGraphKoopmanOperator."""
+    from koopman_graph import ContinuousGraphKoopmanOperator
+
     encoder = GNNEncoder(2, 4, 3, num_layers=1)
     decoder = GNNDecoder(3, 4, 2, num_layers=1)
-    with pytest.raises(ValueError, match="requires dynamics_mode='discrete'"):
-        GraphKoopmanModel(
-            encoder,
-            decoder,
-            latent_dim=3,
-            time_step=0.1,
-            dynamics_mode="continuous",
-            koopman="graph",
-        )
+    model = GraphKoopmanModel(
+        encoder,
+        decoder,
+        latent_dim=3,
+        time_step=0.1,
+        dynamics_mode="continuous",
+        koopman="graph",
+    )
+    assert isinstance(model.koopman, ContinuousGraphKoopmanOperator)
+    assert model.koopman_kind == "continuous_graph"
+    assert model.uses_continuous_graph_koopman
 
 
 def test_rewiring_changes_graph_latent_not_pernode() -> None:
@@ -364,9 +368,9 @@ def test_fit_smoke_graph_operator_on_static_sequence() -> None:
 
 
 def test_unsupported_sparsity_raises() -> None:
-    """Reserved sparsity modes are rejected until implemented."""
-    with pytest.raises(ValueError, match="not implemented"):
-        GraphKoopmanOperator(2, sparsity="block_diagonal")  # type: ignore[arg-type]
+    """Unknown sparsity strings are rejected with a clear error."""
+    with pytest.raises(ValueError, match="must be 'dense' or 'block_diagonal'"):
+        GraphKoopmanOperator(2, sparsity="bogus")  # type: ignore[arg-type]
 
 
 def test_dense_adjacency_helper_used_by_effective_matrix() -> None:
@@ -756,3 +760,119 @@ def test_graph_bound_metric_is_factor_level_not_effective() -> None:
     # Factor max(|λ(K_self)|, |λ(K_nbr)|) need not equal ρ(I⊗K_self+Â⊗K_nbr).
     assert factor_bound.item() != pytest.approx(effective_radius.item(), abs=1e-4)
     assert factor_bound.item() < effective_radius.item()
+
+
+def test_block_diagonal_constructs_and_matches_dense_advance() -> None:
+    """block_diagonal advances identically to dense (same forward math)."""
+    torch.manual_seed(0)
+    edge_index = _path_edge_index(5)
+    dense = GraphKoopmanOperator(3, init_mode="identity_noise", init_scale=0.05)
+    block = GraphKoopmanOperator(3, init_mode="identity", sparsity="block_diagonal")
+    block.set_dense_matrices(
+        dense.K_self.detach().clone(), dense.K_nbr.detach().clone()
+    )
+    z = torch.randn(5, 3)
+    assert torch.allclose(block(z, edge_index), dense(z, edge_index), atol=1e-6)
+
+
+def test_block_diagonal_inverse_exact_when_decoupled() -> None:
+    """Blockwise inverse is exact for empty edges or zero K_nbr."""
+    k_self = torch.diag(torch.tensor([0.6, 0.8, -0.2]))
+    z = torch.randn(4, 3)
+
+    empty = GraphKoopmanOperator(3, init_mode="identity", sparsity="block_diagonal")
+    empty.set_dense_matrices(k_self, 0.3 * torch.eye(3))
+    empty_edges = torch.empty(2, 0, dtype=torch.long)
+    z_next = empty.advance(z, edge_index=empty_edges)
+    recovered = empty.inverse_advance(z_next, edge_index=empty_edges)
+    assert torch.allclose(recovered, z, atol=1e-5)
+
+    zero_nbr = GraphKoopmanOperator(3, init_mode="identity", sparsity="block_diagonal")
+    zero_nbr.set_dense_matrices(k_self, torch.zeros(3, 3))
+    edges = _path_edge_index(4)
+    z_next = zero_nbr.advance(z, edge_index=edges)
+    recovered = zero_nbr.inverse_advance(z_next, edge_index=edges)
+    assert torch.allclose(recovered, z, atol=1e-5)
+
+
+def test_block_diagonal_inverse_approximation_bounded_vs_dense() -> None:
+    """Coupled Jacobi inverse stays near the dense inverse on a small graph."""
+    torch.manual_seed(1)
+    edge_index = _path_edge_index(4)
+    k_self = torch.diag(torch.tensor([0.7, 0.5]))
+    k_nbr = 0.15 * torch.eye(2)
+    dense = GraphKoopmanOperator(2, init_mode="identity")
+    block = GraphKoopmanOperator(2, init_mode="identity", sparsity="block_diagonal")
+    dense.set_dense_matrices(k_self, k_nbr)
+    block.set_dense_matrices(k_self.clone(), k_nbr.clone())
+    z = torch.randn(4, 2)
+    z_next = dense.advance(z, edge_index=edge_index)
+    dense_rec = dense.inverse_advance(z_next, edge_index=edge_index)
+    block_rec = block.inverse_advance(z_next, edge_index=edge_index)
+    # Exact dense recovery; Jacobi approximation error is moderate for mild K_nbr.
+    assert torch.allclose(dense_rec, z, atol=1e-5)
+    err = (block_rec - z).norm() / z.norm()
+    assert err.item() < 0.25
+
+
+def test_block_diagonal_inverse_large_n_smoke() -> None:
+    """N>=2000 inverse_advance avoids materializing the Nd×Nd effective matrix."""
+    torch.manual_seed(2)
+    num_nodes = 2000
+    latent_dim = 4
+    # Path graph: O(N) edges.
+    edges: list[list[int]] = []
+    for node in range(num_nodes - 1):
+        edges.extend([[node, node + 1], [node + 1, node]])
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    op = GraphKoopmanOperator(
+        latent_dim, init_mode="identity", sparsity="block_diagonal"
+    )
+    op.set_dense_matrices(0.8 * torch.eye(latent_dim), 0.05 * torch.eye(latent_dim))
+    z = torch.randn(num_nodes, latent_dim)
+    z_next = op.advance(z, edge_index=edge_index)
+    recovered = op.inverse_advance(z_next, edge_index=edge_index)
+    assert recovered.shape == z.shape
+    assert torch.isfinite(recovered).all()
+    # Dense effective would be (8000, 8000) ≈ 256MB float32; block path stays O(Nd).
+    assert recovered.numel() * recovered.element_size() < 1_000_000
+
+
+def test_distributed_sparsity_rejected_with_planned_message() -> None:
+    """distributed sparsity stays reserved with an updated planned message."""
+    with pytest.raises(ValueError, match="planned; not in 0.6.0"):
+        GraphKoopmanOperator(2, sparsity="distributed")  # type: ignore[arg-type]
+
+
+def test_block_diagonal_rejects_inverse_matrix_kwarg() -> None:
+    """Precomputed inverse_matrix is dense-only."""
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="block_diagonal")
+    edge_index = _path_edge_index(3)
+    z = torch.randn(3, 2)
+    with pytest.raises(ValueError, match="inverse_matrix"):
+        op.inverse_advance(
+            z,
+            edge_index=edge_index,
+            inverse_matrix=torch.eye(6),
+        )
+
+
+def test_block_diagonal_checkpoint_round_trip(tmp_path) -> None:
+    """Format-1 checkpoints round-trip koopman_sparsity=block_diagonal."""
+    from pathlib import Path
+
+    encoder = GNNEncoder(2, 4, 3, num_layers=1)
+    decoder = GNNDecoder(3, 4, 2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        koopman_sparsity="block_diagonal",
+    )
+    assert model.koopman.sparsity == "block_diagonal"
+    path = Path(tmp_path) / "bd.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.sparsity == "block_diagonal"

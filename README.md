@@ -43,12 +43,12 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 
 ## Highlights
 
-- **Topology-aware learning** — GCN/GAT encoders and decoders, delay embeddings, dynamic topology, and edge weights
-- **Flexible dynamics** — discrete, continuous-time, and networked (`koopman="graph"`) operators, with soft or structural stability modes
+- **Topology-aware learning** — GCN/GAT/hypergraph encoders and decoders, delay embeddings, dynamic topology, optional self-adaptive edges, and edge weights
+- **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, global/local, and continuous-graph operators, with soft or structural stability modes
 - **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, and checkpointing
-- **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, and anomaly helpers
-- **Control and adaptation** — additive/bilinear control, online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
-- **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, and reproducible graph benchmarks
+- **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, anomaly helpers, SINDy, and spectral clustering
+- **Control and adaptation** — additive/bilinear control, Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
+- **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, conformal UQ, and reproducible graph benchmarks
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
@@ -132,7 +132,7 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.5.0: see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.6.0: see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -157,7 +157,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21468449},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.5.0},
+  version      = {0.6.0},
 }
 ```
 

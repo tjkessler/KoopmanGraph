@@ -16,14 +16,23 @@ Topology-aware learning
 * ``GNNEncoder`` / ``GATEncoder`` / ``SAGEEncoder`` / ``DiffConvEncoder`` /
   ``GraphTransformerEncoder`` and matching ``GNNDecoder`` / ``GATDecoder`` /
   ``SAGEDecoder`` / ``DiffConvDecoder`` / ``GraphTransformerDecoder``
-  (GraphSAGE: Hamilton et al. 2017; DiffConv: DCRNN-style bidirectional
+  (GCN uses Kipf-normalized adjacency
+  :math:`\widehat{A} = \tilde{D}^{-1/2} \tilde{A} \tilde{D}^{-1/2}`;
+  GraphSAGE: Hamilton et al. 2017; DiffConv: DCRNN-style bidirectional
   diffusion, Li et al. 2018; Transformer: PyG ``TransformerConv`` / Shi et al.
   masked attention on edges — typically denser compute than GCN/GAT/DiffConv
   per edge × heads)
+* ``HypergraphEncoder`` / ``HypergraphDecoder`` with incidence
+  ``hyperedge_index`` (``koopman="hypergraph"``)
 * ``DelayEmbeddingEncoder`` / ``n_delays`` for Hankel-style partial
   observability
 * Per-snapshot ``edge_index`` (dynamic topology) and end-to-end
   ``edge_weight`` support
+* Optional self-adaptive pairwise topology
+  (``learn_topology="self_adaptive"``; ``koopman_graph.nn.AdaptiveAdjacency``)
+* Optional symmetry-adapted orbit-tied ``K_self``
+  (``koopman_auto_orbits`` / ``koopman_orbit_partition``; requires
+  ``pip install "koopman-graph[symmetry]"`` for auto orbits)
 
 Dynamics
 ~~~~~~~~
@@ -32,9 +41,16 @@ Dynamics
   structural guarantees (``schur``, ``dissipative``, ``lyapunov``)
 * Networked ``GraphKoopmanOperator`` (``koopman="graph"``) with
   self/neighbor coupling
+  :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
+* Hypergraph ``HypergraphKoopmanOperator`` (``koopman="hypergraph"``)
+* Global/local non-stationary discrete operator
+  (``GlobalLocalKoopmanOperator``; ``koopman="global_local"``)
 * Continuous-time ``ContinuousKoopmanOperator``
   (``dynamics_mode="continuous"``), irregular timestamps, and
   ``predict_at``
+* Continuous networked generator ``ContinuousGraphKoopmanOperator``
+  (``koopman="graph"`` + ``dynamics_mode="continuous"`` or
+  ``koopman="continuous_graph"``; dense ``N·d`` matrix-exp cost caveat)
 * Continuous ``koopman_parameterization="auxiliary_spectral"`` — state-dependent
   ``generator_at(z)`` / instantaneous spectrum (Lusch-style; locally linear,
   not a fixed global matrix). Prefer delay embeddings first for continuous-
@@ -62,6 +78,10 @@ Analysis
 * ``KoopmanSpectrum`` / ``compute_spectrum`` with mode decoding helpers
 * Dynamical similarity and anomaly utilities via
   ``koopman_graph.analysis``
+* ``identify_sparse_dynamics`` (SINDy / STLSQ on learned latents — not
+  physical governing equations)
+* ``koopman_spectral_clustering`` (node communities from Koopman modes)
+* ``estimate_coupling_from_snapshots`` (topology / coupling diagnostics)
 * ``plot_spectrum`` for unit-disk / data-zoom views
 
 Control, adaptation, and observation
@@ -73,10 +93,13 @@ Control, adaptation, and observation
   ``observation_masks``
 * ``koopman_graph.env.GraphKoopmanEnv`` / ``to_latent_env`` for Gymnasium
   closed-loop control
+* ``koopman_graph.mpc.KoopmanMPC`` for additive-control receding-horizon
+  QP control (``[mpc]`` / OSQP; local decoder-linearization guarantees;
+  optional conformal output-constraint tightening)
 * Hybrid physics observables: Laplacian, nodewise graph-gradient magnitude,
-  graph curvature (``L_sym² x``), polynomial dictionaries, or custom lifting
-  callables. Residual losses are soft penalties, not symplectic/Hamiltonian
-  structure guarantees or a PIKE/SPIKE implementation.
+  graph curvature (:math:`L_{\mathrm{sym}}^2 x`), polynomial dictionaries, or
+  custom lifting callables. Residual losses are soft penalties, not
+  symplectic/Hamiltonian structure guarantees or a PIKE/SPIKE implementation.
 
 Uncertainty quantification (power-user)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -87,8 +110,11 @@ Uncertainty quantification (power-user)
 * ``koopman_graph.uq.LatentGaussianKoopmanUQ`` — linear-Gaussian latent
   forecast with closed-form covariance propagation and optional Kalman
   refinement (not DPK; not a full K²VAE)
-* See notebook ``21_uncertainty_quantification.ipynb`` for an ensemble vs
-  latent-Gaussian comparison
+* ``koopman_graph.uq.ConformalKoopmanUQ`` — split and adaptive (ACI)
+  conformal intervals; marginal coverage under exchangeability (approximate
+  under temporal dependence)
+* See notebooks ``21_uncertainty_quantification.ipynb`` and
+  ``30_conformal_uncertainty.ipynb``
 
 Hierarchical / multi-resolution (power-user)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -147,6 +173,9 @@ Built-in datasets
    * - ``EpidemicNetworkBenchmark``
      - Epidemic
      - Networked SIR on ring / small-world / custom graphs
+   * - ``ContactEpidemicBenchmark``
+     - Epidemic (cache)
+     - SocioPatterns primary-school contacts (fetch-script + SHA256; CC-BY-NC-SA)
    * - ``Lorenz96GraphBenchmark``
      - Chaotic ODE
      - Lorenz-96 on a ring graph
@@ -162,11 +191,18 @@ Built-in datasets
    * - ``MetrLaTrafficBenchmark``
      - Traffic
      - METR-LA sensor graph with cached speed snapshots
+   * - ``PemsBayTrafficBenchmark``
+     - Traffic
+     - PEMS-BAY speeds (325 sensors; fetch-script + SHA256)
+   * - ``PemsTrafficBenchmark``
+     - Traffic
+     - PEMS03/04/07/08 flows (``variant=``; fetch-script + SHA256)
 
 Related pages
 -------------
 
 * :doc:`quickstart` — runnable train/predict walkthrough
+* :doc:`data` — FAIR dataset cards (PEMS / contact epidemic / acquisition)
 * :doc:`tutorials` — notebook gallery
 * :doc:`architecture` — public vs power-user API layers
 * :doc:`api` — module reference

@@ -473,9 +473,7 @@ def test_fit_no_nan_with_all_loss_terms_on_synthetic_benchmark(
     assert all(torch.isfinite(torch.tensor(value)).item() for value in history.loss)
 
 
-def test_fit_with_rollout_loss_on_synthetic_benchmark(
-    trainable_model: GraphKoopmanModel,
-) -> None:
+def test_fit_with_rollout_loss_on_synthetic_benchmark() -> None:
     """Verify rollout loss improves autoregressive prediction on the benchmark."""
     from koopman_graph.datasets import SyntheticDynamicGraphBenchmark
 
@@ -486,7 +484,9 @@ def test_fit_with_rollout_loss_on_synthetic_benchmark(
         seed=42,
         noise_std=0.01,
     )
+    # Seed before construction so encoder/decoder weights are reproducible.
     torch.manual_seed(0)
+    trainable_model = _make_trainable_model()
     history = trainable_model.fit(
         sequence,
         epochs=50,
@@ -1191,3 +1191,185 @@ def test_windowed_fit_applies_gradient_clipping(
             max_grad_norm=1.0,
         )
     assert clip.called
+
+
+def test_fit_neighbor_sampler_large_graph_smoke() -> None:
+    """Neighbor sampling trains on a ≥2000-node graph without full-graph windows."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    torch.manual_seed(0)
+    num_nodes = 2000
+    edges: list[list[int]] = []
+    for node in range(num_nodes - 1):
+        edges.extend([[node, node + 1], [node + 1, node]])
+    edge_index = torch.tensor(edges, dtype=torch.long).t().contiguous()
+    features = torch.randn(3, num_nodes, 2)
+    sequence = GraphSnapshotSequence.from_arrays(features, edge_index)
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=16,
+        num_hops=2,
+        batch_size=2,
+        windows_per_epoch=4,
+        seed=0,
+    )
+    # Subgraph windows stay far below full N in node count.
+    sample = next(iter(sampler.iter_epoch(0)))[0]
+    assert sample.num_nodes < 200
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(2, 8, 4, num_layers=1),
+        decoder=GNNDecoder(4, 8, 2, num_layers=1),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="graph",
+        koopman_sparsity="block_diagonal",
+    )
+    history = model.fit(sequence, epochs=1, sampler=sampler, lr=1e-2)
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))
+
+
+def test_fit_rejects_sampler_with_window_length(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """sampler and window_length are mutually exclusive."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sampler = NeighborWindowSampler(
+        scaling_sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+    )
+    with pytest.raises(ValueError, match="sampler or window_length"):
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            sampler=sampler,
+            window_length=2,
+        )
+
+
+def test_teacher_forced_latent_window_global_local(
+    scaling_sequence: GraphSnapshotSequence,
+    trainable_model: GraphKoopmanModel,
+) -> None:
+    """Global/local operators build teacher-forced latent windows."""
+    from koopman_graph.training.pair_objectives import teacher_forced_latent_window
+
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(3, 16, 8, num_layers=1),
+        decoder=GNNDecoder(8, 16, 3, num_layers=1),
+        latent_dim=8,
+        time_step=0.1,
+        koopman="global_local",
+    )
+    window = teacher_forced_latent_window(model, scaling_sequence, timestep=1)
+    assert window is not None
+    assert window.ndim >= 2
+    assert teacher_forced_latent_window(trainable_model, scaling_sequence, 1) is None
+
+
+def test_one_step_loss_and_pair_objectives_paths(
+    scaling_sequence: GraphSnapshotSequence,
+    trainable_model: GraphKoopmanModel,
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Pair objectives cover masked loss and global/local encode paths."""
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+    from koopman_graph.training.pair_objectives import _one_step_pair
+
+    snap0, snap1 = scaling_sequence[0], scaling_sequence[1]
+    masked = one_step_loss(
+        trainable_model,
+        snap0,
+        snap1,
+        target_mask=torch.tensor([True, False, False, False, False]),
+    )
+    assert masked.ndim == 0
+    assert torch.isfinite(masked)
+
+    global_model = GraphKoopmanModel(
+        encoder=GNNEncoder(3, 16, 8, num_layers=1),
+        decoder=GNNDecoder(8, 16, 3, num_layers=1),
+        latent_dim=8,
+        time_step=0.1,
+        koopman="global_local",
+    )
+    gl_loss = _one_step_pair(global_model, scaling_sequence, timestep=0)
+    assert torch.isfinite(gl_loss)
+
+    masked_sequence = GraphSnapshotSequence(
+        list(scaling_sequence.snapshots),
+        observation_masks=torch.ones(
+            scaling_sequence.num_timesteps,
+            scaling_sequence.num_nodes,
+            dtype=torch.bool,
+        ),
+    )
+    masked_loss = _one_step_pair(trainable_model, masked_sequence, timestep=0)
+    assert torch.isfinite(masked_loss)
+
+    hyper_snaps = [
+        Data(
+            x=torch.randn(4, 3),
+            edge_index=synthetic_hypergraph_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+        for _ in range(2)
+    ]
+    hyper_sequence = GraphSnapshotSequence(hyper_snaps)
+    hyper_model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="global_local",
+    )
+    with (
+        patch(
+            "koopman_graph.training.pair_objectives.snapshot_hyperedge_index",
+            side_effect=lambda snap: (
+                None if snap is hyper_sequence[0] else synthetic_hyperedge_index
+            ),
+        ),
+        pytest.raises(ValueError, match="hyperedge_index"),
+    ):
+        _one_step_pair(hyper_model, hyper_sequence, timestep=0)
+
+    hyper_gl_model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="global_local",
+    )
+    hyper_gl_loss = _one_step_pair(hyper_gl_model, hyper_sequence, timestep=0)
+    assert torch.isfinite(hyper_gl_loss)
+
+    delay_model = GraphKoopmanModel(
+        encoder=GNNEncoder(6, 16, 8, num_layers=1),
+        decoder=GNNDecoder(8, 16, 3, num_layers=1),
+        latent_dim=8,
+        time_step=0.1,
+        n_delays=2,
+    )
+    delay_loss = _one_step_pair(delay_model, scaling_sequence, timestep=1)
+    assert torch.isfinite(delay_loss)
+
+    masked_gl_sequence = GraphSnapshotSequence(
+        list(scaling_sequence.snapshots),
+        observation_masks=torch.tensor(
+            [[True, False, False, False, False]] * scaling_sequence.num_timesteps
+        ),
+    )
+    masked_gl_loss = _one_step_pair(global_model, masked_gl_sequence, timestep=0)
+    assert torch.isfinite(masked_gl_loss)
+
+    from koopman_graph.training.pair_objectives import _encode_at
+
+    encoded = _encode_at(delay_model, scaling_sequence, index=1)
+    assert encoded.shape[-1] == delay_model.latent_dim

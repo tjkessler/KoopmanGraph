@@ -18,7 +18,9 @@ Capability layout
     containers, ``nn.delay``, and model encode paths. Power-user submodule;
     not promoted on this package ``__all__``.
 ``sampling``
-    ``WindowSampler`` for fixed-length temporal windows.
+    ``WindowSampler`` for fixed-length temporal windows;
+    ``NeighborWindowSampler`` for k-hop subgraph windows on large static
+    graphs (training approximation; not on root ``__all__``).
 ``splits``
     ``TemporalSplit`` and :func:`temporal_split`.
 ``rollout``
@@ -30,7 +32,11 @@ from koopman_graph.data.rollout import (
     RolloutStartIndices,
     resolve_rollout_start_indices,
 )
-from koopman_graph.data.sampling import WindowSampler
+from koopman_graph.data.sampling import (
+    NeighborWindowSampler,
+    WindowLikeSampler,
+    WindowSampler,
+)
 from koopman_graph.data.splits import TemporalSplit, temporal_split
 from koopman_graph.data.trajectories import (
     MultiTrajectory,
@@ -42,8 +48,10 @@ from koopman_graph.data.trajectories import (
 __all__ = [
     "GraphSnapshotSequence",
     "MultiTrajectory",
+    "NeighborWindowSampler",
     "RolloutStartIndices",
     "TemporalSplit",
+    "WindowLikeSampler",
     "WindowSampler",
     "as_multi_trajectory",
     "resolve_pair_delta_t",

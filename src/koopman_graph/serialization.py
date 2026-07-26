@@ -2,31 +2,37 @@
 
 Checkpoint format versions
 --------------------------
-``format_version`` 1 (current baseline)
+``format_version`` 1 (current baseline; beta through 0.x)
     Full architecture config for discrete and continuous dynamics, hybrid
     physics observables, control (including bilinear metadata), delay
-    embeddings, and built-in operator kinds (per-node / graph). Decoder
-    configs may include ``type`` (``"gcn"``, ``"gat"``, ``"sage"``,
-    ``"diffconv"``, or ``"transformer"``); missing ``type`` defaults to
-    ``"gcn"``. Hybrid ``physics``
-    blocks own ``dim``, ``preset``, and ``position``; ``position`` is
-    round-tripped and validated on load (currently only ``"prepend"``).
-    Missing ``position`` defaults to ``"prepend"``. Optional ``n_delays``
-    records Hankel delay embedding; the stored encoder block is always the
-    base encoder config with ``in_channels = n_delays * feature_dim``.
+    embeddings, and built-in operator kinds (per-node / graph / hypergraph /
+    global_local / continuous_graph). Encoder/decoder ``type`` strings include
+    ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
+    ``"hyper_enc"``, and ``"hyper_dec"``; missing decoder ``type`` defaults to
+    ``"gcn"``. Hybrid ``physics`` blocks own ``dim``, ``preset``, and
+    ``position``; ``position`` is round-tripped and validated on load
+    (currently only ``"prepend"``). Missing ``position`` defaults to
+    ``"prepend"``. Optional ``n_delays`` records Hankel delay embedding; the
+    stored encoder block is always the base encoder config with
+    ``in_channels = n_delays * feature_dim``. Format-1 also stores placeholder
+    keys ``sparsity`` (operator realization; ``"dense"`` or
+    ``"block_diagonal"`` for supported networked kinds),
+    ``learn_topology`` (``None`` or ``"self_adaptive"``) with
+    ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
+    ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
+    graph / hypergraph operators).
 
-Loaders accept only the supported format set (currently ``{1}``). Retired
-lineages — previously published ``format_version`` 2 checkpoints and legacy
-format-1 payloads that omit required current-schema keys — are rejected with
-a clear error (no silent migration). Future incompatible schema changes bump
-``FORMAT_VERSION`` and add a migration branch in :func:`_migrate_config`.
+Beta policy
+    While the package is pre-1.0, ``FORMAT_VERSION`` stays at ``1``. Incomplete
+    or previously published incompatible checkpoints are **deprecated** and
+    rejected with a clear re-save error rather than migrated. Formal
+    multi-version checkpoint tracking begins at 1.0. Loaders accept only
+    ``{1}``; ``format_version`` 2 and other lineages remain unsupported.
 
-Custom injected operators (anything other than
-:class:`~koopman_graph.operators.KoopmanOperator`,
-:class:`~koopman_graph.operators.ContinuousKoopmanOperator`, or
-:class:`~koopman_graph.operators.GraphKoopmanOperator`) are **not**
-round-trippable: :func:`build_model_config` / :meth:`GraphKoopmanModel.save`
-raise rather than silently writing incomplete factory metadata.
+Custom injected operators (anything other than the built-in serializable
+operator classes registered in this module) are **not** round-trippable:
+:func:`build_model_config` / :meth:`GraphKoopmanModel.save` raise rather than
+silently writing incomplete factory metadata.
 """
 
 from __future__ import annotations
@@ -34,12 +40,13 @@ from __future__ import annotations
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch import nn
 
 from koopman_graph.nn import (
+    DEFAULT_TOPOLOGY_EMBEDDING_DIM,
     DelayEmbeddingEncoder,
     DiffConvDecoder,
     DiffConvEncoder,
@@ -49,6 +56,8 @@ from koopman_graph.nn import (
     GNNEncoder,
     GraphTransformerDecoder,
     GraphTransformerEncoder,
+    HypergraphDecoder,
+    HypergraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
 )
@@ -60,14 +69,15 @@ from koopman_graph.observables import (
     resolve_physics_position,
 )
 from koopman_graph.operators import (
+    ContinuousGraphKoopmanOperator,
     ContinuousKoopmanOperator,
+    GlobalLocalKoopmanOperator,
     GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
     KoopmanOperator,
     resolve_factory_stability_bound,
 )
-
-if TYPE_CHECKING:
-    from koopman_graph.model import GraphKoopmanModel
+from koopman_graph.protocols import ModeShapeModel
 
 FORMAT_VERSION = 1
 SUPPORTED_FORMAT_VERSIONS = frozenset({1})
@@ -91,20 +101,41 @@ _FORMAT_1_REQUIRED_KEYS = frozenset(
         "physics",
         "encoder",
         "decoder",
+        "sparsity",
+        "learn_topology",
+        "topology_embedding_dim",
+        "symmetry",
+        "local_window",
+        "local_rank",
+        "local_hidden_dims",
     }
 )
 
 Decoder = (
-    GNNDecoder | GATDecoder | SAGEDecoder | DiffConvDecoder | GraphTransformerDecoder
+    GNNDecoder
+    | GATDecoder
+    | SAGEDecoder
+    | DiffConvDecoder
+    | GraphTransformerDecoder
+    | HypergraphDecoder
 )
 BaseEncoder = (
-    GNNEncoder | GATEncoder | SAGEEncoder | DiffConvEncoder | GraphTransformerEncoder
+    GNNEncoder
+    | GATEncoder
+    | SAGEEncoder
+    | DiffConvEncoder
+    | GraphTransformerEncoder
+    | HypergraphEncoder
 )
 _SERIALIZABLE_KOOPMAN_TYPES = (
     KoopmanOperator,
     ContinuousKoopmanOperator,
     GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
+    GlobalLocalKoopmanOperator,
+    ContinuousGraphKoopmanOperator,
 )
+_RESERVED_KOOPMAN_KINDS: dict[str, str] = {}
 
 
 def _require_format1_schema(config: dict[str, Any]) -> None:
@@ -123,20 +154,20 @@ def _require_format1_schema(config: dict[str, Any]) -> None:
     missing = sorted(_FORMAT_1_REQUIRED_KEYS - config.keys())
     if missing:
         msg = (
-            "Checkpoint config is missing required format_version 1 fields: "
-            f"{', '.join(missing)}. Re-save the model with the current package "
-            "or reconstruct the architecture explicitly."
+            "Deprecated checkpoint schema: missing required format_version 1 "
+            f"fields: {', '.join(missing)}. Pre-1.0 checkpoints are not "
+            "migrated; re-save the model with the current package or "
+            "reconstruct the architecture explicitly."
         )
         raise ValueError(msg)
 
 
 def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str, Any]:
-    """Apply version-specific migrations before reconstruct.
+    """Validate checkpoint config before reconstruct (beta: no migrations).
 
-    Format 1 is the current baseline: validate the full schema and return the
-    config unchanged (no field backfill). Future incompatible bumps should add
-    branches here (for example ``if format_version == 1: ...``) before
-    returning a migrated config.
+    Format 1 is the only supported baseline through 0.x. Incomplete schemas are
+    rejected as deprecated rather than backfilled. Multi-version migration
+    branches are deferred until the 1.0 checkpoint policy.
 
     Parameters
     ----------
@@ -153,8 +184,8 @@ def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str,
     Raises
     ------
     ValueError
-        If the format version has no migration path or the config fails
-        schema validation for the active version.
+        If the format version is unsupported or the config fails schema
+        validation for the active version.
     """
     if format_version == 1:
         _require_format1_schema(config)
@@ -165,6 +196,52 @@ def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str,
         f"supported versions: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
     )
     raise ValueError(msg)
+
+
+def _parse_symmetry_config(
+    symmetry: Any,
+) -> tuple[list[list[int]] | None, bool, str]:
+    """Parse the format-1 ``symmetry`` config block into factory kwargs.
+
+    Parameters
+    ----------
+    symmetry : Any
+        ``None`` or a dict with ``auto_orbits``, ``orbit_partition``, and
+        ``method``.
+
+    Returns
+    -------
+    tuple
+        ``(orbit_partition, auto_orbits, orbit_method)``.
+
+    Raises
+    ------
+    ValueError
+        If the block shape or field types are invalid.
+    """
+    if symmetry is None:
+        return None, False, "auto"
+    if not isinstance(symmetry, dict):
+        msg = f"symmetry config must be a dict or None, got {type(symmetry).__name__}"
+        raise ValueError(msg)
+    auto_orbits = bool(symmetry.get("auto_orbits", False))
+    method = symmetry.get("method", "auto")
+    if method not in {"auto", "exact"}:
+        msg = f"symmetry.method must be 'auto' or 'exact', got {method!r}"
+        raise ValueError(msg)
+    raw_partition = symmetry.get("orbit_partition")
+    if raw_partition is None:
+        return None, auto_orbits, method
+    if not isinstance(raw_partition, (list, tuple)):
+        msg = "symmetry.orbit_partition must be a sequence of orbits or None"
+        raise ValueError(msg)
+    partition: list[list[int]] = []
+    for orbit in raw_partition:
+        if not isinstance(orbit, (list, tuple)):
+            msg = "each symmetry.orbit_partition orbit must be a sequence of ints"
+            raise ValueError(msg)
+        partition.append([int(node) for node in orbit])
+    return partition, auto_orbits, method
 
 
 def _package_version() -> str:
@@ -188,6 +265,7 @@ _SUPPORTED_ENCODER_TYPES: dict[str, type[BaseEncoder]] = {
     "sage": SAGEEncoder,
     "diffconv": DiffConvEncoder,
     "transformer": GraphTransformerEncoder,
+    "hyper_enc": HypergraphEncoder,
 }
 
 _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
@@ -196,6 +274,7 @@ _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
     "sage": SAGEDecoder,
     "diffconv": DiffConvDecoder,
     "transformer": GraphTransformerDecoder,
+    "hyper_dec": HypergraphDecoder,
 }
 
 
@@ -211,7 +290,8 @@ def _encoder_type(encoder: BaseEncoder) -> str:
     Returns
     -------
     str
-        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, or ``"transformer"``.
+        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
+        or ``"hyper_enc"``.
 
     Raises
     ------
@@ -228,6 +308,8 @@ def _encoder_type(encoder: BaseEncoder) -> str:
         return "gat"
     if isinstance(encoder, GNNEncoder):
         return "gcn"
+    if isinstance(encoder, HypergraphEncoder):
+        return "hyper_enc"
     msg = f"Unsupported encoder type: {type(encoder).__name__}"
     raise TypeError(msg)
 
@@ -278,6 +360,7 @@ def _unwrap_base_encoder(
             SAGEEncoder,
             DiffConvEncoder,
             GraphTransformerEncoder,
+            HypergraphEncoder,
         ),
     ):
         return encoder, 1
@@ -297,7 +380,8 @@ def _decoder_type(decoder: Decoder) -> str:
     Returns
     -------
     str
-        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, or ``"transformer"``.
+        ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
+        or ``"hyper_dec"``.
 
     Raises
     ------
@@ -314,11 +398,13 @@ def _decoder_type(decoder: Decoder) -> str:
         return "gat"
     if isinstance(decoder, GNNDecoder):
         return "gcn"
+    if isinstance(decoder, HypergraphDecoder):
+        return "hyper_dec"
     msg = f"Unsupported decoder type: {type(decoder).__name__}"
     raise TypeError(msg)
 
 
-def _require_serializable_koopman(model: GraphKoopmanModel) -> None:
+def _require_serializable_koopman(model: ModeShapeModel) -> None:
     """Reject custom injected operators that lack checkpoint factory metadata.
 
     Parameters
@@ -338,20 +424,22 @@ def _require_serializable_koopman(model: GraphKoopmanModel) -> None:
         return
     msg = (
         "Checkpoint serialization supports only built-in KoopmanOperator, "
-        "ContinuousKoopmanOperator, and GraphKoopmanOperator instances. "
-        "Custom injected operators are not round-trippable; save the operator "
-        "state separately or reconstruct the model with koopman=... after load. "
+        "ContinuousKoopmanOperator, GraphKoopmanOperator, "
+        "HypergraphKoopmanOperator, GlobalLocalKoopmanOperator, and "
+        "ContinuousGraphKoopmanOperator instances. Custom injected operators "
+        "are not round-trippable; save the operator state separately or "
+        "reconstruct the model with koopman=... after load. "
         f"Got {type(model.koopman).__name__}."
     )
     raise TypeError(msg)
 
 
-def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
+def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
     """Extract architecture configuration from a :class:`GraphKoopmanModel`.
 
     Parameters
     ----------
-    model : GraphKoopmanModel
+    model : ModeShapeModel
         Model whose encoder, decoder, and Koopman settings will be serialized.
 
     Returns
@@ -410,6 +498,7 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
             "position": model.physics_position,
         }
 
+    sparsity = getattr(model.koopman, "sparsity", "dense")
     return {
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
@@ -428,6 +517,21 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
             and model.koopman.parameterization == "auxiliary_spectral"
             else None
         ),
+        "local_window": (
+            int(model.koopman.local_window)
+            if isinstance(model.koopman, GlobalLocalKoopmanOperator)
+            else None
+        ),
+        "local_rank": (
+            int(model.koopman.local_rank)
+            if isinstance(model.koopman, GlobalLocalKoopmanOperator)
+            else None
+        ),
+        "local_hidden_dims": (
+            list(model.koopman.local_hidden_dims)
+            if isinstance(model.koopman, GlobalLocalKoopmanOperator)
+            else None
+        ),
         "control_dim": model.control_dim,
         "control_mode": getattr(model, "control_mode", "additive"),
         "bilinear_rank": getattr(model, "bilinear_rank", None),
@@ -435,6 +539,18 @@ def build_model_config(model: GraphKoopmanModel) -> dict[str, Any]:
         "physics": physics_config,
         "encoder": encoder_config,
         "decoder": decoder_config,
+        "sparsity": sparsity,
+        "learn_topology": getattr(model, "learn_topology", None),
+        "topology_embedding_dim": (
+            int(model.topology_embedding_dim)
+            if getattr(model, "learn_topology", None) is not None
+            else None
+        ),
+        "symmetry": (
+            model.koopman.symmetry_config()
+            if hasattr(model.koopman, "symmetry_config")
+            else None
+        ),
     }
 
 
@@ -490,6 +606,8 @@ def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
             **common_kwargs,
             diffusion_steps=config.get("diffusion_steps", 2),
         )
+    if encoder_type == "hyper_enc":
+        return HypergraphEncoder(**common_kwargs)
     return GNNEncoder(**common_kwargs)
 
 
@@ -547,6 +665,8 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
             **common_kwargs,
             diffusion_steps=config.get("diffusion_steps", 2),
         )
+    if decoder_type == "hyper_dec":
+        return HypergraphDecoder(**common_kwargs)
     return GNNDecoder(**common_kwargs)
 
 
@@ -554,7 +674,7 @@ def reconstruct_model(
     config: dict[str, Any],
     *,
     physics_lifting_fn: PhysicsLiftingFn | None = None,
-) -> GraphKoopmanModel:
+) -> ModeShapeModel:
     """Reconstruct a :class:`GraphKoopmanModel` from a checkpoint configuration.
 
     Parameters
@@ -577,7 +697,10 @@ def reconstruct_model(
         provided and cannot be resolved from a preset, or if
         ``physics.position`` is unsupported.
     """
-    from koopman_graph.model import GraphKoopmanModel
+    import importlib
+
+    estimator_mod = importlib.import_module("koopman_graph.model.estimator")
+    GraphKoopmanModel = estimator_mod.GraphKoopmanModel
 
     decoder = _build_decoder(config["decoder"])
     encoder = _build_encoder(config["encoder"])
@@ -603,18 +726,46 @@ def reconstruct_model(
                 )
                 raise ValueError(msg)
 
+    koopman_kind = config.get("koopman_kind", "pernode")
+    if koopman_kind in _RESERVED_KOOPMAN_KINDS:
+        task = _RESERVED_KOOPMAN_KINDS[koopman_kind]
+        msg = f"koopman_kind={koopman_kind!r} is planned; lands in {task}"
+        raise ValueError(msg)
+    orbit_partition, auto_orbits, orbit_method = _parse_symmetry_config(
+        config.get("symmetry")
+    )
+
+    learn_topology = config.get("learn_topology")
+    topology_embedding_dim = config.get("topology_embedding_dim")
     return GraphKoopmanModel(
         encoder=encoder,
         decoder=decoder,
         latent_dim=config["latent_dim"],
         time_step=config["time_step"],
         dynamics_mode=config.get("dynamics_mode", "discrete"),
-        koopman=config.get("koopman_kind", "pernode"),
+        koopman=koopman_kind,
         koopman_init_mode=config["koopman_init_mode"],
         koopman_init_scale=config["koopman_init_scale"],
         koopman_parameterization=config.get("koopman_parameterization", "dense"),
         koopman_max_spectral_radius=config.get("koopman_max_spectral_radius", 1.0),
         koopman_auxiliary_hidden_dims=config.get("koopman_auxiliary_hidden_dims"),
+        koopman_sparsity=config.get("sparsity", "dense"),
+        koopman_local_window=(
+            int(config["local_window"]) if config.get("local_window") is not None else 4
+        ),
+        koopman_local_rank=(
+            int(config["local_rank"]) if config.get("local_rank") is not None else 2
+        ),
+        koopman_local_hidden_dims=config.get("local_hidden_dims"),
+        koopman_orbit_partition=orbit_partition,
+        koopman_auto_orbits=auto_orbits,
+        koopman_orbit_method=orbit_method,
+        learn_topology=learn_topology,
+        topology_embedding_dim=(
+            int(topology_embedding_dim)
+            if topology_embedding_dim is not None
+            else DEFAULT_TOPOLOGY_EMBEDDING_DIM
+        ),
         control_dim=config.get("control_dim", 0),
         control_mode=config.get("control_mode", "additive"),
         bilinear_rank=config.get("bilinear_rank"),
@@ -626,12 +777,12 @@ def reconstruct_model(
     )
 
 
-def build_checkpoint(model: GraphKoopmanModel) -> dict[str, Any]:
+def build_checkpoint(model: ModeShapeModel) -> dict[str, Any]:
     """Build a versioned checkpoint dictionary for a model.
 
     Parameters
     ----------
-    model : GraphKoopmanModel
+    model : ModeShapeModel
         Model whose weights and architecture will be serialized.
 
     Returns
@@ -647,12 +798,12 @@ def build_checkpoint(model: GraphKoopmanModel) -> dict[str, Any]:
     }
 
 
-def save_checkpoint(model: GraphKoopmanModel, path: str | Path) -> None:
+def save_checkpoint(model: ModeShapeModel, path: str | Path) -> None:
     """Persist a trained model checkpoint to disk.
 
     Parameters
     ----------
-    model : GraphKoopmanModel
+    model : ModeShapeModel
         Model to serialize.
     path : str or Path
         Destination ``.pt`` file path.
@@ -662,12 +813,46 @@ def save_checkpoint(model: GraphKoopmanModel, path: str | Path) -> None:
     torch.save(build_checkpoint(model), destination)
 
 
+def _allocate_adaptive_topology_from_state(
+    model: ModeShapeModel,
+    state_dict: dict[str, Any],
+) -> None:
+    """Bind ``AdaptiveAdjacency`` embeddings before ``load_state_dict``.
+
+    Parameters
+    ----------
+
+    model : ModeShapeModel
+        See the function signature / summary for ``model``.
+    state_dict : dict[str, Any]
+        See the function signature / summary for ``state_dict``.
+
+    Returns
+    -------
+
+    None
+        See summary line.
+
+    Notes
+    -----
+
+    Lazy allocation means reconstructed models have no embedding parameters
+    until ``set_num_nodes``; checkpoint tensors provide ``N``."""
+    adaptive = getattr(model, "adaptive_topology", None)
+    if adaptive is None:
+        return
+    source = state_dict.get("adaptive_topology.source_embedding")
+    if source is None:
+        return
+    adaptive.set_num_nodes(int(source.shape[0]), device=source.device)
+
+
 def load_checkpoint(
     path: str | Path,
     *,
     map_location: str | torch.device | None = None,
     physics_lifting_fn: PhysicsLiftingFn | None = None,
-) -> GraphKoopmanModel:
+) -> ModeShapeModel:
     """Load a trained model from a checkpoint file.
 
     Parameters
@@ -721,6 +906,7 @@ def load_checkpoint(
 
     migrated_config = _migrate_config(config, format_version=int(format_version))
     model = reconstruct_model(migrated_config, physics_lifting_fn=physics_lifting_fn)
+    _allocate_adaptive_topology_from_state(model, state_dict)
     model.load_state_dict(state_dict)
     model.eval()
     return model

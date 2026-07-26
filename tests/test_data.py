@@ -900,3 +900,338 @@ def test_delay_windows_helpers_owned_by_data() -> None:
         "stack_delay_features",
     ):
         assert getattr(nn_delay, name) is getattr(delay_windows, name)
+
+
+def test_neighbor_window_sampler_induces_remapped_subgraph(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampling remaps nodes and preserves feature width."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    features = torch.arange(5 * 3, dtype=torch.float32).reshape(5, 3).unsqueeze(0)
+    features = features.expand(4, -1, -1).contiguous()
+    sequence = GraphSnapshotSequence.from_arrays(features, synthetic_edge_index)
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=1,
+        shuffle=False,
+        seed=0,
+    )
+    batch = next(iter(sampler.iter_epoch(0)))
+    window = batch[0]
+    assert window.num_timesteps == 2
+    assert window.num_nodes <= 5
+    assert window[0].x.shape[-1] == 3
+    assert int(window.edge_index.max()) < window.num_nodes
+    # Remapped indices are contiguous from 0.
+    assert int(window.edge_index.min()) >= 0
+
+
+def test_neighbor_window_sampler_seeded_determinism(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Seeded neighbor sampling is repeatable for the same epoch."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(4, 5, 2),
+        synthetic_edge_index,
+    )
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=4,
+        seed=11,
+    )
+    first = [w[0].x.clone() for batch in sampler.iter_epoch(0) for w in batch]
+    second = [w[0].x.clone() for batch in sampler.iter_epoch(0) for w in batch]
+    assert all(torch.equal(a, b) for a, b in zip(first, second, strict=True))
+
+
+def test_neighbor_window_sampler_rejects_hyperedges(
+    synthetic_hypergraph_edge_index: torch.Tensor,
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hyperedge sequences are rejected by the neighbor sampler."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(3, 4, 2),
+        synthetic_hypergraph_edge_index,
+        hyperedge_index=synthetic_hyperedge_index,
+    )
+    with pytest.raises(ValueError, match="hyperedge"):
+        NeighborWindowSampler(
+            sequence,
+            window_length=2,
+            num_nodes=2,
+        )
+
+
+def test_coerce_hyperedge_index_validation(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hyperedge incidence coercion validates shape and index ranges."""
+    from koopman_graph.data.validation import coerce_hyperedge_index
+
+    with pytest.raises(ValueError, match="shape \\(2, nnz\\)"):
+        coerce_hyperedge_index(torch.zeros(3, 2, dtype=torch.long), num_nodes=4)
+    with pytest.raises(ValueError, match="node indices"):
+        coerce_hyperedge_index(
+            torch.tensor([[4, 1], [0, 0]], dtype=torch.long),
+            num_nodes=4,
+        )
+    with pytest.raises(ValueError, match="hyperedge indices"):
+        coerce_hyperedge_index(
+            torch.tensor([[0, 1], [-1, 0]], dtype=torch.long),
+            num_nodes=4,
+        )
+    coerced = coerce_hyperedge_index(synthetic_hyperedge_index, num_nodes=4)
+    assert coerced.dtype == torch.long
+
+
+def test_coerce_hyperedge_weight_validation(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hyperedge weights must be 1-D and match the incidence hyperedge count."""
+    from koopman_graph.data.validation import (
+        coerce_hyperedge_index,
+        coerce_hyperedge_weight,
+    )
+
+    index = coerce_hyperedge_index(synthetic_hyperedge_index, num_nodes=4)
+    assert (
+        coerce_hyperedge_weight(None, hyperedge_index=index, dtype=torch.float32)
+        is None
+    )
+    with pytest.raises(ValueError, match="shape \\(num_hyperedges"):
+        coerce_hyperedge_weight(
+            torch.ones(2, 1),
+            hyperedge_index=index,
+            dtype=torch.float32,
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        coerce_hyperedge_weight(
+            torch.ones(3),
+            hyperedge_index=index,
+            dtype=torch.float32,
+        )
+    weights = coerce_hyperedge_weight(
+        torch.tensor([1.0, 2.0]),
+        hyperedge_index=index,
+        dtype=torch.float32,
+    )
+    assert weights is not None
+    assert weights.shape == (2,)
+
+
+def test_validate_static_hyperedges_edges(
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Static hyperedge validation covers empty input and weight mismatches."""
+    from koopman_graph.data.validation import validate_static_hyperedges
+
+    validate_static_hyperedges([])
+
+    base = Data(
+        x=torch.randn(4, 2),
+        edge_index=synthetic_hypergraph_edge_index,
+        hyperedge_index=synthetic_hyperedge_index,
+        hyperedge_weight=torch.tensor([1.0, 2.0]),
+    )
+    mismatched = Data(
+        x=torch.randn(4, 2),
+        edge_index=synthetic_hypergraph_edge_index,
+        hyperedge_index=synthetic_hyperedge_index,
+        hyperedge_weight=torch.tensor([1.0, 3.0]),
+    )
+    with pytest.raises(ValueError, match="different hyperedge_weight"):
+        validate_static_hyperedges([base, mismatched])
+
+    missing_weight = Data(
+        x=torch.randn(4, 2),
+        edge_index=synthetic_hypergraph_edge_index,
+        hyperedge_index=synthetic_hyperedge_index,
+    )
+    with pytest.raises(ValueError, match="hyperedge_weight presence"):
+        validate_static_hyperedges([base, missing_weight])
+
+
+def test_sequence_has_hyperedges_helper(
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+    make_snapshots: Callable[..., list[Data]],
+) -> None:
+    """``sequence_has_hyperedges`` inspects snapshots directly."""
+    from koopman_graph.data.validation import sequence_has_hyperedges
+
+    plain = make_snapshots(num_timesteps=2)
+    assert not sequence_has_hyperedges(plain)
+    hyper = [
+        Data(
+            x=torch.randn(4, 2),
+            edge_index=synthetic_hypergraph_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+    ]
+    assert sequence_has_hyperedges(hyper)
+
+
+def test_require_no_hyperedges_callable_flag(
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Guard accepts sequences whose ``has_hyperedges`` is a callable."""
+    from koopman_graph.data.validation import require_no_hyperedges
+
+    class _Sequence:
+        def has_hyperedges(self) -> bool:
+            return True
+
+    with pytest.raises(ValueError, match="hyperedge-carrying"):
+        require_no_hyperedges(_Sequence())
+
+    class _Plain:
+        has_hyperedges = False
+
+    require_no_hyperedges(_Plain())
+
+
+def test_validate_timestamps_helper() -> None:
+    """Timestamp validation enforces shape and strict monotonicity."""
+    from koopman_graph.data.validation import validate_timestamps
+
+    with pytest.raises(ValueError, match="shape"):
+        validate_timestamps(torch.zeros(2, 3), num_timesteps=2)
+    with pytest.raises(ValueError, match="entries"):
+        validate_timestamps(torch.tensor([0.0, 1.0, 2.0]), num_timesteps=2)
+    with pytest.raises(ValueError, match="monotone"):
+        validate_timestamps(torch.tensor([0.0, 0.0, 1.0]), num_timesteps=3)
+    validate_timestamps(torch.tensor([0.0, 1.0, 2.0]), num_timesteps=3)
+
+
+def test_validate_observation_masks_direct() -> None:
+    """Observation mask validation covers rank, shape, dtype, and empties."""
+    from koopman_graph.data.validation import validate_observation_masks
+
+    valid = torch.tensor([[1, 0], [0, 1]], dtype=torch.float32)
+    mask = validate_observation_masks(valid, num_timesteps=2, num_nodes=2)
+    assert mask.dtype == torch.bool
+
+    with pytest.raises(ValueError, match="shape \\(num_timesteps"):
+        validate_observation_masks(torch.ones(2), num_timesteps=2, num_nodes=2)
+    with pytest.raises(ValueError, match="does not match"):
+        validate_observation_masks(
+            torch.ones(2, 3, dtype=torch.bool),
+            num_timesteps=2,
+            num_nodes=2,
+        )
+    with pytest.raises(ValueError, match="boolean or numeric"):
+        validate_observation_masks(
+            torch.ones(2, 2, dtype=torch.float64),
+            num_timesteps=2,
+            num_nodes=2,
+        )
+    with pytest.raises(ValueError, match="only 0 and 1"):
+        validate_observation_masks(
+            torch.tensor([[1.0, 2.0], [0.0, 1.0]]),
+            num_timesteps=2,
+            num_nodes=2,
+        )
+    with pytest.raises(ValueError, match="at least one observed node"):
+        validate_observation_masks(
+            torch.zeros(2, 2, dtype=torch.bool),
+            num_timesteps=2,
+            num_nodes=2,
+        )
+
+
+def test_neighbor_window_sampler_rejects_dynamic_topology(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampling requires static pairwise topology."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    alt_edge = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
+    snapshots = [
+        Data(x=torch.randn(3, 2), edge_index=synthetic_edge_index),
+        Data(x=torch.randn(3, 2), edge_index=alt_edge),
+    ]
+    sequence = GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+    with pytest.raises(ValueError, match="static pairwise topology"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=2)
+
+
+def test_induce_neighbor_subgraph_preserves_weights_controls_masks(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Subgraph induction remaps weights, per-node controls, and masks."""
+    from koopman_graph.data.sampling import induce_neighbor_subgraph_sequence
+
+    num_nodes = 5
+    features = torch.randn(3, num_nodes, 2)
+    weights = torch.ones(synthetic_edge_index.shape[1])
+    snapshots = [
+        Data(
+            x=features[t],
+            edge_index=synthetic_edge_index,
+            edge_weight=weights,
+        )
+        for t in range(3)
+    ]
+    sequence = GraphSnapshotSequence(
+        snapshots,
+        control_inputs=torch.randn(3, num_nodes, 1),
+        observation_masks=torch.ones(3, num_nodes, dtype=torch.bool),
+    )
+    induced = induce_neighbor_subgraph_sequence(
+        sequence,
+        seed_nodes=torch.tensor([0, 1], dtype=torch.long),
+        num_hops=1,
+    )
+    assert induced[0].edge_weight is not None
+    assert induced.control_inputs is not None
+    assert induced.control_inputs.ndim == 3
+    assert induced.control_inputs.shape[1] == induced.num_nodes
+    assert induced.observation_masks is not None
+    assert induced.observation_masks.shape[1] == induced.num_nodes
+
+
+def test_neighbor_window_sampler_validation_and_iter(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampler validates hop config and exposes temporal metadata."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(4, 5, 2),
+        synthetic_edge_index,
+    )
+    with pytest.raises(ValueError, match="num_nodes must be"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=0)
+    with pytest.raises(ValueError, match="num_hops must be"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=2, num_hops=-1)
+
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=3,
+        windows_per_epoch=5,
+        shuffle=False,
+        seed=7,
+    )
+    assert sampler.batch_size == 3
+    assert sampler.windows_per_epoch == 5
+    assert sampler.shuffle is False
+    assert sampler.seed == 7
+    assert sampler.num_windows == 3
+    batch = next(iter(sampler))
+    assert 1 <= len(batch) <= 3

@@ -397,12 +397,26 @@ class GNNForecasterBaseline(nn.Module, ABC):
     def spectrum(self, *args: object, **kwargs: object) -> KoopmanSpectrum:
         """GNN forecasters have no linear Koopman operator spectrum.
 
+        Parameters
+        ----------
+
+        args : object
+            See the function signature / summary for ``args``.
+        kwargs : object
+            See the function signature / summary for ``kwargs``.
+
+        Returns
+        -------
+
+        KoopmanSpectrum
+            See summary line.
+
         Raises
         ------
+
         RuntimeError
             Always. Use :class:`~koopman_graph.model.GraphKoopmanModel` or
-            classical DMD/EDMD baselines for spectral analysis.
-        """
+            classical DMD/EDMD baselines for spectral analysis."""
         msg = (
             f"{type(self).__name__} has no linear Koopman operator spectrum; "
             "use GraphKoopmanModel or classical DMD/EDMD baselines for "
