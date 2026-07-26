@@ -152,6 +152,8 @@ def plot_spectrum(
     show_unit_circle: bool = True,
     cmap: str = "viridis",
     point_size: float = 45.0,
+    annotate_untrustworthy: bool = False,
+    residual_tolerance: float = 1e-2,
 ) -> PathCollection:
     """Plot discrete Koopman eigenvalues in the complex plane.
 
@@ -179,6 +181,13 @@ def plot_spectrum(
         Matplotlib colormap for ``|λ|``. Default is ``"viridis"``.
     point_size : float, optional
         Scatter marker size. Default is ``45``.
+    annotate_untrustworthy : bool, optional
+        When ``True`` and ``spectrum`` is a :class:`KoopmanSpectrum` with
+        ``residuals`` set, overlay distinct markers on modes whose residual
+        exceeds ``residual_tolerance``. No-op when residuals are unset or the
+        input is not a :class:`KoopmanSpectrum`. Default is ``False``.
+    residual_tolerance : float, optional
+        Residual threshold for untrustworthy annotation. Default is ``1e-2``.
 
     Returns
     -------
@@ -190,8 +199,8 @@ def plot_spectrum(
     ImportError
         If Matplotlib is not installed.
     ValueError
-        If ``limits`` is not ``"unit_disk"`` or ``"data"``, or ``pad`` is
-        negative.
+        If ``limits`` is not ``"unit_disk"`` or ``"data"``, ``pad`` is
+        negative, or ``residual_tolerance`` is not positive.
     """
     plt = _require_pyplot()
 
@@ -203,6 +212,9 @@ def plot_spectrum(
         pad = _DEFAULT_UNIT_DISK_PAD if limits == "unit_disk" else _DEFAULT_DATA_PAD
     if pad < 0:
         msg = f"pad must be non-negative, got {pad}"
+        raise ValueError(msg)
+    if residual_tolerance <= 0:
+        msg = f"residual_tolerance must be positive, got {residual_tolerance}"
         raise ValueError(msg)
 
     eigenvalues = _as_complex_eigenvalues(spectrum)
@@ -237,6 +249,27 @@ def plot_spectrum(
         s=point_size,
         zorder=3,
     )
+
+    if (
+        annotate_untrustworthy
+        and isinstance(spectrum, KoopmanSpectrum)
+        and spectrum.residuals is not None
+        and eigenvalues.size
+    ):
+        residuals = spectrum.residuals.detach().cpu().numpy().reshape(-1)
+        untrustworthy = residuals > residual_tolerance
+        if np.any(untrustworthy):
+            ax.scatter(
+                real[untrustworthy],
+                imag[untrustworthy],
+                marker="x",
+                c="0.25",
+                s=point_size * 1.4,
+                linewidths=1.5,
+                zorder=4,
+                label="untrustworthy",
+            )
+
     ax.axhline(0.0, color="0.85", linewidth=0.8, zorder=0)
     ax.axvline(0.0, color="0.85", linewidth=0.8, zorder=0)
     ax.set_xlabel(r"Re($\lambda$)")

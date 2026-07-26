@@ -42,6 +42,15 @@ Dynamics
 * Networked ``GraphKoopmanOperator`` (``koopman="graph"``) with
   self/neighbor coupling
   :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
+  (factorized blocks inspired by compositional / networked Koopman
+  constructions; cross-topology transfer is measured, not assumed — see
+  :doc:`limitations` and ``examples/37_cross_topology_transfer.ipynb``)
+* Pairwise ``adjacency`` modes on graph / continuous-graph operators:
+  ``"symmetric"`` (default), ``"random_walk"``
+  (:math:`D_{\mathrm{out}}^{-1}A`), and ``"dual_random_walk"`` (forward plus
+  reverse); factory keyword ``koopman_adjacency``; format-1
+  ``config.adjacency``. Hypergraph operators stay Zhou-symmetric and do not
+  expose ``adjacency``
 * Hypergraph ``HypergraphKoopmanOperator`` (``koopman="hypergraph"``)
 * Global/local non-stationary discrete operator
   (``GlobalLocalKoopmanOperator``; ``koopman="global_local"``)
@@ -50,7 +59,9 @@ Dynamics
   ``predict_at``
 * Continuous networked generator ``ContinuousGraphKoopmanOperator``
   (``koopman="graph"`` + ``dynamics_mode="continuous"`` or
-  ``koopman="continuous_graph"``; dense ``N·d`` matrix-exp cost caveat)
+  ``koopman="continuous_graph"``; ``adjacency`` modes match discrete
+  ``GraphKoopmanOperator``; dense ``N·d`` matrix-exp cost caveat —
+  prefer modest ``N`` or ``sparsity="block_diagonal"`` self-only shortcut)
 * Continuous ``koopman_parameterization="auxiliary_spectral"`` — state-dependent
   ``generator_at(z)`` / instantaneous spectrum (Lusch-style; locally linear,
   not a fixed global matrix). Prefer delay embeddings first for continuous-
@@ -76,6 +87,16 @@ Analysis
 ~~~~~~~~
 
 * ``KoopmanSpectrum`` / ``compute_spectrum`` with mode decoding helpers
+* ``spectral_residuals`` / ``SpectralResidualReport`` — held-out data-driven
+  residuals and ``trustworthy_mask()``; optional
+  ``plot_spectrum(..., annotate_untrustworthy=True)``. Diagnostic in the
+  learned observable space, **not** a certified ResDMD bound
+  (``ColbrookTownsend2023ResDMD``, ``Colbrook2023ResidualDMD``)
+* Long-horizon statistics via ``koopman_graph.statistics`` (power-user):
+  Welch PSD (``Welch1967``), ``spectral_distance``,
+  ``invariant_measure_distance``, Rosenstein
+  ``largest_lyapunov_exponent`` (``Rosenstein1993Lyapunov``;
+  embedding-sensitive; :math:`O(T^{2})`), and ``LongHorizonReport``
 * Dynamical similarity and anomaly utilities via
   ``koopman_graph.analysis``
 * ``identify_sparse_dynamics`` (SINDy / STLSQ on learned latents — not
@@ -112,7 +133,11 @@ Uncertainty quantification (power-user)
   refinement (not DPK; not a full K²VAE)
 * ``koopman_graph.uq.ConformalKoopmanUQ`` — split and adaptive (ACI)
   conformal intervals; marginal coverage under exchangeability (approximate
-  under temporal dependence)
+  under temporal dependence). Scores: ``"aggregate"``, legacy ``"per_node"``
+  (max-pool over nodes), and ``"node_wise"`` (per-node marginal widths;
+  optional ``neighbor_smoothing`` following DAPS-style diffusion,
+  ``Zargarbashi2023ConformalGNN``). Calibration payload kind
+  ``ConformalKoopmanUQ.calibration.v2``
 * See notebooks ``21_uncertainty_quantification.ipynb`` and
   ``30_conformal_uncertainty.ipynb``
 
@@ -132,7 +157,10 @@ Research tooling
 
 * Classical baselines via ``koopman_graph.baselines``: ``DMDBaseline``,
   ``EDMDBaseline`` (polynomial / RBF / kernel dictionaries; kernel path is
-  :math:`O(T^2)` — small/medium ``T``), ``DMDcBaseline``
+  :math:`O(T^2)` — small/medium ``T``), ``DMDcBaseline``. Truncated-SVD
+  ``rank`` accepts ``None``, a positive integer, or ``"auto"``
+  (Gavish–Donoho median threshold, ``GavishDonoho2014``); fitted
+  ``selected_rank`` is recorded
 * Lightweight STGCN / DCRNN / Graph WaveNet references in
   ``koopman_graph.baselines.gnn`` (teaching baselines, not dedicated-library
   SOTA)
@@ -202,6 +230,7 @@ Related pages
 -------------
 
 * :doc:`quickstart` — runnable train/predict walkthrough
+* :doc:`limitations` — consolidated scope boundaries and “when not to use”
 * :doc:`data` — FAIR dataset cards (PEMS / contact epidemic / acquisition)
 * :doc:`tutorials` — notebook gallery
 * :doc:`architecture` — public vs power-user API layers

@@ -13,8 +13,29 @@ Split conformal provides frequentist **marginal** coverage
 exchangeable (Vovk / Lei et al.). Graph time series typically violate exact
 exchangeability; treat split coverage as approximate under temporal
 dependence. Prefer ``method="adaptive"`` (ACI) when residuals drift.
+
+With ``score="node_wise"``, quantiles are **marginal per node**: each node
+has its own coverage guarantee under exchangeability of that node's scores.
+This is **not** joint / simultaneous coverage across nodes. Small calibration
+sets make per-node quantiles noisy; ``node_wise`` calibration requires at
+least ``ceil(1 / alpha)`` sequences.
+
+Optional ``neighbor_smoothing`` applies DAPS-style diffusion to node-wise
+regression residual scores. Zargarbashi et al. (ICML 2023) prove
+exchangeability preservation for *classification* conformity scores; applying
+the same diffusion to regression residuals is an empirical adaptation, not a
+transferred theorem.
+
 This peer belongs to the package ``uncertainty_quantification`` profile
 (power-user ``koopman_graph.uq`` path).
+
+References
+----------
+Zargarbashi, S. H., Antonelli, S., & Bojchevski, A. (2023). Conformal
+prediction sets for graph neural networks. In *Proceedings of the 40th
+International Conference on Machine Learning* (PMLR 202:12292–12318).
+https://proceedings.mlr.press/v202/h-zargarbashi23a.html
+(``Zargarbashi2023ConformalGNN``)
 """
 
 from __future__ import annotations
@@ -29,51 +50,108 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
+from koopman_graph.graph_utils import random_walk_normalized_adjacency_matvec
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
 from koopman_graph.uq.common import PredictionInterval, snapshot_with_features
 
 ConformalMethod = Literal["split", "adaptive"]
-ConformalScore = Literal["aggregate", "per_node"]
+ConformalScore = Literal["aggregate", "per_node", "node_wise"]
+
+_CALIBRATION_KIND = "ConformalKoopmanUQ.calibration.v2"
 
 
 def _nonconformity_score(
     prediction: Tensor,
     target: Tensor,
-    score: ConformalScore,
+    score: Literal["aggregate", "per_node"],
 ) -> float:
     """Scalar nonconformity between predicted and target node features.
 
     Parameters
     ----------
-
     prediction : Tensor
-        See the function signature / summary for ``prediction``.
+        Predicted node features ``(num_nodes, num_features)``.
     target : Tensor
-        See the function signature / summary for ``target``.
-    score : ConformalScore
-        See the function signature / summary for ``score``.
+        Target node features with the same shape.
+    score : {"aggregate", "per_node"}
+        Scalar score definition.
 
     Returns
     -------
-
     float
-        See summary line.
+        Nonconformity score.
 
     Raises
     ------
-
     ValueError
-        Raised when inputs are invalid."""
+        If ``score`` is not a scalar mode.
+    """
     residual = prediction - target
     if score == "aggregate":
         return float(residual.abs().max().item())
     if score == "per_node":
-        # Max over nodes of per-node feature L2.
+        # Max over nodes of per-node feature L2 (legacy pooled scalar).
         per_node = torch.linalg.vector_norm(residual, dim=-1)
         return float(per_node.max().item())
     msg = f"score must be 'aggregate' or 'per_node', got {score!r}"
     raise ValueError(msg)
+
+
+def _node_wise_scores(prediction: Tensor, target: Tensor) -> Tensor:
+    """Per-node feature ``L_2`` residual norms with shape ``(num_nodes,)``.
+
+    Parameters
+    ----------
+    prediction : Tensor
+        Predicted node features ``(num_nodes, num_features)``.
+    target : Tensor
+        Target node features with the same shape.
+
+    Returns
+    -------
+    Tensor
+        Per-node nonconformity scores.
+    """
+    residual = prediction - target
+    return torch.linalg.vector_norm(residual, dim=-1)
+
+
+def _diffuse_node_scores(
+    scores: Tensor,
+    edge_index: Tensor,
+    *,
+    edge_weight: Tensor | None,
+    lam: float,
+) -> Tensor:
+    """Apply DAPS-style score diffusion ``(1-λ)S + λ D_out^{-1} A S``.
+
+    Parameters
+    ----------
+    scores : Tensor
+        Per-node scores with shape ``(num_nodes,)``.
+    edge_index : Tensor
+        Graph edge index ``(2, num_edges)``.
+    edge_weight : Tensor or None
+        Optional edge weights.
+    lam : float
+        Diffusion weight in ``[0, 1]``.
+
+    Returns
+    -------
+    Tensor
+        Diffused scores with shape ``(num_nodes,)``.
+    """
+    if lam == 0.0:
+        return scores
+    diffused = random_walk_normalized_adjacency_matvec(
+        edge_index,
+        scores.unsqueeze(-1),
+        edge_weight=edge_weight,
+        num_nodes=int(scores.shape[0]),
+        direction="forward",
+    ).squeeze(-1)
+    return (1.0 - lam) * scores + lam * diffused
 
 
 def _split_quantile(scores: Tensor, alpha: float) -> float:
@@ -81,23 +159,21 @@ def _split_quantile(scores: Tensor, alpha: float) -> float:
 
     Parameters
     ----------
-
     scores : Tensor
-        See the function signature / summary for ``scores``.
+        Calibration scores (any shape; flattened).
     alpha : float
-        See the function signature / summary for ``alpha``.
+        Miscoverage rate in ``(0, 1)``.
 
     Returns
     -------
-
     float
-        See summary line.
+        Empirical quantile half-width.
 
     Raises
     ------
-
     ValueError
-        Raised when inputs are invalid."""
+        If ``scores`` is empty.
+    """
     n = int(scores.numel())
     if n < 1:
         msg = "split conformal requires at least one calibration score"
@@ -106,6 +182,44 @@ def _split_quantile(scores: Tensor, alpha: float) -> float:
     sorted_scores = torch.sort(scores.reshape(-1)).values
     index = min(max(ceil((n + 1) * (1.0 - alpha)) - 1, 0), n - 1)
     return float(sorted_scores[index].item())
+
+
+def _split_quantiles_per_column(score_matrix: Tensor, alpha: float) -> Tensor:
+    """Column-wise split conformal quantiles.
+
+    Parameters
+    ----------
+    score_matrix : Tensor
+        Scores with shape ``(n_calibration, num_nodes)``.
+    alpha : float
+        Miscoverage rate.
+
+    Returns
+    -------
+    Tensor
+        Quantiles with shape ``(num_nodes,)`` (float64).
+    """
+    num_nodes = int(score_matrix.shape[1])
+    out = torch.empty(num_nodes, dtype=torch.float64)
+    for node in range(num_nodes):
+        out[node] = _split_quantile(score_matrix[:, node], alpha)
+    return out
+
+
+def _minimum_calibration_count(alpha: float) -> int:
+    """Return the minimum calibration-set size for ``node_wise`` mode.
+
+    Parameters
+    ----------
+    alpha : float
+        Target miscoverage rate in ``(0, 1)``.
+
+    Returns
+    -------
+    int
+        ``ceil(1 / alpha)``.
+    """
+    return int(ceil(1.0 / alpha))
 
 
 class ConformalKoopmanUQ:
@@ -120,18 +234,39 @@ class ConformalKoopmanUQ:
         ``"split"`` (default) uses batch empirical quantiles.
         ``"adaptive"`` runs Gibbs–Candès ACI updates over the calibration
         stream (recommended under residual drift).
-    score : {"aggregate", "per_node"}, optional
+    score : {"aggregate", "per_node", "node_wise"}, optional
         Nonconformity definition. Default ``"aggregate"`` uses the
-        entrywise ``L_∞`` residual. ``"per_node"`` uses the max over nodes
-        of per-node feature ``L_2``, then a single pooled quantile.
+        entrywise ``L_∞`` residual and one scalar quantile per horizon.
+        ``"per_node"`` (legacy) takes the **max over nodes** of per-node
+        feature ``L_2``, then a single pooled quantile — intervals remain
+        homoscedastic across nodes. ``"node_wise"`` keeps a per-node score
+        vector and ``(steps, num_nodes)`` quantiles for heteroscedastic
+        widths. Prefer ``"node_wise"`` when per-node intervals are desired;
+        ``"per_node"`` is retained for compatibility.
     gamma : float, optional
         ACI step size when ``method="adaptive"``. Default ``0.005``.
+    neighbor_smoothing : float or None, optional
+        DAPS-style diffusion weight ``λ`` applied to ``node_wise`` scores
+        before quantiles: ``Ŝ = (1-λ)S + λ D_out^{-1} A S``. Must lie in
+        ``[0, 1]``. ``None`` (default) disables smoothing. ``0`` reproduces
+        unsmoothed ``node_wise`` exactly. Only valid with
+        ``score="node_wise"``.
 
     Notes
     -----
     Call :meth:`calibrate` before :meth:`predict_interval`. Intervals are
-    symmetric half-widths ``ŷ ± q_h`` in feature space. Marginal coverage
-    ``≥ 1 − α`` holds under exchangeability of scores; see module docs.
+    symmetric half-widths ``ŷ ± q`` in feature space. For ``node_wise``,
+    ``q`` is per-node and broadcasts over features. Coverage is **marginal
+    per node**, not joint across nodes. ``node_wise`` calibration requires
+    at least ``ceil(1 / alpha)`` sequences.
+
+    Score diffusion follows Zargarbashi et al. (ICML 2023) for classification
+    conformity scores; using it on regression residuals is an adaptation with
+    empirical rather than theoretical warrant.
+
+    References
+    ----------
+    Zargarbashi, Antonelli & Bojchevski, ICML 2023 (PMLR 202:12292–12318).
     """
 
     def __init__(
@@ -141,27 +276,43 @@ class ConformalKoopmanUQ:
         method: ConformalMethod = "split",
         score: ConformalScore = "aggregate",
         gamma: float = 0.005,
+        neighbor_smoothing: float | None = None,
     ) -> None:
         """Initialize conformal UQ settings.
 
         Parameters
         ----------
-        model, method, score, gamma
+        model, method, score, gamma, neighbor_smoothing
             See the class docstring.
         """
         if method not in {"split", "adaptive"}:
             msg = f"method must be 'split' or 'adaptive', got {method!r}"
             raise ValueError(msg)
-        if score not in {"aggregate", "per_node"}:
-            msg = f"score must be 'aggregate' or 'per_node', got {score!r}"
+        if score not in {"aggregate", "per_node", "node_wise"}:
+            msg = (
+                f"score must be 'aggregate', 'per_node', or 'node_wise', got {score!r}"
+            )
             raise ValueError(msg)
         if gamma <= 0:
             msg = f"gamma must be positive, got {gamma}"
             raise ValueError(msg)
+        if neighbor_smoothing is not None:
+            if score != "node_wise":
+                msg = (
+                    "neighbor_smoothing requires score='node_wise'; "
+                    f"got score={score!r}"
+                )
+                raise ValueError(msg)
+            if not 0.0 <= float(neighbor_smoothing) <= 1.0:
+                msg = f"neighbor_smoothing must lie in [0, 1], got {neighbor_smoothing}"
+                raise ValueError(msg)
         self.model = model
         self.method: ConformalMethod = method
         self.score: ConformalScore = score
         self.gamma = float(gamma)
+        self.neighbor_smoothing = (
+            None if neighbor_smoothing is None else float(neighbor_smoothing)
+        )
         self._quantiles: Tensor | None = None
         self._alpha: float | None = None
         self._n_calibration: int = 0
@@ -174,7 +325,9 @@ class ConformalKoopmanUQ:
         Returns
         -------
         bool
-            See summary line."""
+            ``True`` after a successful :meth:`calibrate` or
+            :meth:`load_calibration`.
+        """
         return self._quantiles is not None
 
     @property
@@ -188,24 +341,27 @@ class ConformalKoopmanUQ:
         Returns
         -------
         int
-            See summary line."""
+            Calibrated forecast horizon.
+        """
         return self._calibrated_steps
 
     @property
     def quantiles(self) -> Tensor:
-        """Per-horizon half-widths with shape ``(calibrated_steps,)``.
+        """Per-horizon half-widths.
+
+        Shape is ``(calibrated_steps,)`` for ``aggregate`` / ``per_node``,
+        or ``(calibrated_steps, num_nodes)`` for ``node_wise``.
 
         Returns
         -------
-
         Tensor
-            See summary line.
+            Calibration quantiles.
 
         Raises
         ------
-
         RuntimeError
-            If :meth:`calibrate` has not been called."""
+            If :meth:`calibrate` has not been called.
+        """
         if self._quantiles is None:
             msg = "ConformalKoopmanUQ is not calibrated; call calibrate() first"
             raise RuntimeError(msg)
@@ -227,7 +383,8 @@ class ConformalKoopmanUQ:
         calibration_sequences : sequence of trajectories
             Each trajectory must have length ``≥ steps + 1``. The first
             snapshot is the rollout origin; the next ``steps`` snapshots are
-            targets.
+            targets. For ``score="node_wise"``, length must be at least
+            ``ceil(1 / alpha)``.
         steps : int
             Forecast horizon used for calibration (and the maximum horizon
             for later :meth:`predict_interval` calls).
@@ -247,7 +404,9 @@ class ConformalKoopmanUQ:
         Raises
         ------
         ValueError
-            If inputs are invalid or sequences are too short.
+            If inputs are invalid, sequences are too short, or (for
+            ``node_wise``) the calibration set is smaller than
+            ``ceil(1 / alpha)``.
         """
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
@@ -260,6 +419,16 @@ class ConformalKoopmanUQ:
             raise ValueError(msg)
 
         resolved = [resolve_sequence(seq) for seq in calibration_sequences]
+        if self.score == "node_wise":
+            min_count = _minimum_calibration_count(alpha)
+            if len(resolved) < min_count:
+                msg = (
+                    "node_wise calibration requires at least "
+                    f"ceil(1/alpha)={min_count} sequences for alpha={alpha}; "
+                    f"got {len(resolved)}. Provide more calibration sequences "
+                    "or increase alpha."
+                )
+                raise ValueError(msg)
         for index, sequence in enumerate(resolved):
             if sequence.num_timesteps < steps + 1:
                 msg = (
@@ -281,6 +450,49 @@ class ConformalKoopmanUQ:
             )
             raise ValueError(msg)
 
+        if self.score == "node_wise":
+            self._calibrate_node_wise(
+                resolved,
+                steps=steps,
+                alpha=alpha,
+                controls=controls,
+                future_topologies=future_topologies,
+            )
+        else:
+            self._calibrate_scalar(
+                resolved,
+                steps=steps,
+                alpha=alpha,
+                controls=controls,
+                future_topologies=future_topologies,
+            )
+        return self
+
+    def _calibrate_scalar(
+        self,
+        resolved: list[GraphSnapshotSequence],
+        *,
+        steps: int,
+        alpha: float,
+        controls: Sequence[Sequence[Tensor] | None] | None,
+        future_topologies: Sequence[Sequence[Data] | None] | None,
+    ) -> None:
+        """Calibrate pooled scalar quantiles (``aggregate`` / ``per_node``).
+
+        Parameters
+        ----------
+        resolved : list of GraphSnapshotSequence
+            Resolved calibration trajectories.
+        steps : int
+            Forecast horizon.
+        alpha : float
+            Miscoverage rate.
+        controls : sequence or None
+            Optional per-trajectory controls.
+        future_topologies : sequence or None
+            Optional per-trajectory topology schedules.
+        """
+        score_mode: Literal["aggregate", "per_node"] = self.score  # type: ignore[assignment]
         score_rows: list[list[float]] = [[] for _ in range(steps)]
         quantiles = torch.zeros(steps, dtype=torch.float64)
 
@@ -308,7 +520,7 @@ class ConformalKoopmanUQ:
                 if pred_x is None or target_x is None:
                     msg = "calibration snapshots must define node features x"
                     raise ValueError(msg)
-                score = _nonconformity_score(pred_x, target_x, self.score)
+                score = _nonconformity_score(pred_x, target_x, score_mode)
                 if self.method == "split":
                     score_rows[horizon].append(score)
                 else:
@@ -325,7 +537,101 @@ class ConformalKoopmanUQ:
         self._alpha = float(alpha)
         self._n_calibration = len(resolved)
         self._calibrated_steps = steps
-        return self
+
+    def _calibrate_node_wise(
+        self,
+        resolved: list[GraphSnapshotSequence],
+        *,
+        steps: int,
+        alpha: float,
+        controls: Sequence[Sequence[Tensor] | None] | None,
+        future_topologies: Sequence[Sequence[Data] | None] | None,
+    ) -> None:
+        """Calibrate per-node quantiles with optional score diffusion.
+
+        Parameters
+        ----------
+        resolved : list of GraphSnapshotSequence
+            Resolved calibration trajectories (fixed node count).
+        steps : int
+            Forecast horizon.
+        alpha : float
+            Miscoverage rate.
+        controls : sequence or None
+            Optional per-trajectory controls.
+        future_topologies : sequence or None
+            Optional per-trajectory topology schedules.
+        """
+        origin0 = resolved[0][0]
+        if origin0.x is None:
+            msg = "calibration snapshots must define node features x"
+            raise ValueError(msg)
+        num_nodes = int(origin0.x.shape[0])
+        lam = 0.0 if self.neighbor_smoothing is None else self.neighbor_smoothing
+        score_rows: list[list[Tensor]] = [[] for _ in range(steps)]
+        quantiles = torch.zeros(steps, num_nodes, dtype=torch.float64)
+
+        for seq_id, sequence in enumerate(resolved):
+            traj_controls = None if controls is None else controls[seq_id]
+            traj_future = (
+                None if future_topologies is None else future_topologies[seq_id]
+            )
+            if traj_controls is not None:
+                validate_controls(
+                    control_dim=self.model.control_dim,
+                    controls=traj_controls,
+                    steps=steps,
+                )
+            origin = sequence[0]
+            if origin.x is None or int(origin.x.shape[0]) != num_nodes:
+                msg = (
+                    "node_wise calibration requires a fixed node count; "
+                    f"expected {num_nodes} nodes"
+                )
+                raise ValueError(msg)
+            if lam > 0.0 and origin.edge_index is None:
+                msg = "neighbor_smoothing requires edge_index on calibration origins"
+                raise ValueError(msg)
+            edge_weight = getattr(origin, "edge_weight", None)
+            forecast = self.model.predict(
+                origin,
+                steps,
+                controls=traj_controls,
+                future_topologies=traj_future,
+            )
+            for horizon in range(steps):
+                pred_x = forecast[horizon].x
+                target_x = sequence[horizon + 1].x
+                if pred_x is None or target_x is None:
+                    msg = "calibration snapshots must define node features x"
+                    raise ValueError(msg)
+                scores = _node_wise_scores(pred_x, target_x).to(dtype=torch.float64)
+                if lam != 0.0:
+                    scores = _diffuse_node_scores(
+                        scores,
+                        origin.edge_index,
+                        edge_weight=edge_weight,
+                        lam=lam,
+                    )
+                if self.method == "split":
+                    score_rows[horizon].append(scores.detach().cpu())
+                else:
+                    q_h = quantiles[horizon]
+                    err = (scores > q_h).to(dtype=torch.float64)
+                    quantiles[horizon] = torch.clamp(
+                        q_h + self.gamma * (err - alpha),
+                        min=0.0,
+                    )
+
+        if self.method == "split":
+            for horizon in range(steps):
+                score_matrix = torch.stack(score_rows[horizon], dim=0)
+                quantiles[horizon] = _split_quantiles_per_column(score_matrix, alpha)
+
+        self._quantiles = quantiles.to(dtype=torch.float32)
+        self._alpha = float(alpha)
+        self._n_calibration = len(resolved)
+        self._calibrated_steps = steps
 
     def predict_interval(
         self,
@@ -359,7 +665,9 @@ class ConformalKoopmanUQ:
         -------
         PredictionInterval
             Mean point forecast plus symmetric conformal bands
-            ``mean ± q_h``. ``n_members`` is the calibration set size.
+            ``mean ± q``. For ``node_wise``, ``q`` has shape ``(num_nodes,)``
+            and broadcasts over features. ``n_members`` is the calibration
+            set size.
 
         Raises
         ------
@@ -398,6 +706,7 @@ class ConformalKoopmanUQ:
         )
         lower_snaps: list[Data] = []
         upper_snaps: list[Data] = []
+        node_wise = self.score == "node_wise"
         for horizon, mean_snap in enumerate(mean_snaps):
             if mean_snap.x is None:
                 msg = "predicted snapshots must define node features x"
@@ -406,6 +715,15 @@ class ConformalKoopmanUQ:
                 device=mean_snap.x.device,
                 dtype=mean_snap.x.dtype,
             )
+            if node_wise:
+                if half.ndim != 1 or half.shape[0] != mean_snap.x.shape[0]:
+                    msg = (
+                        "node_wise quantiles must match the forecast node "
+                        f"count; got {tuple(half.shape)} vs "
+                        f"{mean_snap.x.shape[0]} nodes"
+                    )
+                    raise ValueError(msg)
+                half = half.unsqueeze(-1)
             lower_snaps.append(snapshot_with_features(mean_snap, mean_snap.x - half))
             upper_snaps.append(snapshot_with_features(mean_snap, mean_snap.x + half))
 
@@ -424,14 +742,21 @@ class ConformalKoopmanUQ:
         ----------
         path : str or Path
             Destination file for ``torch.save``.
+
+        Notes
+        -----
+        Payload ``kind`` is ``ConformalKoopmanUQ.calibration.v2`` and includes
+        ``score``, ``neighbor_smoothing``, and quantile tensors (scalar or
+        per-node). This is independent of model ``FORMAT_VERSION``.
         """
         if self._quantiles is None or self._alpha is None:
             msg = "ConformalKoopmanUQ is not calibrated; call calibrate() first"
             raise RuntimeError(msg)
         payload = {
-            "kind": "ConformalKoopmanUQ.calibration",
+            "kind": _CALIBRATION_KIND,
             "method": self.method,
             "score": self.score,
+            "neighbor_smoothing": self.neighbor_smoothing,
             "gamma": self.gamma,
             "alpha": self._alpha,
             "quantiles": self._quantiles.detach().cpu(),
@@ -456,10 +781,11 @@ class ConformalKoopmanUQ:
         Raises
         ------
         ValueError
-            If the payload kind or method/score disagree with this instance.
+            If the payload kind or method/score/smoothing disagree with this
+            instance.
         """
         payload = torch.load(Path(path), map_location="cpu", weights_only=False)
-        if payload.get("kind") != "ConformalKoopmanUQ.calibration":
+        if payload.get("kind") != _CALIBRATION_KIND:
             msg = f"unsupported calibration payload kind: {payload.get('kind')!r}"
             raise ValueError(msg)
         if payload.get("method") != self.method or payload.get("score") != self.score:
@@ -467,6 +793,14 @@ class ConformalKoopmanUQ:
                 "calibration method/score "
                 f"({payload.get('method')!r}, {payload.get('score')!r}) "
                 f"do not match this instance ({self.method!r}, {self.score!r})"
+            )
+            raise ValueError(msg)
+        stored_smooth = payload.get("neighbor_smoothing", None)
+        if stored_smooth != self.neighbor_smoothing:
+            msg = (
+                "calibration neighbor_smoothing "
+                f"{stored_smooth!r} does not match this instance "
+                f"{self.neighbor_smoothing!r}"
             )
             raise ValueError(msg)
         self.gamma = float(payload.get("gamma", self.gamma))

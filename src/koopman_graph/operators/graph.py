@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -22,32 +21,56 @@ from koopman_graph.operators.control import (
     per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.graph_types import (
+    GRAPH_ADJACENCY_MODES,
+    GraphAdjacency,
+    GraphSparsity,
+)
 from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
-GraphSparsity = Literal["dense", "block_diagonal", "distributed"]
+__all__ = [
+    "GraphAdjacency",
+    "GraphKoopmanOperator",
+    "GraphSparsity",
+]
 
 
 class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     """Discrete Koopman step with self and neighbor coupling on the graph.
 
-    Advances stacked node latents ``Z ∈ R^{N×d}`` via the linear map::
+    Advances stacked node latents ``Z ∈ R^{N×d}`` via a linear map whose
+    adjacency normalization depends on ``adjacency``:
 
-        vec(Z_{t+1}) = (I_N ⊗ K_self + Â ⊗ K_nbr) vec(Z_t)
+    * ``"symmetric"`` (default)::
 
-    implemented sparsely as::
+          vec(Z_{t+1}) = (I_N ⊗ K_self + Â_sym ⊗ K_nbr) vec(Z_t)
+          Z_next = Z @ K_self.T + (Â_sym Z) @ K_nbr.T
 
-        Z_next = Z @ K_self.T + (Â Z) @ K_nbr.T
+      with ``Â_sym = D^{-1/2} A D^{-1/2}`` (undirected / symmetrically
+      represented graphs).
 
-    where ``Â`` is the symmetric normalized adjacency
-    ``D^{-1/2} A D^{-1/2}``. Unlike :class:`KoopmanOperator`, topology enters
-    the **linear** step, so mid-horizon rewiring changes latent advance (not
-    only decode). Discrete-time only; for continuous networked generators use
+    * ``"random_walk"``::
+
+          Z_next = Z @ K_self.T + (Â_f Z) @ K_nbr.T
+
+      with ``Â_f = D_out^{-1} A``.
+
+    * ``"dual_random_walk"``::
+
+          Z_next = Z @ K_self.T + (Â_f Z) @ K_fwd.T + (Â_b Z) @ K_bwd.T
+
+      with ``Â_b = D_in^{-1} A^{\\top}``. ``K_fwd`` is an alias of ``K_nbr``.
+
+    Unlike :class:`KoopmanOperator`, topology enters the **linear** step, so
+    mid-horizon rewiring changes latent advance (not only decode).
+    Discrete-time only; for continuous networked generators use
     :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
     (``koopman="graph"`` + ``dynamics_mode="continuous"``).
 
-    When ``K_nbr = 0``, the step reduces exactly to the per-node map
-    ``Z @ K_self.T``.
+    When neighbor factors are zero, the step reduces exactly to the per-node
+    map ``Z @ K_self.T``. Orbit ties (when enabled) apply only to ``K_self``;
+    ``K_nbr`` / ``K_fwd`` / ``K_bwd`` stay globally shared.
 
     Attributes
     ----------
@@ -56,7 +79,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     control_dim : int
         Exogenous control dimension (``0`` disables control).
     parameterization : Parameterization
-        Shared soft/structural parameterization for ``K_self`` and ``K_nbr``.
+        Shared soft/structural parameterization for ``K_self`` and neighbor
+        factors.
+    adjacency : {"symmetric", "random_walk", "dual_random_walk"}
+        Neighbor-coupling normalization (default ``"symmetric"``).
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` and ``"block_diagonal"`` share the same
         sparse forward matvec; they differ in ``inverse_advance`` (exact
@@ -78,6 +104,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         control_mode: ControlMode = "additive",
         bilinear_rank: int | None = None,
         sparsity: GraphSparsity = "dense",
+        adjacency: GraphAdjacency = "symmetric",
         orbit_partition: Sequence[Sequence[int]] | None = None,
         auto_orbits: bool = False,
         orbit_method: OrbitMethod = "auto",
@@ -89,13 +116,13 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         latent_dim : int
             Latent dimension ``d``.
         init_mode : {"identity", "identity_noise", "xavier"}, optional
-            Initialization for ``K_self``. ``K_nbr`` starts at zero for
-            ``identity`` / ``identity_noise`` (plus optional noise on the
-            neighbor term for ``identity_noise`` / ``xavier``).
+            Initialization for ``K_self``. ``K_nbr`` / ``K_fwd`` starts near
+            zero (plus optional noise for ``identity_noise`` / ``xavier``).
+            ``K_bwd`` (dual mode only) initializes at exactly zero.
         init_scale : float, optional
             Noise scale for ``identity_noise`` / neighbor jitter.
         parameterization : Parameterization, optional
-            Shared parameterization for both ``d×d`` factors.
+            Shared parameterization for the ``d×d`` factors.
         max_spectral_radius : float, optional
             Spectral bound for soft/structural modes.
         control_dim : int, optional
@@ -109,9 +136,13 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             ``"block_diagonal"`` keeps the same forward advance and uses an
             approximate per-node inverse. ``"distributed"`` is planned; not
             in 0.6.0.
+        adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
+            Neighbor-coupling normalization. Default ``"symmetric"`` preserves
+            historical undirected behavior bit-for-bit.
         orbit_partition : sequence of sequence of int or None, optional
             Explicit node-orbit partition tying ``K_self`` across orbit mates.
-            Overrides ``auto_orbits`` when provided.
+            Overrides ``auto_orbits`` when provided. Neighbor factors are never
+            orbit-tied.
         auto_orbits : bool, optional
             When ``True``, compute orbits from ``edge_index`` on first advance
             (requires the ``[symmetry]`` extra for non-identity partitions).
@@ -121,8 +152,8 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Raises
         ------
         ValueError
-            If ``sparsity`` is ``"distributed"`` or otherwise unsupported, or
-            construction args are invalid.
+            If ``sparsity`` / ``adjacency`` are unsupported, or construction
+            args are invalid.
         """
         super().__init__()
         if sparsity == "distributed":
@@ -132,6 +163,13 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             msg = (
                 "GraphKoopmanOperator sparsity must be 'dense' or "
                 f"'block_diagonal', got {sparsity!r}"
+            )
+            raise ValueError(msg)
+        if adjacency not in GRAPH_ADJACENCY_MODES:
+            accepted = ", ".join(sorted(GRAPH_ADJACENCY_MODES))
+            msg = (
+                "GraphKoopmanOperator adjacency must be one of "
+                f"{{{accepted}}}, got {adjacency!r}"
             )
             raise ValueError(msg)
 
@@ -144,6 +182,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         self.control_mode = control_mode
         self.bilinear_rank = bilinear_rank
         self.sparsity = sparsity
+        self.adjacency = adjacency
 
         # Self-term owns the optional control matrix B (and bilinear factors).
         self._self = KoopmanOperator(
@@ -164,6 +203,18 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             max_spectral_radius=max_spectral_radius,
             control_dim=0,
         )
+        self._bwd: KoopmanOperator | None
+        if adjacency == "dual_random_walk":
+            self._bwd = KoopmanOperator(
+                latent_dim,
+                init_mode="identity",
+                init_scale=init_scale,
+                parameterization=parameterization,
+                max_spectral_radius=max_spectral_radius,
+                control_dim=0,
+            )
+        else:
+            self._bwd = None
         self._reset_neighbor_parameters()
         self._init_orbit_config(
             orbit_partition=orbit_partition,
@@ -171,40 +222,62 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             orbit_method=orbit_method,
         )
 
-    def _reset_neighbor_parameters(self) -> None:
-        """Initialize ``K_nbr`` near zero so the operator starts per-node-like.
+    def _reset_factor_parameters(
+        self,
+        module: KoopmanOperator,
+        *,
+        allow_noise: bool,
+    ) -> None:
+        """Zero a neighbor factor, optionally adding ``init_scale`` noise.
 
-        Notes
-        -----
-        Dense mode zeros the stored ``K`` factor; factorized modes zero raw
-        parameters, optionally adding ``init_scale`` noise.
+        Parameters
+        ----------
+        module : KoopmanOperator
+            Neighbor factor module to reset.
+        allow_noise : bool
+            When ``True`` and ``init_mode`` is noisy, add ``init_scale`` jitter.
         """
         if self.parameterization == "dense":
-            dense_k = self._nbr.K
+            dense_k = module.K
             with torch.no_grad():
                 dense_k.zero_()
-                if self.init_mode in {"identity_noise", "xavier"}:
+                if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
                     dense_k.add_(torch.randn_like(dense_k) * self.init_scale)
             return
 
-        # Factorized modes: drive assembled K_nbr toward zero via raw params.
         with torch.no_grad():
-            for parameter in self._nbr.parameters():
+            for parameter in module.parameters():
                 parameter.zero_()
-            if self.init_mode in {"identity_noise", "xavier"}:
-                for parameter in self._nbr.parameters():
+            if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
+                for parameter in module.parameters():
                     parameter.add_(torch.randn_like(parameter) * self.init_scale)
 
+    def _reset_neighbor_parameters(self) -> None:
+        """Initialize neighbor factors for a per-node-like starting point.
+
+        Notes
+        -----
+        ``K_nbr`` / ``K_fwd`` may receive ``init_scale`` noise.
+        ``K_bwd`` (dual mode) is always exactly zero so
+        ``dual_random_walk`` begins equivalent to ``random_walk``.
+        """
+        self._reset_factor_parameters(self._nbr, allow_noise=True)
+        if self._bwd is not None:
+            self._reset_factor_parameters(self._bwd, allow_noise=False)
+
     def reset_parameters(self) -> None:
-        """Reinitialize ``K_self`` / ``K_nbr`` (and control ``B`` when present).
+        """Reinitialize ``K_self`` / neighbor factors (and control ``B``).
 
         Notes
         -----
         Delegates to the self/neighbor factor modules, then re-applies the
-        near-zero neighbor initialization.
+        neighbor initialization conventions (near-zero forward; exact-zero
+        backward).
         """
         self.reset_orbit_selves()
         self._nbr.reset_parameters()
+        if self._bwd is not None:
+            self._bwd.reset_parameters()
         self._reset_neighbor_parameters()
 
     @property
@@ -223,14 +296,44 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
 
     @property
     def K_nbr(self) -> Tensor:
-        """Neighbor-coupling matrix with shape ``(latent_dim, latent_dim)``.
+        """Forward / sole neighbor-coupling matrix ``(latent_dim, latent_dim)``.
 
         Returns
         -------
         Tensor
-            Assembled ``K_nbr``.
+            Assembled ``K_nbr`` (alias :attr:`K_fwd`).
         """
         return self._nbr.K
+
+    @property
+    def K_fwd(self) -> Tensor:
+        """Alias of :attr:`K_nbr` (forward random-walk coupling).
+
+        Returns
+        -------
+        Tensor
+            Assembled forward neighbor factor.
+        """
+        return self.K_nbr
+
+    @property
+    def K_bwd(self) -> Tensor:
+        """Backward random-walk coupling (``dual_random_walk`` only).
+
+        Returns
+        -------
+        Tensor
+            Assembled ``K_bwd``.
+
+        Raises
+        ------
+        AttributeError
+            If ``adjacency`` is not ``"dual_random_walk"``.
+        """
+        if self._bwd is None:
+            msg = "K_bwd is only available when adjacency='dual_random_walk'"
+            raise AttributeError(msg)
+        return self._bwd.K
 
     @property
     def matrix(self) -> Tensor:
@@ -263,22 +366,36 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         k_self: Tensor,
         k_nbr: Tensor,
         *,
+        k_bwd: Tensor | None = None,
         control_matrix: Tensor | None = None,
         bilinear_matrices: Tensor | None = None,
     ) -> None:
-        """Write dense ``K_self`` / ``K_nbr`` (and optional control factors).
+        """Write dense ``K_self`` / neighbor factors (and optional control).
 
         Parameters
         ----------
         k_self : Tensor
             Dense self matrix ``(latent_dim, latent_dim)``.
         k_nbr : Tensor
-            Dense neighbor matrix ``(latent_dim, latent_dim)``.
+            Dense forward / sole neighbor matrix ``(latent_dim, latent_dim)``.
+        k_bwd : Tensor or None, optional
+            Dense backward neighbor matrix when
+            ``adjacency="dual_random_walk"``. Must be omitted otherwise.
         control_matrix : Tensor or None, optional
             Control matrix ``B`` when ``control_dim > 0``.
         bilinear_matrices : Tensor or None, optional
             Full-rank bilinear stack when ``control_mode="bilinear"``.
+
+        Raises
+        ------
+        ValueError
+            If ``k_bwd`` is set when ``adjacency`` is not
+            ``"dual_random_walk"``. When dual, ``k_bwd=None`` leaves
+            ``K_bwd`` unchanged.
         """
+        if k_bwd is not None and self._bwd is None:
+            msg = "k_bwd is only valid when adjacency='dual_random_walk'"
+            raise ValueError(msg)
         if self._orbit_selves is None:
             self._self.set_dense_matrix(
                 k_self,
@@ -293,9 +410,12 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     bilinear_matrices=bilinear_matrices if orbit_id == 0 else None,
                 )
         self._nbr.set_dense_matrix(k_nbr, control_matrix=None)
+        if k_bwd is not None:
+            assert self._bwd is not None
+            self._bwd.set_dense_matrix(k_bwd, control_matrix=None)
 
     def bound_metric(self) -> Tensor:
-        """Return ``max(bound(K_self), bound(K_nbr))`` for factor monitoring.
+        """Return ``max`` of self / neighbor factor bounds for monitoring.
 
         This is a **factor-level** soft/structural surrogate used by
         structural eigenvalue regularization. It is **not** the spectral
@@ -310,7 +430,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Tensor
             Scalar factor bound metric.
         """
-        return torch.maximum(self._self.bound_metric(), self._nbr.bound_metric())
+        metric = torch.maximum(self._self.bound_metric(), self._nbr.bound_metric())
+        if self._bwd is not None:
+            metric = torch.maximum(metric, self._bwd.bound_metric())
+        return metric
 
     def spectral_radius(self) -> Tensor:
         """Return ``max(|λ|)`` of ``K_self`` (not the full ``N·d`` operator).
@@ -332,6 +455,121 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         """
         return self._self.stability_certificate()
 
+    def _dense_neighbor_coupling(
+        self,
+        edge_index: Tensor,
+        num_nodes: int,
+        *,
+        edge_weight: Tensor | None,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Assemble ``Â ⊗ K_nbr`` (plus ``Â_b ⊗ K_bwd`` in dual mode).
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        edge_weight : Tensor or None
+            Optional edge weights ``(E,)``.
+        dtype : torch.dtype
+            Floating dtype for the dense adjacency factors.
+
+        Returns
+        -------
+        Tensor
+            Dense neighbor coupling with shape ``(N·d, N·d)``.
+        """
+        from koopman_graph.graph_utils.topology import (
+            dense_random_walk_normalized_adjacency,
+            dense_symmetric_normalized_adjacency,
+        )
+
+        if self.adjacency == "symmetric":
+            adj = dense_symmetric_normalized_adjacency(
+                edge_index,
+                num_nodes,
+                edge_weight=edge_weight,
+                dtype=dtype,
+            )
+            return torch.kron(adj, self.K_nbr)
+
+        adj_fwd = dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+            direction="forward",
+        )
+        coupling = torch.kron(adj_fwd, self.K_nbr)
+        if self.adjacency == "random_walk":
+            return coupling
+        assert self._bwd is not None
+        adj_bwd = dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+            direction="backward",
+        )
+        return coupling + torch.kron(adj_bwd, self.K_bwd)
+
+    def _sparse_neighbor_term(
+        self,
+        z: Tensor,
+        edge_index: Tensor,
+        edge_weight: Tensor | None,
+    ) -> Tensor:
+        """Apply sparse neighbor message passing for the configured mode.
+
+        Parameters
+        ----------
+        z : Tensor
+            Latent node states ``(N, d)``.
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        edge_weight : Tensor or None
+            Optional edge weights.
+
+        Returns
+        -------
+        Tensor
+            Neighbor contribution with the same shape as ``z``.
+        """
+        from koopman_graph.graph_utils.topology import (
+            random_walk_normalized_adjacency_matvec,
+            symmetric_normalized_adjacency_matvec,
+        )
+
+        if self.adjacency == "symmetric":
+            neighbor = symmetric_normalized_adjacency_matvec(
+                edge_index,
+                z,
+                edge_weight=edge_weight,
+                num_nodes=z.shape[0],
+            )
+            return neighbor @ self.K_nbr.T
+
+        neighbor_fwd = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            z,
+            edge_weight=edge_weight,
+            num_nodes=z.shape[0],
+            direction="forward",
+        )
+        term = neighbor_fwd @ self.K_nbr.T
+        if self.adjacency == "random_walk":
+            return term
+        neighbor_bwd = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            z,
+            edge_weight=edge_weight,
+            num_nodes=z.shape[0],
+            direction="backward",
+        )
+        return term + neighbor_bwd @ self.K_bwd.T
+
     def effective_matrix(
         self,
         edge_index: Tensor,
@@ -341,7 +579,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         k_self: Tensor | None = None,
         k_self_blocks: Tensor | None = None,
     ) -> Tensor:
-        """Assemble the dense effective operator ``I⊗K_self + Â⊗K_nbr``.
+        """Assemble the dense effective networked operator ``(N·d, N·d)``.
 
         Parameters
         ----------
@@ -370,10 +608,6 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             If both ``k_self`` and ``k_self_blocks`` are set, or if
             ``k_self_blocks`` has the wrong shape.
         """
-        from koopman_graph.graph_utils.topology import (
-            dense_symmetric_normalized_adjacency,
-        )
-
         if k_self is not None and k_self_blocks is not None:
             msg = "Pass at most one of k_self and k_self_blocks"
             raise ValueError(msg)
@@ -382,15 +616,18 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         if k_self_blocks is None and k_self is None:
             k_self_blocks = self.tied_self_blocks(num_nodes)
         self_matrix = self.K_self if k_self is None else k_self
-        adj = dense_symmetric_normalized_adjacency(
+        neighbor = self._dense_neighbor_coupling(
             edge_index,
             num_nodes,
             edge_weight=edge_weight,
             dtype=self_matrix.dtype,
         )
-        neighbor = torch.kron(adj, self.K_nbr)
         if k_self_blocks is None:
-            identity = torch.eye(num_nodes, dtype=adj.dtype, device=adj.device)
+            identity = torch.eye(
+                num_nodes,
+                dtype=neighbor.dtype,
+                device=neighbor.device,
+            )
             return torch.kron(identity, self_matrix) + neighbor
 
         expected = (num_nodes, self.latent_dim, self.latent_dim)
@@ -413,10 +650,14 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     ) -> KoopmanSpectrum:
         """Eigendecomposition of the effective ``N·d`` networked operator.
 
+        Directed / dual modes may yield complex spectra; magnitudes and
+        frequencies are taken from the complex eigendecomposition (no
+        real-dtype assumption on the eigenvalues).
+
         Parameters
         ----------
         edge_index : Tensor
-            Topology used to build ``Â``.
+            Topology used to build the adjacency factor(s).
         num_nodes : int
             Node count ``N``.
         edge_weight : Tensor or None, optional
@@ -448,7 +689,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         z : Tensor
             Latent node states with shape ``(num_nodes, latent_dim)``.
         edge_index : Tensor
-            Edge index ``(2, num_edges)`` used to build ``Â``.
+            Edge index ``(2, num_edges)`` used to build adjacency factors.
         edge_weight : Tensor or None, optional
             Optional edge weights.
         control : Tensor or None, optional
@@ -472,18 +713,12 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             )
             raise ValueError(msg)
 
-        from koopman_graph.graph_utils.topology import (
-            symmetric_normalized_adjacency_matvec,
-        )
-
         self.ensure_orbit_binding(z.shape[0], edge_index=edge_index)
-        neighbor = symmetric_normalized_adjacency_matvec(
-            edge_index,
+        z_next = self.apply_tied_self(z) + self._sparse_neighbor_term(
             z,
-            edge_weight=edge_weight,
-            num_nodes=z.shape[0],
+            edge_index,
+            edge_weight,
         )
-        z_next = self.apply_tied_self(z) + neighbor @ self.K_nbr.T
 
         if self.control_dim == 0:
             if control is not None:
@@ -555,13 +790,14 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         ``sparsity="dense"`` inverts the effective ``N·d`` map (exact;
         suitable for modest ``N``). ``sparsity="block_diagonal"`` uses a
         one-step Jacobi / per-node ``d×d`` approximate inverse (exact when
-        ``K_nbr = 0`` or the graph has no edges). ``inverse_matrix`` is
+        neighbor factors are zero or the graph has no edges; approximate for
+        all three ``adjacency`` modes otherwise). ``inverse_matrix`` is
         supported only for ``sparsity="dense"``.
 
         For ``control_mode="bilinear"``, global controls fold into a shared
         ``K_self`` override; per-node controls use node-specific bilinear self
-        blocks plus the same ``Â ⊗ K_nbr`` neighbor coupling as forward
-        advance. Singular dense maps fall back to a pseudoinverse.
+        blocks plus the same neighbor coupling as forward advance. Singular
+        dense maps fall back to a pseudoinverse.
 
         Parameters
         ----------
@@ -679,6 +915,8 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 edge_index=edge_index,
                 edge_weight=edge_weight,
                 k_self_blocks=k_self_blocks,
+                adjacency=self.adjacency,
+                k_bwd=None if self._bwd is None else self.K_bwd,
             )
 
         if inverse_matrix is None:

@@ -14,7 +14,9 @@ from koopman_graph import (
     GNNEncoder,
     GraphKoopmanModel,
     GraphKoopmanOperator,
+    HypergraphKoopmanOperator,
 )
+from koopman_graph.spectrum_types import discrete_spectrum_at_delta_t
 
 
 def _path_edge_index(num_nodes: int) -> torch.Tensor:
@@ -232,3 +234,278 @@ def test_inverse_advance_uncontrolled_round_trip() -> None:
     advanced = operator.advance(z, delta_t, edge_index=edge_index)
     recovered = operator.inverse_advance(advanced, delta_t, edge_index=edge_index)
     assert torch.allclose(recovered, z, atol=1e-4)
+
+
+def _directed_path_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build a one-way directed path ``0→1→…→N-1``."""
+    sources = list(range(num_nodes - 1))
+    targets = list(range(1, num_nodes))
+    return torch.tensor([sources, targets], dtype=torch.long)
+
+
+def test_invalid_adjacency_raises() -> None:
+    """Invalid ``adjacency`` values name the accepted set."""
+    with pytest.raises(ValueError, match="dual_random_walk.*random_walk.*symmetric"):
+        ContinuousGraphKoopmanOperator(2, adjacency="bogus")  # type: ignore[arg-type]
+
+
+def test_symmetric_adjacency_seeded_regression() -> None:
+    """Default ``adjacency='symmetric'`` stays bit-stable vs pre-change fixture."""
+    torch.manual_seed(0)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="xavier", init_scale=0.2)
+    assert op.adjacency == "symmetric"
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    z = torch.randn(3, 2)
+    out = op.advance(z, 0.25, edge_index=edge_index)
+    expected = torch.tensor(
+        [
+            [0.5703337788581848, 0.5958525538444519],
+            [-0.7420508861541748, -0.19750848412513733],
+            [-0.5039222240447998, 0.30766671895980835],
+        ]
+    )
+    assert torch.allclose(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_dual_equals_random_walk_when_l_bwd_zero() -> None:
+    """``L_bwd`` is exactly zero at init so dual matches random_walk."""
+    edge_index = _directed_path_edge_index(4)
+    z = torch.randn(4, 2)
+    delta_t = 0.3
+    rw = ContinuousGraphKoopmanOperator(
+        2, init_mode="identity", adjacency="random_walk"
+    )
+    dual = ContinuousGraphKoopmanOperator(
+        2, init_mode="identity", adjacency="dual_random_walk"
+    )
+    assert torch.equal(dual.L_bwd, torch.zeros(2, 2))
+    assert torch.allclose(dual.L_fwd, dual.L_nbr)
+    l_self = torch.tensor([[-0.5, 0.1], [0.0, -0.4]])
+    l_nbr = 0.15 * torch.eye(2)
+    rw.set_dense_matrices(l_self, l_nbr)
+    dual.set_dense_matrices(l_self, l_nbr)
+    assert torch.allclose(
+        rw.advance(z, delta_t, edge_index=edge_index),
+        dual.advance(z, delta_t, edge_index=edge_index),
+        atol=1e-6,
+    )
+
+
+def test_adjacency_modes_advance_match_expm_and_generator_spectrum() -> None:
+    """Advance matches ``exp(L_eff Δt)``; generator spectrum is well-formed."""
+    edge_index = _directed_path_edge_index(3)
+    z = torch.randn(3, 2)
+    delta_t = 0.2
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        op = ContinuousGraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        l_self = torch.tensor([[-0.4, 0.1], [-0.05, -0.5]])
+        l_nbr = 0.12 * torch.eye(2)
+        l_bwd = None if adjacency != "dual_random_walk" else 0.08 * torch.eye(2)
+        op.set_dense_matrices(l_self, l_nbr, l_bwd=l_bwd)
+        advanced = op.advance(z, delta_t, edge_index=edge_index)
+        expected = (
+            op.transition_matrix(delta_t, edge_index, 3) @ z.reshape(-1)
+        ).view_as(z)
+        assert torch.allclose(advanced, expected, atol=1e-5), adjacency
+        spectrum = op.spectrum(edge_index, 3)
+        assert spectrum.eigenvalues.shape == (6,)
+        assert torch.isfinite(spectrum.eigenvalues.real).all()
+        assert torch.isfinite(spectrum.eigenvalues.imag).all()
+        assert torch.isfinite(spectrum.magnitudes).all()
+
+
+def test_directed_discrete_spectrum_matches_transition_eigvals() -> None:
+    """``discrete_spectrum_at_delta_t(L_eff)`` matches ``eigvals(exp(L_eff Δt))``.
+
+    Tolerance: sorted magnitudes agree to ``atol=1e-5`` (documented contract for
+    nonzero neighbor coupling, where factorwise ``exp(L_*)`` is not equivalent).
+    """
+    edge_index = _directed_path_edge_index(4)
+    delta_t = 0.35
+    op = ContinuousGraphKoopmanOperator(
+        2, init_mode="identity", adjacency="dual_random_walk"
+    )
+    op.set_dense_matrices(
+        torch.tensor([[-0.6, 0.2], [0.0, -0.5]]),
+        0.1 * torch.tensor([[0.0, -1.0], [1.0, 0.0]]),
+        l_bwd=0.05 * torch.eye(2),
+    )
+    generator = op.effective_generator(edge_index, 4)
+    mapped = discrete_spectrum_at_delta_t(generator, delta_t)
+    transition = op.transition_matrix(delta_t, edge_index, 4)
+    eigvals = torch.linalg.eigvals(transition)
+    assert torch.allclose(
+        mapped.magnitudes.sort().values,
+        eigvals.abs().sort().values,
+        atol=1e-5,
+    )
+
+
+def test_neighbor_zero_continuous_matches_discrete_for_all_adjacency_modes() -> None:
+    """With zero neighbor factors, continuous matches discrete at fixed ``Δt``."""
+    edge_index = _directed_path_edge_index(3)
+    delta_t = 0.4
+    z = torch.randn(3, 2)
+    l_self = torch.tensor([[-0.3, 0.05], [0.0, -0.45]])
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        continuous = ContinuousGraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        continuous.set_dense_matrices(l_self, torch.zeros(2, 2))
+        discrete = GraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        discrete.set_dense_matrices(
+            torch.linalg.matrix_exp(l_self * delta_t),
+            torch.zeros(2, 2),
+        )
+        assert torch.allclose(
+            continuous.advance(z, delta_t, edge_index=edge_index),
+            discrete.advance(z, edge_index=edge_index),
+            atol=1e-5,
+        ), adjacency
+
+
+def test_directed_modes_irregular_delta_t_sequence() -> None:
+    """Varying ``delta_t`` advances remain finite for directed modes."""
+    edge_index = _directed_path_edge_index(4)
+    z = torch.randn(4, 2)
+    deltas = [0.1, 0.25, 0.05, 0.4]
+    for adjacency in ("random_walk", "dual_random_walk"):
+        op = ContinuousGraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        op.set_dense_matrices(
+            torch.tensor([[-0.5, 0.0], [0.1, -0.4]]),
+            0.2 * torch.eye(2),
+            l_bwd=None if adjacency != "dual_random_walk" else 0.1 * torch.eye(2),
+        )
+        state = z
+        for delta in deltas:
+            state = op.advance(state, delta, edge_index=edge_index)
+            assert torch.isfinite(state).all(), adjacency
+
+
+def test_block_diagonal_ignores_adjacency_neighbor_coupling() -> None:
+    """BD sparsity stays self-only under directed adjacency modes."""
+    edge_index = _directed_path_edge_index(3)
+    delta_t = 0.2
+    z = torch.randn(3, 2)
+    l_self = torch.tensor([[-0.5, 0.1], [0.0, -0.4]])
+    l_nbr = 0.5 * torch.eye(2)
+    block = ContinuousGraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        sparsity="block_diagonal",
+        adjacency="dual_random_walk",
+    )
+    block.set_dense_matrices(l_self, l_nbr, l_bwd=0.3 * torch.eye(2))
+    self_only = ContinuousGraphKoopmanOperator(
+        2, init_mode="identity", adjacency="dual_random_walk"
+    )
+    self_only.set_dense_matrices(l_self, torch.zeros(2, 2))
+    assert torch.allclose(
+        block.advance(z, delta_t, edge_index=edge_index),
+        self_only.advance(z, delta_t, edge_index=edge_index),
+        atol=1e-5,
+    )
+
+
+def test_hypergraph_rejects_adjacency_kwarg() -> None:
+    """Hypergraph stays Zhou-symmetric and does not expose ``adjacency``."""
+    with pytest.raises(TypeError, match="adjacency"):
+        HypergraphKoopmanOperator(2, adjacency="random_walk")  # type: ignore[call-arg]
+    assert "adjacency" not in HypergraphKoopmanOperator.__init__.__code__.co_varnames
+
+
+def test_continuous_graph_api_guards_and_properties() -> None:
+    """Constructor guards, properties, generator overrides, and zero Δt."""
+    with pytest.raises(ValueError, match="sparsity must be"):
+        ContinuousGraphKoopmanOperator(2, sparsity="bogus")  # type: ignore[arg-type]
+
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(
+        2, init_mode="identity", adjacency="dual_random_walk", control_dim=1
+    )
+    op.reset_parameters()
+    assert op.matrix.shape == (2, 2)
+    assert torch.equal(op.L, op.matrix)
+    assert op.B is not None and op.B.numel() == 2
+    assert torch.isfinite(op.bound_metric())
+    assert torch.isfinite(op.max_real_part())
+    assert torch.isfinite(op.spectral_radius())
+    _ = op.L_bwd
+
+    plain = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    with pytest.raises(AttributeError, match="L_bwd"):
+        _ = plain.L_bwd
+    with pytest.raises(ValueError, match="l_bwd is only valid"):
+        plain.set_dense_matrices(
+            torch.eye(2) * -0.5, torch.zeros(2, 2), l_bwd=torch.eye(2)
+        )
+    with pytest.raises(ValueError, match="control matrix requested"):
+        plain._networked_control_matrix(3)
+    with pytest.raises(ValueError, match="at most one of l_self"):
+        plain.effective_generator(
+            edge_index,
+            3,
+            l_self=torch.eye(2) * -0.4,
+            l_self_blocks=torch.eye(2).expand(3, 2, 2) * -0.4,
+        )
+    with pytest.raises(ValueError, match="l_self_blocks must have shape"):
+        plain.effective_generator(
+            edge_index, 3, l_self_blocks=torch.eye(2).expand(2, 2, 2)
+        )
+    blocks = torch.eye(2).expand(3, 2, 2) * -0.5
+    gen = plain.effective_generator(edge_index, 3, l_self_blocks=blocks)
+    assert gen.shape == (6, 6)
+
+    z = torch.randn(3, 2)
+    assert torch.equal(plain.advance(z, 0.0, edge_index=edge_index), z)
+    with pytest.raises(ValueError, match="expects z with shape"):
+        plain.advance(torch.randn(3, 4), 0.1, edge_index=edge_index)
+    with pytest.raises(ValueError, match="control input provided"):
+        plain.inverse_advance(z, 0.1, edge_index=edge_index, control=torch.ones(1))
+    # Cached inverse_matrix path for uncontrolled dense inverse.
+    advanced = plain.advance(z, 0.2, edge_index=edge_index)
+    inv = torch.linalg.matrix_exp(plain.effective_generator(edge_index, 3) * (-0.2))
+    recovered = plain.inverse_advance(
+        advanced, 0.2, edge_index=edge_index, inverse_matrix=inv
+    )
+    assert torch.allclose(recovered, z, atol=1e-4)
+
+    # Shared bilinear control (ndim==1) on the dense path.
+    bilinear = ContinuousGraphKoopmanOperator(
+        2,
+        control_dim=1,
+        control_mode="bilinear",
+        init_mode="identity",
+    )
+    out = bilinear.advance(z, 0.1, edge_index=edge_index, control=torch.tensor([0.15]))
+    assert out.shape == z.shape
+    out_nodes = bilinear.advance(
+        z, 0.1, edge_index=edge_index, control=torch.full((3, 1), 0.15)
+    )
+    assert out_nodes.shape == z.shape
+
+    # Non-dense parameterization exercises neighbor reset with parameter tensors.
+    soft = ContinuousGraphKoopmanOperator(
+        2,
+        init_mode="xavier",
+        init_scale=0.05,
+        parameterization="dissipative",
+        adjacency="dual_random_walk",
+        control_dim=1,
+    )
+    soft.reset_parameters()
+    assert soft.L_nbr.shape == (2, 2)

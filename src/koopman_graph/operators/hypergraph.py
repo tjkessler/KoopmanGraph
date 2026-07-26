@@ -43,6 +43,12 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     ``D_v^{-1/2} B W_e D_e^{-1} Bᵀ D_v^{-1/2}``. Discrete-time only;
     continuous hypergraph generators are out of scope for this module.
 
+    Directed pairwise ``adjacency`` modes
+    (``"random_walk"`` / ``"dual_random_walk"`` on
+    :class:`~koopman_graph.operators.GraphKoopmanOperator`) are **not**
+    supported here: hypergraph coupling stays Zhou-symmetric by design.
+    Passing ``adjacency=...`` is rejected as an unexpected keyword.
+
     When ``K_hedge = 0``, the step reduces exactly to the per-node map
     ``Z @ K_self.T``. A 2-uniform hypergraph is related to
     :class:`~koopman_graph.operators.GraphKoopmanOperator` by

@@ -155,12 +155,13 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``spectrum_distance``, ``koopman_std``, ``dynamical_similarity``,
 ``detect_anomaly``, ``calibrate_anomaly_threshold``,
 ``AnomalyDetectionResult``, ``plot_spectrum``,
+``spectral_residuals``, ``SpectralResidualReport``,
 ``identify_sparse_dynamics``, ``SINDyReport``,
 ``koopman_spectral_clustering``, ``ClusteringResult``,
 ``estimate_coupling_from_snapshots``, ``CouplingEstimate``) are imported from
 :mod:`koopman_graph.analysis` only. The helpers live in the ``spectrum`` /
-``similarity`` / ``anomaly`` / ``plotting`` / ``sindy`` / ``clustering`` /
-``topology_estimation`` submodules.
+``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` / ``sindy`` /
+``clustering`` / ``topology_estimation`` submodules.
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
 
@@ -170,7 +171,25 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 
 .. automodule:: koopman_graph.analysis
    :members:
-   :exclude-members: KoopmanSpectrum
+   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.residuals
+   :members:
+   :show-inheritance:
+
+Long-horizon statistics (power-user)
+------------------------------------
+
+Welch PSD, spectral / invariant-measure distances, and Rosenstein largest-
+Lyapunov estimation live in the neutral leaf :mod:`koopman_graph.statistics`
+(torch-only; peer to :mod:`koopman_graph.metrics`). Prefer
+``from koopman_graph.statistics import …``. Symbols are **not** on root
+``__all__``. See :doc:`limitations` for embedding sensitivity and
+:math:`O(T^{2})` cost of the Lyapunov helper.
+
+.. automodule:: koopman_graph.statistics
+   :members:
    :show-inheritance:
 
 Baselines
@@ -187,6 +206,10 @@ satisfy :class:`~koopman_graph.protocols.ForecastModel` (``fit`` / ``predict`` /
 decoder) and supports ``dictionary`` in ``{"polynomial", "rbf", "kernel"}``
 (Williams2015 polynomial / RBF EDMD; kernel sections following
 Williams2015KernelDMD / Klus2018TransferOperator).
+Truncated-SVD ``rank`` accepts ``None`` (full least squares), a positive
+integer, or ``"auto"`` (Gavish–Donoho median threshold;
+``koopman_graph.baselines.base.optimal_hard_threshold_rank``); fitted
+``selected_rank`` is stored on the baseline instance.
 The full ``kernel`` path with one center per training snapshot is
 :math:`O(T^2)` in feature dimension and is intended for small/medium ``T``
 only; ``kernel="linear"`` reduces to DMD. Prefer
@@ -370,7 +393,11 @@ latent under the linear Koopman map with optional Kalman refinement
 (ACI) conformal prediction intervals with the shared
 :class:`~koopman_graph.uq.PredictionInterval` type; marginal coverage
 ``≥ 1 − α`` assumes exchangeability and is approximate under temporal
-dependence (prefer ACI under drift). Neither ensemble nor Gaussian path is
+dependence (prefer ACI under drift). Nonconformity ``score`` modes are
+``"aggregate"``, legacy ``"per_node"`` (max-pool over nodes into a scalar),
+and ``"node_wise"`` (per-node marginal half-widths; optional
+``neighbor_smoothing``). Calibration persistence uses kind
+``ConformalKoopmanUQ.calibration.v2``. Neither ensemble nor Gaussian path is
 Deep Probabilistic Koopman (time-varying distribution parameters), and the
 Gaussian peer is **not** a full VAE + KalmanNet reimplementation.
 

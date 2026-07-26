@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-26
+
+### Added
+
+- Held-out data-driven spectral residuals
+  (``koopman_graph.analysis.spectral_residuals``,
+  ``SpectralResidualReport.trustworthy_mask``) and optional
+  ``plot_spectrum(..., annotate_untrustworthy=True)`` overlay. Diagnostic
+  in the learned latent / observable space — not a certified ResDMD bound.
+- Pairwise graph / continuous-graph ``adjacency`` modes:
+  ``"symmetric"`` (default), ``"random_walk"``, and ``"dual_random_walk"``,
+  with factory ``koopman_adjacency`` and format-1 ``config.adjacency``.
+  Row-walk normalization helpers live in ``koopman_graph.graph_utils``.
+- Long-horizon statistics leaf ``koopman_graph.statistics`` (Welch PSD,
+  ``spectral_distance``, ``invariant_measure_distance``, Rosenstein
+  ``largest_lyapunov_exponent``, ``LongHorizonReport``). Power-user only;
+  off root ``__all__``.
+- Conformal ``score="node_wise"`` with optional ``neighbor_smoothing``;
+  calibration payload kind ``ConformalKoopmanUQ.calibration.v2``. Legacy
+  ``score="per_node"`` (max-pool) retained.
+- Classical DMD-family ``rank="auto"`` (Gavish–Donoho median threshold) with
+  recorded ``selected_rank``.
+- Public scope page ``docs/source/limitations.rst`` (linked from README and
+  the Sphinx toctree).
+- Tutorials: residual / spurious-mode section on notebook 07; long-horizon
+  PSD / W1 on notebook 24; ``37_cross_topology_transfer.ipynb``;
+  ``38_operator_factorization_ablation.ipynb``.
+
+### Changed
+
+- Undirected-symmetric coupling is no longer the unconditional graph-operator
+  contract; directed modes are first-class (see architecture / FAQ).
+- JOSS ``paper.md`` wording: compositional / networked Koopman citations are
+  inspiration for factorized self/neighbor blocks, not a demonstrated
+  cross-``N`` transfer claim.
+- Chaotic-benchmark guidance: report distributional statistics alongside
+  short-horizon RMSE past the predictability horizon.
+- Notebook ``24_nonlinear_chaotic_benchmarks.ipynb`` follows the nine-section
+  scientific-notebook arc (Setup through Further reading), cites Li (2017) /
+  Lorenz (1996) in Further reading, and documents CI-budget ranking caveats.
+
 ## [0.6.0] - 2026-07-25
 
 ### Added
@@ -247,6 +288,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.7.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.0
 [0.6.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.6.0
 [0.5.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.5.0
 [0.4.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.4.0

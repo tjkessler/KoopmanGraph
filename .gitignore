@@ -228,14 +228,34 @@ REVIEWER_AUDIT_*.txt
 scripts/_*.py
 scripts/_*.md
 
-# Maintainer-local (not part of the published package)
+# Local agent tooling (maintainer-only; not part of published package)
 AGENTS.md
 CLAUDE.md
 .github/copilot-instructions.md
+.cursor/rules/_dev.mdc
+.cursor/rules/*.mdc
+.cursor/dev-toolkit.yaml
+docs/blueprint/BLUEPRINT.md
+
+# Mathematics verification (maintainer-only; not part of published package)
+docs/MATHEMATICS_VERIFICATION.md
+.cursor/mathematics_verification.yaml
+.cursor/mathematics_verification
+.cursor/skills/scan-mathematics
+.cursor/skills/audit-mathematics
+.cursor/skills/search-mathematics-literature
+.cursor/skills/add-mathematics-verification
+
+# Architecture verification (maintainer-only; not part of published package)
+.cursor/architecture_verification.yaml
+.cursor/architecture_verification
+.cursor/skills/define-code-architecture
+.cursor/skills/audit-code-architecture
+
+# Broader Cursor / blueprint local state (maintainer-only)
 .cursor/
 .cursor-tmp/
 docs/blueprint/
-docs/MATHEMATICS_VERIFICATION.md
 
 # Large / non-shipped benchmark downloads (rebuild via scripts/download_*.py).
 # Tracked teaching fixtures and source files under 50 MB may live under

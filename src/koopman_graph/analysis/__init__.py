@@ -31,6 +31,12 @@ Capability layout
     (:func:`~koopman_graph.analysis.koopman_spectral_clustering`,
     :class:`~koopman_graph.analysis.ClusteringResult`). Node embeddings from
     leading eigenmodes; quality inherits the operator / spectrum.
+``residuals``
+    Data-driven spectral residuals
+    (:func:`~koopman_graph.analysis.spectral_residuals`,
+    :class:`~koopman_graph.analysis.SpectralResidualReport`). A posteriori
+    diagnostic in the learned observable norm — **not** a certified ResDMD
+    bound.
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` and the spectrum
 assembly helpers stay in the neutral top-level
@@ -50,6 +56,10 @@ from koopman_graph.analysis.clustering import (
     koopman_spectral_clustering,
 )
 from koopman_graph.analysis.plotting import SpectrumLimits, plot_spectrum
+from koopman_graph.analysis.residuals import (
+    SpectralResidualReport,
+    spectral_residuals,
+)
 from koopman_graph.analysis.similarity import (
     SpectrumDistanceMethod,
     SpectrumSource,
@@ -78,6 +88,7 @@ __all__ = [
     "CouplingEstimate",
     "KoopmanSpectrum",
     "SINDyReport",
+    "SpectralResidualReport",
     "SpectrumDistanceMethod",
     "SpectrumLimits",
     "SpectrumSource",
@@ -94,5 +105,6 @@ __all__ = [
     "koopman_std",
     "plot_spectrum",
     "resolve_spectrum",
+    "spectral_residuals",
     "spectrum_distance",
 ]

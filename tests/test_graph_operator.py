@@ -876,3 +876,235 @@ def test_block_diagonal_checkpoint_round_trip(tmp_path) -> None:
     model.save(path)
     loaded = GraphKoopmanModel.load(path)
     assert loaded.koopman.sparsity == "block_diagonal"
+
+
+def _directed_path_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build a one-way directed path ``0→1→…→N-1``."""
+    sources = list(range(num_nodes - 1))
+    targets = list(range(1, num_nodes))
+    return torch.tensor([sources, targets], dtype=torch.long)
+
+
+def test_invalid_adjacency_raises() -> None:
+    """Invalid ``adjacency`` values name the accepted set."""
+    with pytest.raises(ValueError, match="dual_random_walk.*random_walk.*symmetric"):
+        GraphKoopmanOperator(2, adjacency="bogus")  # type: ignore[arg-type]
+
+
+def test_symmetric_adjacency_seeded_regression() -> None:
+    """Default ``adjacency='symmetric'`` stays bit-stable vs pre-change fixture."""
+    torch.manual_seed(0)
+    op = GraphKoopmanOperator(2, init_mode="xavier", init_scale=0.2)
+    assert op.adjacency == "symmetric"
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    z = torch.randn(3, 2)
+    out = op(z, edge_index)
+    expected = torch.tensor(
+        [
+            [0.7360891103744507, -0.971832811832428],
+            [-0.11684554815292358, 0.9164610505104065],
+            [0.3142688274383545, 0.627437949180603],
+        ]
+    )
+    assert torch.allclose(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_dual_equals_random_walk_when_k_bwd_zero() -> None:
+    """``K_bwd`` is exactly zero at init so dual matches random_walk."""
+    edge_index = _directed_path_edge_index(4)
+    z = torch.randn(4, 2)
+    rw = GraphKoopmanOperator(2, init_mode="identity", adjacency="random_walk")
+    dual = GraphKoopmanOperator(2, init_mode="identity", adjacency="dual_random_walk")
+    assert torch.equal(dual.K_bwd, torch.zeros(2, 2))
+    assert torch.allclose(dual.K_fwd, dual.K_nbr)
+    k_self = 0.4 * torch.eye(2)
+    k_nbr = 0.15 * torch.eye(2)
+    rw.set_dense_matrices(k_self, k_nbr)
+    dual.set_dense_matrices(k_self, k_nbr)
+    assert torch.allclose(rw(z, edge_index), dual(z, edge_index), atol=1e-6)
+
+
+def test_adjacency_modes_forward_match_effective_matrix() -> None:
+    """Sparse forward matches dense Kronecker effective map for all modes."""
+    edge_index = _directed_path_edge_index(4)
+    z = torch.randn(4, 3)
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        torch.manual_seed(3)
+        op = GraphKoopmanOperator(
+            3,
+            init_mode="xavier",
+            init_scale=0.1,
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        if adjacency == "dual_random_walk":
+            op.set_dense_matrices(
+                op.K_self.detach().clone(),
+                op.K_nbr.detach().clone(),
+                k_bwd=0.05 * torch.eye(3),
+            )
+        sparse_next = op(z, edge_index)
+        effective = op.effective_matrix(edge_index, 4)
+        assert effective.shape == (12, 12)
+        dense_next = (effective @ z.reshape(-1)).view_as(z)
+        assert torch.allclose(sparse_next, dense_next, atol=1e-5), adjacency
+
+
+def test_adjacency_modes_dense_inverse_round_trip() -> None:
+    """Dense ``inverse_advance`` round-trips for all adjacency modes."""
+    edge_index = _directed_path_edge_index(3)
+    z = torch.randn(3, 2)
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        op = GraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        op.set_dense_matrices(
+            0.6 * torch.eye(2),
+            0.2 * torch.eye(2),
+            k_bwd=None if adjacency != "dual_random_walk" else 0.1 * torch.eye(2),
+        )
+        z_next = op(z, edge_index)
+        recovered = op.inverse_advance(z_next, edge_index=edge_index)
+        assert torch.allclose(recovered, z, atol=1e-5), adjacency
+
+
+def test_adjacency_modes_block_diagonal_jacobi_documented_approx() -> None:
+    """Jacobi inverse is approximate (not exact) when neighbor factors are nonzero."""
+    edge_index = _directed_path_edge_index(3)
+    z = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.5, -0.5]])
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        dense = GraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        block = GraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            sparsity="block_diagonal",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        k_bwd = None if adjacency != "dual_random_walk" else 0.15 * torch.eye(2)
+        for op in (dense, block):
+            op.set_dense_matrices(0.7 * torch.eye(2), 0.25 * torch.eye(2), k_bwd=k_bwd)
+        z_next = dense(z, edge_index)
+        dense_rec = dense.inverse_advance(z_next, edge_index=edge_index)
+        block_rec = block.inverse_advance(z_next, edge_index=edge_index)
+        assert torch.allclose(dense_rec, z, atol=1e-5), adjacency
+        # Jacobi is a documented approximation for all three modes.
+        assert not torch.allclose(block_rec, z, atol=1e-3), adjacency
+
+
+def test_directed_spectrum_allows_complex_eigenvalues() -> None:
+    """Asymmetric coupling may yield complex spectra without real-dtype leaks."""
+    edge_index = _directed_path_edge_index(4)
+    op = GraphKoopmanOperator(2, init_mode="identity", adjacency="dual_random_walk")
+    op.set_dense_matrices(
+        0.3 * torch.eye(2),
+        0.4 * torch.tensor([[0.0, -1.0], [1.0, 0.0]]),
+        k_bwd=0.2 * torch.eye(2),
+    )
+    spectrum = op.spectrum(edge_index, 4)
+    assert spectrum.eigenvalues.dtype.is_complex
+    assert spectrum.eigenvalues.shape == (8,)
+    assert torch.isfinite(spectrum.eigenvalues.real).all()
+    assert torch.isfinite(spectrum.eigenvalues.imag).all()
+    assert torch.isfinite(spectrum.magnitudes).all()
+
+
+def test_random_walk_modes_handle_sink_and_isolated_nodes() -> None:
+    """Sink / isolated nodes produce finite advances (no NaN/Inf)."""
+    # Nodes 0→1; node 2 isolated; node 1 is a sink.
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    z = torch.randn(3, 2)
+    for adjacency in ("random_walk", "dual_random_walk"):
+        op = GraphKoopmanOperator(
+            2,
+            init_mode="identity",
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        op.set_dense_matrices(
+            torch.eye(2),
+            0.5 * torch.eye(2),
+            k_bwd=None if adjacency != "dual_random_walk" else 0.25 * torch.eye(2),
+        )
+        out = op(z, edge_index)
+        assert torch.isfinite(out).all(), adjacency
+        effective = op.effective_matrix(edge_index, 3)
+        assert torch.isfinite(effective).all(), adjacency
+
+
+def test_orbit_ties_do_not_tie_neighbor_factors() -> None:
+    """Orbit partitions tie ``K_self`` only; ``K_fwd`` / ``K_bwd`` stay shared."""
+    op = GraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        adjacency="dual_random_walk",
+        orbit_partition=((0, 1), (2,)),
+    )
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    op.ensure_orbit_binding(3, edge_index=edge_index)
+    assert op._orbit_selves is not None
+    assert len(op._orbit_selves) == 2
+    assert op._bwd is not None
+    # Distinct orbit self modules; single shared neighbor modules.
+    assert op._orbit_selves[0] is not op._orbit_selves[1]
+    assert op._nbr is not op._orbit_selves[0]
+    assert op._bwd is not op._orbit_selves[0]
+    blocks = op.tied_self_blocks(3)
+    assert torch.allclose(blocks[0], blocks[1])
+    # Neighbor factors are global properties, not per-orbit banks.
+    assert torch.allclose(op.K_fwd, op.K_nbr)
+    with pytest.raises(AttributeError, match="K_bwd"):
+        _ = GraphKoopmanOperator(2, adjacency="symmetric").K_bwd
+
+
+def test_dual_random_walk_learns_directed_advection_better_than_symmetric() -> None:
+    """Dual recovers a one-way advection teacher with a documented error gap.
+
+    Tolerance contract: after a fixed-seed short Adam fit, dual one-step MSE
+    is at most half the symmetric MSE, and dual MSE is below ``1e-3``.
+    """
+    torch.manual_seed(0)
+    num_nodes = 5
+    latent_dim = 2
+    edge_index = _directed_path_edge_index(num_nodes)
+    teacher = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        adjacency="dual_random_walk",
+    )
+    # Upstream advection along directed edges via the backward walk term.
+    teacher.set_dense_matrices(
+        0.25 * torch.eye(latent_dim),
+        torch.zeros(latent_dim, latent_dim),
+        k_bwd=0.65 * torch.eye(latent_dim),
+    )
+    states = torch.randn(48, num_nodes, latent_dim)
+    with torch.no_grad():
+        targets = torch.stack([teacher(state, edge_index) for state in states])
+
+    def _fit_mse(adjacency: str, *, steps: int = 250) -> float:
+        torch.manual_seed(1)
+        student = GraphKoopmanOperator(
+            latent_dim,
+            init_mode="identity_noise",
+            init_scale=1e-3,
+            adjacency=adjacency,  # type: ignore[arg-type]
+        )
+        optimizer = torch.optim.Adam(student.parameters(), lr=0.08)
+        for _ in range(steps):
+            optimizer.zero_grad()
+            pred = torch.stack([student(state, edge_index) for state in states])
+            loss = torch.mean((pred - targets) ** 2)
+            loss.backward()
+            optimizer.step()
+        with torch.no_grad():
+            pred = torch.stack([student(state, edge_index) for state in states])
+            return float(torch.mean((pred - targets) ** 2).item())
+
+    err_dual = _fit_mse("dual_random_walk")
+    err_symmetric = _fit_mse("symmetric")
+    assert err_dual < 1e-3
+    assert err_dual <= 0.5 * err_symmetric

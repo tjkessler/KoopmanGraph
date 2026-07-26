@@ -38,6 +38,12 @@ class KoopmanSpectrum:
       ``frequencies = Im(mu) / (2 * pi)``, with ``time_step`` set to ``1.0``
       as a placeholder (native continuous-time units).
 
+    Optional ``residuals`` carry a posteriori data-driven residuals from
+    :func:`~koopman_graph.analysis.spectral_residuals`. Populate with
+    ``dataclasses.replace(spectrum, residuals=report.residuals)`` — this
+    dataclass is frozen. Residuals are analysis state only and are **not**
+    part of model checkpoints.
+
     Attributes
     ----------
     eigenvalues : Tensor
@@ -54,6 +60,9 @@ class KoopmanSpectrum:
     time_step : float
         Discrete sampling interval for discrete spectra; ``1.0`` for
         generator spectra.
+    residuals : Tensor or None
+        Optional non-negative real residuals with shape ``(latent_dim,)``.
+        Default is ``None`` (unset).
     """
 
     eigenvalues: Tensor
@@ -62,6 +71,32 @@ class KoopmanSpectrum:
     growth_rates: Tensor
     frequencies: Tensor
     time_step: float
+    residuals: Tensor | None = None
+
+    def __post_init__(self) -> None:
+        """Validate optional residual tensor shape and values.
+
+        Raises
+        ------
+        ValueError
+            If ``residuals`` is present but not a 1-D tensor of length
+            ``latent_dim``, or contains negative / non-finite values.
+        """
+        if self.residuals is None:
+            return
+        latent_dim = int(self.eigenvalues.numel())
+        if self.residuals.ndim != 1 or int(self.residuals.numel()) != latent_dim:
+            msg = (
+                "residuals must have shape (latent_dim,), "
+                f"got {tuple(self.residuals.shape)} for latent_dim={latent_dim}"
+            )
+            raise ValueError(msg)
+        if not bool(torch.isfinite(self.residuals).all().item()):
+            msg = "residuals must be finite"
+            raise ValueError(msg)
+        if bool((self.residuals < 0).any().item()):
+            msg = "residuals must be non-negative"
+            raise ValueError(msg)
 
     def mode_amplitudes(self, latent_states: Tensor) -> Tensor:
         """Project latent states onto the Koopman eigenvector basis.

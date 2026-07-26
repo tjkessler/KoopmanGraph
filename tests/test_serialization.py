@@ -56,6 +56,7 @@ def _format1_config(
         "encoder": encoder,
         "decoder": decoder,
         "sparsity": "dense",
+        "adjacency": None,
         "learn_topology": None,
         "topology_embedding_dim": None,
         "symmetry": None,
@@ -281,6 +282,7 @@ def test_save_checkpoint_uses_current_format_version(
         "n_delays",
         "physics",
         "sparsity",
+        "adjacency",
         "learn_topology",
         "topology_embedding_dim",
         "symmetry",
@@ -799,6 +801,7 @@ def test_build_model_config_includes_placeholder_keys(
     """New format-1 saves always write sparsity / topology / symmetry keys."""
     config = build_model_config(graph_koopman_model)
     assert config["sparsity"] == "dense"
+    assert config["adjacency"] is None
     assert config["learn_topology"] is None
     assert config["symmetry"] is None
     assert config["local_window"] is None
@@ -813,6 +816,7 @@ def test_load_rejects_pre_placeholder_format1_schema(
     """Older complete format-1 payloads missing new keys are deprecated."""
     config = build_model_config(graph_koopman_model)
     del config["sparsity"]
+    del config["adjacency"]
     del config["learn_topology"]
     del config["symmetry"]
     path = tmp_path / "pre_placeholder.pt"
@@ -850,10 +854,12 @@ def test_continuous_graph_kind_reconstructs_under_format1() -> None:
         },
         koopman_kind="continuous_graph",
         dynamics_mode="continuous",
+        adjacency="symmetric",
     )
     model = reconstruct_model(config)
     assert model.koopman_kind == "continuous_graph"
     assert model.dynamics_mode == "continuous"
+    assert model.koopman.adjacency == "symmetric"
 
 
 def test_hypergraph_format1_round_trip(
@@ -904,6 +910,7 @@ def test_hypergraph_format1_round_trip(
     assert config["control_mode"] == "bilinear"
     assert config["bilinear_rank"] == 1
     assert config["sparsity"] == "dense"
+    assert config["adjacency"] is None
 
     path = tmp_path / "hypergraph.pt"
     model.save(path)
@@ -948,3 +955,144 @@ def test_hypergraph_operator_delay_round_trip(tmp_path: Path) -> None:
     loaded = GraphKoopmanModel.load(path)
     assert loaded.n_delays == 2
     assert loaded.koopman_kind == "hypergraph"
+
+
+def _tiny_networked_model(
+    *,
+    adjacency: str,
+    dynamics_mode: str = "discrete",
+    seed: int = 0,
+) -> GraphKoopmanModel:
+    """Build a small networked model for adjacency serialization tests."""
+    torch.manual_seed(seed)
+    encoder = GNNEncoder(in_channels=2, hidden_channels=4, latent_dim=3, num_layers=1)
+    decoder = GNNDecoder(latent_dim=3, hidden_channels=4, out_channels=2, num_layers=1)
+    return GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=3,
+        time_step=0.1,
+        dynamics_mode=dynamics_mode,  # type: ignore[arg-type]
+        koopman="graph",
+        koopman_adjacency=adjacency,  # type: ignore[arg-type]
+    )
+
+
+def test_adjacency_modes_round_trip_preserve_factors_and_predictions(
+    tmp_path: Path,
+) -> None:
+    """Save/load preserves adjacency mode, factors, and predictions for all modes."""
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    data = Data(x=torch.randn(3, 2), edge_index=edge_index)
+    for adjacency in ("symmetric", "random_walk", "dual_random_walk"):
+        for dynamics_mode in ("discrete", "continuous"):
+            model = _tiny_networked_model(
+                adjacency=adjacency,
+                dynamics_mode=dynamics_mode,
+                seed=7,
+            )
+            if adjacency == "dual_random_walk":
+                if dynamics_mode == "discrete":
+                    model.koopman.set_dense_matrices(
+                        0.5 * torch.eye(3),
+                        0.1 * torch.eye(3),
+                        k_bwd=0.05 * torch.eye(3),
+                    )
+                else:
+                    model.koopman.set_dense_matrices(
+                        -0.5 * torch.eye(3),
+                        0.1 * torch.eye(3),
+                        l_bwd=0.05 * torch.eye(3),
+                    )
+            path = tmp_path / f"{dynamics_mode}_{adjacency}.pt"
+            model.eval()
+            with torch.no_grad():
+                before = model.predict(data, steps=2)
+            config = build_model_config(model)
+            assert config["adjacency"] == adjacency
+            assert FORMAT_VERSION == 1
+            model.save(path)
+            loaded = GraphKoopmanModel.load(path)
+            assert loaded.koopman.adjacency == adjacency
+            if dynamics_mode == "discrete":
+                assert torch.allclose(loaded.koopman.K_self, model.koopman.K_self)
+                assert torch.allclose(loaded.koopman.K_nbr, model.koopman.K_nbr)
+                if adjacency == "dual_random_walk":
+                    assert torch.allclose(loaded.koopman.K_bwd, model.koopman.K_bwd)
+                    assert any("._bwd." in key for key in loaded.state_dict())
+                else:
+                    assert not any("._bwd." in key for key in loaded.state_dict())
+            else:
+                assert torch.allclose(loaded.koopman.L_self, model.koopman.L_self)
+                assert torch.allclose(loaded.koopman.L_nbr, model.koopman.L_nbr)
+                if adjacency == "dual_random_walk":
+                    assert torch.allclose(loaded.koopman.L_bwd, model.koopman.L_bwd)
+                    assert any("._bwd." in key for key in loaded.state_dict())
+                else:
+                    assert not any("._bwd." in key for key in loaded.state_dict())
+            loaded.eval()
+            with torch.no_grad():
+                after = loaded.predict(data, steps=2)
+            for left, right in zip(before, after, strict=True):
+                assert torch.allclose(left.x, right.x, atol=1e-5)
+
+
+def test_load_rejects_networked_checkpoint_missing_adjacency(
+    tmp_path: Path,
+) -> None:
+    """Networked payloads without ``adjacency`` raise a clear ValueError."""
+    model = _tiny_networked_model(adjacency="random_walk")
+    config = build_model_config(model)
+    del config["adjacency"]
+    path = tmp_path / "missing_adjacency.pt"
+    torch.save(
+        {
+            "format_version": 1,
+            "package_version": "0.6.0",
+            "config": config,
+            "state_dict": model.state_dict(),
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match="adjacency"):
+        load_checkpoint(path)
+
+
+def test_factory_rejects_adjacency_for_non_networked_koopman() -> None:
+    """Non-default ``koopman_adjacency`` is rejected for non-networked kinds."""
+    with pytest.raises(ValueError, match="koopman_adjacency is only meaningful"):
+        GraphKoopmanModel(
+            encoder=GNNEncoder(2, 4, 3, num_layers=1),
+            decoder=GNNDecoder(3, 4, 2, num_layers=1),
+            latent_dim=3,
+            time_step=0.1,
+            koopman="pernode",
+            koopman_adjacency="random_walk",
+        )
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+
+    with pytest.raises(ValueError, match="koopman_adjacency is only meaningful"):
+        GraphKoopmanModel(
+            encoder=HypergraphEncoder(2, 4, 3),
+            decoder=HypergraphDecoder(3, 4, 2),
+            latent_dim=3,
+            time_step=0.1,
+            koopman="hypergraph",
+            koopman_adjacency="dual_random_walk",
+        )
+
+
+def test_injection_rejects_non_default_koopman_adjacency() -> None:
+    """Injected operators reject conflicting non-default ``koopman_adjacency``."""
+    from koopman_graph import GraphKoopmanOperator
+
+    injected = GraphKoopmanOperator(3, adjacency="random_walk")
+    with pytest.raises(ValueError, match="koopman_adjacency"):
+        GraphKoopmanModel(
+            encoder=GNNEncoder(2, 4, 3, num_layers=1),
+            decoder=GNNDecoder(3, 4, 2, num_layers=1),
+            latent_dim=3,
+            time_step=0.1,
+            koopman=injected,
+            koopman_adjacency="random_walk",
+        )

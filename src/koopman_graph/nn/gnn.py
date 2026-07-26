@@ -30,7 +30,10 @@ from torch_geometric.nn import (
     TransformerConv,
 )
 
-from koopman_graph.graph_utils import resolve_graph_inputs
+from koopman_graph.graph_utils import (
+    dense_random_walk_normalized_adjacency,
+    resolve_graph_inputs,
+)
 
 ActivationName = Literal["relu", "sigmoid", "tanh"]
 
@@ -430,61 +433,6 @@ def build_transformer_convs(
     return nn.ModuleList(convs)
 
 
-def _dense_adjacency(
-    edge_index: Tensor,
-    edge_weight: Tensor | None,
-    num_nodes: int,
-    *,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> Tensor:
-    """Assemble a dense adjacency matrix from sparse COO topology.
-
-    Parameters
-    ----------
-    edge_index : Tensor
-        COO edge index with shape ``(2, num_edges)``.
-    edge_weight : Tensor or None
-        Optional scalar edge weights with shape ``(num_edges,)``.
-    num_nodes : int
-        Number of nodes in the graph.
-    dtype : torch.dtype
-        Floating dtype for the assembled matrix.
-    device : torch.device
-        Device for the assembled matrix.
-
-    Returns
-    -------
-    Tensor
-        Dense adjacency with shape ``(num_nodes, num_nodes)``.
-    """
-    weights = (
-        torch.ones(edge_index.shape[1], dtype=dtype, device=device)
-        if edge_weight is None
-        else edge_weight.to(dtype=dtype, device=device)
-    )
-    adjacency = torch.zeros((num_nodes, num_nodes), dtype=dtype, device=device)
-    adjacency.index_put_((edge_index[0], edge_index[1]), weights, accumulate=True)
-    return adjacency
-
-
-def _random_walk_normalize(adjacency: Tensor) -> Tensor:
-    """Row-normalize adjacency (``D^{-1} A``) with a small degree floor.
-
-    Parameters
-    ----------
-    adjacency : Tensor
-        Dense adjacency with shape ``(num_nodes, num_nodes)``.
-
-    Returns
-    -------
-    Tensor
-        Random-walk normalized adjacency of the same shape.
-    """
-    degree = adjacency.sum(dim=1).clamp_min(1e-6)
-    return adjacency / degree.unsqueeze(1)
-
-
 def _diffusion_supports(
     edge_index: Tensor,
     edge_weight: Tensor | None,
@@ -498,7 +446,8 @@ def _diffusion_supports(
 
     Follows the DCRNN support set (Li et al., ICLR 2018): ``I`` plus powers of
     the forward and backward row-normalized adjacency up to
-    ``diffusion_steps``.
+    ``diffusion_steps``. Uses
+    :func:`~koopman_graph.graph_utils.dense_random_walk_normalized_adjacency`.
 
     Parameters
     ----------
@@ -520,15 +469,22 @@ def _diffusion_supports(
     list of Tensor
         Dense supports of length ``1 + 2 * diffusion_steps``.
     """
-    adjacency = _dense_adjacency(
-        edge_index,
-        edge_weight,
+    edges = edge_index.to(device=device)
+    weights = None if edge_weight is None else edge_weight.to(device=device)
+    forward = dense_random_walk_normalized_adjacency(
+        edges,
         num_nodes,
+        edge_weight=weights,
         dtype=dtype,
-        device=device,
+        direction="forward",
     )
-    forward = _random_walk_normalize(adjacency)
-    backward = _random_walk_normalize(adjacency.transpose(0, 1))
+    backward = dense_random_walk_normalized_adjacency(
+        edges,
+        num_nodes,
+        edge_weight=weights,
+        dtype=dtype,
+        direction="backward",
+    )
     supports: list[Tensor] = [torch.eye(num_nodes, dtype=dtype, device=device)]
     support = forward
     for _ in range(diffusion_steps):

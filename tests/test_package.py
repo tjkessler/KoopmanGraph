@@ -252,6 +252,8 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         "dynamical_similarity",
         "koopman_std",
         "plot_spectrum",
+        "spectral_residuals",
+        "SpectralResidualReport",
         "spectrum_distance",
     }
     exported = set(koopman_graph.__all__)
@@ -261,6 +263,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
 
     from koopman_graph.analysis import (
         AnomalyDetectionResult,
+        SpectralResidualReport,
         calibrate_anomaly_threshold,
         compute_generator_spectrum,
         decode_mode_shapes,
@@ -269,10 +272,12 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         dynamical_similarity,
         koopman_std,
         plot_spectrum,
+        spectral_residuals,
         spectrum_distance,
     )
 
     assert AnomalyDetectionResult is not None
+    assert SpectralResidualReport is not None
     assert callable(calibrate_anomaly_threshold)
     assert callable(compute_generator_spectrum)
     assert callable(decode_mode_shapes)
@@ -281,7 +286,30 @@ def test_analysis_secondaries_demoted_from_root() -> None:
     assert callable(dynamical_similarity)
     assert callable(koopman_std)
     assert callable(plot_spectrum)
+    assert callable(spectral_residuals)
     assert callable(spectrum_distance)
+
+
+def test_statistics_module_off_root_all() -> None:
+    """Long-horizon statistics stay a power-user leaf off root ``__all__``."""
+    exported = set(koopman_graph.__all__)
+    assert "statistics" not in exported
+    assert "power_spectral_density" not in exported
+    assert "largest_lyapunov_exponent" not in exported
+    assert "spectral_distance" not in exported
+    assert not hasattr(koopman_graph, "largest_lyapunov_exponent")
+
+    from koopman_graph.statistics import (
+        LongHorizonReport,
+        largest_lyapunov_exponent,
+        power_spectral_density,
+        spectral_distance,
+    )
+
+    assert LongHorizonReport is not None
+    assert callable(power_spectral_density)
+    assert callable(spectral_distance)
+    assert callable(largest_lyapunov_exponent)
 
 
 def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:

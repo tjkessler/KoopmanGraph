@@ -4,17 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.baselines.base import (
     ClassicalBaseline,
+    RankSpec,
     check_initial_graph,
     copy_topology,
     fit_controlled_row_operator,
     flatten_snapshots,
     require_global_controls,
     require_static_topology,
+    resolve_fit_rank,
     transition_controls,
 )
 from koopman_graph.data import (
@@ -49,12 +52,13 @@ class DMDcBaseline(ClassicalBaseline):
     time_step : float, optional
         Physical duration represented by one snapshot transition. Used by
         :meth:`spectrum`. Default is ``1.0``.
-    rank : int or None, optional
+    rank : int or None or {"auto"}, optional
         Optional truncated-SVD rank for the augmented regression. ``None`` uses
-        the full least-squares solution. Default is ``None``.
+        the full least-squares solution. ``"auto"`` selects the Gavish–Donoho
+        hard threshold. Default is ``None``.
     """
 
-    def __init__(self, *, time_step: float = 1.0, rank: int | None = None) -> None:
+    def __init__(self, *, time_step: float = 1.0, rank: RankSpec = None) -> None:
         """Initialize the DMDc baseline.
 
         Parameters
@@ -62,8 +66,9 @@ class DMDcBaseline(ClassicalBaseline):
         time_step : float, optional
             Physical duration represented by one snapshot transition. Default
             is ``1.0``.
-        rank : int or None, optional
+        rank : int or None or {"auto"}, optional
             Optional truncated-SVD rank. ``None`` uses full least squares.
+            ``"auto"`` selects the Gavish–Donoho hard threshold.
 
         Raises
         ------
@@ -161,11 +166,14 @@ class DMDcBaseline(ClassicalBaseline):
         controls = transition_controls(resolved)
         self.control_dim = int(controls.shape[1])
 
+        left = states[:-1]
+        augmented = torch.cat([left, controls], dim=-1)
+        self.selected_rank = resolve_fit_rank(augmented, self.rank)
         self.K, self.B = fit_controlled_row_operator(
-            states[:-1],
+            left,
             states[1:],
             controls,
-            self.rank,
+            self.selected_rank,
         )
         self.num_nodes = resolved.num_nodes
         self.in_channels = resolved.in_channels

@@ -221,6 +221,16 @@ _REQUIRED_PAPER_BIB_KEYS = (
     "Wu2019WaveNet",
     "Yu2018STGCN",
 )
+
+# v0.7.0 method literature (must exist in paper.bib and be cited in src/docs).
+_V070_BIB_KEYS = (
+    "ColbrookTownsend2023ResDMD",
+    "Colbrook2023ResidualDMD",
+    "GavishDonoho2014",
+    "Zargarbashi2023ConformalGNN",
+    "Rosenstein1993Lyapunov",
+    "Welch1967",
+)
 _REQUIRED_PAPER_MD_CITES = (
     "Azencot2020",
     "Bruder2021",
@@ -257,6 +267,38 @@ def test_literature_precedent_citations_in_paper_sources() -> None:
         "consistent Koopman autoencoder lineage" in readme
         or "consistent-autoencoder" in readme
     )
+
+
+def test_v070_bibliography_entries_are_cited() -> None:
+    """v0.7.0 method keys must exist in paper.bib and appear in src/ or docs."""
+    bib_text = (_PROJECT_ROOT / "paper.bib").read_text(encoding="utf-8")
+    corpus_parts: list[str] = []
+    for root_name in ("src", "docs/source"):
+        root = _PROJECT_ROOT / root_name
+        for path in root.rglob("*"):
+            if path.suffix in {".py", ".rst", ".md"} and path.is_file():
+                corpus_parts.append(path.read_text(encoding="utf-8"))
+    corpus = "\n".join(corpus_parts)
+
+    missing_bib = [
+        key
+        for key in _V070_BIB_KEYS
+        if not re.search(rf"@\w+\{{{re.escape(key)}\s*,", bib_text)
+    ]
+    missing_cites = [key for key in _V070_BIB_KEYS if key not in corpus]
+    assert not missing_bib, f"paper.bib missing v0.7.0 keys: {missing_bib}"
+    assert not missing_cites, f"uncited v0.7.0 bib keys: {missing_cites}"
+
+    # DOI-bearing entries (PMLR Zargarbashi has a stable URL, not a DOI).
+    for key, doi_fragment in (
+        ("ColbrookTownsend2023ResDMD", "10.1002/cpa.22125"),
+        ("Colbrook2023ResidualDMD", "10.1017/jfm.2022.1052"),
+        ("GavishDonoho2014", "10.1109/TIT.2014.2323359"),
+        ("Rosenstein1993Lyapunov", "10.1016/0167-2789(93)90009-P"),
+        ("Welch1967", "10.1109/TAU.1967.1161901"),
+    ):
+        assert doi_fragment in bib_text, f"{key} missing DOI {doi_fragment}"
+    assert "proceedings.mlr.press/v202/h-zargarbashi23a.html" in bib_text
 
 
 def test_joss_paper_narrative_word_count_at_most_1000() -> None:

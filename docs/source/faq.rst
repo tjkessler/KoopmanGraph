@@ -102,11 +102,35 @@ aliases), for example:
    from koopman_graph.analysis import (
        identify_sparse_dynamics,
        koopman_spectral_clustering,
+       spectral_residuals,
    )
+   from koopman_graph.statistics import spectral_distance
 
 ``ImportError: cannot import name '…' from 'koopman_graph'`` for one of these
 names usually means the import should use the capability module. See the Keep-in
 / Demote inventories in :doc:`architecture`.
+
+Choosing an ``adjacency`` mode (graph operators)
+------------------------------------------------
+
+Pairwise networked operators (``koopman="graph"`` and
+``koopman="continuous_graph"``) take ``adjacency`` (factory:
+``koopman_adjacency``):
+
+* ``"symmetric"`` (default) — undirected
+  :math:`D^{-1/2} A D^{-1/2}`. Use when the graph is undirected or when you
+  intentionally symmetrize directed edges.
+* ``"random_walk"`` — row-normalized :math:`D_{\mathrm{out}}^{-1} A`. Use for
+  one-way / directed coupling that the symmetric mode cannot represent.
+* ``"dual_random_walk"`` — forward walk plus
+  :math:`D_{\mathrm{in}}^{-1} A^{\top}` (extra ``K_bwd`` / ``L_bwd`` factors).
+  Use when both directions matter but should not be forced into a single
+  symmetric matrix (DCRNN-style bidirectional diffusion).
+
+Hypergraph operators do **not** expose ``adjacency`` (Zhou symmetric
+incidence). Self-adaptive topology and orbit-tied ``K_{\mathrm{self}}`` are
+separate options and are not substitutes for directed normalization. See
+:doc:`architecture` (adjacency contract) and :doc:`limitations`.
 
 Checkpoint format and load failures
 -----------------------------------

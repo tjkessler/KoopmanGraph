@@ -13,8 +13,8 @@ symmetry-adapted orbit ties, SINDy / spectral clustering / topology-estimation
 diagnostics, conformal UQ, and Koopman-MPC, on top of the v0.5.0 ensemble /
 latent-Gaussian UQ, auxiliary-spectral generators, physics-residual and
 sparsity losses, expanded GNN encoder zoo, and hierarchical forecasting.
-See :doc:`capabilities` for the full inventory and :doc:`architecture` for
-the public vs power-user API contract.
+See :doc:`capabilities` for the full inventory, :doc:`limitations` for scope
+boundaries, and :doc:`architecture` for the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2
@@ -24,6 +24,7 @@ the public vs power-user API contract.
    quickstart
    faq
    capabilities
+   limitations
    data
    tutorials
    architecture

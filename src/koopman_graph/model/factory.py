@@ -37,6 +37,7 @@ from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     ContinuousKoopmanOperator,
     GlobalLocalKoopmanOperator,
+    GraphAdjacency,
     GraphKoopmanOperator,
     HypergraphKoopmanOperator,
     InitMode,
@@ -90,6 +91,11 @@ DEFAULT_BILINEAR_RANK: int | None = None
 DEFAULT_KOOPMAN_ORBIT_PARTITION: Sequence[Sequence[int]] | None = None
 DEFAULT_KOOPMAN_AUTO_ORBITS = False
 DEFAULT_KOOPMAN_ORBIT_METHOD: OrbitMethod = "auto"
+DEFAULT_KOOPMAN_ADJACENCY: GraphAdjacency = "symmetric"
+_NETWORKED_ADJACENCY_KINDS: frozenset[str] = frozenset({"graph", "continuous_graph"})
+_GRAPH_ADJACENCY_MODES: frozenset[str] = frozenset(
+    {"symmetric", "random_walk", "dual_random_walk"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +146,7 @@ def resolve_model_components(
     koopman_max_spectral_radius: float = DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
     koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
     koopman_sparsity: str = "dense",
+    koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
     koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
     koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
     koopman_local_hidden_dims: Sequence[int] | None = None,
@@ -186,6 +193,9 @@ def resolve_model_components(
     koopman_sparsity : str
         Graph / hypergraph / continuous-graph sparsity mode
         (``dense`` / ``block_diagonal``).
+    koopman_adjacency : {"symmetric", "random_walk", "dual_random_walk"}
+        Neighbor-coupling normalization for ``koopman="graph"`` /
+        ``"continuous_graph"``. Default ``"symmetric"``.
     koopman_local_window, koopman_local_rank, koopman_local_hidden_dims
         Global/local operator hyperparameters.
     koopman_orbit_partition, koopman_auto_orbits, koopman_orbit_method
@@ -282,6 +292,7 @@ def resolve_model_components(
         koopman_max_spectral_radius=koopman_max_spectral_radius,
         koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
         koopman_sparsity=koopman_sparsity,
+        koopman_adjacency=koopman_adjacency,
         koopman_local_window=koopman_local_window,
         koopman_local_rank=koopman_local_rank,
         koopman_local_hidden_dims=koopman_local_hidden_dims,
@@ -403,6 +414,7 @@ def resolve_injected_koopman(
     ),
     koopman_auto_orbits: bool = DEFAULT_KOOPMAN_AUTO_ORBITS,
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
+    koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
 ) -> KoopmanOperatorContract:
     """Validate and return an injected Koopman operator module.
 
@@ -443,6 +455,8 @@ def resolve_injected_koopman(
         See the function signature / summary for ``koopman_auto_orbits``.
     koopman_orbit_method : OrbitMethod
         See the function signature / summary for ``koopman_orbit_method``.
+    koopman_adjacency : GraphAdjacency
+        Factory adjacency mode (must be default when injecting).
 
     Returns
     -------
@@ -494,6 +508,8 @@ def resolve_injected_koopman(
         conflicting.append("koopman_auto_orbits")
     if koopman_orbit_method != DEFAULT_KOOPMAN_ORBIT_METHOD:
         conflicting.append("koopman_orbit_method")
+    if koopman_adjacency != DEFAULT_KOOPMAN_ADJACENCY:
+        conflicting.append("koopman_adjacency")
     if conflicting:
         names = ", ".join(conflicting)
         msg = (
@@ -621,6 +637,7 @@ def build_koopman(
     koopman_max_spectral_radius: float,
     koopman_auxiliary_hidden_dims: Sequence[int] | None,
     koopman_sparsity: str = "dense",
+    koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
     koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
     koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
     koopman_local_hidden_dims: Sequence[int] | None = None,
@@ -661,6 +678,8 @@ def build_koopman(
         Local-network config for ``koopman="global_local"``.
     koopman_sparsity : str
         See the function signature / summary for ``koopman_sparsity``.
+    koopman_adjacency : GraphAdjacency
+        Neighbor-coupling normalization for networked graph operators.
     koopman_orbit_partition : Sequence[Sequence[int]] | None
         See the function signature / summary for ``koopman_orbit_partition``.
     koopman_auto_orbits : bool
@@ -699,6 +718,27 @@ def build_koopman(
             "koopman_sparsity is only meaningful for koopman='graph', "
             f"'hypergraph', or 'continuous_graph'; got sparsity="
             f"{koopman_sparsity!r} with koopman={kind!r}"
+        )
+        raise ValueError(msg)
+
+    if koopman_adjacency not in _GRAPH_ADJACENCY_MODES:
+        accepted = ", ".join(sorted(_GRAPH_ADJACENCY_MODES))
+        msg = (
+            "koopman_adjacency must be one of "
+            f"{{{accepted}}}, got {koopman_adjacency!r}"
+        )
+        raise ValueError(msg)
+    # Injection uses kind="pernode" as a placeholder; non-default adjacency is
+    # rejected later as a conflicting factory kwarg.
+    if (
+        injected is None
+        and kind not in _NETWORKED_ADJACENCY_KINDS
+        and koopman_adjacency != DEFAULT_KOOPMAN_ADJACENCY
+    ):
+        msg = (
+            "koopman_adjacency is only meaningful for koopman='graph' or "
+            f"'continuous_graph'; got adjacency={koopman_adjacency!r} with "
+            f"koopman={kind!r}"
         )
         raise ValueError(msg)
 
@@ -759,6 +799,7 @@ def build_koopman(
             koopman_orbit_partition=koopman_orbit_partition,
             koopman_auto_orbits=koopman_auto_orbits,
             koopman_orbit_method=koopman_orbit_method,
+            koopman_adjacency=koopman_adjacency,
         )
         if isinstance(operator, ContinuousGraphKoopmanOperator):
             resolved_kind: KoopmanKind = "continuous_graph"
@@ -807,6 +848,7 @@ def build_koopman(
                     control_mode=control_mode,
                     bilinear_rank=bilinear_rank,
                     sparsity=koopman_sparsity,  # type: ignore[arg-type]
+                    adjacency=koopman_adjacency,
                 ),
                 "continuous_graph",
             )
@@ -857,6 +899,7 @@ def build_koopman(
                 control_mode=control_mode,
                 bilinear_rank=bilinear_rank,
                 sparsity=koopman_sparsity,  # type: ignore[arg-type]
+                adjacency=koopman_adjacency,
                 orbit_partition=koopman_orbit_partition,
                 auto_orbits=koopman_auto_orbits,
                 orbit_method=koopman_orbit_method,
