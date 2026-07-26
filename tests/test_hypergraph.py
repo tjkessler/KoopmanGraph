@@ -438,6 +438,105 @@ def test_hypergraph_model_fit_predict_smoke(
     assert preds[0].x.shape == (4, 3)
 
 
+def test_hypergraph_decoder_forward_requires_hyperedge_on_data(
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Data forwards with a GNN encoder still require hyperedge incidence to decode."""
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(
+            in_channels=3,
+            hidden_channels=8,
+            latent_dim=4,
+            num_layers=1,
+        ),
+        decoder=HypergraphDecoder(
+            latent_dim=4,
+            hidden_channels=8,
+            out_channels=3,
+        ),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="pernode",
+    )
+    origin = Data(x=torch.randn(4, 3), edge_index=synthetic_hypergraph_edge_index)
+    model.eval()
+    with torch.no_grad(), pytest.raises(ValueError, match="hyperedge_index"):
+        model(origin)
+
+
+def test_hypergraph_rollout_tensor_origin_uses_positional_incidence(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Tensor rollout resolves hyperedge incidence from positional args."""
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hypergraph",
+    )
+    model.eval()
+    with (
+        torch.no_grad(),
+        pytest.raises(ValueError, match="hyperedge_index is required"),
+    ):
+        model.predict(
+            torch.randn(4, 3),
+            steps=1,
+            edge_index=synthetic_hyperedge_index,
+        )
+
+
+def test_hypergraph_rollout_requires_hyperedge_index(
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Rollout decode rejects origin graphs without hyperedge incidence."""
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hypergraph",
+    )
+    origin = Data(x=torch.randn(4, 3), edge_index=synthetic_hypergraph_edge_index)
+    with pytest.raises(ValueError, match="hyperedge_index"):
+        model.predict(origin, steps=2)
+
+
+def test_delay_hypergraph_encoder_detects_hypergraph_base(
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Delay-wrapped hypergraph encoders keep hyperedge encode semantics."""
+    from koopman_graph.nn import DelayEmbeddingEncoder
+
+    base = HypergraphEncoder(in_channels=6, hidden_channels=8, latent_dim=4)
+    encoder = DelayEmbeddingEncoder(base, n_delays=2)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hypergraph",
+        n_delays=2,
+        learn_topology="self_adaptive",
+    )
+    snaps = [
+        Data(
+            x=torch.randn(4, 3),
+            edge_index=synthetic_hypergraph_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+        for _ in range(3)
+    ]
+    sequence = GraphSnapshotSequence(snaps)
+    model.eval()
+    with torch.no_grad():
+        preds = model.predict(sequence[0], steps=1)
+    assert len(preds) == 1
+    assert preds[0].x.shape == (4, 3)
+
+
 def test_hypergraph_mismatched_peers_raise(
     synthetic_hyperedge_index: torch.Tensor,
     synthetic_hypergraph_edge_index: torch.Tensor,

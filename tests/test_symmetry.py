@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -314,6 +315,25 @@ def test_node_orbit_partition_exact_requires_pynauty() -> None:
         pytest.raises(ImportError, match="pynauty"),
     ):
         node_orbit_partition(edge_index, 3, method="exact")
+
+
+def test_node_orbit_partition_uses_mock_pynauty() -> None:
+    """Auto/exact paths delegate to pynauty when the backend is importable."""
+    edge_index = torch.tensor(
+        [[0, 0, 1, 1, 2], [0, 1, 0, 2, 1]],
+        dtype=torch.long,
+    )
+    mock_pynauty = MagicMock()
+    mock_pynauty.Graph.return_value = MagicMock()
+    mock_pynauty.autgroup.return_value = ([], 0, 0, [0, 0, 1, 1], 2)
+
+    with patch.dict(sys.modules, {"pynauty": mock_pynauty}):
+        auto_partition = node_orbit_partition(edge_index, 4, method="auto")
+        exact_partition = node_orbit_partition(edge_index, 4, method="exact")
+
+    assert validate_orbit_partition(auto_partition, 4) == auto_partition
+    assert validate_orbit_partition(exact_partition, 4) == exact_partition
+    assert mock_pynauty.autgroup.call_count == 2
 
 
 def test_node_orbit_partition_ignores_self_loops_and_empty_edges() -> None:

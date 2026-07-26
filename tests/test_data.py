@@ -1150,3 +1150,88 @@ def test_validate_observation_masks_direct() -> None:
             num_timesteps=2,
             num_nodes=2,
         )
+
+
+def test_neighbor_window_sampler_rejects_dynamic_topology(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampling requires static pairwise topology."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    alt_edge = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
+    snapshots = [
+        Data(x=torch.randn(3, 2), edge_index=synthetic_edge_index),
+        Data(x=torch.randn(3, 2), edge_index=alt_edge),
+    ]
+    sequence = GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+    with pytest.raises(ValueError, match="static pairwise topology"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=2)
+
+
+def test_induce_neighbor_subgraph_preserves_weights_controls_masks(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Subgraph induction remaps weights, per-node controls, and masks."""
+    from koopman_graph.data.sampling import induce_neighbor_subgraph_sequence
+
+    num_nodes = 5
+    features = torch.randn(3, num_nodes, 2)
+    weights = torch.ones(synthetic_edge_index.shape[1])
+    snapshots = [
+        Data(
+            x=features[t],
+            edge_index=synthetic_edge_index,
+            edge_weight=weights,
+        )
+        for t in range(3)
+    ]
+    sequence = GraphSnapshotSequence(
+        snapshots,
+        control_inputs=torch.randn(3, num_nodes, 1),
+        observation_masks=torch.ones(3, num_nodes, dtype=torch.bool),
+    )
+    induced = induce_neighbor_subgraph_sequence(
+        sequence,
+        seed_nodes=torch.tensor([0, 1], dtype=torch.long),
+        num_hops=1,
+    )
+    assert induced[0].edge_weight is not None
+    assert induced.control_inputs is not None
+    assert induced.control_inputs.ndim == 3
+    assert induced.control_inputs.shape[1] == induced.num_nodes
+    assert induced.observation_masks is not None
+    assert induced.observation_masks.shape[1] == induced.num_nodes
+
+
+def test_neighbor_window_sampler_validation_and_iter(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Neighbor sampler validates hop config and exposes temporal metadata."""
+    from koopman_graph.data import NeighborWindowSampler
+
+    sequence = GraphSnapshotSequence.from_arrays(
+        torch.randn(4, 5, 2),
+        synthetic_edge_index,
+    )
+    with pytest.raises(ValueError, match="num_nodes must be"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=0)
+    with pytest.raises(ValueError, match="num_hops must be"):
+        NeighborWindowSampler(sequence, window_length=2, num_nodes=2, num_hops=-1)
+
+    sampler = NeighborWindowSampler(
+        sequence,
+        window_length=2,
+        num_nodes=2,
+        num_hops=1,
+        batch_size=3,
+        windows_per_epoch=5,
+        shuffle=False,
+        seed=7,
+    )
+    assert sampler.batch_size == 3
+    assert sampler.windows_per_epoch == 5
+    assert sampler.shuffle is False
+    assert sampler.seed == 7
+    assert sampler.num_windows == 3
+    batch = next(iter(sampler))
+    assert 1 <= len(batch) <= 3

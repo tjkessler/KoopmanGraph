@@ -2520,3 +2520,216 @@ def test_v06_operator_and_uq_coverage_gaps() -> None:
         uq.predict_interval(seq[0], steps=1, level=0.0)
     with pytest.raises(ValueError, match="does not match"):
         uq.predict_interval(seq[0], steps=1, level=0.5)
+
+
+def test_factory_patch_coverage_gaps() -> None:
+    """Cover factory injection, validation, and build_koopman reject paths."""
+    from unittest.mock import patch
+
+    from koopman_graph.model.factory import (
+        build_koopman,
+        resolve_injected_koopman,
+        resolve_model_components,
+    )
+    from koopman_graph.operators import (
+        ContinuousGraphKoopmanOperator,
+        GlobalLocalKoopmanOperator,
+        GraphKoopmanOperator,
+        HypergraphKoopmanOperator,
+    )
+
+    enc = GNNEncoder(2, 8, 2)
+    dec = GNNDecoder(2, 8, 2)
+    base_kwargs = dict(
+        encoder=enc,
+        decoder=dec,
+        latent_dim=2,
+        time_step=0.1,
+        control_dim=0,
+        control_mode="additive",
+        bilinear_rank=None,
+        dynamics_mode="discrete",
+        physics_dim=0,
+        physics_lifting_fn=None,
+        physics_position="post",
+        n_delays=1,
+        koopman=None,
+    )
+
+    with (
+        patch(
+            "koopman_graph.model.factory.resolve_physics_lifting_fn",
+            return_value=None,
+        ),
+        pytest.raises(ValueError, match="physics_preset requires"),
+    ):
+        resolve_model_components(**base_kwargs, physics_preset="missing")
+
+    injected_global_local = GlobalLocalKoopmanOperator(2)
+    injected_graph = GraphKoopmanOperator(2)
+    for extra in (
+        {"koopman_local_window": 8},
+        {"koopman_local_rank": 4},
+        {"koopman_local_hidden_dims": (16,)},
+    ):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            GraphKoopmanModel(
+                enc,
+                dec,
+                latent_dim=2,
+                time_step=0.1,
+                koopman=injected_global_local,
+                **extra,
+            )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            koopman=injected_graph,
+            koopman_orbit_method="exact",
+        )
+    resolve_common = dict(
+        koopman=injected_graph,
+        latent_dim=2,
+        control_dim=0,
+        control_mode="additive",
+        bilinear_rank=None,
+        dynamics_mode="discrete",
+        koopman_init_mode="identity_noise",
+        koopman_init_scale=1e-2,
+        koopman_parameterization="dense",
+        koopman_max_spectral_radius=1.0,
+        koopman_auxiliary_hidden_dims=None,
+        koopman_local_window=4,
+        koopman_local_rank=2,
+        koopman_local_hidden_dims=None,
+        koopman_orbit_partition=None,
+        koopman_auto_orbits=False,
+        koopman_orbit_method="auto",
+    )
+    for key, value in (
+        ("koopman_orbit_partition", ((0, 1),)),
+        ("koopman_auto_orbits", True),
+        ("koopman_orbit_method", "exact"),
+    ):
+        kwargs = dict(resolve_common)
+        kwargs[key] = value
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            resolve_injected_koopman(**kwargs)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        aux_kwargs = dict(resolve_common)
+        aux_kwargs["koopman_auxiliary_hidden_dims"] = (8,)
+        resolve_injected_koopman(**aux_kwargs)
+
+    dynamics_mismatch = [
+        (GraphKoopmanOperator(2), "continuous"),
+        (HypergraphKoopmanOperator(2), "continuous"),
+        (GlobalLocalKoopmanOperator(2), "continuous"),
+        (ContinuousGraphKoopmanOperator(2), "discrete"),
+    ]
+    for operator, dynamics_mode in dynamics_mismatch:
+        with pytest.raises(ValueError, match="dynamics_mode"):
+            GraphKoopmanModel(
+                enc,
+                dec,
+                latent_dim=2,
+                time_step=0.1,
+                dynamics_mode=dynamics_mode,  # type: ignore[arg-type]
+                koopman=operator,
+            )
+
+    kind_cases = [
+        (GraphKoopmanOperator(2), "discrete", "graph"),
+        (HypergraphKoopmanOperator(2), "discrete", "hypergraph"),
+        (GlobalLocalKoopmanOperator(2), "discrete", "global_local"),
+        (ContinuousGraphKoopmanOperator(2), "continuous", "continuous_graph"),
+    ]
+    for operator, dynamics_mode, expected_kind in kind_cases:
+        model = GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            dynamics_mode=dynamics_mode,  # type: ignore[arg-type]
+            koopman=operator,
+        )
+        assert model.koopman_kind == expected_kind
+
+    common_build = dict(
+        latent_dim=2,
+        control_dim=0,
+        control_mode="additive",
+        bilinear_rank=None,
+        dynamics_mode="discrete",
+        koopman_init_mode="identity_noise",
+        koopman_init_scale=1e-2,
+        koopman_parameterization="dense",
+        koopman_max_spectral_radius=1.0,
+        koopman_auxiliary_hidden_dims=None,
+    )
+    with pytest.raises(ValueError, match="koopman_sparsity is only meaningful"):
+        build_koopman(
+            koopman="pernode",
+            koopman_sparsity="block_diagonal",
+            **common_build,
+        )
+    with pytest.raises(ValueError, match="koopman_orbit_partition"):
+        build_koopman(
+            koopman="pernode",
+            koopman_orbit_partition=((0, 1),),
+            **common_build,
+        )
+    with pytest.raises(ValueError, match="koopman_orbit_method must be"):
+        build_koopman(
+            koopman="graph",
+            koopman_orbit_method="bogus",  # type: ignore[arg-type]
+            **common_build,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="koopman_auxiliary_hidden_dims is not supported",
+    ):
+        GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            dynamics_mode="continuous",
+            koopman="graph",
+            koopman_parameterization="auxiliary_spectral",
+            koopman_auxiliary_hidden_dims=(8,),
+        )
+    with pytest.raises(ValueError, match="koopman_auxiliary_hidden_dims requires"):
+        GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            koopman="hypergraph",
+            koopman_parameterization="auxiliary_spectral",
+            koopman_auxiliary_hidden_dims=(8,),
+        )
+    with pytest.raises(ValueError, match="koopman_auxiliary_hidden_dims requires"):
+        GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            dynamics_mode="continuous",
+            koopman="graph",
+            koopman_parameterization="dense",
+            koopman_auxiliary_hidden_dims=(8,),
+        )
+    with pytest.raises(ValueError, match="koopman_auxiliary_hidden_dims requires"):
+        GraphKoopmanModel(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=0.1,
+            koopman="global_local",
+            koopman_parameterization="auxiliary_spectral",
+            koopman_auxiliary_hidden_dims=(8,),
+        )

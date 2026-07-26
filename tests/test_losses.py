@@ -931,6 +931,73 @@ def test_predict_and_rollout_loss_agree_on_static_topology(
         assert torch.allclose(loss, expected_loss, atol=1e-6)
 
 
+def test_rollout_sequence_loss_requires_hyperedge_sequence(
+    synthetic_edge_index: torch.Tensor,
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hypergraph decoders require hyperedge-carrying rollout sequences."""
+    from unittest.mock import PropertyMock, patch
+
+    from koopman_graph.losses import rollout_sequence_loss
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="hypergraph",
+    )
+    snapshots = [
+        Data(
+            x=torch.randn(4, 3),
+            edge_index=synthetic_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+        for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    with (
+        patch.object(
+            type(sequence),
+            "hyperedge_index",
+            new_callable=PropertyMock,
+            return_value=None,
+        ),
+        pytest.raises(ValueError, match="hyperedge-carrying"),
+    ):
+        rollout_sequence_loss(model, sequence, horizon=2)
+
+
+def test_rollout_sequence_loss_hypergraph_smoke(
+    synthetic_edge_index: torch.Tensor,
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Hypergraph rollout loss binds decoder incidence and returns finite loss."""
+    from koopman_graph.losses import rollout_sequence_loss
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="hypergraph",
+    )
+    snapshots = [
+        Data(
+            x=torch.randn(4, 3),
+            edge_index=synthetic_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+        for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    loss = rollout_sequence_loss(model, sequence, horizon=2)
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+
+
 def test_lie_consistency_is_zero_for_exact_linear_vector_field() -> None:
     """Lie consistency is 0 when f(x)=x and \\dot x = L x for generator matrix L."""
     generator = torch.tensor([[-0.2, 1.0], [-1.0, -0.2]])

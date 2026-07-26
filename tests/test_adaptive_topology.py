@@ -232,3 +232,121 @@ def test_format1_round_trip(tmp_path: Path) -> None:
     with torch.no_grad():
         after = loaded(data)
     assert torch.allclose(before, after, atol=1e-5)
+
+
+def test_topology_embedding_dim_must_be_positive() -> None:
+    """Factory rejects non-positive topology embedding width."""
+    with pytest.raises(ValueError, match="topology_embedding_dim"):
+        GraphKoopmanModel(
+            GNNEncoder(2, 8, 3, num_layers=1),
+            GNNDecoder(3, 8, 2, num_layers=1),
+            latent_dim=3,
+            time_step=0.1,
+            learn_topology="self_adaptive",
+            topology_embedding_dim=0,
+        )
+
+
+def test_adaptive_adjacency_validation_and_forward() -> None:
+    """AdaptiveAdjacency guards embedding width, node count, and binding."""
+    with pytest.raises(ValueError, match="embedding_dim"):
+        AdaptiveAdjacency(embedding_dim=0)
+    module = AdaptiveAdjacency(embedding_dim=4)
+    with pytest.raises(ValueError, match="num_nodes"):
+        module.set_num_nodes(0)
+    with pytest.raises(RuntimeError, match="set_num_nodes"):
+        module.dense_adjacency()
+    bound = AdaptiveAdjacency(embedding_dim=3, num_nodes=2)
+    edge_index, edge_weight = bound()
+    assert edge_index.shape == (2, 4)
+    assert edge_weight.shape == (4,)
+
+
+def test_materialize_learned_topology_paths() -> None:
+    """Learned topology materialization infers N and rejects bad inputs."""
+    data = Data(x=torch.randn(3, 2), edge_index=_path_edge_index(3))
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 3, num_layers=1),
+        GNNDecoder(3, 8, 2, num_layers=1),
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    with pytest.raises(RuntimeError, match="self_adaptive"):
+        GraphKoopmanModel(
+            GNNEncoder(2, 8, 3, num_layers=1),
+            GNNDecoder(3, 8, 2, num_layers=1),
+            latent_dim=3,
+            time_step=1.0,
+        ).materialize_learned_topology(data)
+    learned_from_data = model.materialize_learned_topology(data)
+    learned_from_tensor = model.materialize_learned_topology(data.x)
+    assert learned_from_data[0].shape == learned_from_tensor[0].shape
+    with pytest.raises(ValueError, match="num_nodes is required"):
+        model.materialize_learned_topology(42)  # type: ignore[arg-type]
+
+
+def test_encode_rollout_origin_and_rollout_materialize_topology() -> None:
+    """Rollout origin and predict materialize static learned adjacency."""
+    data = Data(x=torch.randn(3, 2), edge_index=_path_edge_index(3))
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 3, num_layers=1),
+        GNNDecoder(3, 8, 2, num_layers=1),
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    model.eval()
+    with torch.no_grad():
+        z, edge_index, edge_weight = model.encode_rollout_origin(data)
+    assert z.shape == (3, 3)
+    assert edge_index.shape[0] == 2
+    assert edge_weight is not None
+    with torch.no_grad():
+        preds = model.predict(data, steps=2)
+    assert len(preds) == 2
+
+
+def test_spectrum_requires_adaptive_module_when_learning() -> None:
+    """Spectrum on learned topology fails if the module is missing."""
+    from unittest.mock import PropertyMock, patch
+
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 2, num_layers=1),
+        GNNDecoder(2, 8, 2, num_layers=1),
+        latent_dim=2,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    with (
+        patch.object(
+            type(model),
+            "learns_pairwise_topology",
+            new_callable=PropertyMock,
+        ),
+        patch.object(model, "adaptive_topology", None),
+    ):
+        type(model).learns_pairwise_topology.return_value = True  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError, match="adaptive_topology module missing"):
+            model.spectrum(num_nodes=3, edge_index=edge_index)
+
+
+def test_materialize_learned_topology_explicit_num_nodes() -> None:
+    """Explicit num_nodes resolves device from Data, Tensor, or neither."""
+    data = Data(x=torch.randn(3, 2), edge_index=_path_edge_index(3))
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 3, num_layers=1),
+        GNNDecoder(3, 8, 2, num_layers=1),
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    from_data = model.materialize_learned_topology(data, num_nodes=3)
+    from_tensor = model.materialize_learned_topology(data.x, num_nodes=3)
+    from_scalar = model.materialize_learned_topology(0, num_nodes=3)  # type: ignore[arg-type]
+    assert from_data[0].shape == from_tensor[0].shape == from_scalar[0].shape
