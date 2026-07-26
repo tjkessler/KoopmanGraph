@@ -13,6 +13,7 @@ from koopman_graph.baselines.base import (
     fit_row_operator,
     flatten_snapshots,
     require_static_topology,
+    resolve_fit_rank,
 )
 from koopman_graph.data import (
     GraphSnapshotSequence,
@@ -38,9 +39,10 @@ class DMDBaseline(ClassicalBaseline):
     time_step : float, optional
         Physical duration represented by one snapshot transition. Used by
         :meth:`spectrum`. Default is ``1.0``.
-    rank : int or None, optional
+    rank : int or None or {"auto"}, optional
         Optional truncated-SVD rank for the data matrix. ``None`` uses the full
-        least-squares solution. Default is ``None``.
+        least-squares solution. ``"auto"`` selects the Gavish–Donoho
+        unknown-``σ`` median hard threshold. Default is ``None``.
     """
 
     def _is_fitted(self) -> bool:
@@ -86,7 +88,9 @@ class DMDBaseline(ClassicalBaseline):
             raise ValueError(msg)
 
         states = flatten_snapshots(resolved)
-        self.K = fit_row_operator(states[:-1], states[1:], self.rank)
+        left = states[:-1]
+        self.selected_rank = resolve_fit_rank(left, self.rank)
+        self.K = fit_row_operator(left, states[1:], self.selected_rank)
         self.num_nodes = resolved.num_nodes
         self.in_channels = resolved.in_channels
         self.state_dim = states.shape[1]

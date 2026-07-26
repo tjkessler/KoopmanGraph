@@ -369,6 +369,38 @@ def test_diffconv_forward_and_weights(synthetic_graph: Data) -> None:
     assert not torch.allclose(out_unweighted, out_weighted)
 
 
+def test_diffconv_seeded_regression_after_random_walk_lift() -> None:
+    """DiffConvEncoder output stays stable after topology helper lift."""
+    torch.manual_seed(0)
+    edge_index = torch.tensor(
+        [[0, 1, 1, 2], [1, 0, 2, 1]],
+        dtype=torch.long,
+    )
+    x = torch.tensor(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    edge_weight = torch.tensor([1.0, 0.1, 2.0, 0.5])
+    encoder = DiffConvEncoder(
+        in_channels=3,
+        hidden_channels=4,
+        latent_dim=2,
+        num_layers=1,
+        diffusion_steps=1,
+    )
+    encoder.eval()
+    with torch.no_grad():
+        out = encoder(x, edge_index, edge_weight)
+    # Golden values from the pre-lift DiffConv path (seed 0, same weights).
+    expected = torch.tensor(
+        [
+            [-0.3595312535762787, 0.5926259756088257],
+            [-1.1433429718017578, -0.7968395948410034],
+            [-0.6265825033187866, 0.4029189944267273],
+        ]
+    )
+    assert torch.allclose(out, expected, atol=1e-5, rtol=1e-5)
+
+
 @pytest.mark.parametrize("activation", ["relu", "sigmoid", "tanh"])
 def test_diffconv_activation_options(activation: str, synthetic_graph: Data) -> None:
     """Verify DiffConv activations produce finite outputs."""

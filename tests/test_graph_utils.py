@@ -6,15 +6,18 @@ import pytest
 import torch
 from torch_geometric.data import Data
 
+import koopman_graph.graph_utils.topology as topology_module
 from koopman_graph.graph_utils import (
     advance_and_decode,
     autoregressive_latent_rollout,
     degree_support_mask,
+    dense_random_walk_normalized_adjacency,
     dense_symmetric_normalized_adjacency,
     dense_symmetric_normalized_laplacian,
     hold_last_topology_at,
     inverse_propagate_latent,
     propagate_latent,
+    random_walk_normalized_adjacency_matvec,
     resolve_delta_t,
     resolve_edge_index,
     resolve_edge_weight,
@@ -378,6 +381,7 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "KoopmanPropagator",
     "OrbitMethod",
     "OrbitPartition",
+    "RandomWalkDirection",
     "TopologyAtFn",
     "advance_and_decode",
     "apply_orbit_self",
@@ -385,6 +389,7 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "autoregressive_latent_rollout",
     "degree_support_mask",
     "dense_hyperedge_normalized_adjacency",
+    "dense_random_walk_normalized_adjacency",
     "dense_symmetric_normalized_adjacency",
     "dense_symmetric_normalized_laplacian",
     "hold_last_topology_at",
@@ -398,6 +403,8 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "node_orbit_partition",
     "pack_rollout_snapshots",
     "propagate_latent",
+    "random_walk_normalized_adjacency_edge_weights",
+    "random_walk_normalized_adjacency_matvec",
     "resolve_delta_t",
     "resolve_edge_index",
     "resolve_edge_weight",
@@ -430,3 +437,128 @@ def test_graph_utils_package_import_contract() -> None:
     assert callable(_topology_kwargs_for)
     assert not hasattr(graph_utils, "_topology_kwargs_for")
     assert not hasattr(topology_mod, "_topology_kwargs_for")
+
+
+def _legacy_random_walk_normalize(adjacency: torch.Tensor) -> torch.Tensor:
+    """Pre-refactor DiffConv formula (degree floor ``1e-6``)."""
+    degree = adjacency.sum(dim=1).clamp_min(1e-6)
+    return adjacency / degree.unsqueeze(1)
+
+
+def test_random_walk_dense_matches_legacy_diffconv_formula() -> None:
+    """Dense helpers reproduce the historical DiffConv row-normalization."""
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    edge_weight = torch.tensor([1.0, 0.1, 2.0, 0.5])
+    num_nodes = 3
+    adjacency = torch.zeros(num_nodes, num_nodes)
+    adjacency.index_put_(
+        (edge_index[0], edge_index[1]),
+        edge_weight,
+        accumulate=True,
+    )
+    expected_fwd = _legacy_random_walk_normalize(adjacency)
+    expected_bwd = _legacy_random_walk_normalize(adjacency.transpose(0, 1))
+    got_fwd = dense_random_walk_normalized_adjacency(
+        edge_index,
+        num_nodes,
+        edge_weight=edge_weight,
+        dtype=torch.float32,
+        direction="forward",
+    )
+    got_bwd = dense_random_walk_normalized_adjacency(
+        edge_index,
+        num_nodes,
+        edge_weight=edge_weight,
+        dtype=torch.float32,
+        direction="backward",
+    )
+    assert torch.allclose(got_fwd, expected_fwd)
+    assert torch.allclose(got_bwd, expected_bwd)
+
+
+def test_random_walk_dense_and_matvec_agree_on_directed_graph() -> None:
+    """Dense and sparse random-walk paths agree (forward and backward)."""
+    # Directed chain 0→1→2 with an extra 0→2 edge; node 2 is a sink.
+    edge_index = torch.tensor([[0, 1, 0], [1, 2, 2]], dtype=torch.long)
+    edge_weight = torch.tensor([1.0, 2.0, 0.5])
+    x = torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.5, -0.5]])
+    for direction in ("forward", "backward"):
+        adj = dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes=3,
+            edge_weight=edge_weight,
+            dtype=torch.float32,
+            direction=direction,  # type: ignore[arg-type]
+        )
+        sparse = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            x,
+            edge_weight=edge_weight,
+            direction=direction,  # type: ignore[arg-type]
+        )
+        assert torch.allclose(sparse, adj @ x, atol=1e-6)
+
+
+def test_random_walk_zero_degree_rows_are_zero() -> None:
+    """Sink and isolated nodes yield zero rows without NaN/Inf."""
+    # Nodes: 0→1 only; 2 isolated; 1 is a sink (in-degree only).
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    fwd = dense_random_walk_normalized_adjacency(
+        edge_index,
+        num_nodes=3,
+        dtype=torch.float32,
+        direction="forward",
+    )
+    bwd = dense_random_walk_normalized_adjacency(
+        edge_index,
+        num_nodes=3,
+        dtype=torch.float32,
+        direction="backward",
+    )
+    assert torch.isfinite(fwd).all()
+    assert torch.isfinite(bwd).all()
+    # Sink node 1 has zero out-degree → zero forward row.
+    assert torch.equal(fwd[1], torch.zeros(3))
+    # Isolated node 2 → zero forward and backward rows.
+    assert torch.equal(fwd[2], torch.zeros(3))
+    assert torch.equal(bwd[2], torch.zeros(3))
+    # Source-only node 0 has zero in-degree → zero backward row.
+    assert torch.equal(bwd[0], torch.zeros(3))
+
+
+def test_topology_module_has_no_upward_imports() -> None:
+    """``graph_utils.topology`` must not import higher layers."""
+    from pathlib import Path
+
+    forbidden = (
+        "koopman_graph.nn",
+        "koopman_graph.operators",
+        "koopman_graph.analysis",
+        "koopman_graph.model",
+        "koopman_graph.uq",
+    )
+    source = topology_module.__file__
+    assert source is not None
+    text = Path(source).read_text(encoding="utf-8")
+    for name in forbidden:
+        assert f"import {name}" not in text
+        assert f"from {name}" not in text
+
+
+def test_random_walk_rejects_invalid_direction() -> None:
+    """Invalid ``direction`` values raise ``ValueError``."""
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    x = torch.ones(2, 1)
+    with pytest.raises(ValueError, match="direction"):
+        dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes=2,
+            dtype=torch.float32,
+            direction="sideways",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="direction"):
+        random_walk_normalized_adjacency_matvec(
+            edge_index,
+            x,
+            direction="sideways",  # type: ignore[arg-type]
+        )

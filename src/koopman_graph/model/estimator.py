@@ -163,6 +163,7 @@ class GraphKoopmanModel(nn.Module):
         koopman_max_spectral_radius: float = DEFAULT_KOOPMAN_MAX_SPECTRAL_RADIUS,
         koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
         koopman_sparsity: str = "dense",
+        koopman_adjacency: str = "symmetric",
         koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
         koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
         koopman_local_hidden_dims: Sequence[int] | None = None,
@@ -244,6 +245,10 @@ class GraphKoopmanModel(nn.Module):
             values are rejected by the operator constructors. Ignored for
             per-node operators (must remain ``"dense"``). Default is
             ``"dense"``.
+        koopman_adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
+            Neighbor-coupling normalization for ``koopman="graph"`` and
+            continuous-graph peers. Default ``"symmetric"``. Rejected for
+            non-networked ``koopman`` choices.
         koopman_local_window : int, optional
             Latent history length for ``koopman="global_local"`` (default
             ``4``). Must stay default when not using global/local.
@@ -340,6 +345,7 @@ class GraphKoopmanModel(nn.Module):
             koopman_max_spectral_radius=koopman_max_spectral_radius,
             koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
             koopman_sparsity=koopman_sparsity,
+            koopman_adjacency=koopman_adjacency,  # type: ignore[arg-type]
             koopman_local_window=koopman_local_window,
             koopman_local_rank=koopman_local_rank,
             koopman_local_hidden_dims=koopman_local_hidden_dims,

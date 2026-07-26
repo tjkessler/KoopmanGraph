@@ -1,8 +1,8 @@
 """Continuous networked (spatially-coupled) Koopman generator.
 
-Implements the topology-coupled generator::
+Implements the topology-coupled generator (adjacency-dependent)::
 
-    L_eff = I_N ⊗ L_self + Â ⊗ L_nbr
+    L_eff = I_N ⊗ L_self + Â_* ⊗ L_nbr  (+ Â_b ⊗ L_bwd in dual mode)
 
 with one-step map ``K(Δt) = exp(L_eff Δt)``. Discrete networked peers live in
 :mod:`koopman_graph.operators.graph`. Selected via
@@ -11,7 +11,8 @@ with one-step map ``K(Δt) = exp(L_eff Δt)``. Discrete networked peers live in
 
 The dense path forms an ``N·d`` matrix exponential (costly for large ``N``);
 ``sparsity="block_diagonal"`` advances with the self-term only (self-dominated
-approximation; exact when ``L_nbr = 0`` or the graph has no edges).
+approximation; exact when neighbor factors are zero or the graph has no edges).
+Neighbor adjacency mode does **not** change the block-diagonal shortcut.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from koopman_graph.operators.control import (
     effective_bilinear_matrix,
     per_node_effective_bilinear_matrices,
 )
+from koopman_graph.operators.graph_types import GRAPH_ADJACENCY_MODES, GraphAdjacency
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_generator_spectrum
 
 ContinuousGraphSparsity = Literal["dense", "block_diagonal", "distributed"]
@@ -49,9 +51,17 @@ class ContinuousGraphKoopmanOperator(nn.Module):
 
         vec(Z(t+Δt)) = exp(L_eff Δt) vec(Z(t))
 
-    where ``L_eff = I_N ⊗ L_self + Â ⊗ L_nbr`` and ``Â`` is the symmetric
-    normalized adjacency. Control (when enabled) is owned by the self factor
-    and integrated with Van Loan factors on the dense ``N·d`` generator.
+    where ``L_eff`` depends on ``adjacency``:
+
+    * ``"symmetric"`` (default): ``I⊗L_self + Â_sym⊗L_nbr``
+    * ``"random_walk"``: ``I⊗L_self + Â_f⊗L_nbr``
+    * ``"dual_random_walk"``:
+      ``I⊗L_self + Â_f⊗L_fwd + Â_b⊗L_bwd`` (``L_fwd`` aliases ``L_nbr``)
+
+    Control (when enabled) is owned by the self factor and integrated with Van
+    Loan factors on the dense ``N·d`` generator. Prefer modest ``N`` for the
+    dense path; large graphs should use ``sparsity="block_diagonal"`` (self
+    only; ignores neighbor coupling and adjacency).
 
     Attributes
     ----------
@@ -60,7 +70,10 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     control_dim : int
         Exogenous control dimension (``0`` disables control).
     parameterization : Parameterization
-        Shared soft/structural parameterization for ``L_self`` / ``L_nbr``.
+        Shared soft/structural parameterization for ``L_self`` / neighbor
+        factors.
+    adjacency : {"symmetric", "random_walk", "dual_random_walk"}
+        Neighbor-coupling normalization (default ``"symmetric"``).
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` uses the full ``N·d`` exponential;
         ``"block_diagonal"`` advances with ``L_self`` only; ``"distributed"``
@@ -81,6 +94,7 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         control_mode: ControlMode = "additive",
         bilinear_rank: int | None = None,
         sparsity: ContinuousGraphSparsity = "dense",
+        adjacency: GraphAdjacency = "symmetric",
     ) -> None:
         """Initialize self and neighbor continuous generators.
 
@@ -89,11 +103,12 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         latent_dim : int
             Latent dimension ``d``.
         init_mode : {"identity", "identity_noise", "xavier"}, optional
-            Initialization for ``L_self``. ``L_nbr`` starts near zero.
+            Initialization for ``L_self``. ``L_nbr`` / ``L_fwd`` starts near
+            zero. ``L_bwd`` (dual mode only) initializes at exactly zero.
         init_scale : float, optional
             Noise scale for ``identity_noise`` / neighbor jitter.
         parameterization : Parameterization, optional
-            Shared parameterization for both ``d×d`` generators. Continuous-only
+            Shared parameterization for the ``d×d`` generators. Continuous-only
             ``"auxiliary_spectral"`` is rejected.
         max_real_eigenvalue : float, optional
             Magnitude scale for structural Hurwitz modes.
@@ -104,12 +119,17 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         bilinear_rank : int or None, optional
             Low-rank bilinear size when ``control_mode="bilinear"``.
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
-            Realization mode. Default ``"dense"``.
+            Realization mode. Default ``"dense"``. ``"block_diagonal"`` is a
+            self-term-only shortcut and ignores neighbor / adjacency coupling.
+        adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
+            Neighbor-coupling normalization. Default ``"symmetric"`` preserves
+            historical undirected behavior bit-for-bit.
 
         Raises
         ------
         ValueError
-            If ``sparsity`` / parameterization are unsupported or args invalid.
+            If ``sparsity`` / ``adjacency`` / parameterization are unsupported
+            or args invalid.
         """
         super().__init__()
         if sparsity == "distributed":
@@ -123,6 +143,13 @@ class ContinuousGraphKoopmanOperator(nn.Module):
             msg = (
                 "ContinuousGraphKoopmanOperator sparsity must be 'dense' or "
                 f"'block_diagonal', got {sparsity!r}"
+            )
+            raise ValueError(msg)
+        if adjacency not in GRAPH_ADJACENCY_MODES:
+            accepted = ", ".join(sorted(GRAPH_ADJACENCY_MODES))
+            msg = (
+                "ContinuousGraphKoopmanOperator adjacency must be one of "
+                f"{{{accepted}}}, got {adjacency!r}"
             )
             raise ValueError(msg)
         if parameterization == "auxiliary_spectral":
@@ -141,6 +168,7 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         self.control_mode = control_mode
         self.bilinear_rank = bilinear_rank
         self.sparsity = sparsity
+        self.adjacency = adjacency
 
         self._self = ContinuousKoopmanOperator(
             latent_dim,
@@ -160,40 +188,76 @@ class ContinuousGraphKoopmanOperator(nn.Module):
             max_real_eigenvalue=max_real_eigenvalue,
             control_dim=0,
         )
+        self._bwd: ContinuousKoopmanOperator | None
+        if adjacency == "dual_random_walk":
+            self._bwd = ContinuousKoopmanOperator(
+                latent_dim,
+                init_mode="identity",
+                init_scale=init_scale,
+                parameterization=parameterization,
+                max_real_eigenvalue=max_real_eigenvalue,
+                control_dim=0,
+            )
+        else:
+            self._bwd = None
         self._reset_neighbor_parameters()
 
-    def _reset_neighbor_parameters(self) -> None:
-        """Drive ``L_nbr`` toward zero so the operator starts per-node-like.
+    def _reset_factor_parameters(
+        self,
+        module: ContinuousKoopmanOperator,
+        *,
+        allow_noise: bool,
+    ) -> None:
+        """Zero a neighbor generator, optionally adding ``init_scale`` noise.
 
-        Returns
-        -------
-        None
-            See summary line."""
+        Parameters
+        ----------
+        module : ContinuousKoopmanOperator
+            Neighbor factor module to reset.
+        allow_noise : bool
+            When ``True`` and ``init_mode`` is noisy, add ``init_scale`` jitter.
+        """
         if self.parameterization == "dense":
-            dense_l = self._nbr.L
+            dense_l = module.L
             with torch.no_grad():
                 dense_l.zero_()
-                if self.init_mode in {"identity_noise", "xavier"}:
+                if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
                     dense_l.add_(torch.randn_like(dense_l) * self.init_scale)
             return
         with torch.no_grad():
-            for parameter in self._nbr.parameters():
+            for parameter in module.parameters():
                 parameter.zero_()
-            if self.init_mode in {"identity_noise", "xavier"}:
-                for parameter in self._nbr.parameters():
+            if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
+                for parameter in module.parameters():
                     parameter.add_(torch.randn_like(parameter) * self.init_scale)
 
+    def _reset_neighbor_parameters(self) -> None:
+        """Initialize neighbor generators for a per-node-like starting point.
+
+        Notes
+        -----
+        ``L_nbr`` / ``L_fwd`` may receive ``init_scale`` noise.
+        ``L_bwd`` (dual mode) is always exactly zero so
+        ``dual_random_walk`` begins equivalent to ``random_walk``.
+        """
+        self._reset_factor_parameters(self._nbr, allow_noise=True)
+        if self._bwd is not None:
+            self._reset_factor_parameters(self._bwd, allow_noise=False)
+
     def reset_parameters(self) -> None:
-        """Reinitialize ``L_self`` / ``L_nbr`` (and control when present).
+        """Reinitialize ``L_self`` / neighbor factors (and control when present).
 
         Returns
         -------
         None
-            See summary line."""
+            See summary line.
+        """
         self._self.reset_parameters()
         if self.control_dim > 0:
             self._self.reset_control_parameters()
         self._nbr.reset_parameters()
+        if self._bwd is not None:
+            self._bwd.reset_parameters()
         self._reset_neighbor_parameters()
 
     @property
@@ -203,18 +267,50 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            See summary line."""
+            Assembled ``L_self``.
+        """
         return self._self.L
 
     @property
     def L_nbr(self) -> Tensor:
-        """Neighbor-coupling generator with shape ``(latent_dim, latent_dim)``.
+        """Forward / sole neighbor generator ``(latent_dim, latent_dim)``.
 
         Returns
         -------
         Tensor
-            See summary line."""
+            Assembled ``L_nbr`` (alias :attr:`L_fwd`).
+        """
         return self._nbr.L
+
+    @property
+    def L_fwd(self) -> Tensor:
+        """Alias of :attr:`L_nbr` (forward random-walk coupling).
+
+        Returns
+        -------
+        Tensor
+            Assembled forward neighbor generator.
+        """
+        return self.L_nbr
+
+    @property
+    def L_bwd(self) -> Tensor:
+        """Backward random-walk generator (``dual_random_walk`` only).
+
+        Returns
+        -------
+        Tensor
+            Assembled ``L_bwd``.
+
+        Raises
+        ------
+        AttributeError
+            If ``adjacency`` is not ``"dual_random_walk"``.
+        """
+        if self._bwd is None:
+            msg = "L_bwd is only available when adjacency='dual_random_walk'"
+            raise AttributeError(msg)
+        return self._bwd.L
 
     @property
     def matrix(self) -> Tensor:
@@ -223,7 +319,8 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            See summary line."""
+            ``L_self``.
+        """
         return self.L_self
 
     @property
@@ -233,7 +330,8 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            See summary line."""
+            ``L_self``.
+        """
         return self.matrix
 
     def set_dense_matrices(
@@ -241,28 +339,44 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         l_self: Tensor,
         l_nbr: Tensor,
         *,
+        l_bwd: Tensor | None = None,
         control_matrix: Tensor | None = None,
         bilinear_matrices: Tensor | None = None,
     ) -> None:
-        """Write dense ``L_self`` / ``L_nbr`` (and optional control factors).
+        """Write dense ``L_self`` / neighbor generators (and optional control).
 
         Parameters
         ----------
         l_self : Tensor
             Dense self generator ``(latent_dim, latent_dim)``.
         l_nbr : Tensor
-            Dense neighbor generator ``(latent_dim, latent_dim)``.
+            Dense forward / sole neighbor generator ``(latent_dim, latent_dim)``.
+        l_bwd : Tensor or None, optional
+            Dense backward neighbor generator when
+            ``adjacency="dual_random_walk"``. Must be omitted otherwise.
+            ``None`` leaves ``L_bwd`` unchanged in dual mode.
         control_matrix : Tensor or None, optional
             Control matrix ``B`` when ``control_dim > 0``.
         bilinear_matrices : Tensor or None, optional
             Full-rank bilinear stack when ``control_mode="bilinear"``.
+
+        Raises
+        ------
+        ValueError
+            If ``l_bwd`` is set when ``adjacency`` is not dual.
         """
+        if l_bwd is not None and self._bwd is None:
+            msg = "l_bwd is only valid when adjacency='dual_random_walk'"
+            raise ValueError(msg)
         self._self.set_dense_matrix(
             l_self,
             control_matrix=control_matrix,
             bilinear_matrices=bilinear_matrices,
         )
         self._nbr.set_dense_matrix(l_nbr, control_matrix=None)
+        if l_bwd is not None:
+            assert self._bwd is not None
+            self._bwd.set_dense_matrix(l_bwd, control_matrix=None)
 
     @property
     def B(self) -> Tensor | None:
@@ -271,13 +385,14 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor | None
-            See summary line."""
+            Control matrix ``B``, or ``None`` when uncontrolled.
+        """
         if self.control_dim <= 0:
             return None
         return self._self.B
 
     def bound_metric(self) -> Tensor:
-        """Return ``max(bound(L_self), bound(L_nbr))`` (factor-level surrogate).
+        """Return ``max`` of self / neighbor factor bounds (surrogate).
 
         Notes
         -----
@@ -286,8 +401,12 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            See summary line."""
-        return torch.maximum(self._self.bound_metric(), self._nbr.bound_metric())
+            Scalar factor bound metric.
+        """
+        metric = torch.maximum(self._self.bound_metric(), self._nbr.bound_metric())
+        if self._bwd is not None:
+            metric = torch.maximum(metric, self._bwd.bound_metric())
+        return metric
 
     def max_real_part(self) -> Tensor:
         """Maximum real eigenvalue of ``L_self`` (not the full ``N·d`` generator).
@@ -316,6 +435,66 @@ class ContinuousGraphKoopmanOperator(nn.Module):
             See summary line."""
         return self._self.stability_certificate()
 
+    def _dense_neighbor_coupling(
+        self,
+        edge_index: Tensor,
+        num_nodes: int,
+        *,
+        edge_weight: Tensor | None,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Assemble neighbor Kronecker terms for the configured adjacency mode.
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        edge_weight : Tensor or None
+            Optional edge weights ``(E,)``.
+        dtype : torch.dtype
+            Floating dtype for the dense adjacency factors.
+
+        Returns
+        -------
+        Tensor
+            Dense neighbor coupling with shape ``(N·d, N·d)``.
+        """
+        from koopman_graph.graph_utils.topology import (
+            dense_random_walk_normalized_adjacency,
+            dense_symmetric_normalized_adjacency,
+        )
+
+        if self.adjacency == "symmetric":
+            adj = dense_symmetric_normalized_adjacency(
+                edge_index,
+                num_nodes,
+                edge_weight=edge_weight,
+                dtype=dtype,
+            )
+            return torch.kron(adj, self.L_nbr)
+
+        adj_fwd = dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+            direction="forward",
+        )
+        coupling = torch.kron(adj_fwd, self.L_nbr)
+        if self.adjacency == "random_walk":
+            return coupling
+        assert self._bwd is not None
+        adj_bwd = dense_random_walk_normalized_adjacency(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+            direction="backward",
+        )
+        return coupling + torch.kron(adj_bwd, self.L_bwd)
+
     def effective_generator(
         self,
         edge_index: Tensor,
@@ -325,7 +504,7 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         l_self: Tensor | None = None,
         l_self_blocks: Tensor | None = None,
     ) -> Tensor:
-        """Assemble the dense effective generator ``I⊗L_self + Â⊗L_nbr``.
+        """Assemble the dense effective networked generator ``(N·d, N·d)``.
 
         Parameters
         ----------
@@ -344,25 +523,30 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         -------
         Tensor
             Dense generator with shape ``(N·d, N·d)``.
-        """
-        from koopman_graph.graph_utils.topology import (
-            dense_symmetric_normalized_adjacency,
-        )
 
+        Raises
+        ------
+        ValueError
+            If both ``l_self`` and ``l_self_blocks`` are set, or if
+            ``l_self_blocks`` has the wrong shape.
+        """
         if l_self is not None and l_self_blocks is not None:
             msg = "Pass at most one of l_self and l_self_blocks"
             raise ValueError(msg)
 
         self_matrix = self.L_self if l_self is None else l_self
-        adj = dense_symmetric_normalized_adjacency(
+        neighbor = self._dense_neighbor_coupling(
             edge_index,
             num_nodes,
             edge_weight=edge_weight,
             dtype=self_matrix.dtype,
         )
-        neighbor = torch.kron(adj, self.L_nbr)
         if l_self_blocks is None:
-            identity = torch.eye(num_nodes, dtype=adj.dtype, device=adj.device)
+            identity = torch.eye(
+                num_nodes,
+                dtype=neighbor.dtype,
+                device=neighbor.device,
+            )
             return torch.kron(identity, self_matrix) + neighbor
 
         expected = (num_nodes, self.latent_dim, self.latent_dim)
@@ -383,6 +567,9 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         edge_weight: Tensor | None = None,
     ) -> KoopmanSpectrum:
         """Eigendecomposition of the effective ``N·d`` networked generator.
+
+        Directed / dual modes may yield complex spectra; growth rates and
+        frequencies come from the complex eigendecomposition.
 
         Parameters
         ----------
@@ -590,21 +777,23 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     ) -> Tensor:
         """Self-dominated approximate advance via per-node ``exp(L_self Δt)``.
 
+        Ignores neighbor factors and ``adjacency`` (documented self-only
+        shortcut; exact when neighbor generators are zero).
+
         Parameters
         ----------
-
         z : Tensor
-            See the function signature / summary for ``z``.
-        delta_t : float | Tensor
-            See the function signature / summary for ``delta_t``.
-        control : Tensor | None
-            See the function signature / summary for ``control``.
+            Latent node states ``(num_nodes, latent_dim)``.
+        delta_t : float or Tensor
+            Integration interval.
+        control : Tensor or None
+            Optional control input.
 
         Returns
         -------
-
         Tensor
-            See summary line."""
+            Advanced latents with the same shape as ``z``.
+        """
         return self._self.advance(z, delta_t, control=control)
 
     def forward(

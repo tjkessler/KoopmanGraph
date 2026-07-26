@@ -52,6 +52,8 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
+**Scope.** KoopmanGraph targets topology-aware Koopman autoencoders on graphs and hypergraphs, not traffic-forecasting leaderboards, simplicial/Hodge layers, or molecular-dynamics MSM toolchains. Measured limits (transfer, factorization cost, residual diagnostics, UQ assumptions) are consolidated in [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html).
+
 ## Installation
 
 Requires **Python 3.10+**, [PyTorch](https://pytorch.org/get-started/locally/), and [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html). Install those first, then:
@@ -129,10 +131,11 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 
 - [Quickstart](https://koopmangraph.readthedocs.io/en/latest/quickstart.html) — train / predict walkthrough
 - [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) — feature inventory and datasets
+- [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html) — when not to use; measured boundaries
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.6.0: see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.7.0: see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -157,7 +160,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21584577},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.6.0},
+  version      = {0.7.0},
 }
 ```
 

@@ -3,13 +3,24 @@
 Shared degree / adjacency / Laplacian mathematics and graph-input resolution.
 Import from :mod:`koopman_graph.graph_utils` (package re-exports) unless you
 need the peer module explicitly.
+
+Includes symmetric normalization (``D^{-1/2} A D^{-1/2}``) and directed
+random-walk normalization (``D_{\\mathrm{out}}^{-1} A`` /
+``D_{\\mathrm{in}}^{-1} A^{\\top}``).
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
+
+RandomWalkDirection = Literal["forward", "backward"]
+
+# Match DiffConv / DCRNN-style row normalization (nn.gnn legacy floor).
+_RANDOM_WALK_DEGREE_FLOOR = 1e-6
 
 
 def snapshot_edge_weight(snapshot: Data) -> Tensor | None:
@@ -248,9 +259,13 @@ def node_degrees(
 ) -> Tensor:
     """Return weighted out-degrees ``d_i = sum_j A_{ij}`` for each node.
 
-    Assumes an undirected, symmetrically represented adjacency (each undirected
-    edge appears in both directions, or weights already encode that symmetry).
-    Duplicate edges accumulate.
+    For ``symmetric`` / Laplacian helpers this assumes an undirected,
+    symmetrically represented adjacency (each undirected edge appears in both
+    directions, or weights already encode that symmetry). Directed graphs
+    should use the random-walk helpers
+    (:func:`dense_random_walk_normalized_adjacency` /
+    :func:`random_walk_normalized_adjacency_matvec`) instead. Duplicate edges
+    accumulate.
 
     Parameters
     ----------
@@ -341,7 +356,9 @@ def symmetric_normalized_adjacency_edge_weights(
     these weights; they differ only in sparse matvec vs dense assembly
     (duplicate edges accumulate in both paths).
 
-    The contract assumes an **undirected, symmetrically represented** adjacency.
+    Intended for **undirected, symmetrically represented** adjacency (the
+    ``adjacency="symmetric"`` networked-operator mode). For directed graphs use
+    the random-walk helpers instead.
 
     Parameters
     ----------
@@ -432,8 +449,9 @@ def dense_symmetric_normalized_laplacian(
     """Assemble dense ``L_sym = P - Â = (D^+)^{1/2} (D - A) (D^+)^{1/2}``.
 
     On graphs with no isolated nodes, ``P = I`` and this reduces to ``I - Â``.
-    Isolated nodes have a zero diagonal entry (not ``1``). Assumes undirected,
-    symmetrically represented adjacency.
+    Isolated nodes have a zero diagonal entry (not ``1``). Intended for
+    undirected, symmetrically represented adjacency; directed graphs should use
+    random-walk normalization rather than ``L_sym``.
 
     Parameters
     ----------
@@ -515,6 +533,194 @@ def symmetric_normalized_adjacency_matvec(
     return out
 
 
+def random_walk_normalized_adjacency_edge_weights(
+    edge_index: Tensor,
+    *,
+    num_nodes: int,
+    edge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+    direction: RandomWalkDirection = "forward",
+) -> Tensor:
+    """Return per-edge weights for row-normalized random-walk adjacency.
+
+    ``direction="forward"`` implements ``Â_f = D_{out}^{-1} A`` (DCRNN forward
+    support). ``direction="backward"`` implements
+    ``Â_b = D_{in}^{-1} A^{\\top}``.
+
+    Zero out-/in-degree nodes yield a **zero row** (not an identity fill). A
+    small positive degree floor (``1e-6``) matches the historical DiffConv
+    normalization and avoids divide-by-zero; when the adjacency row is already
+    zero, the normalized row remains zero.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Edge index with shape ``(2, num_edges)`` (row 0 = source, row 1 =
+        target).
+    num_nodes : int
+        Number of graph nodes.
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``. Defaults to ones.
+    dtype : torch.dtype
+        Floating dtype for the returned weights.
+    device : torch.device or None, optional
+        Device for the computation. Defaults to ``edge_index.device``.
+    direction : {"forward", "backward"}, optional
+        Random-walk orientation. Default is ``"forward"``.
+
+    Returns
+    -------
+    Tensor
+        Per-edge normalized weights with shape ``(num_edges,)``, aligned with
+        ``edge_index`` columns for the corresponding sparse matvec.
+
+    Raises
+    ------
+    ValueError
+        If ``direction`` is not ``"forward"`` or ``"backward"``.
+    """
+    if direction not in {"forward", "backward"}:
+        msg = f'direction must be "forward" or "backward", got {direction!r}'
+        raise ValueError(msg)
+
+    resolved_device = device if device is not None else edge_index.device
+    row = edge_index[0]
+    col = edge_index[1]
+    if edge_weight is None:
+        weights = torch.ones(row.size(0), dtype=dtype, device=resolved_device)
+    else:
+        weights = edge_weight.to(dtype=dtype, device=resolved_device)
+
+    if direction == "forward":
+        # (Â_f x)_i = sum_j A_{ij} / d_out_i · x_j  → scale by source degree.
+        deg = torch.zeros(num_nodes, dtype=dtype, device=resolved_device)
+        deg.index_add_(0, row, weights)
+        scale = deg[row].clamp_min(_RANDOM_WALK_DEGREE_FLOOR)
+        return weights / scale
+
+    # Backward: (Â_b x)_i = sum_j A_{ji} / d_in_i · x_j  → scale by target degree.
+    deg = torch.zeros(num_nodes, dtype=dtype, device=resolved_device)
+    deg.index_add_(0, col, weights)
+    scale = deg[col].clamp_min(_RANDOM_WALK_DEGREE_FLOOR)
+    return weights / scale
+
+
+def dense_random_walk_normalized_adjacency(
+    edge_index: Tensor,
+    num_nodes: int,
+    *,
+    edge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    direction: RandomWalkDirection = "forward",
+) -> Tensor:
+    """Assemble dense row-normalized random-walk adjacency.
+
+    ``direction="forward"`` returns ``D_{out}^{-1} A``.
+    ``direction="backward"`` returns ``D_{in}^{-1} A^{\\top}``.
+
+    Sink and isolated nodes produce zero rows (not identity). See
+    :func:`random_walk_normalized_adjacency_edge_weights` for the degree-floor
+    convention.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Edge index with shape ``(2, num_edges)``.
+    num_nodes : int
+        Number of graph nodes.
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``. Defaults to ones.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    direction : {"forward", "backward"}, optional
+        Random-walk orientation. Default is ``"forward"``.
+
+    Returns
+    -------
+    Tensor
+        Dense matrix with shape ``(num_nodes, num_nodes)``. Duplicate edges
+        accumulate (sum).
+    """
+    row, col = edge_index
+    device = edge_index.device
+    if edge_weight is None:
+        weights = torch.ones(row.size(0), dtype=dtype, device=device)
+    else:
+        weights = edge_weight.to(dtype=dtype, device=device)
+
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=dtype, device=device)
+    adjacency.index_put_((row, col), weights, accumulate=True)
+    if direction == "backward":
+        adjacency = adjacency.transpose(0, 1).contiguous()
+    elif direction != "forward":
+        msg = f'direction must be "forward" or "backward", got {direction!r}'
+        raise ValueError(msg)
+
+    degree = adjacency.sum(dim=1).clamp_min(_RANDOM_WALK_DEGREE_FLOOR)
+    return adjacency / degree.unsqueeze(1)
+
+
+def random_walk_normalized_adjacency_matvec(
+    edge_index: Tensor,
+    x: Tensor,
+    *,
+    edge_weight: Tensor | None = None,
+    num_nodes: int | None = None,
+    direction: RandomWalkDirection = "forward",
+) -> Tensor:
+    """Apply row-normalized random-walk adjacency without a dense matrix.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Edge index with shape ``(2, num_edges)``.
+    x : Tensor
+        Node features with shape ``(num_nodes, feature_dim)``.
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``. Defaults to ones.
+    num_nodes : int or None, optional
+        Number of nodes. Inferred from ``x`` when omitted.
+    direction : {"forward", "backward"}, optional
+        Random-walk orientation. Default is ``"forward"``.
+
+    Returns
+    -------
+    Tensor
+        Smoothed node features with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2D or ``direction`` is invalid.
+    """
+    if x.dim() != 2:
+        msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+
+    node_count = num_nodes if num_nodes is not None else x.size(0)
+    row, col = edge_index
+    norm_weights = random_walk_normalized_adjacency_edge_weights(
+        edge_index,
+        num_nodes=node_count,
+        edge_weight=edge_weight,
+        dtype=x.dtype,
+        device=x.device,
+        direction=direction,
+    )
+    out = torch.zeros_like(x)
+    if direction == "forward":
+        # Messages along A: accumulate at source from target features.
+        out.index_add_(0, row, x[col] * norm_weights.unsqueeze(-1))
+    elif direction == "backward":
+        # Messages along A^T: accumulate at target from source features.
+        out.index_add_(0, col, x[row] * norm_weights.unsqueeze(-1))
+    else:
+        msg = f'direction must be "forward" or "backward", got {direction!r}'
+        raise ValueError(msg)
+    return out
+
+
 def symmetric_normalized_laplacian_matvec(
     edge_index: Tensor,
     x: Tensor,
@@ -525,8 +731,9 @@ def symmetric_normalized_laplacian_matvec(
     """Apply ``L_sym = P - Â`` to node features without a dense matrix.
 
     Isolated nodes (``d_i = 0``) map to zeros. On graphs with no isolates this
-    matches ``(I - Â) x``. Assumes undirected, symmetrically represented
-    adjacency.
+    matches ``(I - Â) x``. Intended for undirected, symmetrically represented
+    adjacency; directed graphs should use random-walk normalization rather than
+    ``L_sym``.
 
     Parameters
     ----------

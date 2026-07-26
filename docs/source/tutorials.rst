@@ -59,7 +59,7 @@ Forecasting and benchmarks
    * - `22_gnn_forecaster_comparison.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb>`_
      - GraphKoopman vs STGCN / DCRNN / Graph WaveNet references
    * - `24_nonlinear_chaotic_benchmarks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_nonlinear_chaotic_benchmarks.ipynb>`_
-     - Nonlinear/chaotic graph benchmarks vs linear vector DMD
+     - Nonlinear/chaotic graph benchmarks vs linear vector DMD (RMSE + late-window PSD/Wasserstein on KS & Lorenz-96)
    * - `27_hypergraph_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/27_hypergraph_koopman.ipynb>`_
      - Hypergraph vs pairwise GraphKoopman (SocioPatterns cache or synthetic fallback)
    * - `28_adaptive_topology_learning.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/28_adaptive_topology_learning.ipynb>`_
@@ -79,7 +79,7 @@ Analysis and stability
    * - `04_grid_attention.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/04_grid_attention.ipynb>`_
      - GAT encoder on grid graphs
    * - `07_koopman_spectrum.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb>`_
-     - Koopman eigenvalue analysis
+     - Koopman eigenvalue analysis + held-out ``spectral_residuals`` / spurious-mode filter
    * - `08_loss_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb>`_
      - Loss weighting and soft stability regularization
    * - `26_sparse_interpretable_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/26_sparse_interpretable_operator.ipynb>`_
@@ -88,6 +88,10 @@ Analysis and stability
      - Post-hoc SINDy on encoded latents (planted recovery + epidemic-ring caveat; vs notebook 26)
    * - `09_topology_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb>`_
      - Topology ablation + GCN/SAGE/DiffConv/Transformer encoder zoo on anisotropic advection
+   * - `37_cross_topology_transfer.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb>`_
+     - Zero-shot :math:`N_1\to N_2` transfer for ``koopman="graph"`` vs ``pernode`` (honest measurement; adaptive/orbit boundaries)
+   * - `38_operator_factorization_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/38_operator_factorization_ablation.ipynb>`_
+     - Factorized :math:`I\otimes K_{\mathrm{self}}+\hat{A}\otimes K_{\mathrm{nbr}}` vs joint :math:`Nd\times Nd` latent map (MSE, params, spectrum)
    * - `11_long_horizon_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb>`_
      - Structural stability parameterizations, long rollouts
    * - `16_spectral_similarity_anomalies.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb>`_

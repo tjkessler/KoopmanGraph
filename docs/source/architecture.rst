@@ -100,10 +100,14 @@ validation / timing / encoding / inference / online_adaptation peers).
 * ``topology`` — degree / adjacency / Laplacian helpers
   (``node_degrees``, ``degree_support_mask``,
   ``symmetric_normalized_adjacency_edge_weights``, dense and sparse
-  ``Â`` / ``L_sym`` surfaces), plus graph-input resolution
-  (``snapshot_edge_weight``, ``resolve_edge_index``,
+  ``Â`` / ``L_sym`` surfaces, plus row-walk
+  ``dense_random_walk_normalized_adjacency`` /
+  ``random_walk_normalized_adjacency_matvec`` for directed
+  ``adjacency="random_walk"|"dual_random_walk"``), plus graph-input
+  resolution (``snapshot_edge_weight``, ``resolve_edge_index``,
   ``resolve_edge_weight``, ``resolve_graph_inputs``,
-  ``snapshot_to_device``)
+  ``snapshot_to_device``). Row-walk helpers live here (neutral leaf), not
+  in ``nn.gnn``.
 * ``propagation`` — ``KoopmanPropagator`` alias, rollout callback types,
   ``resolve_delta_t``, ``propagate_latent`` /
   ``inverse_propagate_latent``, ``advance_and_decode``,
@@ -341,7 +345,7 @@ Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
 ``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
-plotting / topology estimation / SINDy / clustering):
+plotting / residuals / topology estimation / SINDy / clustering):
 
 * ``spectrum`` — re-exports neutral-leaf ``compute_spectrum``,
   ``compute_generator_spectrum``, and ``discrete_spectrum_at_delta_t``, plus
@@ -351,7 +355,11 @@ plotting / topology estimation / SINDy / clustering):
 * ``anomaly`` — ``AnomalyDetectionResult``, ``calibrate_anomaly_threshold``,
   ``detect_anomaly``
 * ``plotting`` — ``plot_spectrum`` (discrete unit-disk / data-zoom complex-plane
-  figures; Matplotlib call-site import)
+  figures; Matplotlib call-site import; optional untrustworthy-mode overlay)
+* ``residuals`` —
+  :func:`~koopman_graph.analysis.spectral_residuals` and
+  :class:`~koopman_graph.analysis.SpectralResidualReport` (held-out
+  data-driven residuals / ``trustworthy_mask``; diagnostic, not ResDMD)
 * ``topology_estimation`` —
   :func:`~koopman_graph.analysis.estimate_coupling_from_snapshots` and
   :class:`~koopman_graph.analysis.CouplingEstimate` (flattened DMD → ``N×N``
@@ -389,9 +397,10 @@ public API.
   **non-private** power-user helpers used by classical and GNN peers:
   ``require_static_topology``, ``flatten_snapshots``, ``fit_row_operator``,
   ``fit_controlled_row_operator``, ``require_global_controls``,
-  ``transition_controls``, ``copy_topology``, ``check_initial_graph``.
-  Peers must import these names (not leading-``_`` aliases). Helpers stay off
-  package and root ``__all__``.
+  ``transition_controls``, ``copy_topology``, ``check_initial_graph``,
+  ``optimal_hard_threshold_rank`` / ``gavish_donoho_omega`` /
+  ``resolve_fit_rank`` (``rank="auto"``). Peers must import these names
+  (not leading-``_`` aliases). Helpers stay off package and root ``__all__``.
 * ``dmd`` — :class:`~koopman_graph.baselines.DMDBaseline`
 * ``dmdc`` — :class:`~koopman_graph.baselines.DMDcBaseline`
 * ``edmd`` — :class:`~koopman_graph.baselines.EDMDBaseline`
@@ -413,8 +422,8 @@ When to stay flat
 Keep a single module (or leave an existing small package alone) when:
 
 * The module is **small and single-purpose** (for example ``metrics``,
-  ``env``, ``observables``, ``serialization``, ``protocols``,
-  ``spectrum_types``).
+  ``statistics``, ``env``, ``observables``, ``serialization``,
+  ``protocols``, ``spectrum_types``).
 * :mod:`koopman_graph.datasets` is already the correct benchmark/load
   subpackage — do **not** merge it into ``data/`` (data structures vs
   datasets, same distinction as sklearn/PyG).
@@ -1009,15 +1018,26 @@ contract, but ``matrix`` / ``K`` / ``L`` / ``spectral_radius`` /
 spectral analysis uses the explicit helpers ``effective_matrix`` /
 ``effective_generator`` / ``spectrum``:
 
-* Graph — assemble
-  :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
-  on a supplied ``edge_index`` / ``edge_weight`` (same symmetric-normalized
-  adjacency semantics as advance; package row-state latent layout).
-* Continuous graph — assemble ``I_N ⊗ L_self + Â ⊗ L_nbr``; advance applies
-  ``exp(L_eff Δt)``. Dense realization forms an ``N·d`` matrix exponential
-  (prefer modest ``N`` or ``sparsity="block_diagonal"`` for the self-dominated
-  approximation). Checkpoint kind is always ``continuous_graph`` (including
-  when selected via ``koopman="graph"`` + ``dynamics_mode="continuous"``).
+* Graph — assemble a topology-coupled map on a supplied ``edge_index`` /
+  ``edge_weight`` (package row-state latent layout). The adjacency factor
+  depends on ``adjacency``:
+
+  - ``"symmetric"`` (default):
+    :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A}_{\mathrm{sym}} \otimes K_{\mathrm{nbr}}`
+    with symmetric normalization
+  - ``"random_walk"``:
+    :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A}_f \otimes K_{\mathrm{nbr}}`
+  - ``"dual_random_walk"``:
+    :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A}_f \otimes K_{\mathrm{fwd}} + \widehat{A}_b \otimes K_{\mathrm{bwd}}`
+    (``K_fwd`` aliases ``K_nbr``)
+* Continuous graph — assemble ``L_eff`` with the same ``adjacency`` modes as
+  discrete ``GraphKoopmanOperator`` (``symmetric`` / ``random_walk`` /
+  ``dual_random_walk``); advance applies ``exp(L_eff Δt)``. Dense realization
+  forms an ``N·d`` matrix exponential (prefer modest ``N`` or
+  ``sparsity="block_diagonal"`` for the self-dominated approximation, which
+  ignores neighbor coupling). Checkpoint kind is always ``continuous_graph``
+  (including when selected via ``koopman="graph"`` +
+  ``dynamics_mode="continuous"``).
 * Hypergraph — assemble ``I_N ⊗ K_self + Ĥ ⊗ K_hedge`` on a supplied
   ``hyperedge_index`` / ``hyperedge_weight`` (Zhou ``Ĥ`` semantics as advance).
 
@@ -1068,10 +1088,35 @@ The stored checkpoint field is ``config.sparsity`` (format 1). Continuous-graph
 ``block_diagonal`` remains the self-dominated advance / inverse shortcut
 documented under that peer (not the Jacobi path above).
 
+**Graph / continuous-graph adjacency (``adjacency``).** Neighbor-coupling
+normalization for pairwise networked operators:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - ``adjacency``
+     - Coupling
+   * - ``"symmetric"`` (default)
+     - ``D^{-1/2} A D^{-1/2}``
+   * - ``"random_walk"``
+     - ``D_{\mathrm{out}}^{-1} A``
+   * - ``"dual_random_walk"``
+     - Forward plus ``D_{\mathrm{in}}^{-1} A^{\top}`` (``K_bwd`` / ``L_bwd``
+       in the state dict only for this mode)
+
+Factory keyword ``koopman_adjacency`` selects the mode for
+``koopman="graph"`` / ``"continuous_graph"`` (rejected for other kinds).
+Checkpoint field ``config.adjacency`` is required for those kinds and is
+``null`` otherwise (format 1; incomplete payloads are rejected, not
+migrated). Hypergraph operators stay Zhou-symmetric and do not expose
+``adjacency``.
+
 **Symmetry-adapted self factors (orbit ties).** Opt-in inductive bias for
 discrete ``koopman="graph"`` / ``"hypergraph"``: nodes in the same orbit
 share a ``K_self`` factor. Neighbor / hyperedge factors
-(``K_nbr`` / ``K_hedge``) stay shared and are **not** orbit-tied.
+(``K_nbr`` / ``K_fwd`` / ``K_bwd`` / ``K_hedge``) stay globally shared and
+are **not** orbit-tied.
 Default (symmetry off) keeps today's single shared ``K_self``. Enable via
 factory kwargs ``koopman_orbit_partition=...`` (explicit) or
 ``koopman_auto_orbits=True`` (bind from topology on first advance, and
@@ -1159,8 +1204,8 @@ when ``koopman`` is omitted.
   :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
   :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`, and
   :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`
-  (including ``koopman_kind``, control / bilinear / sparsity / symmetry /
-  global-local factory metadata, and ``n_delays``). RLS
+  (including ``koopman_kind``, control / bilinear / sparsity / adjacency /
+  symmetry / global-local factory metadata, and ``n_delays``). RLS
   :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` seed and
   write-back is a **narrower** surface: dense built-in discrete and
   continuous operators only (not networked graph / hypergraph /
@@ -1575,9 +1620,16 @@ degree with zeros on isolated nodes (``(D^+)^{1/2}``), and
 node has positive degree, ``P = I`` and this reduces to the familiar ``I - Â``.
 Isolated nodes therefore have a **zero** Laplacian diagonal (not ``1``), so
 ``L_sym x`` maps isolates to zeros and the diffusion step ``I - α L_sym`` leaves
-them unchanged. The contract assumes an **undirected, symmetrically
-represented** adjacency; do not apply this formula to directed graphs without a
-separate definition.
+them unchanged. Symmetric normalization / ``L_sym`` assume an **undirected,
+symmetrically represented** adjacency and are the contract for
+``GraphKoopmanOperator(adjacency="symmetric")``. Directed coupling uses the
+separate random-walk helpers
+(:func:`~koopman_graph.graph_utils.dense_random_walk_normalized_adjacency` /
+:func:`~koopman_graph.graph_utils.random_walk_normalized_adjacency_matvec`)
+via ``adjacency="random_walk"`` (``D_{\mathrm{out}}^{-1} A``) or
+``adjacency="dual_random_walk"`` (forward plus
+``D_{\mathrm{in}}^{-1} A^{\top}``), matching DCRNN-style bidirectional
+diffusion.
 
 One shared weight core lives in :mod:`koopman_graph.graph_utils`
 (:func:`~koopman_graph.graph_utils.symmetric_normalized_adjacency_edge_weights`
@@ -1771,9 +1823,12 @@ sklearn-like façade, functional helpers, string-mode configuration). Do
      - :class:`~koopman_graph.uq.ConformalKoopmanUQ` composes a fitted
        model; split + adaptive (ACI) calibration; returns shared
        :class:`~koopman_graph.uq.PredictionInterval`; calibration state
-       is wrapper-local (not model ``FORMAT_VERSION``); marginal coverage
-       ``≥ 1 − α`` under exchangeability — approximate under temporal
-       dependence; prefer ACI under drift
+       is wrapper-local (not model ``FORMAT_VERSION``; kind
+       ``ConformalKoopmanUQ.calibration.v2``); scores
+       ``aggregate`` / ``per_node`` / ``node_wise`` (+ optional
+       ``neighbor_smoothing``); marginal coverage ``≥ 1 − α`` under
+       exchangeability — approximate under temporal dependence; prefer ACI
+       under drift
    * - :mod:`koopman_graph.hierarchical` (capability module/package)
      - Power-user
      - Compose the primary model; spectrum / regularization use **pooled**
@@ -1810,7 +1865,10 @@ latent-Gaussian, and conformal peers must import those non-private symbols
 the shared interval type.
 :class:`~koopman_graph.uq.ConformalKoopmanUQ` documents frequentist
 marginal coverage under exchangeability and recommends adaptive conformal
-inference (ACI) when residuals drift. ``PredictionInterval.mean`` / ``.lower`` / ``.upper`` are
+inference (ACI) when residuals drift. ``score="node_wise"`` stores
+per-node quantiles and returns per-node marginal half-widths (not joint
+coverage); legacy ``"per_node"`` still max-pools over nodes.
+``PredictionInterval.mean`` / ``.lower`` / ``.upper`` are
 immutable ``tuple[Data, ...]`` sequences (borrowed ``Data`` mutability as
 for :class:`~koopman_graph.data.GraphSnapshotSequence`). Latent-Gaussian
 forecast scheduling reuses
@@ -1942,14 +2000,24 @@ new operator classes are the 0.6.0 root additions).
   :mod:`koopman_graph.graph_utils.symmetry`; ``[symmetry]`` extra)
 * Analysis peers: :func:`~koopman_graph.analysis.identify_sparse_dynamics`,
   :func:`~koopman_graph.analysis.koopman_spectral_clustering`,
-  :func:`~koopman_graph.analysis.estimate_coupling_from_snapshots`
-* :class:`~koopman_graph.uq.ConformalKoopmanUQ` (split + ACI)
+  :func:`~koopman_graph.analysis.estimate_coupling_from_snapshots`,
+  :func:`~koopman_graph.analysis.spectral_residuals`
+* Long-horizon statistics leaf :mod:`koopman_graph.statistics` (PSD / W1 /
+  Rosenstein LLE; off root ``__all__``)
+* Pairwise ``adjacency`` modes on graph / continuous-graph operators
+  (``symmetric`` / ``random_walk`` / ``dual_random_walk``;
+  ``koopman_adjacency``; format-1 ``config.adjacency``)
+* :class:`~koopman_graph.uq.ConformalKoopmanUQ` (split + ACI;
+  ``node_wise`` / ``neighbor_smoothing``)
+* Classical DMD ``rank="auto"`` (Gavish–Donoho)
 * :class:`~koopman_graph.mpc.KoopmanMPC` (``[mpc]`` / OSQP; optional conformal
   tightening)
 * Datasets: PEMS variants and SocioPatterns contact-epidemic FAIR cards
-* Tutorials ``27``–``36`` covering the surfaces above
+* Tutorials ``27``–``38`` covering the surfaces above (including residual /
+  transfer / factorization notebooks)
+* :doc:`limitations` — consolidated scope boundaries
 
-**Capability and API-tier map (0.6.0 peers)**
+**Capability and API-tier map (0.6.0 / 0.7.0 peers)**
 
 .. list-table::
    :header-rows: 1
@@ -1984,13 +2052,24 @@ new operator classes are the 0.6.0 root additions).
      - Power-user
      - ``[symmetry]`` (networkx) for ``method="auto"``; identity fallback
        warns without backends; approximate orbits are an inductive bias
-   * - :mod:`koopman_graph.analysis` (SINDy / clustering / topology estimation)
+   * - :mod:`koopman_graph.analysis` (SINDy / clustering / topology estimation
+       / residuals)
      - Power-user
      - Learned-latent caveat for SINDy; ARI / operator-quality caveats for
-       clustering; coupling estimates are diagnostics
+       clustering; coupling estimates are diagnostics;
+       ``spectral_residuals`` is a held-out diagnostic (not ResDMD)
+   * - :mod:`koopman_graph.statistics`
+     - Power-user (neutral leaf)
+     - Torch-only; off root ``__all__``; Lyapunov helper is
+       embedding-sensitive and :math:`O(T^{2})`
    * - :mod:`koopman_graph.uq` (conformal)
      - Power-user
-     - Same contracts as the v0.5.0 conformal row; wrapper-local calibration
+     - Wrapper-local calibration (``calibration.v2``);
+       ``node_wise`` marginal widths; ``per_node`` legacy max-pool retained
+   * - :mod:`koopman_graph.baselines` (``rank="auto"``)
+     - Power-user
+     - Gavish–Donoho ``optimal_hard_threshold_rank``; ``selected_rank`` on
+       fit; helpers off package ``__all__``
    * - :mod:`koopman_graph.mpc`
      - Power-user
      - Same contracts as the v0.5.0 MPC row; ``[mpc]`` extra
@@ -2015,6 +2094,8 @@ Related documentation
 ---------------------
 
 * :doc:`api` — module-level API reference
+* :doc:`capabilities` — feature inventory
+* :doc:`limitations` — scope boundaries and when not to use
 * :doc:`quickstart` — end-user training and prediction walkthrough
 * :doc:`faq` — install / import / checkpoint troubleshooting and support routing
 * Repository ``CONTRIBUTING.md`` — development setup and contribution workflow

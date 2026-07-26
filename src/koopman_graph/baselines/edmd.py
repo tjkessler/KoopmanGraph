@@ -11,11 +11,13 @@ from torch_geometric.data import Data
 
 from koopman_graph.baselines.base import (
     ClassicalBaseline,
+    RankSpec,
     check_initial_graph,
     copy_topology,
     fit_row_operator,
     flatten_snapshots,
     require_static_topology,
+    resolve_fit_rank,
 )
 from koopman_graph.data import (
     GraphSnapshotSequence,
@@ -61,9 +63,10 @@ class EDMDBaseline(ClassicalBaseline):
     time_step : float, optional
         Physical duration represented by one snapshot transition. Used by
         :meth:`spectrum`. Default is ``1.0``.
-    rank : int or None, optional
+    rank : int or None or {"auto"}, optional
         Optional truncated-SVD rank for the observable data matrix. ``None``
-        uses the full least-squares solution. Default is ``None``.
+        uses the full least-squares solution. ``"auto"`` selects the
+        Gavish–Donoho hard threshold. Default is ``None``.
     dictionary : {"polynomial", "rbf", "kernel"}, optional
         Observable dictionary family. Default is ``"polynomial"``.
     polynomial_degree : {1, 2}, optional
@@ -92,7 +95,7 @@ class EDMDBaseline(ClassicalBaseline):
         self,
         *,
         time_step: float = 1.0,
-        rank: int | None = None,
+        rank: RankSpec = None,
         dictionary: DictionaryKind = "polynomial",
         polynomial_degree: PolynomialDegree = 2,
         num_centers: int | None = None,
@@ -109,9 +112,9 @@ class EDMDBaseline(ClassicalBaseline):
         time_step : float, optional
             Physical duration represented by one snapshot transition. Default
             is ``1.0``.
-        rank : int or None, optional
+        rank : int or None or {"auto"}, optional
             Optional truncated-SVD rank in observable space. ``None`` uses full
-            least squares.
+            least squares. ``"auto"`` selects the Gavish–Donoho hard threshold.
         dictionary : {"polynomial", "rbf", "kernel"}, optional
             Observable dictionary family. Default is ``"polynomial"``.
         polynomial_degree : {1, 2}, optional
@@ -239,7 +242,9 @@ class EDMDBaseline(ClassicalBaseline):
         states = flatten_snapshots(resolved)
         self.centers = self._select_centers(states)
         observables = self._observables(states)
-        self.K = fit_row_operator(observables[:-1], observables[1:], self.rank)
+        left = observables[:-1]
+        self.selected_rank = resolve_fit_rank(left, self.rank)
+        self.K = fit_row_operator(left, observables[1:], self.selected_rank)
         self.reconstruction_matrix = torch.linalg.lstsq(observables, states).solution.T
         self.num_nodes = resolved.num_nodes
         self.in_channels = resolved.in_channels

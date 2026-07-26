@@ -112,7 +112,8 @@ from koopman_graph.operators.global_local import (
     pad_latent_window,
     stack_latent_window,
 )
-from koopman_graph.operators.graph import GraphKoopmanOperator, GraphSparsity
+from koopman_graph.operators.graph import GraphKoopmanOperator
+from koopman_graph.operators.graph_types import GraphAdjacency, GraphSparsity
 from koopman_graph.operators.hypergraph import (
     HypergraphKoopmanOperator,
     HypergraphSparsity,
@@ -132,6 +133,7 @@ __all__ = [
     "DynamicsMode",
     "GeneratorParameterization",
     "GlobalLocalKoopmanOperator",
+    "GraphAdjacency",
     "GraphKoopmanOperator",
     "GraphSparsity",
     "HypergraphKoopmanOperator",

@@ -15,8 +15,10 @@ from torch import Tensor
 
 from koopman_graph.graph_utils.topology import (
     hyperedge_normalized_adjacency_matvec,
+    random_walk_normalized_adjacency_matvec,
     symmetric_normalized_adjacency_matvec,
 )
+from koopman_graph.operators.graph_types import GraphAdjacency
 
 
 def _invert_square(matrix: Tensor) -> Tensor:
@@ -115,18 +117,24 @@ def block_diagonal_graph_inverse_advance(
     edge_index: Tensor,
     edge_weight: Tensor | None = None,
     k_self_blocks: Tensor | None = None,
+    adjacency: GraphAdjacency = "symmetric",
+    k_bwd: Tensor | None = None,
 ) -> Tensor:
     """Approximate networked inverse via one Jacobi / block-diagonal step.
 
-    Forward advance is ``Z_next = Z K_self.T + (Â Z) K_nbr.T`` (plus control,
-    already removed into ``z_adjusted``). This helper forms::
+    Forward advance (plus control, already removed into ``z_adjusted``) is
+    mode-dependent:
 
-        R = Z_adj - (Â Z_adj) K_nbr.T
-        Z = R K_self^{-T}
+    * ``symmetric``: ``Z_next = Z K_self.T + (Â_sym Z) K_nbr.T``
+    * ``random_walk``: ``Z_next = Z K_self.T + (Â_f Z) K_nbr.T``
+    * ``dual_random_walk``:
+      ``Z_next = Z K_self.T + (Â_f Z) K_nbr.T + (Â_b Z) K_bwd.T``
 
-    (or per-node ``K_self`` blocks when ``k_self_blocks`` is set). The step is
-    **exact** when ``K_nbr = 0`` or the graph has no edges, and otherwise an
-    approximation of the dense ``N·d`` inverse.
+    This helper subtracts the neighbor contribution(s) evaluated at
+    ``Z_adj`` and solves the self-term (shared or per-node blocks). The step
+    is **exact** when neighbor factors are zero or the graph has no edges,
+    and otherwise an approximation of the dense ``N·d`` inverse for **all**
+    adjacency modes.
 
     Parameters
     ----------
@@ -136,7 +144,7 @@ def block_diagonal_graph_inverse_advance(
     k_self : Tensor
         Shared self factor (ignored when ``k_self_blocks`` is provided).
     k_nbr : Tensor
-        Neighbor factor with shape ``(latent_dim, latent_dim)``.
+        Forward / sole neighbor factor with shape ``(latent_dim, latent_dim)``.
     edge_index : Tensor
         Graph topology ``(2, num_edges)``.
     edge_weight : Tensor or None, optional
@@ -144,19 +152,64 @@ def block_diagonal_graph_inverse_advance(
     k_self_blocks : Tensor or None, optional
         Optional per-node bilinear self blocks
         ``(num_nodes, latent_dim, latent_dim)``.
+    adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
+        Neighbor-coupling normalization matching the forward operator.
+    k_bwd : Tensor or None, optional
+        Backward neighbor factor when ``adjacency="dual_random_walk"``.
 
     Returns
     -------
     Tensor
         Approximate latents at ``t`` with the same shape as ``z_adjusted``.
+
+    Raises
+    ------
+    ValueError
+        If ``adjacency`` is invalid or ``k_bwd`` is missing for dual mode.
     """
-    neighbor = symmetric_normalized_adjacency_matvec(
-        edge_index,
-        z_adjusted,
-        edge_weight=edge_weight,
-        num_nodes=z_adjusted.shape[0],
-    )
-    rhs = z_adjusted - neighbor @ k_nbr.T
+    if adjacency == "symmetric":
+        neighbor = symmetric_normalized_adjacency_matvec(
+            edge_index,
+            z_adjusted,
+            edge_weight=edge_weight,
+            num_nodes=z_adjusted.shape[0],
+        )
+        rhs = z_adjusted - neighbor @ k_nbr.T
+    elif adjacency == "random_walk":
+        neighbor = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            z_adjusted,
+            edge_weight=edge_weight,
+            num_nodes=z_adjusted.shape[0],
+            direction="forward",
+        )
+        rhs = z_adjusted - neighbor @ k_nbr.T
+    elif adjacency == "dual_random_walk":
+        if k_bwd is None:
+            msg = "k_bwd is required when adjacency='dual_random_walk'"
+            raise ValueError(msg)
+        neighbor_fwd = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            z_adjusted,
+            edge_weight=edge_weight,
+            num_nodes=z_adjusted.shape[0],
+            direction="forward",
+        )
+        neighbor_bwd = random_walk_normalized_adjacency_matvec(
+            edge_index,
+            z_adjusted,
+            edge_weight=edge_weight,
+            num_nodes=z_adjusted.shape[0],
+            direction="backward",
+        )
+        rhs = z_adjusted - neighbor_fwd @ k_nbr.T - neighbor_bwd @ k_bwd.T
+    else:
+        msg = (
+            "adjacency must be 'symmetric', 'random_walk', or "
+            f"'dual_random_walk', got {adjacency!r}"
+        )
+        raise ValueError(msg)
+
     if k_self_blocks is None:
         return apply_self_inverse(rhs, k_self=k_self)
     return apply_self_inverse(rhs, k_self_blocks=k_self_blocks)

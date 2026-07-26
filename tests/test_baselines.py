@@ -14,6 +14,8 @@ from koopman_graph.baselines import (
 from koopman_graph.baselines.base import (
     fit_controlled_row_operator,
     flatten_snapshots,
+    gavish_donoho_omega,
+    optimal_hard_threshold_rank,
     transition_controls,
 )
 
@@ -353,11 +355,11 @@ def test_dmd_baseline_truncated_rank_on_low_rank_data(
 def test_dmd_baseline_rejects_invalid_rank(
     synthetic_edge_index: torch.Tensor,
 ) -> None:
-    """Verify rank bounds are enforced during fitting."""
+    """Verify rank bounds are enforced during construction / fitting."""
     sequence = _linear_fit_sequence(synthetic_edge_index)
 
     with pytest.raises(ValueError, match="rank must be >= 1"):
-        DMDBaseline(rank=0).fit(sequence)
+        DMDBaseline(rank=0)
     with pytest.raises(ValueError, match="rank must be <="):
         DMDBaseline(rank=99).fit(sequence)
 
@@ -710,3 +712,108 @@ def test_baseline_peers_have_no_private_cross_module_imports() -> None:
                 if alias.name.startswith("_"):
                     private_imports.append(f"{path.name}:{node.module}.{alias.name}")
     assert private_imports == []
+
+
+def test_gavish_donoho_omega_square_matches_published_constant() -> None:
+    """ω(1) recovers the published unknown-σ square coefficient ≈ 2.858."""
+    assert gavish_donoho_omega(1.0) == pytest.approx(2.858, abs=5e-3)
+
+
+def test_optimal_hard_threshold_square_recovers_rank() -> None:
+    """Seeded square low-rank-plus-noise matrix recovers the true rank."""
+    torch.manual_seed(0)
+    n = 80
+    rank = 3
+    u, _ = torch.linalg.qr(torch.randn(n, rank))
+    v, _ = torch.linalg.qr(torch.randn(n, rank))
+    signal = u @ torch.diag(torch.tensor([50.0, 40.0, 30.0])) @ v.T
+    noisy = signal + 0.5 * torch.randn(n, n)
+    singular_values = torch.linalg.svdvals(noisy)
+    assert optimal_hard_threshold_rank(singular_values, num_rows=n, num_cols=n) == rank
+
+
+def test_optimal_hard_threshold_nonsquare_and_square_shortcut_fails() -> None:
+    """Non-square β-correction recovers rank; square constant under-selects."""
+    torch.manual_seed(0)
+    num_rows, num_cols, rank = 40, 100, 3
+    beta = min(num_rows, num_cols) / max(num_rows, num_cols)
+    u, _ = torch.linalg.qr(torch.randn(num_rows, rank))
+    v, _ = torch.linalg.qr(torch.randn(num_cols, rank))
+    amps = torch.tensor([30.0, 24.0, 18.0])
+    signal = u @ torch.diag(amps) @ v.T
+    noisy = signal + 1.0 * torch.randn(num_rows, num_cols)
+    singular_values = torch.linalg.svdvals(noisy)
+
+    selected = optimal_hard_threshold_rank(
+        singular_values, num_rows=num_rows, num_cols=num_cols
+    )
+    assert selected == rank
+
+    # Square-case shortcut ω≡2.858 is incorrect for β≠1.
+    square_threshold = 2.858 * float(torch.median(singular_values).item())
+    square_shortcut_rank = int((singular_values > square_threshold).sum().item())
+    assert square_shortcut_rank != rank
+    assert gavish_donoho_omega(beta) != pytest.approx(2.858, abs=1e-3)
+
+
+def test_rank_auto_on_dmd_family_exposes_selected_rank(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """rank='auto' is accepted by DMD/EDMD/DMDc and sets selected_rank."""
+    operator = torch.diag(torch.tensor([0.9, 0.7, 0.5, 0.3], dtype=torch.float64))
+    states = _linear_sequence(
+        operator, torch.tensor([1.0, -0.5, 0.25, -0.125], dtype=torch.float64)
+    )
+    # Longer trajectory so the data matrix is well-conditioned for SVHT.
+    for _ in range(40):
+        states.append(states[-1] @ operator.T)
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=2,
+    )
+
+    dmd = DMDBaseline(rank="auto").fit(sequence)
+    assert dmd.selected_rank is not None
+    assert dmd.selected_rank >= 1
+
+    edmd = EDMDBaseline(rank="auto", polynomial_degree=1).fit(sequence)
+    assert edmd.selected_rank is not None
+    assert edmd.selected_rank >= 1
+
+    controls = torch.zeros(len(states), 1, dtype=torch.float64)
+    controlled = GraphSnapshotSequence(
+        [
+            Data(
+                x=state.reshape(2, 2),
+                edge_index=synthetic_edge_index,
+            )
+            for state in states
+        ],
+        control_inputs=controls,
+    )
+    dmdc = DMDcBaseline(rank="auto").fit(controlled)
+    assert dmdc.selected_rank is not None
+    assert dmdc.selected_rank >= 1
+
+
+def test_rank_none_and_int_selected_rank_semantics(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """None keeps selected_rank=None; int rank is recorded after fit."""
+    sequence = _linear_fit_sequence(synthetic_edge_index)
+    full = DMDBaseline(rank=None).fit(sequence)
+    assert full.selected_rank is None
+    truncated = DMDBaseline(rank=2).fit(sequence)
+    assert truncated.selected_rank == 2
+
+
+def test_rank_auto_rejects_all_zero_data_matrix() -> None:
+    """All-zero left matrix yields rank-0 auto selection → ValueError."""
+    left = torch.zeros(20, 10)
+    right = torch.zeros(20, 10)
+    from koopman_graph.baselines.base import fit_row_operator
+
+    with pytest.raises(ValueError, match="rank='auto' selected rank 0"):
+        fit_row_operator(left, right, "auto")

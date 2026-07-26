@@ -17,7 +17,9 @@ Checkpoint format versions
     ``in_channels = n_delays * feature_dim``. Format-1 also stores placeholder
     keys ``sparsity`` (operator realization; ``"dense"`` or
     ``"block_diagonal"`` for supported networked kinds),
-    ``learn_topology`` (``None`` or ``"self_adaptive"``) with
+    ``adjacency`` (``"symmetric"`` / ``"random_walk"`` /
+    ``"dual_random_walk"`` for graph / continuous-graph operators, else
+    ``None``), ``learn_topology`` (``None`` or ``"self_adaptive"``) with
     ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
     ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
     graph / hypergraph operators).
@@ -102,6 +104,7 @@ _FORMAT_1_REQUIRED_KEYS = frozenset(
         "encoder",
         "decoder",
         "sparsity",
+        "adjacency",
         "learn_topology",
         "topology_embedding_dim",
         "symmetry",
@@ -138,6 +141,10 @@ _SERIALIZABLE_KOOPMAN_TYPES = (
 _RESERVED_KOOPMAN_KINDS: dict[str, str] = {}
 
 
+_NETWORKED_ADJACENCY_KINDS = frozenset({"graph", "continuous_graph"})
+_GRAPH_ADJACENCY_MODES = frozenset({"symmetric", "random_walk", "dual_random_walk"})
+
+
 def _require_format1_schema(config: dict[str, Any]) -> None:
     """Reject incomplete configs that lack the current format-1 schema keys.
 
@@ -160,6 +167,58 @@ def _require_format1_schema(config: dict[str, Any]) -> None:
             "reconstruct the architecture explicitly."
         )
         raise ValueError(msg)
+
+
+def _resolve_checkpoint_adjacency(
+    adjacency: Any,
+    *,
+    koopman_kind: str,
+) -> str:
+    """Validate checkpoint ``adjacency`` and return a factory keyword value.
+
+    Parameters
+    ----------
+    adjacency : Any
+        Checkpoint ``config.adjacency`` value (``None`` for non-networked
+        kinds, or a mode string for graph / continuous-graph).
+    koopman_kind : str
+        Serialized operator kind.
+
+    Returns
+    -------
+    str
+        Factory ``koopman_adjacency`` value (defaults to ``"symmetric"`` for
+        non-networked kinds when ``adjacency`` is ``None``).
+
+    Raises
+    ------
+    ValueError
+        If a networked kind is missing / invalid ``adjacency``, or a
+        non-networked kind supplies a non-null value.
+    """
+    accepted = ", ".join(sorted(_GRAPH_ADJACENCY_MODES))
+    if koopman_kind in _NETWORKED_ADJACENCY_KINDS:
+        if adjacency is None:
+            msg = (
+                "Checkpoint config.adjacency is required for networked "
+                f"koopman_kind={koopman_kind!r}; accepted values: "
+                f"{{{accepted}}}"
+            )
+            raise ValueError(msg)
+        if adjacency not in _GRAPH_ADJACENCY_MODES:
+            msg = (
+                "Checkpoint config.adjacency must be one of "
+                f"{{{accepted}}}, got {adjacency!r}"
+            )
+            raise ValueError(msg)
+        return str(adjacency)
+    if adjacency is not None:
+        msg = (
+            "Checkpoint config.adjacency must be null for non-networked "
+            f"koopman_kind={koopman_kind!r}, got {adjacency!r}"
+        )
+        raise ValueError(msg)
+    return "symmetric"
 
 
 def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str, Any]:
@@ -499,6 +558,7 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         }
 
     sparsity = getattr(model.koopman, "sparsity", "dense")
+    adjacency = getattr(model.koopman, "adjacency", None)
     return {
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
@@ -540,6 +600,7 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         "encoder": encoder_config,
         "decoder": decoder_config,
         "sparsity": sparsity,
+        "adjacency": adjacency,
         "learn_topology": getattr(model, "learn_topology", None),
         "topology_embedding_dim": (
             int(model.topology_embedding_dim)
@@ -734,6 +795,10 @@ def reconstruct_model(
     orbit_partition, auto_orbits, orbit_method = _parse_symmetry_config(
         config.get("symmetry")
     )
+    koopman_adjacency = _resolve_checkpoint_adjacency(
+        config["adjacency"],
+        koopman_kind=str(koopman_kind),
+    )
 
     learn_topology = config.get("learn_topology")
     topology_embedding_dim = config.get("topology_embedding_dim")
@@ -750,6 +815,7 @@ def reconstruct_model(
         koopman_max_spectral_radius=config.get("koopman_max_spectral_radius", 1.0),
         koopman_auxiliary_hidden_dims=config.get("koopman_auxiliary_hidden_dims"),
         koopman_sparsity=config.get("sparsity", "dense"),
+        koopman_adjacency=koopman_adjacency,
         koopman_local_window=(
             int(config["local_window"]) if config.get("local_window") is not None else 4
         ),

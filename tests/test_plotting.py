@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError, replace
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -134,3 +136,106 @@ def test_data_limits_match_epidemic_style_cluster_tightly() -> None:
     assert span < 0.06
     assert xmin <= float(real.min()) <= float(real.max()) <= xmax
     assert ymin <= float(imag.min()) <= float(imag.max()) <= ymax
+
+
+def test_koopman_spectrum_residuals_replace_and_validation() -> None:
+    """Residuals attach via ``replace``; frozen; shape / sign validated."""
+    spectrum = _spectrum_from_eigenvalues(
+        torch.tensor([0.9 + 0.0j, 0.5 + 0.1j], dtype=torch.complex128)
+    )
+    assert spectrum.residuals is None
+    # Six-arg positional construction still works (residuals defaults to None).
+    positional = KoopmanSpectrum(
+        spectrum.eigenvalues,
+        spectrum.eigenvectors,
+        spectrum.magnitudes,
+        spectrum.growth_rates,
+        spectrum.frequencies,
+        spectrum.time_step,
+    )
+    assert positional.residuals is None
+
+    residuals = torch.tensor([1e-4, 5e-2], dtype=torch.float64)
+    annotated = replace(spectrum, residuals=residuals)
+    assert annotated.residuals is not None
+    assert torch.equal(annotated.residuals, residuals)
+    with pytest.raises(FrozenInstanceError):
+        spectrum.residuals = residuals  # type: ignore[misc]
+
+    with pytest.raises(ValueError, match="shape"):
+        replace(spectrum, residuals=torch.tensor([1.0, 2.0, 3.0]))
+    with pytest.raises(ValueError, match="non-negative"):
+        replace(spectrum, residuals=torch.tensor([1e-3, -0.1]))
+    with pytest.raises(ValueError, match="finite"):
+        replace(spectrum, residuals=torch.tensor([1e-3, float("nan")]))
+
+
+def test_residuals_not_serialized_in_checkpoint() -> None:
+    """Spectrum residuals are analysis state, never checkpoint payload keys."""
+    from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
+    from koopman_graph.serialization import build_checkpoint
+
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(2, 4, 2),
+        decoder=GNNDecoder(2, 4, 2),
+        latent_dim=2,
+        time_step=1.0,
+    )
+    checkpoint = build_checkpoint(model)
+    payload = repr(checkpoint).lower()
+    assert "residual" not in payload
+    assert set(checkpoint) == {
+        "format_version",
+        "package_version",
+        "config",
+        "state_dict",
+    }
+
+
+def test_plot_spectrum_annotate_untrustworthy() -> None:
+    """Annotation overlays untrustworthy modes; no-op when residuals unset."""
+    spectrum = _spectrum_from_eigenvalues(
+        torch.tensor([0.9 + 0.0j, 0.4 + 0.2j, 0.3 - 0.1j], dtype=torch.complex128)
+    )
+    fig, ax = plt.subplots()
+    try:
+        # No-op path: residuals unset.
+        scatter = plot_spectrum(
+            spectrum,
+            ax=ax,
+            annotate_untrustworthy=True,
+            residual_tolerance=1e-2,
+        )
+        assert scatter is not None
+        assert len(ax.collections) == 1
+    finally:
+        plt.close(fig)
+
+    annotated = replace(
+        spectrum,
+        residuals=torch.tensor([1e-4, 5e-2, 1e-5], dtype=torch.float64),
+    )
+    fig, ax = plt.subplots()
+    try:
+        plot_spectrum(
+            annotated,
+            ax=ax,
+            annotate_untrustworthy=True,
+            residual_tolerance=1e-2,
+        )
+        # Base scatter + untrustworthy overlay.
+        assert len(ax.collections) == 2
+    finally:
+        plt.close(fig)
+
+    fig, ax = plt.subplots()
+    try:
+        with pytest.raises(ValueError, match="residual_tolerance"):
+            plot_spectrum(
+                annotated,
+                ax=ax,
+                annotate_untrustworthy=True,
+                residual_tolerance=0.0,
+            )
+    finally:
+        plt.close(fig)

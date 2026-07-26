@@ -3,14 +3,15 @@
 Module-level helpers (``require_static_topology``, ``flatten_snapshots``,
 ``fit_row_operator``, ``fit_controlled_row_operator``,
 ``require_global_controls``, ``transition_controls``, ``copy_topology``,
-``check_initial_graph``) are documented non-private power-user symbols for
-classical and GNN baseline peers. They are not re-exported from package or
-root ``__all__``.
+``check_initial_graph``, ``optimal_hard_threshold_rank``) are documented
+non-private power-user symbols for classical and GNN baseline peers. They
+are not re-exported from package or root ``__all__``.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -19,6 +20,8 @@ from torch_geometric.data import Data
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.graph_utils import snapshot_edge_weight
+
+RankSpec = int | None | Literal["auto"]
 
 
 def require_static_topology(sequence: GraphSnapshotSequence) -> None:
@@ -76,7 +79,172 @@ def flatten_snapshots(sequence: GraphSnapshotSequence) -> Tensor:
     return torch.stack(states)
 
 
-def fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
+def gavish_donoho_omega(beta: float) -> float:
+    """Cubic approximation to the unknown-``σ`` coefficient ``ω(β)``.
+
+    Parameters
+    ----------
+    beta : float
+        Aspect ratio ``β = min(m, n) / max(m, n)`` in ``(0, 1]``.
+
+    Returns
+    -------
+    float
+        Approximate ``ω(β)``. At ``β = 1`` this recovers ``≈ 2.858``.
+
+    Raises
+    ------
+    ValueError
+        If ``beta`` is outside ``(0, 1]``.
+
+    Notes
+    -----
+    Gavish & Donoho (2014) give ``τ̂* = ω(β) · y_med`` for unknown noise
+    level. Exact ``ω(β) = λ*(β) / √μ_β`` requires the Marchenko–Pastur
+    median; the published cubic
+    ``0.56 β³ − 0.95 β² + 1.82 β + 1.43`` is used here.
+
+    References
+    ----------
+    Gavish, M. & Donoho, D. L. (2014). The optimal hard threshold for
+    singular values is ``4/√3``. *IEEE Transactions on Information Theory*,
+    60(8), 5040–5053. https://doi.org/10.1109/TIT.2014.2323359
+    (``GavishDonoho2014``)
+    """
+    if not 0.0 < beta <= 1.0:
+        msg = f"beta must lie in (0, 1], got {beta}"
+        raise ValueError(msg)
+    return ((0.56 * beta - 0.95) * beta + 1.82) * beta + 1.43
+
+
+def optimal_hard_threshold_rank(
+    singular_values: Tensor,
+    *,
+    num_rows: int,
+    num_cols: int,
+) -> int:
+    """Select truncated-SVD rank by the Gavish–Donoho median threshold.
+
+    Implements the unknown-``σ`` rule ``τ̂* = ω(β) · y_med`` where
+    ``y_med`` is the median empirical singular value and
+    ``β = min(m, n) / max(m, n)`` (transpose convention so ``β ∈ (0, 1]``).
+    Singular values strictly above ``τ̂*`` are retained.
+
+    For the square case ``β = 1``, ``ω(1) ≈ 2.858``. The known-``σ``
+    companion threshold is ``τ* = λ*(β) √n σ`` with
+    ``λ*(1) = 4/√3 ≈ 2.309``; this helper implements only the
+    unknown-``σ`` median form.
+
+    Assumptions (asymptotic optimality): additive white noise, matrix
+    dimensions large relative to the signal rank, and a constant
+    signal-to-noise ratio. Finite-sample recovery is not guaranteed.
+
+    Parameters
+    ----------
+    singular_values : Tensor
+        Non-increasing singular values from ``torch.linalg.svd`` (1-D).
+    num_rows : int
+        Number of rows ``m`` of the data matrix.
+    num_cols : int
+        Number of columns ``n`` of the data matrix.
+
+    Returns
+    -------
+    int
+        Selected rank in ``0 .. len(singular_values)``. ``0`` means every
+        singular value fell at or below the threshold (e.g. all-zero data).
+
+    Raises
+    ------
+    ValueError
+        If shapes / dimensions are invalid or singular values are
+        non-finite.
+
+    References
+    ----------
+    Gavish, M. & Donoho, D. L. (2014). The optimal hard threshold for
+    singular values is ``4/√3``. *IEEE Transactions on Information Theory*,
+    60(8), 5040–5053. https://doi.org/10.1109/TIT.2014.2323359
+    (``GavishDonoho2014``)
+    """
+    if singular_values.ndim != 1:
+        msg = f"singular_values must be 1-D, got shape {tuple(singular_values.shape)}"
+        raise ValueError(msg)
+    if num_rows < 1 or num_cols < 1:
+        msg = f"num_rows and num_cols must be >= 1, got {num_rows}, {num_cols}"
+        raise ValueError(msg)
+    if singular_values.numel() == 0:
+        return 0
+    if not torch.isfinite(singular_values).all():
+        msg = "singular_values must be finite (no NaN/Inf)"
+        raise ValueError(msg)
+
+    beta = min(num_rows, num_cols) / max(num_rows, num_cols)
+    omega = gavish_donoho_omega(beta)
+    y_med = float(torch.median(singular_values).item())
+    if y_med <= 0.0:
+        return 0
+    threshold = omega * y_med
+    return int((singular_values > threshold).sum().item())
+
+
+def resolve_fit_rank(left: Tensor, rank: RankSpec) -> int | None:
+    """Resolve ``rank`` to ``None`` (full LS) or a positive truncation.
+
+    Parameters
+    ----------
+    left : Tensor
+        Data matrix with shape ``(num_samples, feature_dim)`` whose SVD
+        would be truncated.
+    rank : int or None or {"auto"}
+        Truncation request. ``None`` keeps full least squares. ``"auto"``
+        applies :func:`optimal_hard_threshold_rank` to the singular values
+        of ``left``.
+
+    Returns
+    -------
+    int or None
+        ``None`` for full least squares, otherwise a positive rank.
+
+    Raises
+    ------
+    ValueError
+        If ``rank`` is invalid or ``"auto"`` selects rank 0.
+    """
+    if rank is None:
+        return None
+    if rank == "auto":
+        if left.ndim != 2:
+            msg = f"left must be 2-D for rank='auto', got shape {tuple(left.shape)}"
+            raise ValueError(msg)
+        singular_values = torch.linalg.svdvals(left)
+        selected = optimal_hard_threshold_rank(
+            singular_values,
+            num_rows=int(left.shape[0]),
+            num_cols=int(left.shape[1]),
+        )
+        if selected < 1:
+            msg = (
+                "rank='auto' selected rank 0 (all singular values at or "
+                "below the Gavish–Donoho threshold). Provide a denser / "
+                "less noisy data matrix or set rank to a positive integer."
+            )
+            raise ValueError(msg)
+        return selected
+    if not isinstance(rank, int):
+        msg = f"rank must be int, None, or 'auto', got {rank!r}"
+        raise ValueError(msg)
+    if rank < 1:
+        msg = f"rank must be >= 1 when provided, got {rank}"
+        raise ValueError(msg)
+    max_rank = min(left.shape)
+    if rank > max_rank:
+        msg = f"rank must be <= {max_rank} for data matrix shape {tuple(left.shape)}"
+        raise ValueError(msg)
+    return rank
+
+
+def fit_row_operator(left: Tensor, right: Tensor, rank: RankSpec) -> Tensor:
     """Fit ``right ~= left @ A`` and return ``K`` for ``x_next = x @ K.T``.
 
     Parameters
@@ -85,8 +253,10 @@ def fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
         Source states or observables with shape ``(num_samples, state_dim)``.
     right : Tensor
         Target states or observables with shape ``(num_samples, state_dim)``.
-    rank : int or None
+    rank : int or None or {"auto"}
         Optional truncated-SVD rank. ``None`` uses full least squares.
+        ``"auto"`` selects the rank by the Gavish–Donoho unknown-``σ``
+        median hard threshold (see :func:`optimal_hard_threshold_rank`).
 
     Returns
     -------
@@ -97,24 +267,24 @@ def fit_row_operator(left: Tensor, right: Tensor, rank: int | None) -> Tensor:
     Raises
     ------
     ValueError
-        If ``rank`` is outside the valid range for the data matrix.
+        If ``rank`` is outside the valid range for the data matrix, or
+        ``"auto"`` yields rank 0.
+
+    References
+    ----------
+    Gavish, M. & Donoho, D. L. (2014). The optimal hard threshold for
+    singular values is ``4/√3``. *IEEE Transactions on Information Theory*,
+    60(8), 5040–5053. https://doi.org/10.1109/TIT.2014.2323359
     """
-    if rank is None:
+    resolved = resolve_fit_rank(left, rank)
+    if resolved is None:
         solution = torch.linalg.lstsq(left, right).solution
         return solution.T
 
-    if rank < 1:
-        msg = f"rank must be >= 1 when provided, got {rank}"
-        raise ValueError(msg)
-    max_rank = min(left.shape)
-    if rank > max_rank:
-        msg = f"rank must be <= {max_rank} for data matrix shape {tuple(left.shape)}"
-        raise ValueError(msg)
-
     u, singular_values, vh = torch.linalg.svd(left, full_matrices=False)
-    u_r = u[:, :rank]
-    s_r = singular_values[:rank]
-    vh_r = vh[:rank, :]
+    u_r = u[:, :resolved]
+    s_r = singular_values[:resolved]
+    vh_r = vh[:resolved, :]
     solution = vh_r.T @ ((u_r.T @ right) / s_r.unsqueeze(1))
     return solution.T
 
@@ -123,7 +293,7 @@ def fit_controlled_row_operator(
     left: Tensor,
     right: Tensor,
     controls: Tensor,
-    rank: int | None,
+    rank: RankSpec,
 ) -> tuple[Tensor, Tensor]:
     """Fit ``right ~= left @ K.T + controls @ B``.
 
@@ -135,8 +305,9 @@ def fit_controlled_row_operator(
         Target states with shape ``(num_samples, state_dim)``.
     controls : Tensor
         Control inputs with shape ``(num_samples, control_dim)``.
-    rank : int or None
-        Optional truncated-SVD rank for the augmented regression.
+    rank : int or None or {"auto"}
+        Optional truncated-SVD rank for the augmented regression. Same
+        semantics as :func:`fit_row_operator`.
 
     Returns
     -------
@@ -285,8 +456,14 @@ class ClassicalBaseline(ABC):
     ----------
     time_step : float
         Physical duration represented by one snapshot transition.
-    rank : int or None
-        Optional truncated-SVD rank. ``None`` uses full least squares.
+    rank : int or None or {"auto"}
+        Truncated-SVD rank request. ``None`` uses full least squares;
+        ``"auto"`` selects the Gavish–Donoho hard threshold at fit time.
+    selected_rank : int or None
+        Rank actually used by the last successful :meth:`fit`. ``None``
+        before fit, or when ``rank is None`` (full least squares). After
+        ``rank="auto"`` or an integer ``rank``, this is the positive
+        truncation used.
     K : Tensor or None
         Fitted Koopman matrix, or ``None`` before :meth:`fit`.
     num_nodes : int or None
@@ -297,7 +474,7 @@ class ClassicalBaseline(ABC):
         Flattened state dimension recorded at fit time.
     """
 
-    def __init__(self, *, time_step: float = 1.0, rank: int | None = None) -> None:
+    def __init__(self, *, time_step: float = 1.0, rank: RankSpec = None) -> None:
         """Initialize shared baseline hyperparameters.
 
         Parameters
@@ -305,19 +482,29 @@ class ClassicalBaseline(ABC):
         time_step : float, optional
             Physical duration represented by one snapshot transition. Default
             is ``1.0``.
-        rank : int or None, optional
+        rank : int or None or {"auto"}, optional
             Optional truncated-SVD rank. ``None`` uses full least squares.
+            ``"auto"`` applies the Gavish–Donoho unknown-``σ`` median hard
+            threshold at fit time.
 
         Raises
         ------
         ValueError
-            If ``time_step`` is not positive.
+            If ``time_step`` is not positive or ``rank`` is invalid.
         """
         if time_step <= 0:
             msg = f"time_step must be positive, got {time_step}"
             raise ValueError(msg)
+        if rank is not None and rank != "auto":
+            if not isinstance(rank, int):
+                msg = f"rank must be int, None, or 'auto', got {rank!r}"
+                raise ValueError(msg)
+            if rank < 1:
+                msg = f"rank must be >= 1 when provided, got {rank}"
+                raise ValueError(msg)
         self.time_step = float(time_step)
-        self.rank = rank
+        self.rank: RankSpec = rank
+        self.selected_rank: int | None = None
         self.K: Tensor | None = None
         self.num_nodes: int | None = None
         self.in_channels: int | None = None
