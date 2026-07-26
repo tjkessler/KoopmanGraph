@@ -18,6 +18,7 @@ from koopman_graph.graph_utils import (
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.nn import GNNDecoder, GNNEncoder
 from koopman_graph.operators import GraphKoopmanOperator
+from koopman_graph.operators.orbit_ties import build_orbit_self_bank
 from koopman_graph.serialization import (
     build_model_config,
     load_checkpoint,
@@ -323,3 +324,111 @@ def test_node_orbit_partition_ignores_self_loops_and_empty_edges() -> None:
     loops = torch.tensor([[0, 0], [0, 0]], dtype=torch.long)
     loop_partition = node_orbit_partition(loops, 2, method="auto")
     assert validate_orbit_partition(loop_partition, 2) == loop_partition
+
+
+def test_build_orbit_self_bank_allocates_control_on_first_orbit() -> None:
+    """Orbit bank gives control only to orbit 0."""
+    bank = build_orbit_self_bank(
+        num_orbits=2,
+        latent_dim=3,
+        init_mode="identity",
+        init_scale=1e-2,
+        parameterization="dense",
+        max_spectral_radius=1.0,
+        control_dim=2,
+        control_mode="additive",
+        bilinear_rank=None,
+    )
+    assert len(bank) == 2
+    assert bank[0].control_dim == 2
+    assert bank[1].control_dim == 0
+
+
+def test_orbit_method_validation_rejects_unknown_backend() -> None:
+    """Invalid orbit_method values fail at construction."""
+    with pytest.raises(ValueError, match="orbit_method must be 'auto' or 'exact'"):
+        GraphKoopmanOperator(2, auto_orbits=True, orbit_method="wl")  # type: ignore[arg-type]
+
+
+def test_bind_auto_orbits_errors_and_hyperedge_path() -> None:
+    """bind_auto_orbits guards auto flag, topology, and hyperedge binding."""
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    with pytest.raises(
+        RuntimeError, match="bind_auto_orbits requires auto_orbits=True"
+    ):
+        op.bind_auto_orbits(num_nodes=2, edge_index=_cycle_edge_index(2))
+    op = GraphKoopmanOperator(2, init_mode="identity", auto_orbits=True)
+    with pytest.raises(ValueError, match="edge_index or hyperedge_index is required"):
+        op.bind_auto_orbits(num_nodes=2)
+    hyperedge_index = torch.tensor([[0, 1, 2], [0, 0, 0]], dtype=torch.long)
+    op.bind_auto_orbits(num_nodes=3, hyperedge_index=hyperedge_index)
+    assert op.orbit_partition is not None
+    before = op.orbit_partition
+    op.bind_auto_orbits(num_nodes=3, edge_index=_cycle_edge_index(3))
+    assert op.orbit_partition == before
+
+
+def test_ensure_orbit_binding_rejects_node_count_mismatch() -> None:
+    """Bound partitions must match subsequent num_nodes."""
+    op = GraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        orbit_partition=((0, 1), (2, 3)),
+    )
+    with pytest.raises(ValueError, match="orbit partition was bound for 4 nodes"):
+        op.ensure_orbit_binding(3, edge_index=_cycle_edge_index(3))
+
+
+def test_orbit_self_matrices_requires_allocated_bank() -> None:
+    """orbit_self_matrices raises when no orbit bank exists."""
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    with pytest.raises(RuntimeError, match="orbit self bank is not allocated"):
+        op.orbit_self_matrices()
+
+
+def test_reset_orbit_selves_resets_multi_orbit_bank_with_control() -> None:
+    """Multi-orbit reset reinitializes orbit-0 control parameters."""
+    op = GraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        control_dim=1,
+        orbit_partition=((0, 1), (2, 3)),
+    )
+    with torch.no_grad():
+        op._orbit_selves[0].K.fill_(2.0)
+        op._orbit_selves[1].K.fill_(3.0)
+        if op._orbit_selves[0].B is not None:
+            op._orbit_selves[0].B.fill_(5.0)
+    op.reset_orbit_selves()
+    assert torch.allclose(op._orbit_selves[0].K, torch.eye(2))
+    assert torch.allclose(op._orbit_selves[1].K, torch.eye(2))
+    assert op._orbit_selves[0].B is not None
+    assert torch.all(op._orbit_selves[0].B == 0)
+
+
+def test_reset_orbit_selves_resets_shared_self_without_orbit_bank() -> None:
+    """Single-self operators reset through the representative K_self module."""
+    op = GraphKoopmanOperator(2, init_mode="identity", control_dim=1)
+    with torch.no_grad():
+        op._self.K.fill_(2.0)
+        op._self.B.fill_(5.0)
+    op.reset_orbit_selves()
+    assert torch.allclose(op._self.K, torch.eye(2))
+    assert torch.all(op._self.B == 0)
+
+
+def test_apply_tied_self_without_orbit_bank() -> None:
+    """Shared K_self path is used when no orbit bank is allocated."""
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    z = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    expected = z @ op._self.K.T
+    assert torch.allclose(op.apply_tied_self(z), expected)
+
+
+def test_symmetry_config_auto_orbits_before_binding() -> None:
+    """Auto-orbit operators expose symmetry config before first bind."""
+    op = GraphKoopmanOperator(2, init_mode="identity", auto_orbits=True)
+    config = op.symmetry_config()
+    assert config is not None
+    assert config["auto_orbits"] is True
+    assert config["orbit_partition"] is None

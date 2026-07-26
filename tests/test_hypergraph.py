@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 from torch_geometric.data import Data
+from torch_geometric.nn import GCNConv
 
 import koopman_graph
 from koopman_graph.baselines import DMDBaseline
@@ -22,6 +23,11 @@ from koopman_graph.nn import (
     GNNEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+)
+from koopman_graph.nn.hypergraph import (
+    _hypergraph_message_passing,
+    _resolve_hypergraph_forward_inputs,
+    bind_hypergraph_decoder,
 )
 from koopman_graph.serialization import build_model_config
 
@@ -1168,3 +1174,65 @@ def test_hypergraph_orbit_tied_set_dense_and_inverse_guards(
             hyperedge_index=synthetic_hyperedge_index,
             control=torch.zeros(2, 2, 1),
         )
+
+
+def test_resolve_hypergraph_forward_inputs_errors(
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Forward input resolution requires hyperedge incidence on Data or tensors."""
+    snapshot = Data(
+        x=torch.randn(4, 2),
+        edge_index=synthetic_hypergraph_edge_index,
+    )
+    with pytest.raises(ValueError, match="hyperedge_index is required on Data"):
+        _resolve_hypergraph_forward_inputs(snapshot, None, None)
+
+    features = torch.randn(4, 2)
+    with pytest.raises(ValueError, match="hyperedge_index is required when"):
+        _resolve_hypergraph_forward_inputs(features, None, None)
+
+
+def test_hypergraph_message_passing_validation(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Message passing validates feature rank, width, and convolution type."""
+    encoder = HypergraphEncoder(in_channels=3, hidden_channels=4, latent_dim=2)
+    x = torch.randn(4, 3)
+    with pytest.raises(ValueError, match="Expected x with shape"):
+        _hypergraph_message_passing(
+            encoder,
+            torch.randn(4, 3, 2),
+            synthetic_hyperedge_index,
+            None,
+        )
+    with pytest.raises(ValueError, match="in_channels"):
+        _hypergraph_message_passing(
+            encoder,
+            torch.randn(4, 2),
+            synthetic_hyperedge_index,
+            None,
+        )
+    encoder.convs[0] = GCNConv(3, 4)  # type: ignore[misc]
+    with pytest.raises(TypeError, match="HypergraphConv"):
+        _hypergraph_message_passing(
+            encoder,
+            x,
+            synthetic_hyperedge_index,
+            None,
+        )
+
+
+def test_bind_hypergraph_decoder_closure(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Bound decoder ignores pairwise topology args and uses static incidence."""
+    decoder = HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3)
+    bound = bind_hypergraph_decoder(
+        decoder,
+        synthetic_hyperedge_index,
+        torch.tensor([1.0, 2.0]),
+    )
+    z = torch.randn(4, 4)
+    out = bound(z, torch.zeros(2, 0, dtype=torch.long), None)
+    expected = decoder(z, synthetic_hyperedge_index, torch.tensor([1.0, 2.0]))
+    assert torch.allclose(out, expected)

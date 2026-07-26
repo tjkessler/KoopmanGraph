@@ -9,7 +9,15 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph.analysis import SINDyReport, identify_sparse_dynamics
-from koopman_graph.analysis.sindy import _build_graph_library, _build_poly_library
+from koopman_graph.analysis.sindy import (
+    _build_graph_library,
+    _build_poly_library,
+    _discrete_pairs,
+    _finite_difference_targets,
+    _library_for_frames,
+    _monomial_name,
+    _stlsq,
+)
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.nn import GNNDecoder, GNNEncoder
@@ -188,3 +196,161 @@ def test_sindy_report_is_frozen() -> None:
     )
     with pytest.raises(FrozenInstanceError):
         report.residual = 0.0  # type: ignore[misc]
+
+
+def test_monomial_name_empty_and_powers() -> None:
+    """Monomial naming covers the constant term and repeated powers."""
+    assert _monomial_name(()) == "1"
+    assert _monomial_name((0,)) == "z0"
+    assert _monomial_name((0, 0, 1)) == "z0^2*z1"
+
+
+def test_build_poly_library_validation() -> None:
+    """Polynomial library rejects invalid shapes and degrees."""
+    with pytest.raises(ValueError, match="num_samples, latent_dim"):
+        _build_poly_library(torch.ones(2, 2, 2), degree=1)
+    with pytest.raises(ValueError, match="degree must be >= 1"):
+        _build_poly_library(torch.ones(3, 2), degree=0)
+
+
+def test_build_graph_library_validation() -> None:
+    """Graph library validates node-matrix rank before Laplacian lifting."""
+    edge_index = _path_edge_index(3)
+    with pytest.raises(ValueError, match="num_nodes, latent_dim"):
+        _build_graph_library(torch.ones(2, 2, 2), edge_index, None, degree=1)
+
+
+def test_stlsq_validation_and_rank_one_solution() -> None:
+    """STLSQ validates inputs and handles rank-one least-squares solutions."""
+    theta = torch.tensor([[1.0], [1.0], [1.0]])
+    target = torch.tensor([[2.0], [2.0], [2.0]])
+    with pytest.raises(ValueError, match="threshold must be non-negative"):
+        _stlsq(theta, target, threshold=-0.1, max_iter=1)
+    with pytest.raises(ValueError, match="max_iter must be >= 1"):
+        _stlsq(theta, target, threshold=0.1, max_iter=0)
+    with pytest.raises(ValueError, match="theta and target must be 2D"):
+        _stlsq(torch.ones(3), target, threshold=0.1, max_iter=1)
+    with pytest.raises(ValueError, match="share the sample axis"):
+        _stlsq(theta, target[:2], threshold=0.1, max_iter=1)
+    with pytest.raises(ValueError, match="at least one sample"):
+        _stlsq(torch.zeros(0, 1), torch.zeros(0, 1), threshold=0.1, max_iter=1)
+
+    coefficients, active_mask, history = _stlsq(
+        theta,
+        target,
+        threshold=0.5,
+        max_iter=2,
+    )
+    assert coefficients.shape == (1, 1)
+    assert history[0] == pytest.approx(0.5)
+    assert active_mask.shape == coefficients.shape
+
+    wide_theta = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    wide_target = torch.tensor([[0.01, 5.0], [0.01, 5.0], [0.01, 5.0]])
+    wide_coefficients, _, _ = _stlsq(
+        wide_theta,
+        wide_target,
+        threshold=1.0,
+        max_iter=2,
+    )
+    assert wide_coefficients.shape == (2, 2)
+    assert wide_coefficients[0, 0].item() == pytest.approx(0.0)
+
+
+def test_finite_difference_and_discrete_pair_validation() -> None:
+    """Target builders require at least two latent frames and positive ``dt``."""
+    latent = torch.ones(3, 2)
+    with pytest.raises(ValueError, match="at least two latent frames"):
+        _finite_difference_targets([latent], timestamps=None, time_step=0.1)
+    with pytest.raises(ValueError, match="at least two latent frames"):
+        _discrete_pairs([latent])
+    with pytest.raises(ValueError, match="non-positive time increment"):
+        _finite_difference_targets(
+            [latent, latent + 1.0],
+            timestamps=torch.tensor([0.0, 0.0]),
+            time_step=0.1,
+        )
+
+
+def test_library_for_frames_validation() -> None:
+    """Frame-wise library construction validates graph topology and indices."""
+    latents = [torch.ones(3, 2), torch.ones(3, 2) * 2.0]
+    with pytest.raises(ValueError, match="graph library requires edge_index"):
+        _library_for_frames(
+            latents,
+            library="graph",
+            degree=1,
+            edge_index=None,
+            edge_weight=None,
+            frame_indices=[0],
+        )
+    with pytest.raises(ValueError, match="no frames provided"):
+        _library_for_frames(
+            latents,
+            library="poly",
+            degree=1,
+            edge_index=None,
+            edge_weight=None,
+            frame_indices=[],
+        )
+
+
+def test_identify_sparse_dynamics_validation_branches() -> None:
+    """Public API rejects invalid libraries, modes, degrees, and sequences."""
+    sequence = _planted_discrete_sequence(num_timesteps=8)
+    model = _identity_latent_model(2)
+    with pytest.raises(ValueError, match="library must be"):
+        identify_sparse_dynamics(
+            model,
+            sequence,
+            library="invalid",
+            threshold=0.1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="mode must be"):
+        identify_sparse_dynamics(
+            model,
+            sequence,
+            mode="invalid",
+            threshold=0.1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="degree must be >= 1"):
+        identify_sparse_dynamics(model, sequence, degree=0, threshold=0.1)
+    single_snapshot = Data(x=torch.ones(3, 2), edge_index=_path_edge_index(3))
+    with pytest.raises(ValueError, match="at least two snapshots"):
+        identify_sparse_dynamics(
+            model,
+            GraphSnapshotSequence([single_snapshot]),
+            threshold=0.1,
+        )
+
+
+def test_identify_sparse_dynamics_latent_dim_mismatch(monkeypatch) -> None:
+    """Encoded latent width must stay constant across timesteps."""
+    sequence = _planted_discrete_sequence(num_timesteps=8)
+    model = _identity_latent_model(2)
+
+    def _inconsistent_latents(_model, _sequence):
+        return [torch.ones(4, 2), torch.ones(4, 3)]
+
+    monkeypatch.setattr(
+        "koopman_graph.analysis.sindy._encode_latent_trajectory",
+        _inconsistent_latents,
+    )
+    with pytest.raises(ValueError, match="inconsistent across timesteps"):
+        identify_sparse_dynamics(model, sequence, threshold=0.1)
+
+
+def test_identify_sparse_dynamics_sample_count_mismatch(monkeypatch) -> None:
+    """Library and target row counts must agree before STLSQ."""
+    sequence = _planted_discrete_sequence(num_timesteps=8)
+    model = _identity_latent_model(2)
+
+    def _short_discrete(_latents):
+        return torch.ones(1, 2), torch.ones(1, 2)
+
+    monkeypatch.setattr(
+        "koopman_graph.analysis.sindy._discrete_pairs",
+        _short_discrete,
+    )
+    with pytest.raises(ValueError, match="sample counts disagree"):
+        identify_sparse_dynamics(model, sequence, threshold=0.1)

@@ -14,6 +14,7 @@ from koopman_graph.operators.global_local import (
     DEFAULT_LOCAL_HIDDEN_DIMS,
     DEFAULT_LOCAL_RANK,
     DEFAULT_LOCAL_WINDOW,
+    normalize_local_hidden_dims,
     pad_latent_window,
 )
 
@@ -258,3 +259,95 @@ def test_gradient_flows_through_local_mlp() -> None:
     assert any(grad is not None and torch.any(grad != 0) for grad in grads)
     assert operator._local_logit.grad is not None
     assert torch.any(operator._local_logit.grad != 0)
+
+
+def test_normalize_local_hidden_dims_validation() -> None:
+    """Hidden widths must be a non-empty tuple of positive integers."""
+    assert normalize_local_hidden_dims(None) == DEFAULT_LOCAL_HIDDEN_DIMS
+    assert normalize_local_hidden_dims((16, 8)) == (16, 8)
+    with pytest.raises(ValueError, match="local_hidden_dims must be non-empty"):
+        normalize_local_hidden_dims(())
+    with pytest.raises(ValueError, match="local_hidden_dims must be positive integers"):
+        normalize_local_hidden_dims((0,))
+
+
+def test_global_local_rejects_auxiliary_spectral() -> None:
+    """Discrete global/local cannot use continuous auxiliary_spectral K_g."""
+    with pytest.raises(ValueError, match="auxiliary_spectral"):
+        GlobalLocalKoopmanOperator(4, parameterization="auxiliary_spectral")
+
+
+def test_k_property_aliases_global_matrix() -> None:
+    """K is an alias of the global backbone matrix."""
+    operator = GlobalLocalKoopmanOperator(4, init_mode="identity")
+    assert torch.allclose(operator.K, operator.matrix)
+    assert operator.B is None
+
+
+def test_b_property_and_stability_certificate_with_control() -> None:
+    """Controlled operators expose B and delegate stability_certificate."""
+    operator = GlobalLocalKoopmanOperator(
+        4,
+        init_mode="identity",
+        control_dim=2,
+        parameterization="lyapunov",
+    )
+    assert operator.B is not None
+    assert operator.B.shape == (2, 4)
+    certificate = operator.stability_certificate()
+    assert certificate is not None
+    assert operator.B is operator._global.B
+
+
+def test_reset_parameters_resets_global_control_and_local_mlp() -> None:
+    """reset_parameters reinitializes K_g control and the local MLP."""
+    operator = GlobalLocalKoopmanOperator(3, control_dim=1, init_mode="identity")
+    with torch.no_grad():
+        operator._global.K.fill_(2.0)
+        operator._local_logit.fill_(1.0)
+    operator.reset_parameters()
+    assert torch.allclose(operator.matrix, torch.eye(3))
+    assert operator._local_logit.item() == pytest.approx(-4.0)
+
+
+def test_local_correction_and_resolve_window_validation() -> None:
+    """local_correction and resolve_latent_window validate shapes."""
+    operator = GlobalLocalKoopmanOperator(4, local_window=3)
+    z = torch.randn(2, 4)
+    with pytest.raises(ValueError, match="latent_window must have shape"):
+        operator.local_correction(torch.randn(4))
+    bad_window = pad_latent_window(z, 2)
+    with pytest.raises(ValueError, match="latent_window length must be 3"):
+        operator.local_correction(bad_window)
+    with pytest.raises(ValueError, match="latent_window trailing dim must be 4"):
+        operator.local_correction(pad_latent_window(torch.randn(2, 3), 3))
+    with pytest.raises(
+        ValueError, match="latent_window batch/feature shape must match z"
+    ):
+        operator.resolve_latent_window(z, pad_latent_window(torch.randn(2, 5), 3))
+    with pytest.raises(ValueError, match="latent_window length must be 3"):
+        operator.resolve_latent_window(z, pad_latent_window(z, 2))
+
+
+def test_effective_matrix_adds_local_correction() -> None:
+    """effective_matrix returns K_g + K_l for a supplied window."""
+    operator = GlobalLocalKoopmanOperator(3, local_window=2, init_mode="identity")
+    z = torch.randn(4, 3)
+    window = pad_latent_window(z, 2)
+    effective = operator.effective_matrix(window)
+    expected = operator.matrix + operator.local_correction(window)
+    torch.testing.assert_close(effective, expected)
+
+
+def test_controlled_forward_applies_additive_control() -> None:
+    """Forward with control uses the global B matrix and local correction."""
+    operator = GlobalLocalKoopmanOperator(3, init_mode="identity", control_dim=2)
+    z = torch.randn(2, 3)
+    control = torch.ones(2, 2)
+    window = pad_latent_window(z, operator.local_window)
+    z_next = operator.forward(z, control=control, latent_window=window)
+    global_only = operator._global.advance(z, control=control)
+    local_delta = (
+        z.unsqueeze(-2) @ operator.local_correction(window).transpose(-1, -2)
+    ).squeeze(-2)
+    torch.testing.assert_close(z_next, global_only + local_delta)

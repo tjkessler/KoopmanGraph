@@ -23,6 +23,7 @@ from koopman_graph.datasets.pems import (
     _default_variant_traffic_path,
     build_bay_cache_payload,
     build_variant_cache_payload,
+    default_variant_cache_dir,
     download_bay_distances_csv,
     download_bay_sensor_ids,
     ensure_bay_traffic_cache,
@@ -344,3 +345,207 @@ def test_ensure_variant_rejects_bad_npz_checksum(tmp_path: Path) -> None:
             adj_csv_path=adj_path,
             expected_npz_sha256="0" * 64,
         )
+
+
+def test_default_variant_cache_dir_prefers_existing_traffic_pt(tmp_path: Path) -> None:
+    """Existing traffic.pt under a candidate directory is selected."""
+    cache_dir = tmp_path / "data" / "pems04"
+    cache_dir.mkdir(parents=True)
+    traffic = cache_dir / "traffic.pt"
+    torch.save({"edge_index": torch.zeros((2, 0), dtype=torch.long)}, traffic)
+    with patch("koopman_graph.datasets.pems.Path.cwd", return_value=tmp_path):
+        assert default_variant_cache_dir("04") == cache_dir.resolve()
+
+
+def test_read_bay_h5_rejects_missing_keys_and_bad_window(tmp_path: Path) -> None:
+    """HDF5 without speed tables or invalid windows raise."""
+    h5py = pytest.importorskip("h5py")
+    h5_path = tmp_path / "empty.h5"
+    with h5py.File(h5_path, "w") as handle:
+        handle.create_dataset("other", data=np.zeros((2, 2)))
+    with pytest.raises(KeyError, match="PEMS-BAY HDF5 missing speed table"):
+        read_bay_h5_speed_window(h5_path, num_timesteps=1)
+    with h5py.File(tmp_path / "small.h5", "w") as handle:
+        handle.create_dataset("df/block0_values", data=np.zeros((2, BAY_NUM_SENSORS)))
+    with pytest.raises(ValueError, match="exceeds available rows"):
+        read_bay_h5_speed_window(tmp_path / "small.h5", num_timesteps=3, offset=0)
+
+
+def test_download_bay_sensor_ids_skips_blank_rows_and_validates_count() -> None:
+    """Blank CSV rows are ignored; wrong sensor counts raise."""
+    lines = ["\n"] + [f"{400000 + i},0.0,0.0" for i in range(BAY_NUM_SENSORS - 1)]
+    raw = ("\n".join(lines) + "\n").encode("utf-8")
+    mock_response = MagicMock()
+    mock_response.read.return_value = raw
+    mock_response.__enter__.return_value = mock_response
+    with (
+        patch("koopman_graph.datasets.download.urlopen", return_value=mock_response),
+        pytest.raises(ValueError, match=f"Expected {BAY_NUM_SENSORS} PEMS-BAY sensors"),
+    ):
+        download_bay_sensor_ids(verify=False)
+
+
+def test_download_bay_distances_verifies_and_prepends_header() -> None:
+    """Distance CSV downloads verify SHA256 and prepend a header when missing."""
+    body = "400000,400001,10.0\n"
+    raw = body.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    mock_response = MagicMock()
+    mock_response.read.return_value = raw
+    mock_response.__enter__.return_value = mock_response
+    with (
+        patch("koopman_graph.datasets.download.urlopen", return_value=mock_response),
+        patch("koopman_graph.datasets.pems.BAY_DISTANCES_SHA256", digest),
+    ):
+        text = download_bay_distances_csv()
+    assert text.startswith("from,to,cost\n")
+
+
+def test_read_npz_flow_window_validation(tmp_path: Path) -> None:
+    """NPZ readers validate keys, rank, window, and channel."""
+    npz_path = tmp_path / "bad.npz"
+    np.savez(npz_path, other=np.zeros((2, 2)))
+    with pytest.raises(ValueError, match="must contain a 'data' array"):
+        read_npz_flow_window(npz_path, num_timesteps=1)
+    np.savez(npz_path, data=np.zeros((4, 3)))
+    with pytest.raises(ValueError, match="Expected data shape \\(T, N, C\\)"):
+        read_npz_flow_window(npz_path, num_timesteps=1)
+    np.savez(npz_path, data=np.zeros((2, 3, 1)))
+    with pytest.raises(ValueError, match="exceeds available rows"):
+        read_npz_flow_window(npz_path, num_timesteps=3)
+    with pytest.raises(ValueError, match="channel=2 is out of range"):
+        read_npz_flow_window(npz_path, num_timesteps=1, channel=2)
+
+
+def test_read_adjacency_csv_rejects_non_square(tmp_path: Path) -> None:
+    """Adjacency CSV must be square."""
+    path = tmp_path / "adj.csv"
+    np.savetxt(path, np.ones((2, 3)), delimiter=",")
+    with pytest.raises(ValueError, match="adjacency CSV must be square"):
+        read_adjacency_csv(path)
+
+
+def test_build_bay_cache_payload_rejects_shape_mismatch() -> None:
+    """BAY payload rejects non-2D speeds and sensor count mismatches."""
+    with pytest.raises(ValueError, match="speeds must have shape"):
+        build_bay_cache_payload(np.ones(6), ["a"], distance_csv="from,to,cost\n")
+    with pytest.raises(ValueError, match="speeds has 2 sensors but sensor_ids has 1"):
+        build_bay_cache_payload(
+            np.ones((2, 2)),
+            ["a"],
+            distance_csv="from,to,cost\na,a,0.0\n",
+        )
+
+
+def test_build_variant_cache_payload_rejects_mismatches() -> None:
+    """Variant payload validates flow rank, sensor count, and adjacency shape."""
+    variant = "08"
+    n = VARIANT_NUM_SENSORS[variant]
+    with pytest.raises(ValueError, match="flows must have shape"):
+        build_variant_cache_payload(
+            np.ones(4), np.eye(n), variant=variant, source_url="x"
+        )
+    with pytest.raises(ValueError, match=f"PEMS{variant} expects {n} sensors"):
+        build_variant_cache_payload(
+            np.ones((2, n - 1)),
+            np.eye(n),
+            variant=variant,
+            source_url="x",
+        )
+    with pytest.raises(ValueError, match="adjacency must have shape"):
+        build_variant_cache_payload(
+            np.ones((2, n)),
+            np.eye(n - 1),
+            variant=variant,
+            source_url="x",
+        )
+
+
+def test_ensure_bay_cache_returns_existing_without_h5(tmp_path: Path) -> None:
+    """Existing BAY cache is reused when h5_path is omitted."""
+    path = _default_bay_traffic_path(tmp_path)
+    torch.save({"edge_index": torch.zeros((2, 0), dtype=torch.long)}, path)
+    assert ensure_bay_traffic_cache(tmp_path, h5_path=None) == path
+
+
+def test_ensure_bay_cache_force_reuses_existing_without_h5(tmp_path: Path) -> None:
+    """Force rebuild without HDF5 reuses traffic.pt when it already exists."""
+    path = _default_bay_traffic_path(tmp_path)
+    torch.save({"edge_index": torch.zeros((2, 0), dtype=torch.long)}, path)
+    assert ensure_bay_traffic_cache(tmp_path, force=True, h5_path=None) == path
+
+
+def test_ensure_bay_cache_rejects_wrong_sensor_count(tmp_path: Path) -> None:
+    """HDF5 column count must match BAY_NUM_SENSORS."""
+    h5py = pytest.importorskip("h5py")
+    h5_path = tmp_path / "pems-bay.h5"
+    with h5py.File(h5_path, "w") as handle:
+        handle.create_dataset(
+            "df/block0_values",
+            data=np.zeros((4, BAY_NUM_SENSORS - 1), dtype=np.float32),
+        )
+    with (
+        patch(
+            "koopman_graph.datasets.pems.download_bay_sensor_ids",
+            return_value=[f"s{i}" for i in range(BAY_NUM_SENSORS)],
+        ),
+        patch(
+            "koopman_graph.datasets.pems.download_bay_distances_csv",
+            return_value="from,to,cost\n",
+        ),
+        pytest.raises(ValueError, match=f"Expected {BAY_NUM_SENSORS} PEMS-BAY sensors"),
+    ):
+        ensure_bay_traffic_cache(tmp_path, force=True, h5_path=h5_path, num_timesteps=2)
+
+
+def test_ensure_variant_cache_returns_existing_without_paths(tmp_path: Path) -> None:
+    """Existing variant cache is reused when NPZ/CSV paths are omitted."""
+    variant = "04"
+    path = _default_variant_traffic_path(variant, tmp_path)
+    torch.save({"edge_index": torch.zeros((2, 0), dtype=torch.long)}, path)
+    assert (
+        ensure_variant_traffic_cache(
+            variant,
+            tmp_path,
+            npz_path=None,
+            adj_csv_path=None,
+        )
+        == path
+    )
+
+
+def test_ensure_variant_cache_force_reuses_existing_without_paths(
+    tmp_path: Path,
+) -> None:
+    """Force rebuild without NPZ/CSV reuses traffic.pt when present."""
+    variant = "04"
+    path = _default_variant_traffic_path(variant, tmp_path)
+    torch.save({"edge_index": torch.zeros((2, 0), dtype=torch.long)}, path)
+    assert (
+        ensure_variant_traffic_cache(
+            variant,
+            tmp_path,
+            force=True,
+            npz_path=None,
+            adj_csv_path=None,
+        )
+        == path
+    )
+
+
+def test_pems_variant_load_sequence_rejects_wrong_num_nodes(tmp_path: Path) -> None:
+    """Variant load_sequence rejects cached num_nodes mismatches."""
+    variant = "04"
+    n = VARIANT_NUM_SENSORS[variant]
+    path = _default_variant_traffic_path(variant, tmp_path)
+    torch.save(
+        {
+            "sensor_ids": [f"s{i}" for i in range(n - 1)],
+            "edge_index": torch.zeros((2, 0), dtype=torch.long),
+            "speeds": torch.ones(2, n - 1, 1),
+            "num_nodes": n - 1,
+        },
+        path,
+    )
+    with pytest.raises(ValueError, match=f"Expected {n} sensors"):
+        PemsTrafficBenchmark.load_sequence(variant, tmp_path)

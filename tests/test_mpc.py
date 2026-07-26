@@ -11,8 +11,17 @@ from torch_geometric.data import Data
 from koopman_graph import GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.mpc import KoopmanMPC
-from koopman_graph.mpc.controller import _conformal_stage_margins
-from koopman_graph.mpc.qp import assemble_condensed_mpc, require_osqp
+from koopman_graph.mpc.controller import (
+    _conformal_stage_margins,
+    _mean_latent,
+    _resolve_reference,
+    _validate_mpc_model,
+)
+from koopman_graph.mpc.qp import (
+    _as_2d_spd,
+    assemble_condensed_mpc,
+    require_osqp,
+)
 from koopman_graph.uq import ConformalKoopmanUQ
 from koopman_graph.uq.common import snapshot_with_features
 
@@ -480,3 +489,204 @@ def test_mpc_package_import_without_solve() -> None:
     from koopman_graph import mpc as mpc_pkg
 
     assert mpc_pkg.KoopmanMPC is KoopmanMPC
+
+
+def _minimal_assemble_kwargs() -> dict:
+    """Shared valid arguments for ``assemble_condensed_mpc`` validation tests."""
+    return {
+        "a_mat": np.eye(2),
+        "b_mat": np.array([[1.0], [0.0]]),
+        "c_mat": np.eye(2),
+        "x0": np.zeros(2),
+        "references": np.zeros((3, 2)),
+        "q_cost": np.eye(2),
+        "r_cost": np.eye(1),
+        "qf_cost": np.eye(2),
+        "u_min": None,
+        "u_max": None,
+        "y_min": None,
+        "y_max": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("matrix", "match"),
+    [
+        (np.eye(3), "shape"),
+        (np.array([[0.0, 1.0], [0.0, 0.0]]), "symmetric"),
+        (-np.eye(2), "positive semidefinite"),
+    ],
+)
+def test_as_2d_spd_rejects_invalid_cost(
+    matrix: np.ndarray,
+    match: str,
+) -> None:
+    """Cost matrices must be square, symmetric, and PSD."""
+    with pytest.raises(ValueError, match=match):
+        _as_2d_spd(matrix, "Q", 2)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "match"),
+    [
+        ("a_mat", np.zeros((2, 3)), "square"),
+        ("b_mat", np.zeros((3, 1)), "b_mat"),
+        ("c_mat", np.zeros((2, 3)), "c_mat"),
+        ("x0", np.zeros(3), "x0"),
+        ("references", np.zeros((3, 3)), "references"),
+        ("references", np.zeros((1, 2)), "at least one stage"),
+    ],
+)
+def test_assemble_condensed_mpc_rejects_invalid_plant(
+    key: str,
+    value: object,
+    match: str,
+) -> None:
+    """Plant dimensions and reference horizon are validated."""
+    kwargs = _minimal_assemble_kwargs()
+    kwargs[key] = value
+    with pytest.raises(ValueError, match=match):
+        assemble_condensed_mpc(**kwargs)
+
+
+def test_assemble_condensed_mpc_rejects_bad_bounds_and_margins() -> None:
+    """Input/output bounds and stage margins must be consistent."""
+    kwargs = _minimal_assemble_kwargs()
+    kwargs["u_min"] = np.zeros(2)
+    with pytest.raises(ValueError, match="u_min/u_max"):
+        assemble_condensed_mpc(**kwargs)
+    kwargs["u_min"] = np.array([-1.0])
+    kwargs["y_min"] = np.zeros(3)
+    with pytest.raises(ValueError, match="y_min/y_max"):
+        assemble_condensed_mpc(**kwargs)
+    kwargs.pop("y_min", None)
+    kwargs["y_min"] = None
+    kwargs["stage_margins"] = np.zeros(3)
+    with pytest.raises(ValueError, match="stage_margins require"):
+        assemble_condensed_mpc(**kwargs)
+    kwargs["y_max"] = np.array([1.0, 1.0])
+    kwargs["stage_margins"] = np.zeros(2)
+    with pytest.raises(ValueError, match="stage_margins must have shape"):
+        assemble_condensed_mpc(**kwargs)
+    kwargs["stage_margins"] = -np.ones(3)
+    with pytest.raises(ValueError, match="non-negative"):
+        assemble_condensed_mpc(**kwargs)
+
+
+def test_assemble_condensed_mpc_unconstrained_dummy_rows() -> None:
+    """Unconstrained QPs attach a zero dummy inequality row for OSQP."""
+    _p, _q, a_ineq, lower, upper = assemble_condensed_mpc(**_minimal_assemble_kwargs())
+    assert a_ineq.shape == (1, 2)
+    assert lower.shape == (1,)
+    assert upper.shape == (1,)
+    assert lower[0] == pytest.approx(0.0)
+    assert upper[0] == pytest.approx(0.0)
+
+
+def test_validate_mpc_model_rejects_unsupported_operators() -> None:
+    """MPC accepts only discrete additive per-node KoopmanOperator plants."""
+    common = {
+        "encoder": GNNEncoder(2, 4, 2, num_layers=1),
+        "decoder": _IdentityDecoder(2),
+        "latent_dim": 2,
+        "time_step": 0.1,
+        "control_dim": 1,
+    }
+    continuous = GraphKoopmanModel(**common, dynamics_mode="continuous")
+    with pytest.raises(ValueError, match="discrete"):
+        _validate_mpc_model(continuous)
+
+    graph = GraphKoopmanModel(**common, koopman="graph")
+    with pytest.raises(ValueError, match="graph/hypergraph"):
+        _validate_mpc_model(graph)
+
+    hyper = GraphKoopmanModel(**common, koopman="hypergraph")
+    with pytest.raises(ValueError, match="graph/hypergraph"):
+        _validate_mpc_model(hyper)
+
+    uncontrolled = GraphKoopmanModel(
+        encoder=GNNEncoder(2, 4, 2, num_layers=1),
+        decoder=_IdentityDecoder(2),
+        latent_dim=2,
+        time_step=0.1,
+        control_dim=0,
+    )
+    with pytest.raises(ValueError, match="control_dim"):
+        _validate_mpc_model(uncontrolled)
+
+    model = _identity_plant_model()
+    model.koopman.B = None
+    with pytest.raises(ValueError, match="control matrix"):
+        _validate_mpc_model(model)
+
+    model = _identity_plant_model()
+    model.koopman = nn.Linear(2, 2)  # type: ignore[assignment]
+    with pytest.raises(TypeError, match="KoopmanOperator"):
+        _validate_mpc_model(model)
+
+
+def test_mean_latent_rejects_wrong_rank() -> None:
+    """Mean latent reduction requires a node-by-feature matrix."""
+    with pytest.raises(ValueError, match="latent must"):
+        _mean_latent(torch.randn(2, 3, 4))
+
+
+def test_resolve_reference_accepts_sequence_and_rejects_shape() -> None:
+    """References normalize from sequences and enforce final shape."""
+    rows = [np.array([1.0, 0.0]), np.array([0.5, 0.5]), np.array([0.0, 1.0])]
+    refs = _resolve_reference(rows, horizon=2, out_dim=2)
+    assert refs.shape == (3, 2)
+    assert refs[0, 0] == pytest.approx(1.0)
+
+    with pytest.raises(ValueError, match="broadcast"):
+        _resolve_reference(np.zeros((3, 3)), horizon=2, out_dim=2)
+
+    broadcast = _resolve_reference(np.array([[1.0, 0.0]]), horizon=2, out_dim=2)
+    assert broadcast.shape == (3, 2)
+    assert np.allclose(broadcast, np.array([1.0, 0.0]))
+
+
+def test_mpc_rejects_invalid_horizon_and_rollout_steps() -> None:
+    """Horizon and rollout step counts must be positive."""
+    model = _identity_plant_model()
+    with pytest.raises(ValueError, match="horizon must"):
+        KoopmanMPC(model, horizon=0, Q=torch.eye(2), R=torch.eye(1))
+    controller = KoopmanMPC(model, horizon=2, Q=torch.eye(2), R=torch.eye(1))
+    with pytest.raises(ValueError, match="steps must"):
+        controller.rollout(_origin(), torch.zeros(2), steps=0)
+
+
+def test_mpc_rejects_mismatched_tightening_model() -> None:
+    """Conformal tightening must be calibrated on the same model instance."""
+    model_a = _identity_plant_model()
+    model_b = _identity_plant_model()
+    uq = _calibrated_uq(model_a, steps=4)
+    with pytest.raises(ValueError, match="same GraphKoopmanModel"):
+        KoopmanMPC(
+            model_b,
+            horizon=3,
+            Q=torch.eye(2),
+            R=torch.eye(1),
+            y_max=torch.tensor([1.0, 1.0]),
+            constraint_tightening=uq,
+        )
+
+
+def test_mpc_accepts_numpy_costs_and_sequence_reference() -> None:
+    """Controller accepts ndarray costs and per-stage reference sequences."""
+    model = _identity_plant_model()
+    controller = KoopmanMPC(
+        model,
+        horizon=2,
+        Q=np.eye(2),
+        R=np.eye(1),
+        u_min=np.array([-1.0]),
+        u_max=np.array([1.0]),
+    )
+    reference = [
+        np.array([0.5, 0.0]),
+        np.array([0.5, 0.0]),
+        np.array([0.5, 0.0]),
+    ]
+    action = controller.solve(_origin(), reference)
+    assert action.shape == (1,)

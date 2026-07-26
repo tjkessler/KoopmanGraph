@@ -419,3 +419,76 @@ def test_registered_physics_presets_include_graph_laplacian() -> None:
     """Static graph derivative presets should be publicly registered."""
     expected = {"graph_laplacian", "graph_gradient", "graph_curvature"}
     assert expected <= PHYSICS_PRESETS.keys()
+
+
+def test_encode_features_prefer_explicit_topology_with_physics(
+    small_snapshot: Data,
+) -> None:
+    """Explicit topology override concatenates physics on Data snapshots."""
+    from koopman_graph.model.encoding import encode_features
+
+    override_edges = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
+
+    def encoder(
+        x: torch.Tensor,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_weight
+        assert edge_index is not None
+        assert edge_index.shape == override_edges.shape
+        return x.new_ones(x.shape[0], 4)
+
+    latent = encode_features(
+        encoder,
+        small_snapshot,
+        edge_index=override_edges,
+        prefer_explicit_topology=True,
+        physics_lifting_fn=graph_laplacian_features,
+        physics_dim=3,
+        physics_position="prepend",
+    )
+    assert latent.shape == (small_snapshot.num_nodes, 7)
+
+    gnn_only = encode_features(
+        encoder,
+        small_snapshot,
+        edge_index=override_edges,
+        prefer_explicit_topology=True,
+        physics_position="prepend",
+    )
+    assert gnn_only.shape == (small_snapshot.num_nodes, 4)
+
+    tensor_latent = encode_features(
+        encoder,
+        small_snapshot.x,
+        edge_index=override_edges,
+        prefer_explicit_topology=True,
+        physics_lifting_fn=graph_laplacian_features,
+        physics_dim=3,
+        physics_position="prepend",
+    )
+    assert tensor_latent.shape == latent.shape
+
+
+def test_encode_features_default_path_with_physics(small_snapshot: Data) -> None:
+    """Default topology resolution still concatenates physics features."""
+    from koopman_graph.model.encoding import encode_features
+
+    def encoder(
+        x_or_data: torch.Tensor | Data,
+        edge_index: torch.Tensor | None,
+        edge_weight: torch.Tensor | None,
+    ) -> torch.Tensor:
+        del edge_index, edge_weight
+        features = x_or_data.x if isinstance(x_or_data, Data) else x_or_data
+        return features.new_ones(features.shape[0], 4)
+
+    latent = encode_features(
+        encoder,
+        small_snapshot,
+        physics_lifting_fn=graph_laplacian_features,
+        physics_dim=3,
+        physics_position="prepend",
+    )
+    assert latent.shape == (small_snapshot.num_nodes, 7)
