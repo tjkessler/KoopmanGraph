@@ -264,8 +264,8 @@ power-user losses stay package imports outside root ``__all__``.
 * ``graph`` — :class:`~koopman_graph.operators.graph.GraphKoopmanOperator`
   (discrete networked self/neighbor coupling; select via ``koopman="graph"``)
 * ``graph_inverse`` — block-diagonal / Jacobi approximate inverse helpers for
-  ``GraphKoopmanOperator(sparsity="block_diagonal")`` (no ``operators/graph/``
-  subtree)
+  ``GraphKoopmanOperator`` / ``HypergraphKoopmanOperator`` with
+  ``sparsity="block_diagonal"`` (no ``operators/graph/`` subtree)
 * ``continuous_graph`` —
   :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
   (continuous networked generator ``I⊗L_self + Â⊗L_nbr``; select via
@@ -275,7 +275,8 @@ power-user losses stay package imports outside root ``__all__``.
   approximate path
 * ``hypergraph`` —
   :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
-  (discrete hyperedge-coupled advance; select via ``koopman="hypergraph"``)
+  (discrete hyperedge-coupled advance; select via ``koopman="hypergraph"``;
+  ``sparsity="block_diagonal"`` shares the Jacobi approximate inverse path)
 * ``global_local`` —
   :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
   (discrete global backbone ``K_g`` plus low-rank local window correction
@@ -1035,8 +1036,9 @@ Bilinear ``inverse_advance`` matches the control capability matrix: global
 uses node-specific bilinear self blocks plus the same ``Â ⊗ K_nbr`` neighbor
 coupling as forward advance.
 
-**Graph operator sparsity (``sparsity``).** Forward advance is always the
-sparse message-passing matvec. ``inverse_advance`` and serialization differ:
+**Graph / hypergraph operator sparsity (``sparsity``).** Forward advance is
+always the sparse message-passing matvec (pairwise ``Â`` or Zhou ``Ĥ``).
+``inverse_advance`` and serialization differ:
 
 .. list-table::
    :header-rows: 1
@@ -1051,15 +1053,20 @@ sparse message-passing matvec. ``inverse_advance`` and serialization differ:
        assemble the dense map
    * - ``"block_diagonal"``
      - Approximate per-node ``d×d`` Jacobi inverse
-       (exact when ``K_nbr=0`` or no edges)
+       (exact when the coupling factor is zero or the topology is empty —
+       ``K_nbr=0`` / no edges for graph; ``K_hedge=0`` / no hyperedges for
+       hypergraph)
      - For backward-consistency / imputation at scale; **not** an exact
-       whole-network inverse. ``inverse_matrix=`` is rejected
+       whole-network inverse. ``inverse_matrix=`` is rejected. Shared by
+       :class:`~koopman_graph.operators.GraphKoopmanOperator` and
+       :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
    * - ``"distributed"``
      - — (rejected)
      - Planned; not in 0.6.0
 
-The stored checkpoint field is ``config.sparsity`` (format 1). Hypergraph
-operators still accept only ``sparsity="dense"`` in this release.
+The stored checkpoint field is ``config.sparsity`` (format 1). Continuous-graph
+``block_diagonal`` remains the self-dominated advance / inverse shortcut
+documented under that peer (not the Jacobi path above).
 
 **Symmetry-adapted self factors (orbit ties).** Opt-in inductive bias for
 discrete ``koopman="graph"`` / ``"hypergraph"``: nodes in the same orbit
@@ -1963,6 +1970,7 @@ new operator classes are the 0.6.0 root additions).
    * - :mod:`koopman_graph.operators.hypergraph`
      - Public root façade
      - ``koopman="hypergraph"``; effective spectrum requires incidence;
+       ``sparsity="dense"|"block_diagonal"`` (Jacobi approx inverse);
        RLS rejected
    * - :mod:`koopman_graph.operators.global_local`
      - Public root façade

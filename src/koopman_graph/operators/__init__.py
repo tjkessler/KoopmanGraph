@@ -48,11 +48,10 @@ Capability layout
     coupled discrete advance).
 ``graph_inverse``
     Block-diagonal / Jacobi approximate ``inverse_advance`` helpers for
-    ``GraphKoopmanOperator(sparsity="block_diagonal")`` (no ``graph/``
-    subtree).
+    graph / hypergraph ``sparsity="block_diagonal"`` (no ``graph/`` subtree).
 ``hypergraph``
     :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
-    (hyperedge-coupled discrete advance).
+    (hyperedge-coupled discrete advance; supports ``block_diagonal``).
 ``global_local``
     :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
     (discrete global backbone + low-rank local window correction).

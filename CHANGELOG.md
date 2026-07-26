@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Self-adaptive pairwise topology via ``AdaptiveAdjacency`` and
   ``learn_topology="self_adaptive"``.
 - Large-graph training aids: ``sparsity="block_diagonal"`` for graph /
-  continuous-graph operators and neighbor-sampling mini-batches.
+  hypergraph / continuous-graph operators and neighbor-sampling
+  mini-batches (hypergraph shares the graph Jacobi approximate inverse
+  via Zhou ``Ĥ``; forward advance unchanged vs ``dense``).
 - ``GlobalLocalKoopmanOperator`` (``koopman="global_local"``) and
   ``ContinuousGraphKoopmanOperator`` (continuous networked generator;
   dense ``N·d`` cost caveat documented).

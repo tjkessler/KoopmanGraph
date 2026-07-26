@@ -815,12 +815,181 @@ def test_eigenvalue_loss_hypergraph_structural_uses_factor_bound() -> None:
     assert loss_fn(op).item() == pytest.approx(0.0, abs=1e-8)
 
 
-def test_hypergraph_operator_rejects_non_dense_sparsity() -> None:
-    """Only sparsity='dense' is implemented for hypergraph operators."""
+def test_hypergraph_block_diagonal_constructs_and_matches_dense_advance(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """block_diagonal advances identically to dense (same forward math)."""
     from koopman_graph.operators import HypergraphKoopmanOperator
 
-    with pytest.raises(ValueError, match="sparsity"):
-        HypergraphKoopmanOperator(2, sparsity="block_diagonal")  # type: ignore[arg-type]
+    torch.manual_seed(0)
+    dense = HypergraphKoopmanOperator(3, init_mode="identity_noise", init_scale=0.05)
+    block = HypergraphKoopmanOperator(
+        3, init_mode="identity", sparsity="block_diagonal"
+    )
+    block.set_dense_matrices(
+        dense.K_self.detach().clone(), dense.K_hedge.detach().clone()
+    )
+    z = torch.randn(4, 3)
+    assert torch.allclose(
+        block(z, synthetic_hyperedge_index),
+        dense(z, synthetic_hyperedge_index),
+        atol=1e-6,
+    )
+
+
+def test_hypergraph_block_diagonal_inverse_exact_when_decoupled() -> None:
+    """Blockwise inverse is exact for empty hyperedges or zero K_hedge."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    k_self = torch.diag(torch.tensor([0.6, 0.8, -0.2]))
+    z = torch.randn(4, 3)
+
+    empty = HypergraphKoopmanOperator(
+        3, init_mode="identity", sparsity="block_diagonal"
+    )
+    empty.set_dense_matrices(k_self, 0.3 * torch.eye(3))
+    empty_incidence = torch.empty(2, 0, dtype=torch.long)
+    z_next = empty.advance(z, hyperedge_index=empty_incidence)
+    recovered = empty.inverse_advance(z_next, hyperedge_index=empty_incidence)
+    assert torch.allclose(recovered, z, atol=1e-5)
+
+    zero_hedge = HypergraphKoopmanOperator(
+        3, init_mode="identity", sparsity="block_diagonal"
+    )
+    zero_hedge.set_dense_matrices(k_self, torch.zeros(3, 3))
+    incidence = torch.tensor(
+        [[0, 1, 2, 1, 2, 3], [0, 0, 0, 1, 1, 1]],
+        dtype=torch.long,
+    )
+    z_next = zero_hedge.advance(z, hyperedge_index=incidence)
+    recovered = zero_hedge.inverse_advance(z_next, hyperedge_index=incidence)
+    assert torch.allclose(recovered, z, atol=1e-5)
+
+
+def test_hypergraph_block_diagonal_inverse_approximation_bounded(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Coupled Jacobi inverse stays near the dense inverse on a tiny hypergraph."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    torch.manual_seed(1)
+    k_self = torch.diag(torch.tensor([0.7, 0.5]))
+    k_hedge = 0.15 * torch.eye(2)
+    dense = HypergraphKoopmanOperator(2, init_mode="identity")
+    block = HypergraphKoopmanOperator(
+        2, init_mode="identity", sparsity="block_diagonal"
+    )
+    dense.set_dense_matrices(k_self, k_hedge)
+    block.set_dense_matrices(k_self.clone(), k_hedge.clone())
+    z = torch.randn(4, 2)
+    z_next = dense.advance(z, hyperedge_index=synthetic_hyperedge_index)
+    dense_rec = dense.inverse_advance(z_next, hyperedge_index=synthetic_hyperedge_index)
+    block_rec = block.inverse_advance(z_next, hyperedge_index=synthetic_hyperedge_index)
+    assert torch.allclose(dense_rec, z, atol=1e-5)
+    err = (block_rec - z).norm() / z.norm()
+    assert err.item() < 0.25
+
+
+def test_hypergraph_block_diagonal_inverse_large_n_smoke() -> None:
+    """N>=2000 inverse_advance avoids materializing the Nd×Nd effective inverse."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    torch.manual_seed(2)
+    num_nodes = 2000
+    latent_dim = 4
+    # Sliding 3-uniform hyperedges: O(N) incidence nnz; dense Ĥ is N×N (~16MB).
+    node_ids: list[int] = []
+    hedge_ids: list[int] = []
+    for hedge, start in enumerate(range(num_nodes - 2)):
+        for offset in range(3):
+            node_ids.append(start + offset)
+            hedge_ids.append(hedge)
+    hyperedge_index = torch.tensor([node_ids, hedge_ids], dtype=torch.long)
+    op = HypergraphKoopmanOperator(
+        latent_dim, init_mode="identity", sparsity="block_diagonal"
+    )
+    op.set_dense_matrices(0.8 * torch.eye(latent_dim), 0.05 * torch.eye(latent_dim))
+    z = torch.randn(num_nodes, latent_dim)
+    z_next = op.advance(z, hyperedge_index=hyperedge_index)
+    recovered = op.inverse_advance(z_next, hyperedge_index=hyperedge_index)
+    assert recovered.shape == z.shape
+    assert torch.isfinite(recovered).all()
+    # Dense effective would be (8000, 8000) ≈ 256MB float32; recovered stays O(Nd).
+    assert recovered.numel() * recovered.element_size() < 1_000_000
+
+
+def test_hypergraph_distributed_sparsity_rejected() -> None:
+    """distributed sparsity stays reserved with a planned message."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    with pytest.raises(ValueError, match="planned; not in 0.6.0"):
+        HypergraphKoopmanOperator(2, sparsity="distributed")  # type: ignore[arg-type]
+
+
+def test_hypergraph_invalid_sparsity_rejected() -> None:
+    """Unsupported sparsity strings raise clearly."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    with pytest.raises(ValueError, match="must be 'dense' or 'block_diagonal'"):
+        HypergraphKoopmanOperator(2, sparsity="sparse")  # type: ignore[arg-type]
+
+
+def test_hypergraph_block_diagonal_rejects_inverse_matrix_kwarg(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Precomputed inverse_matrix is dense-only."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    op = HypergraphKoopmanOperator(2, init_mode="identity", sparsity="block_diagonal")
+    z = torch.randn(4, 2)
+    with pytest.raises(ValueError, match="inverse_matrix"):
+        op.inverse_advance(
+            z,
+            hyperedge_index=synthetic_hyperedge_index,
+            inverse_matrix=torch.eye(8),
+        )
+
+
+def test_hypergraph_block_diagonal_checkpoint_and_orbit_smoke(tmp_path) -> None:
+    """Factory + format-1 round-trip; orbit-tied block_diagonal does not error."""
+    from pathlib import Path
+
+    from koopman_graph.model import GraphKoopmanModel
+    from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    encoder = HypergraphEncoder(2, 4, 3, num_layers=1)
+    decoder = HypergraphDecoder(3, 4, 2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=3,
+        time_step=1.0,
+        koopman="hypergraph",
+        koopman_sparsity="block_diagonal",
+    )
+    assert model.koopman.sparsity == "block_diagonal"
+    path = Path(tmp_path) / "hyp_bd.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.sparsity == "block_diagonal"
+
+    incidence = torch.tensor(
+        [[0, 1, 2, 1, 2, 3], [0, 0, 0, 1, 1, 1]],
+        dtype=torch.long,
+    )
+    orbit_op = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        sparsity="block_diagonal",
+        orbit_partition=((0, 3), (1, 2)),
+    )
+    orbit_op.set_dense_matrices(0.7 * torch.eye(2), 0.1 * torch.eye(2))
+    z = torch.randn(4, 2)
+    z_next = orbit_op.advance(z, hyperedge_index=incidence)
+    recovered = orbit_op.inverse_advance(z_next, hyperedge_index=incidence)
+    assert recovered.shape == z.shape
+    assert torch.isfinite(recovered).all()
 
 
 def test_hypergraph_operator_factorized_reset_and_aliases(

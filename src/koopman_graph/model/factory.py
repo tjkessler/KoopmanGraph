@@ -184,7 +184,8 @@ def resolve_model_components(
     koopman_auxiliary_hidden_dims : Sequence[int] or None
         Hidden widths for auxiliary-spectral operators.
     koopman_sparsity : str
-        Graph / continuous-graph sparsity mode (``dense`` / ``block_diagonal``).
+        Graph / hypergraph / continuous-graph sparsity mode
+        (``dense`` / ``block_diagonal``).
     koopman_local_window, koopman_local_rank, koopman_local_hidden_dims
         Global/local operator hyperparameters.
     koopman_orbit_partition, koopman_auto_orbits, koopman_orbit_method

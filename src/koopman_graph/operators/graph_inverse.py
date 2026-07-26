@@ -1,10 +1,11 @@
-"""Block-diagonal approximate inverse helpers for networked graph operators.
+"""Block-diagonal approximate inverse helpers for networked operators.
 
-Used by :class:`~koopman_graph.operators.GraphKoopmanOperator` when
-``sparsity="block_diagonal"``. Forward advance stays a sparse message-passing
-matvec; this module only approximates ``inverse_advance`` with per-node
-``d×d`` solves (one Jacobi step). Exact whole-network inversion remains the
-``sparsity="dense"`` path.
+Used by :class:`~koopman_graph.operators.GraphKoopmanOperator` and
+:class:`~koopman_graph.operators.HypergraphKoopmanOperator` when
+``sparsity="block_diagonal"``. Forward advance stays the sparse (or
+hyperedge) message-passing matvec; this module only approximates
+``inverse_advance`` with per-node ``d×d`` solves (one Jacobi step). Exact
+whole-network inversion remains the ``sparsity="dense"`` path.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import torch
 from torch import Tensor
 
 from koopman_graph.graph_utils.topology import (
+    hyperedge_normalized_adjacency_matvec,
     symmetric_normalized_adjacency_matvec,
 )
 
@@ -155,6 +157,61 @@ def block_diagonal_graph_inverse_advance(
         num_nodes=z_adjusted.shape[0],
     )
     rhs = z_adjusted - neighbor @ k_nbr.T
+    if k_self_blocks is None:
+        return apply_self_inverse(rhs, k_self=k_self)
+    return apply_self_inverse(rhs, k_self_blocks=k_self_blocks)
+
+
+def block_diagonal_hypergraph_inverse_advance(
+    z_adjusted: Tensor,
+    *,
+    k_self: Tensor,
+    k_hedge: Tensor,
+    hyperedge_index: Tensor,
+    hyperedge_weight: Tensor | None = None,
+    k_self_blocks: Tensor | None = None,
+) -> Tensor:
+    """Approximate hypergraph inverse via one Jacobi / block-diagonal step.
+
+    Forward advance is ``Z_next = Z K_self.T + (Ĥ Z) K_hedge.T`` (plus control,
+    already removed into ``z_adjusted``). This helper forms::
+
+        R = Z_adj - (Ĥ Z_adj) K_hedge.T
+        Z = R K_self^{-T}
+
+    (or per-node ``K_self`` blocks when ``k_self_blocks`` is set). The step is
+    **exact** when ``K_hedge = 0`` or there are no hyperedges, and otherwise an
+    approximation of the dense ``N·d`` inverse.
+
+    Parameters
+    ----------
+    z_adjusted : Tensor
+        Control-adjusted latents at ``t+1`` with shape
+        ``(num_nodes, latent_dim)``.
+    k_self : Tensor
+        Shared self factor (ignored when ``k_self_blocks`` is provided).
+    k_hedge : Tensor
+        Hyperedge coupling factor with shape ``(latent_dim, latent_dim)``.
+    hyperedge_index : Tensor
+        Bipartite incidence ``(2, nnz)``.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights.
+    k_self_blocks : Tensor or None, optional
+        Optional per-node bilinear / orbit-tied self blocks
+        ``(num_nodes, latent_dim, latent_dim)``.
+
+    Returns
+    -------
+    Tensor
+        Approximate latents at ``t`` with the same shape as ``z_adjusted``.
+    """
+    coupled = hyperedge_normalized_adjacency_matvec(
+        hyperedge_index,
+        z_adjusted,
+        hyperedge_weight=hyperedge_weight,
+        num_nodes=z_adjusted.shape[0],
+    )
+    rhs = z_adjusted - coupled @ k_hedge.T
     if k_self_blocks is None:
         return apply_self_inverse(rhs, k_self=k_self)
     return apply_self_inverse(rhs, k_self_blocks=k_self_blocks)
