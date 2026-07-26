@@ -237,10 +237,12 @@ CLAUDE.md
 docs/blueprint/
 docs/MATHEMATICS_VERIFICATION.md
 
-# Large downloaded benchmark caches (rebuild via scripts/download_*.py).
-# Keep tracked teaching fixtures (traffic.pt / topology.pt / wake.pt) under
-# data/metr_la/, data/ieee118/, and data/cylinder_wake/; do not commit raw
-# DCRNN HDF5, PEMS, or contact dumps.
+# Large / non-shipped benchmark downloads (rebuild via scripts/download_*.py).
+# Tracked teaching fixtures and source files under 50 MB may live under
+# data/metr_la/, data/ieee118/, data/cylinder_wake/, data/pems_bay/,
+# data/pems07/, and data/contact_epidemic/. Ignore oversized raw dumps and
+# PEMS variants that are not intentionally shipped.
 data/metr_la/metr-la.h5
-data/pems*/
-data/contact_epidemic/
+data/pems03/
+data/pems04/
+data/pems08/
