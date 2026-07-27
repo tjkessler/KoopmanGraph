@@ -22,6 +22,71 @@ RandomWalkDirection = Literal["forward", "backward"]
 # Match DiffConv / DCRNN-style row normalization (nn.gnn legacy floor).
 _RANDOM_WALK_DEGREE_FLOOR = 1e-6
 
+# Ephemeral Zhou Ĥ reuse for static incidence (pointer-keyed; not in checkpoints).
+_HyperedgeHatCacheKey = tuple[int, int, int | None, torch.dtype, torch.device]
+_hat_cache_key: _HyperedgeHatCacheKey | None = None
+_hat_cache: Tensor | None = None
+
+
+def clear_hyperedge_cache() -> None:
+    """Drop the cached dense Zhou hypergraph adjacency ``Ĥ``.
+
+    Call after in-place edits to ``hyperedge_index`` / ``hyperedge_weight``
+    storage that do not change tensor ``data_ptr`` values. Ordinary incidence
+    swaps (new tensors) invalidate automatically on the next assembly.
+
+    Notes
+    -----
+    The cache is module-scoped and ephemeral; it is never written to
+    ``state_dict``. Caching does **not** remove the dense
+    :math:`O(N^2)` representation of ``Ĥ``.
+    """
+    global _hat_cache_key, _hat_cache
+    _hat_cache_key = None
+    _hat_cache = None
+
+
+def _hyperedge_hat_cache_key(
+    hyperedge_index: Tensor,
+    hyperedge_weight: Tensor | None,
+    num_nodes: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> _HyperedgeHatCacheKey:
+    """Build a cheap incidence fingerprint for dense ``Ĥ`` reuse.
+
+    Uses tensor storage pointers. Callers that mutate incidence / weight
+    storage in place without changing pointers must call
+    :func:`clear_hyperedge_cache`.
+
+    Parameters
+    ----------
+    hyperedge_index : Tensor
+        Bipartite incidence ``(2, nnz)``.
+    hyperedge_weight : Tensor or None
+        Optional hyperedge weights.
+    num_nodes : int
+        Node count ``N``.
+    dtype : torch.dtype
+        Floating dtype of ``Ĥ``.
+    device : torch.device
+        Device of ``Ĥ``.
+
+    Returns
+    -------
+    tuple
+        Cache key ``(N, index_ptr, weight_ptr, dtype, device)``.
+    """
+    weight_ptr = None if hyperedge_weight is None else hyperedge_weight.data_ptr()
+    return (
+        num_nodes,
+        hyperedge_index.data_ptr(),
+        weight_ptr,
+        dtype,
+        device,
+    )
+
 
 def snapshot_edge_weight(snapshot: Data) -> Tensor | None:
     """Return optional scalar edge weights attached to a snapshot.
@@ -104,6 +169,11 @@ def dense_hyperedge_normalized_adjacency(
     row/column via the same ``d ↦ d^{-1/2}`` with non-finite → ``0`` convention
     used for ``Â``. Singleton hyperedges are retained (degree 1).
 
+    Repeated calls with the same incidence storage pointers, ``num_nodes``,
+    dtype, and device reuse an ephemeral dense ``Ĥ`` (see
+    :func:`clear_hyperedge_cache`). Caching does not change the dense
+    :math:`O(N^2)` representation.
+
     Parameters
     ----------
     hyperedge_index : Tensor
@@ -129,6 +199,8 @@ def dense_hyperedge_normalized_adjacency(
     ValueError
         If ``hyperedge_index`` has invalid shape or ``num_nodes`` is invalid.
     """
+    global _hat_cache_key, _hat_cache
+
     if num_nodes < 0:
         msg = f"num_nodes must be >= 0, got {num_nodes}"
         raise ValueError(msg)
@@ -140,12 +212,25 @@ def dense_hyperedge_normalized_adjacency(
         raise ValueError(msg)
 
     resolved_device = device if device is not None else hyperedge_index.device
+    key = _hyperedge_hat_cache_key(
+        hyperedge_index,
+        hyperedge_weight,
+        num_nodes,
+        dtype=dtype,
+        device=resolved_device,
+    )
+    if _hat_cache is not None and _hat_cache_key == key:
+        return _hat_cache
+
     if hyperedge_index.numel() == 0 or num_nodes == 0:
-        return torch.zeros(
+        result = torch.zeros(
             (num_nodes, num_nodes),
             dtype=dtype,
             device=resolved_device,
         )
+        _hat_cache = result
+        _hat_cache_key = key
+        return result
 
     node_idx = hyperedge_index[0].to(device=resolved_device)
     hedge_idx = hyperedge_index[1].to(device=resolved_device)
@@ -193,7 +278,10 @@ def dense_hyperedge_normalized_adjacency(
     # Ĥ = D_v^{-1/2} B W_e D_e^{-1} Bᵀ D_v^{-1/2}
     scaled = incidence * weights.unsqueeze(0) * deg_e_inv.unsqueeze(0)
     mid = scaled @ incidence.transpose(0, 1)
-    return deg_v_inv_sqrt.unsqueeze(1) * mid * deg_v_inv_sqrt.unsqueeze(0)
+    result = deg_v_inv_sqrt.unsqueeze(1) * mid * deg_v_inv_sqrt.unsqueeze(0)
+    _hat_cache = result
+    _hat_cache_key = key
+    return result
 
 
 # Design / blueprint alias for the Zhou incidence-normalized operator.
@@ -210,8 +298,9 @@ def hyperedge_normalized_adjacency_matvec(
     """Apply Zhou ``Ĥ`` to node features.
 
     Assembles dense ``Ĥ`` via
-    :func:`dense_hyperedge_normalized_adjacency` and returns ``Ĥ @ x``.
-    Suitable for modest ``N`` (same dense-operator ceiling as
+    :func:`dense_hyperedge_normalized_adjacency` (shared ephemeral cache) and
+    returns ``Ĥ @ x``. Suitable for modest ``N`` (same dense-operator ceiling
+    as
     :meth:`~koopman_graph.operators.HypergraphKoopmanOperator.effective_matrix`).
 
     Parameters

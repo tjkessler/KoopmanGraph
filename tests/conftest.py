@@ -1,10 +1,25 @@
 """Shared pytest fixtures for KoopmanGraph tests."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 import torch
 from torch_geometric.data import Data
+
+
+@pytest.fixture(autouse=True)
+def _clear_ephemeral_hyperedge_cache() -> Iterator[None]:
+    """Drop module-level Zhou ``Ĥ`` cache around each test.
+
+    Pointer-keyed reuse can false-hit when allocator recycling reuses a
+    ``data_ptr`` across tests (especially under xdist). Production callers
+    that mutate incidence in place must still call ``clear_hyperedge_cache``.
+    """
+    from koopman_graph.graph_utils import clear_hyperedge_cache
+
+    clear_hyperedge_cache()
+    yield
+    clear_hyperedge_cache()
 
 
 @pytest.fixture

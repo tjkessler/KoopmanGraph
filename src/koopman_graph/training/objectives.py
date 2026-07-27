@@ -11,6 +11,7 @@ against this module remain stable.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
@@ -39,12 +40,17 @@ from koopman_graph.training.history import (
     LossWeights,
     TrainingLossBreakdown,
 )
+from koopman_graph.training.latent_cache import encode_sequence_latents
 from koopman_graph.training.pair_objectives import (
     compute_backward_consistency_sequence_loss,
     compute_forward_consistency_sequence_loss,
     compute_sequence_loss,
     one_step_loss,
+    one_step_predictions,
 )
+
+if TYPE_CHECKING:
+    from koopman_graph.training.latent_cache import SequenceLatentCache
 
 _EIGENVALUE_REGULARIZATION_LOSS = EigenvalueRegularizationLoss()
 
@@ -261,6 +267,7 @@ def compute_rollout_loss(
     *,
     horizon: int,
     start_indices: Sequence[int],
+    cache: SequenceLatentCache | None = None,
 ) -> Tensor:
     """Compute rollout reconstruction loss averaged over start origins.
 
@@ -274,6 +281,8 @@ def compute_rollout_loss(
         Number of rollout steps.
     start_indices : sequence of int
         Rollout origin indices.
+    cache : SequenceLatentCache or None, optional
+        Shared teacher-forced latents for rollout origins.
 
     Returns
     -------
@@ -286,12 +295,14 @@ def compute_rollout_loss(
             sequence,
             horizon=horizon,
             start=start_indices[0],
+            cache=cache,
         )
     return rollout_multi_start_loss(
         model,
         sequence,
         horizon=horizon,
         start_indices=start_indices,
+        cache=cache,
     )
 
 
@@ -305,6 +316,12 @@ def compute_training_loss(
     rollout_start_indices: Sequence[int] | None = None,
 ) -> TrainingLossBreakdown:
     """Compute reconstruction, consistency, and rollout losses.
+
+    When reconstruction, forward, backward, rollout, PDE, or worst-case
+    weights are non-zero, encodes the sequence once into a shared
+    :class:`~koopman_graph.training.latent_cache.SequenceLatentCache` and
+    reuses those latents across those terms. Reconstruction, PDE, and
+    worst-case additionally share one decoded one-step prediction per pair.
 
     Parameters
     ----------
@@ -328,20 +345,51 @@ def compute_training_loss(
     TrainingLossBreakdown
         Unweighted per-term losses and the weighted total.
     """
+    # Evaluation-scoped continuous L_eff / Φ caches must not span optimizer steps.
+    koopman = model.koopman
+    if isinstance(koopman, ContinuousGraphKoopmanOperator):
+        koopman.clear_transition_cache()
+
     device = next(model.parameters()).device
+    needs_shared_predictions = (
+        loss_weights.reconstruction != 0.0
+        or loss_weights.pde != 0.0
+        or loss_weights.worst_case != 0.0
+    )
+    needs_latent_cache = (
+        needs_shared_predictions
+        or loss_weights.forward != 0.0
+        or loss_weights.backward != 0.0
+        or loss_weights.rollout != 0.0
+    )
+    cache = encode_sequence_latents(model, sequence) if needs_latent_cache else None
+    predictions = (
+        one_step_predictions(model, sequence, cache=cache)
+        if needs_shared_predictions and cache is not None
+        else None
+    )
 
     if loss_weights.reconstruction != 0.0:
-        reconstruction = compute_sequence_loss(model, sequence)
+        reconstruction = compute_sequence_loss(
+            model,
+            sequence,
+            cache=cache,
+            predictions=predictions,
+        )
     else:
         reconstruction = torch.zeros((), device=device)
 
     if loss_weights.forward != 0.0:
-        forward = compute_forward_consistency_sequence_loss(model, sequence)
+        forward = compute_forward_consistency_sequence_loss(
+            model, sequence, cache=cache
+        )
     else:
         forward = torch.zeros((), device=device)
 
     if loss_weights.backward != 0.0:
-        backward = compute_backward_consistency_sequence_loss(model, sequence)
+        backward = compute_backward_consistency_sequence_loss(
+            model, sequence, cache=cache
+        )
     else:
         backward = torch.zeros((), device=device)
 
@@ -361,12 +409,14 @@ def compute_training_loss(
         sequence,
         weight=loss_weights.pde,
         extra_losses=extra_losses,
+        predictions=predictions,
     )
     sparsity = compute_sparsity_loss(model, weight=loss_weights.sparsity)
     worst_case = compute_worst_case_reconstruction_loss(
         model,
         sequence,
         weight=loss_weights.worst_case,
+        predictions=predictions,
     )
 
     if loss_weights.rollout != 0.0:
@@ -379,6 +429,7 @@ def compute_training_loss(
             sequence,
             horizon=horizon,
             start_indices=starts,
+            cache=cache,
         )
     else:
         rollout = torch.zeros((), device=device)

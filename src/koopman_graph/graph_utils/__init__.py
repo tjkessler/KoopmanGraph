@@ -53,6 +53,7 @@ from koopman_graph.graph_utils.symmetry import (
 )
 from koopman_graph.graph_utils.topology import (
     RandomWalkDirection,
+    clear_hyperedge_cache,
     degree_support_mask,
     dense_hyperedge_normalized_adjacency,
     dense_random_walk_normalized_adjacency,
@@ -88,6 +89,7 @@ __all__ = [
     "apply_orbit_self",
     "assemble_orbit_self_blocks",
     "autoregressive_latent_rollout",
+    "clear_hyperedge_cache",
     "degree_support_mask",
     "dense_hyperedge_normalized_adjacency",
     "dense_random_walk_normalized_adjacency",

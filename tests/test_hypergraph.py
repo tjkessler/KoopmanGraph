@@ -1335,3 +1335,156 @@ def test_bind_hypergraph_decoder_closure(
     out = bound(z, torch.zeros(2, 0, dtype=torch.long), None)
     expected = decoder(z, synthetic_hyperedge_index, torch.tensor([1.0, 2.0]))
     assert torch.allclose(out, expected)
+
+
+def test_backward_sequence_precomputes_one_dense_hypergraph_inverse(
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Static dense hypergraph: one inverse per backward sequence loss."""
+    import koopman_graph.operators.hypergraph as hyper_mod
+    from koopman_graph.operators import HypergraphKoopmanOperator
+    from koopman_graph.training.pair_objectives import (
+        compute_backward_consistency_sequence_loss,
+    )
+
+    calls = {"count": 0}
+    original = hyper_mod.dense_inverse_or_pinv
+
+    def _counting(matrix: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return original(matrix)
+
+    monkeypatch.setattr(hyper_mod, "dense_inverse_or_pinv", _counting)
+
+    torch.manual_seed(7)
+    snapshots = [
+        Data(
+            x=torch.randn(4, 3),
+            edge_index=synthetic_hypergraph_edge_index,
+            hyperedge_index=synthetic_hyperedge_index,
+        )
+        for _ in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=HypergraphDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="hypergraph",
+    )
+    assert isinstance(model.koopman, HypergraphKoopmanOperator)
+    model.eval()
+    with torch.no_grad():
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+    assert torch.isfinite(loss)
+    assert calls["count"] == 1
+
+
+def test_hyperedge_hat_cache_object_identity(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Identical incidence storage reuses the same dense Ĥ object (TASK-1515)."""
+    from koopman_graph.graph_utils import (
+        clear_hyperedge_cache,
+        dense_hyperedge_normalized_adjacency,
+    )
+
+    clear_hyperedge_cache()
+    first = dense_hyperedge_normalized_adjacency(
+        synthetic_hyperedge_index,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    second = dense_hyperedge_normalized_adjacency(
+        synthetic_hyperedge_index,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    assert first is second
+
+
+def test_hyperedge_hat_cache_invalidates_on_new_incidence(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """A new incidence tensor (new data_ptr) rebuilds Ĥ."""
+    from koopman_graph.graph_utils import (
+        clear_hyperedge_cache,
+        dense_hyperedge_normalized_adjacency,
+    )
+
+    clear_hyperedge_cache()
+    first = dense_hyperedge_normalized_adjacency(
+        synthetic_hyperedge_index,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    cloned = synthetic_hyperedge_index.clone()
+    rebuilt = dense_hyperedge_normalized_adjacency(
+        cloned,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    assert rebuilt is not first
+    torch.testing.assert_close(rebuilt, first, rtol=0.0, atol=0.0)
+
+
+def test_hyperedge_hat_clear_forces_rebuild(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """clear_hyperedge_cache forces a fresh assembly for the same pointers."""
+    from koopman_graph.graph_utils import (
+        clear_hyperedge_cache,
+        dense_hyperedge_normalized_adjacency,
+    )
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    clear_hyperedge_cache()
+    first = dense_hyperedge_normalized_adjacency(
+        synthetic_hyperedge_index,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    HypergraphKoopmanOperator(2).clear_hyperedge_cache()
+    rebuilt = dense_hyperedge_normalized_adjacency(
+        synthetic_hyperedge_index,
+        num_nodes=4,
+        dtype=torch.float32,
+    )
+    assert rebuilt is not first
+    torch.testing.assert_close(rebuilt, first, rtol=0.0, atol=0.0)
+
+
+def test_hyperedge_hat_cached_advance_matches_cleared(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Advance with cached Ĥ matches a cleared rebuild within float tolerance."""
+    from koopman_graph.graph_utils import clear_hyperedge_cache
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    torch.manual_seed(51)
+    op = HypergraphKoopmanOperator(3, init_mode="xavier", init_scale=0.05)
+    z = torch.randn(4, 3)
+    clear_hyperedge_cache()
+    out_cached = op(z, synthetic_hyperedge_index)
+    out_hit = op(z, synthetic_hyperedge_index)
+    torch.testing.assert_close(out_cached, out_hit, rtol=0.0, atol=0.0)
+    clear_hyperedge_cache()
+    out_fresh = op(z, synthetic_hyperedge_index)
+    torch.testing.assert_close(out_cached, out_fresh, rtol=1e-6, atol=1e-6)
+
+
+def test_hyperedge_hat_cache_excluded_from_state_dict(
+    synthetic_hyperedge_index: torch.Tensor,
+) -> None:
+    """Ĥ cache is ephemeral and absent from operator checkpoints."""
+    from koopman_graph.graph_utils import clear_hyperedge_cache
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    clear_hyperedge_cache()
+    op = HypergraphKoopmanOperator(2, init_mode="identity")
+    _ = op(torch.randn(4, 2), synthetic_hyperedge_index)
+    state = op.state_dict()
+    assert all("hat" not in key and "hyperedge_cache" not in key for key in state)

@@ -10,6 +10,7 @@ from koopman_graph.nn.gnn import (
     build_gcn_convs,
     build_sage_convs,
     build_transformer_convs,
+    clear_diff_conv_support_caches,
     validate_diffusion_steps,
     validate_gat_attention,
     validate_optional_edge_dim,
@@ -257,7 +258,9 @@ class DiffConvEncoder(BaseGNNModule):
     Stacks DCRNN-style bidirectional diffusion convolutions (Li et al., ICLR
     2018). Unlike GCN, DiffConv builds separate forward/backward random-walk
     supports and therefore respects asymmetric ``edge_weight`` structure on
-    directed or anisotropically weighted graphs.
+    directed or anisotropically weighted graphs. Dense supports are cached per
+    layer for static topology; use :meth:`clear_support_cache` after in-place
+    topology edits (see :class:`~koopman_graph.nn.gnn.DiffusionConv`).
 
     Attributes
     ----------
@@ -331,6 +334,17 @@ class DiffConvEncoder(BaseGNNModule):
                 diffusion_steps=diffusion_steps,
             ),
         )
+
+    def clear_support_cache(self) -> None:
+        """Clear dense diffusion supports on every DiffConv layer.
+
+        See :meth:`~koopman_graph.nn.gnn.DiffusionConv.clear_support_cache`.
+
+        Notes
+        -----
+        Fan-out helper for in-place topology edits across the encoder stack.
+        """
+        clear_diff_conv_support_caches(self.convs)
 
 
 class GraphTransformerEncoder(BaseGNNModule):

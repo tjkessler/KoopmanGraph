@@ -8,6 +8,8 @@ non-private names.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
@@ -125,6 +127,7 @@ def compute_pde_residual_loss(
     *,
     weight: float,
     extra_losses: ExtraLosses | None,
+    predictions: Sequence[Tensor] | None = None,
 ) -> Tensor:
     """Average decoded-field PDE residuals across one-step predictions.
 
@@ -138,6 +141,9 @@ def compute_pde_residual_loss(
         Active PDE loss weight; zero skips evaluation.
     extra_losses : ExtraLosses or None
         Fit-time PDE residual configuration.
+    predictions : sequence of Tensor or None, optional
+        Shared one-step decoded forecasts (length ``T - 1``). When set, skips
+        a per-pair ``model(...)`` forward.
 
     Returns
     -------
@@ -157,19 +163,27 @@ def compute_pde_residual_loss(
     residual_fn = extra_losses.pde_residual_fn
     losses: list[Tensor] = []
     default_delta_t = model_default_delta_t(model)
-    for timestep in range(sequence.num_timesteps - 1):
-        source = sequence[timestep]
+    num_pairs = sequence.num_timesteps - 1
+    if predictions is not None and len(predictions) != num_pairs:
+        msg = (
+            f"predictions length ({len(predictions)}) must equal "
+            f"num_pairs ({num_pairs})"
+        )
+        raise ValueError(msg)
+    for timestep in range(num_pairs):
         target = sequence[timestep + 1]
-        delta_t = resolve_pair_delta_t(
-            sequence,
-            timestep,
-            default_time_step=default_delta_t,
-        )
-        prediction = model(
-            source,
-            control=pair_control(sequence, timestep),
-            delta_t=delta_t,
-        )
+        if predictions is None:
+            prediction = model(
+                sequence[timestep],
+                control=pair_control(sequence, timestep),
+                delta_t=resolve_pair_delta_t(
+                    sequence,
+                    timestep,
+                    default_time_step=default_delta_t,
+                ),
+            )
+        else:
+            prediction = predictions[timestep]
         mask = (
             sequence.observation_mask_at(timestep + 1)
             if sequence.has_observation_masks
@@ -215,6 +229,8 @@ def _worst_case_pair(
     model: TrainableKoopmanModel,
     sequence: GraphSnapshotSequence,
     timestep: int,
+    *,
+    prediction: Tensor | None = None,
 ) -> Tensor:
     """Compute worst-case reconstruction loss for one consecutive pair.
 
@@ -226,6 +242,8 @@ def _worst_case_pair(
         Snapshot sequence containing the consecutive pair.
     timestep : int
         Index of the source snapshot in the transition pair.
+    prediction : Tensor or None, optional
+        Shared one-step decoded forecast. When omitted, calls ``model(...)``.
 
     Returns
     -------
@@ -237,15 +255,16 @@ def _worst_case_pair(
         if sequence.has_observation_masks
         else None
     )
-    prediction = model(
-        sequence[timestep],
-        control=pair_control(sequence, timestep),
-        delta_t=resolve_pair_delta_t(
-            sequence,
-            timestep,
-            default_time_step=model_default_delta_t(model),
-        ),
-    )
+    if prediction is None:
+        prediction = model(
+            sequence[timestep],
+            control=pair_control(sequence, timestep),
+            delta_t=resolve_pair_delta_t(
+                sequence,
+                timestep,
+                default_time_step=model_default_delta_t(model),
+            ),
+        )
     return _WORST_CASE_RECONSTRUCTION_LOSS(
         prediction,
         sequence[timestep + 1].x,
@@ -258,6 +277,7 @@ def compute_worst_case_reconstruction_loss(
     sequence: GraphSnapshotSequence,
     *,
     weight: float,
+    predictions: Sequence[Tensor] | None = None,
 ) -> Tensor:
     """Average worst-case reconstruction over consecutive pairs when enabled.
 
@@ -269,6 +289,9 @@ def compute_worst_case_reconstruction_loss(
         Source/target pairs.
     weight : float
         Active worst-case weight; zero skips evaluation.
+    predictions : sequence of Tensor or None, optional
+        Shared one-step decoded forecasts (length ``T - 1``). When set, skips
+        a per-pair ``model(...)`` forward.
 
     Returns
     -------
@@ -278,4 +301,25 @@ def compute_worst_case_reconstruction_loss(
     device = next(model.parameters()).device
     if weight == 0.0:
         return torch.zeros((), device=device)
-    return mean_pair_sequence_loss(model, sequence, _worst_case_pair)
+    if predictions is None:
+        return mean_pair_sequence_loss(model, sequence, _worst_case_pair)
+
+    num_pairs = sequence.num_timesteps - 1
+    if sequence.num_timesteps < 2:
+        msg = "GraphSnapshotSequence must contain at least 2 snapshots for training"
+        raise ValueError(msg)
+    if len(predictions) != num_pairs:
+        msg = (
+            f"predictions length ({len(predictions)}) must equal "
+            f"num_pairs ({num_pairs})"
+        )
+        raise ValueError(msg)
+    total_loss = torch.zeros((), device=device)
+    for timestep in range(num_pairs):
+        total_loss = total_loss + _worst_case_pair(
+            model,
+            sequence,
+            timestep,
+            prediction=predictions[timestep],
+        )
+    return total_loss / num_pairs

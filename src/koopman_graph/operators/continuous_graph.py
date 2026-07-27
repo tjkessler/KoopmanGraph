@@ -61,7 +61,10 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     Control (when enabled) is owned by the self factor and integrated with Van
     Loan factors on the dense ``N·d`` generator. Prefer modest ``N`` for the
     dense path; large graphs should use ``sparsity="block_diagonal"`` (self
-    only; ignores neighbor coupling and adjacency).
+    only; ignores neighbor coupling and adjacency). Dense uncontrolled
+    advances may reuse assembled ``L_eff`` and ``Φ = exp(Δt L_eff)`` within
+    one training-loss evaluation; call :meth:`clear_transition_cache` between
+    evaluations (``compute_training_loss`` does this automatically).
 
     Attributes
     ----------
@@ -201,6 +204,155 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         else:
             self._bwd = None
         self._reset_neighbor_parameters()
+        # Ephemeral L_eff / Φ reuse within one training-loss evaluation.
+        # Cleared by :meth:`clear_transition_cache` (wired from compute_training_loss).
+        self._leff_cache: list[
+            tuple[Tensor, Tensor | None, int, torch.dtype, torch.device, Tensor]
+        ] = []
+        self._phi_cache: list[
+            tuple[Tensor, Tensor | None, float, torch.dtype, torch.device, Tensor]
+        ] = []
+
+    def clear_transition_cache(self) -> None:
+        """Drop cached dense ``L_eff`` and transition matrices ``Φ = exp(Δt L_eff)``.
+
+        Call at the start of each training-loss evaluation so cached
+        generators and transitions never span an optimizer step. Ordinary
+        topology / ``Δt`` changes miss the cache key and rebuild
+        automatically.
+
+        Notes
+        -----
+        Entries are ephemeral and never written to ``state_dict``. Bilinear
+        pair-local generators (``l_self`` / ``l_self_blocks`` overrides) and
+        Van Loan controlled advances do not use these caches.
+        """
+        self._leff_cache.clear()
+        self._phi_cache.clear()
+
+    def _topology_payload_equal(
+        self,
+        edge_index_a: Tensor,
+        edge_weight_a: Tensor | None,
+        edge_index_b: Tensor,
+        edge_weight_b: Tensor | None,
+    ) -> bool:
+        """Return whether two pairwise topology payloads match by content.
+
+        Parameters
+        ----------
+        edge_index_a, edge_index_b : Tensor
+            COO edge indices.
+        edge_weight_a, edge_weight_b : Tensor or None
+            Optional edge weights.
+
+        Returns
+        -------
+        bool
+            ``True`` when indices and weights match (including both absent).
+        """
+        if not torch.equal(edge_index_a, edge_index_b):
+            return False
+        if (edge_weight_a is None) != (edge_weight_b is None):
+            return False
+        if edge_weight_a is None:
+            return True
+        assert edge_weight_b is not None
+        return torch.allclose(edge_weight_a, edge_weight_b, equal_nan=True)
+
+    def _lookup_cached_generator(
+        self,
+        edge_index: Tensor,
+        edge_weight: Tensor | None,
+        num_nodes: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor | None:
+        """Return a cached ``L_eff`` for matching topology / size / dtype / device.
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Pairwise topology.
+        edge_weight : Tensor or None
+            Optional edge weights.
+        num_nodes : int
+            Node count ``N``.
+        dtype : torch.dtype
+            Floating dtype of ``L_eff``.
+        device : torch.device
+            Device of ``L_eff``.
+
+        Returns
+        -------
+        Tensor or None
+            Cached generator, or ``None`` on miss.
+        """
+        for (
+            cached_index,
+            cached_weight,
+            cached_nodes,
+            cached_dtype,
+            cached_device,
+            cached_generator,
+        ) in self._leff_cache:
+            if (
+                cached_nodes == num_nodes
+                and cached_dtype == dtype
+                and cached_device == device
+                and self._topology_payload_equal(
+                    edge_index, edge_weight, cached_index, cached_weight
+                )
+            ):
+                return cached_generator
+        return None
+
+    def _lookup_cached_transition(
+        self,
+        edge_index: Tensor,
+        edge_weight: Tensor | None,
+        delta_value: float,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor | None:
+        """Return a cached ``Φ`` for matching topology / ``Δt`` / dtype / device.
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Pairwise topology.
+        edge_weight : Tensor or None
+            Optional edge weights.
+        delta_value : float
+            Scalar integration interval.
+        dtype : torch.dtype
+            Floating dtype of ``Φ``.
+        device : torch.device
+            Device of ``Φ``.
+
+        Returns
+        -------
+        Tensor or None
+            Cached transition, or ``None`` on miss.
+        """
+        for (
+            cached_index,
+            cached_weight,
+            cached_delta,
+            cached_dtype,
+            cached_device,
+            cached_phi,
+        ) in self._phi_cache:
+            if (
+                cached_delta == delta_value
+                and cached_dtype == dtype
+                and cached_device == device
+                and self._topology_payload_equal(
+                    edge_index, edge_weight, cached_index, cached_weight
+                )
+            ):
+                return cached_phi
+        return None
 
     def _reset_factor_parameters(
         self,
@@ -529,10 +681,28 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         ValueError
             If both ``l_self`` and ``l_self_blocks`` are set, or if
             ``l_self_blocks`` has the wrong shape.
+
+        Notes
+        -----
+        When ``l_self`` and ``l_self_blocks`` are both omitted, repeated calls
+        with the same topology reuse an evaluation-scoped ``L_eff`` (see
+        :meth:`clear_transition_cache`). Overrides skip that cache.
         """
         if l_self is not None and l_self_blocks is not None:
             msg = "Pass at most one of l_self and l_self_blocks"
             raise ValueError(msg)
+
+        use_cache = l_self is None and l_self_blocks is None
+        if use_cache:
+            cached = self._lookup_cached_generator(
+                edge_index,
+                edge_weight,
+                num_nodes,
+                self.L_self.dtype,
+                self.L_self.device,
+            )
+            if cached is not None:
+                return cached
 
         self_matrix = self.L_self if l_self is None else l_self
         neighbor = self._dense_neighbor_coupling(
@@ -547,17 +717,30 @@ class ContinuousGraphKoopmanOperator(nn.Module):
                 dtype=neighbor.dtype,
                 device=neighbor.device,
             )
-            return torch.kron(identity, self_matrix) + neighbor
+            generator = torch.kron(identity, self_matrix) + neighbor
+        else:
+            expected = (num_nodes, self.latent_dim, self.latent_dim)
+            if l_self_blocks.shape != expected:
+                msg = (
+                    f"l_self_blocks must have shape {expected}, "
+                    f"got {tuple(l_self_blocks.shape)}"
+                )
+                raise ValueError(msg)
+            self_blocks = torch.block_diag(*l_self_blocks.unbind(0))
+            generator = self_blocks + neighbor
 
-        expected = (num_nodes, self.latent_dim, self.latent_dim)
-        if l_self_blocks.shape != expected:
-            msg = (
-                f"l_self_blocks must have shape {expected}, "
-                f"got {tuple(l_self_blocks.shape)}"
+        if use_cache:
+            self._leff_cache.append(
+                (
+                    edge_index,
+                    edge_weight,
+                    num_nodes,
+                    generator.dtype,
+                    generator.device,
+                    generator,
+                )
             )
-            raise ValueError(msg)
-        self_blocks = torch.block_diag(*l_self_blocks.unbind(0))
-        return self_blocks + neighbor
+        return generator
 
     def spectrum(
         self,
@@ -598,28 +781,54 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     ) -> Tensor:
         """Return ``exp(L_eff Δt)`` for the dense networked generator.
 
+        Within an evaluation, repeated calls with the same topology and
+        scalar ``Δt`` reuse a cached ``Φ``; distinct ``Δt`` values reuse
+        cached ``L_eff`` (see :meth:`clear_transition_cache`).
+
         Parameters
         ----------
-
-        delta_t : float | Tensor
-            See the function signature / summary for ``delta_t``.
+        delta_t : float or Tensor
+            Integration interval.
         edge_index : Tensor
-            See the function signature / summary for ``edge_index``.
+            Edge index ``(2, E)``.
         num_nodes : int
-            See the function signature / summary for ``num_nodes``.
-        edge_weight : Tensor | None
-            See the function signature / summary for ``edge_weight``.
+            Number of nodes ``N``.
+        edge_weight : Tensor or None, optional
+            Optional edge weights ``(E,)``.
 
         Returns
         -------
-
         Tensor
-            See summary line."""
+            Dense transition matrix with shape ``(N·d, N·d)``.
+        """
+        dtype = self.L_self.dtype
+        device = self.L_self.device
+        delta = torch.as_tensor(delta_t, dtype=dtype, device=device)
+        delta_value = float(delta.detach().reshape(-1)[0].item())
+        cached_phi = self._lookup_cached_transition(
+            edge_index,
+            edge_weight,
+            delta_value,
+            dtype,
+            device,
+        )
+        if cached_phi is not None:
+            return cached_phi
         generator = self.effective_generator(
             edge_index, num_nodes, edge_weight=edge_weight
         )
-        delta = torch.as_tensor(delta_t, dtype=generator.dtype, device=generator.device)
-        return torch.linalg.matrix_exp(generator * delta)
+        phi = torch.linalg.matrix_exp(generator * delta)
+        self._phi_cache.append(
+            (
+                edge_index,
+                edge_weight,
+                delta_value,
+                generator.dtype,
+                generator.device,
+                phi,
+            )
+        )
+        return phi
 
     def _networked_control_matrix(self, num_nodes: int) -> Tensor:
         """Build ``B_eff`` with shape ``(C, N·d)`` for global additive control.
@@ -702,6 +911,17 @@ class ContinuousGraphKoopmanOperator(nn.Module):
                 l_self_blocks = per_node_effective_bilinear_matrices(
                     self.L_self, control, coupling
                 )
+
+        # Uncontrolled dense path: reuse evaluation-scoped Φ when the generator
+        # is the default (no bilinear self overrides).
+        if self.control_dim == 0 and l_self_override is None and l_self_blocks is None:
+            if control is not None:
+                msg = "control input provided to an uncontrolled operator"
+                raise ValueError(msg)
+            transition = self.transition_matrix(
+                delta_t, edge_index, num_nodes, edge_weight=edge_weight
+            )
+            return (flat @ transition.T).view_as(z)
 
         generator = self.effective_generator(
             edge_index,

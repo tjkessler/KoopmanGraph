@@ -270,6 +270,11 @@ def test_hierarchical_validation_and_resolution_paths(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="pool_ratios must contain"):
         HierarchicalGraphKoopmanModel(_tiny_model(), pool_ratios=())
+    with pytest.raises(ValueError, match="pool_schedule must be"):
+        HierarchicalGraphKoopmanModel(
+            _tiny_model(),
+            pool_schedule="every_epoch",  # type: ignore[arg-type]
+        )
 
     bare = SimpleNamespace(encoder=object(), decoder=object())
     with pytest.raises(ValueError, match="encoder.in_channels"):
@@ -348,3 +353,111 @@ def test_hierarchical_validation_and_resolution_paths(tmp_path: Path) -> None:
     restored = unpool(coarse_x, perm, num_fine=4)
     assert restored.shape == (4, 1)
     assert torch.equal(restored[0], coarse_x[0])
+
+
+def test_pool_schedule_default_pools_each_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``per_snapshot`` calls ``pool_down`` once per timestep."""
+    model = _tiny_model()
+    hier = HierarchicalGraphKoopmanModel(model, pool_ratios=(0.5,))
+    assert hier.pool_schedule == "per_snapshot"
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=8,
+        num_timesteps=5,
+        in_channels=1,
+        noise_std=0.0,
+        seed=20,
+    )
+    calls = {"count": 0}
+    original = hier.pool_down
+
+    def _counting(graph, edge_index=None, edge_weight=None):
+        calls["count"] += 1
+        return original(graph, edge_index, edge_weight)
+
+    monkeypatch.setattr(hier, "pool_down", _counting)
+    with torch.no_grad():
+        coarse, all_steps = hier._pool_sequence(sequence)
+    assert calls["count"] == sequence.num_timesteps
+    assert len(all_steps) == sequence.num_timesteps
+    assert coarse.is_dynamic_topology
+
+
+def test_pool_schedule_hold_perm_pools_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``hold_perm`` runs ``pool_down`` once and reuses reference perms."""
+    model = _tiny_model()
+    hier = HierarchicalGraphKoopmanModel(
+        model, pool_ratios=(0.5,), pool_schedule="hold_perm"
+    )
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=8,
+        num_timesteps=6,
+        in_channels=1,
+        noise_std=0.0,
+        seed=21,
+    )
+    calls = {"count": 0}
+    original = hier.pool_down
+
+    def _counting(graph, edge_index=None, edge_weight=None):
+        calls["count"] += 1
+        return original(graph, edge_index, edge_weight)
+
+    monkeypatch.setattr(hier, "pool_down", _counting)
+    with torch.no_grad():
+        coarse, all_steps = hier._pool_sequence(sequence)
+    assert calls["count"] == 1
+    assert len(all_steps) == sequence.num_timesteps
+    assert all_steps[0] is all_steps[-1]
+    assert not coarse.is_dynamic_topology
+    # Features still vary across time under the held perm.
+    assert coarse[0].x is not None and coarse[1].x is not None
+    assert not torch.equal(coarse[0].x, coarse[1].x)
+
+
+def test_hold_perm_fit_and_save_load_round_trip(tmp_path: Path) -> None:
+    """``hold_perm`` fit + checkpoint restore the schedule (TASK-1512)."""
+    model = _tiny_model()
+    hier = HierarchicalGraphKoopmanModel(
+        model, pool_ratios=(0.5,), pool_schedule="hold_perm"
+    )
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=8,
+        num_timesteps=4,
+        in_channels=1,
+        noise_std=0.0,
+        seed=22,
+    )
+    history = hier.fit(sequence, epochs=2, lr=1e-2, unpool_epochs=1)
+    assert len(history.reconstruction_loss) == 2
+    out = tmp_path / "hier_hold"
+    hier.save(out)
+    loaded = HierarchicalGraphKoopmanModel.load(out)
+    assert loaded.pool_schedule == "hold_perm"
+
+
+def test_pool_features_with_steps_matches_perm_index() -> None:
+    """Held-perm helper indexes features like the unpool teacher path."""
+    from koopman_graph.hierarchical.pooling import pool_features_with_steps
+
+    model = _tiny_model()
+    hier = HierarchicalGraphKoopmanModel(model, pool_ratios=(0.5,))
+    sequence = SyntheticDynamicGraphBenchmark.generate(
+        num_nodes=8,
+        num_timesteps=2,
+        in_channels=1,
+        noise_std=0.0,
+        seed=23,
+    )
+    fine = sequence[0]
+    assert fine.x is not None
+    _, steps = hier.pool_down(fine)
+    held = pool_features_with_steps(fine.x, steps)
+    expected = fine.x
+    for step in steps:
+        expected = expected[step.perm]
+    torch.testing.assert_close(held.x, expected, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(held.edge_index, steps[-1].edge_index)

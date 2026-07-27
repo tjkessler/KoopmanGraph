@@ -1,5 +1,9 @@
 """Tests for GraphKoopmanModel.fit and training utilities."""
 
+from __future__ import annotations
+
+import contextlib
+import warnings
 from unittest.mock import patch
 
 import pytest
@@ -1373,3 +1377,131 @@ def test_one_step_loss_and_pair_objectives_paths(
 
     encoded = _encode_at(delay_model, scaling_sequence, index=1)
     assert encoded.shape[-1] == delay_model.latent_dim
+
+
+def test_fit_default_amp_off_preserves_fp32(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Default use_amp=False keeps the FP32 training path (TASK-1506)."""
+    history = trainable_model.fit(scaling_sequence, epochs=1, lr=1e-2)
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))
+
+
+def test_fit_use_amp_on_cpu_warns_and_runs_fp32(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Non-CUDA use_amp warns once and continues in FP32."""
+    import koopman_graph.training.epochs as epochs_mod
+
+    epochs_mod._AMP_NON_CUDA_WARNED = False
+    with pytest.warns(UserWarning, match="only supported on CUDA"):
+        history = trainable_model.fit(scaling_sequence, epochs=1, lr=1e-2, use_amp=True)
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))
+    # Second call should not warn again (module-level once flag).
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trainable_model.fit(scaling_sequence, epochs=1, lr=1e-2, use_amp=True)
+    assert not any("only supported on CUDA" in str(w.message) for w in caught)
+
+
+def test_fit_amp_grad_clip_uses_unscale_before_clip(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """When AMP is active, scaler.unscale_ precedes gradient clipping."""
+    import koopman_graph.training.epochs as epochs_mod
+
+    order: list[str] = []
+
+    class _StubScaler:
+        def scale(self, loss):
+            order.append("scale")
+            return loss
+
+        def unscale_(self, optimizer):
+            order.append("unscale")
+
+        def step(self, optimizer):
+            order.append("step")
+            optimizer.step()
+
+        def update(self):
+            order.append("update")
+
+    stub = _StubScaler()
+
+    def _force_amp(use_amp, device, amp_dtype=None, *, grad_scaler=None):
+        if not use_amp:
+            return False, None, None
+        return True, torch.float16, grad_scaler if grad_scaler is not None else stub
+
+    with (
+        patch.object(epochs_mod, "prepare_training_amp", side_effect=_force_amp),
+        patch(
+            "koopman_graph.training.loop.prepare_training_amp",
+            side_effect=_force_amp,
+        ),
+        patch(
+            "torch.amp.autocast",
+            side_effect=lambda *args, **kwargs: contextlib.nullcontext(),
+        ),
+        patch(
+            "koopman_graph.training.epochs.nn.utils.clip_grad_norm_",
+            side_effect=lambda *args, **kwargs: order.append("clip"),
+        ),
+    ):
+        trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            lr=1e-2,
+            use_amp=True,
+            max_grad_norm=1.0,
+        )
+    assert order == ["scale", "unscale", "clip", "step", "update"]
+
+
+def test_fit_amp_with_eigenvalue_weight_finite(
+    trainable_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """Eigenvalue-regularized fit stays finite with use_amp (FP32 on CPU)."""
+    import koopman_graph.training.epochs as epochs_mod
+
+    epochs_mod._AMP_NON_CUDA_WARNED = False
+    with pytest.warns(UserWarning, match="only supported on CUDA"):
+        history = trainable_model.fit(
+            scaling_sequence,
+            epochs=1,
+            lr=1e-2,
+            use_amp=True,
+            loss_weights=LossWeights(reconstruction=1.0, eigenvalue=0.1),
+        )
+    assert torch.isfinite(torch.tensor(history.loss[0]))
+    assert torch.isfinite(torch.tensor(history.eigenvalue_loss[0]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA AMP smoke")
+def test_fit_amp_cuda_smoke_one_epoch(
+    scaling_sequence: GraphSnapshotSequence,
+) -> None:
+    """CUDA AMP: one epoch produces finite losses."""
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+    )
+    history = model.fit(
+        scaling_sequence,
+        epochs=1,
+        lr=1e-2,
+        device="cuda",
+        use_amp=True,
+        loss_weights=LossWeights(reconstruction=1.0, eigenvalue=0.05),
+    )
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))

@@ -350,3 +350,70 @@ def test_materialize_learned_topology_explicit_num_nodes() -> None:
     from_tensor = model.materialize_learned_topology(data.x, num_nodes=3)
     from_scalar = model.materialize_learned_topology(0, num_nodes=3)  # type: ignore[arg-type]
     assert from_data[0].shape == from_tensor[0].shape == from_scalar[0].shape
+
+
+def test_forward_materializes_learned_topology_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Self-adaptive forward materializes Â at most once (TASK-1514 / G10)."""
+    data = Data(x=torch.randn(3, 2), edge_index=_path_edge_index(3))
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 3, num_layers=1),
+        GNNDecoder(3, 8, 2, num_layers=1),
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    assert model.adaptive_topology is not None
+    calls = {"count": 0}
+    original = model.adaptive_topology.materialize
+
+    def _counting() -> tuple[torch.Tensor, torch.Tensor]:
+        calls["count"] += 1
+        return original()
+
+    monkeypatch.setattr(model.adaptive_topology, "materialize", _counting)
+    model.eval()
+    with torch.no_grad():
+        _ = model(data)
+    assert calls["count"] == 1
+
+
+def test_encode_rollout_origin_materializes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """encode_rollout_origin does not rematerialize after resolving edges."""
+    data = Data(x=torch.randn(3, 2), edge_index=_path_edge_index(3))
+    model = GraphKoopmanModel(
+        GNNEncoder(2, 8, 3, num_layers=1),
+        GNNDecoder(3, 8, 2, num_layers=1),
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        learn_topology="self_adaptive",
+    )
+    assert model.adaptive_topology is not None
+    calls = {"count": 0}
+    original = model.adaptive_topology.materialize
+
+    def _counting() -> tuple[torch.Tensor, torch.Tensor]:
+        calls["count"] += 1
+        return original()
+
+    monkeypatch.setattr(model.adaptive_topology, "materialize", _counting)
+    model.eval()
+    with torch.no_grad():
+        z, edge_index, edge_weight = model.encode_rollout_origin(data)
+    assert calls["count"] == 1
+    assert z.shape == (3, 3)
+    assert edge_index.shape == (2, 9)
+    assert edge_weight is not None and edge_weight.shape == (9,)
+
+
+def test_adaptive_adjacency_still_full_n_squared_coo() -> None:
+    """AdaptiveAdjacency remains dense N² COO (no top-k sparsification)."""
+    module = AdaptiveAdjacency(embedding_dim=4, num_nodes=5)
+    edge_index, edge_weight = module.materialize()
+    assert edge_index.shape == (2, 25)
+    assert edge_weight.shape == (25,)

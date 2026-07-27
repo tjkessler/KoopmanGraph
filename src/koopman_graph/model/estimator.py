@@ -36,6 +36,7 @@ from koopman_graph.nn import (
     HypergraphEncoder,
     bind_hypergraph_decoder,
 )
+from koopman_graph.nn.delay import history_from_snapshots
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
@@ -732,6 +733,8 @@ class GraphKoopmanModel(nn.Module):
         x_or_data: Tensor | Data,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        *,
+        resolve_learned_topology: bool = True,
     ) -> Tensor:
         """Lift graph node features into the hybrid Koopman latent space.
 
@@ -753,6 +756,11 @@ class GraphKoopmanModel(nn.Module):
             Edge index required when ``x_or_data`` is a tensor.
         edge_weight : Tensor or None, optional
             Optional scalar edge weights for tensor input.
+        resolve_learned_topology : bool, optional
+            When ``True`` (default) and pairwise topology learning is enabled,
+            materialize learned ``Â`` here. Callers that already resolved
+            topology (e.g. :meth:`forward`) pass ``False`` so materialize runs
+            at most once per top-level call.
 
         Returns
         -------
@@ -760,11 +768,11 @@ class GraphKoopmanModel(nn.Module):
             Latent node features with shape ``(num_nodes, latent_dim)``.
         """
         replace = self.learns_pairwise_topology and not self._uses_hypergraph_encode()
-        if replace:
+        if replace and resolve_learned_topology:
             edge_index, edge_weight = self.materialize_learned_topology(
                 x_or_data, edge_index, edge_weight
             )
-        elif self.adaptive_topology is not None:
+        elif self.adaptive_topology is not None and not replace:
             # Bind N for hypergraph peers (incidence stays exogenous).
             self.materialize_learned_topology(x_or_data, edge_index, edge_weight)
         return encode_features(
@@ -808,7 +816,37 @@ class GraphKoopmanModel(nn.Module):
             Encoded latent ``z``, resolved ``edge_index``, and optional
             ``edge_weight`` at the rollout origin.
         """
-        z, edge_resolved, weight_resolved = encode_rollout_origin_helper(
+        if self.learns_pairwise_topology and not self._uses_hypergraph_encode():
+            # Materialize at most once; encode reuses the resolved COO.
+            if edge_index is None or edge_weight is None:
+                edge_resolved, weight_resolved = self.materialize_learned_topology(
+                    x_or_data, edge_index, edge_weight
+                )
+            else:
+                edge_resolved, weight_resolved = edge_index, edge_weight
+            if self.n_delays > 1 and isinstance(x_or_data, Data):
+                past = list(history) if history is not None else []
+                x_window, _, _, _ = history_from_snapshots(
+                    [*past, x_or_data],
+                    self.n_delays,
+                    pad=True,
+                )
+                z = self.encode(
+                    x_window,
+                    edge_resolved,
+                    weight_resolved,
+                    resolve_learned_topology=False,
+                )
+            else:
+                z = self.encode(
+                    x_or_data,
+                    edge_resolved,
+                    weight_resolved,
+                    resolve_learned_topology=False,
+                )
+            return z, edge_resolved, weight_resolved
+
+        return encode_rollout_origin_helper(
             self.encode,
             n_delays=self.n_delays,
             x_or_data=x_or_data,
@@ -816,11 +854,6 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             history=history,
         )
-        if self.learns_pairwise_topology and not self._uses_hypergraph_encode():
-            edge_resolved, weight_resolved = self.materialize_learned_topology(
-                x_or_data, edge_index, edge_weight
-            )
-        return z, edge_resolved, weight_resolved
 
     def encode_at(
         self,
@@ -1109,7 +1142,12 @@ class GraphKoopmanModel(nn.Module):
         else:
             hyperedge_index = None
             hyperedge_weight = None
-        z = self.encode(x_or_data, edge_index, edge_weight)
+        z = self.encode(
+            x_or_data,
+            edge_index,
+            edge_weight,
+            resolve_learned_topology=False,
+        )
         z_next = self._advance_latent(
             z,
             control=control,
@@ -1420,6 +1458,8 @@ class GraphKoopmanModel(nn.Module):
         window_seed: int | None = None,
         sampler: WindowLikeSampler | None = None,
         max_grad_norm: float | None = None,
+        use_amp: bool = False,
+        amp_dtype: torch.dtype | None = None,
         early_stopping_patience: int | None = None,
         early_stopping_min_delta: float = 0.0,
         early_stopping_monitor: EarlyStoppingMonitor = "auto",
@@ -1524,6 +1564,11 @@ Data
             full-graph.
         max_grad_norm : float or None, optional
             When set, clip the global gradient norm before each optimizer step.
+        use_amp : bool, optional
+            Enable CUDA automatic mixed precision (autocast + GradScaler).
+            On CPU/MPS, warns once and continues in FP32. Default is ``False``.
+        amp_dtype : torch.dtype or None, optional
+            Autocast dtype when AMP is active (default ``torch.float16``).
         early_stopping_patience : int or None, optional
             Stop training when training loss fails to improve for this many
             consecutive epochs. Disabled when ``None``.
@@ -1598,6 +1643,8 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             window_seed=window_seed,
             sampler=sampler,
             max_grad_norm=max_grad_norm,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
             early_stopping_patience=early_stopping_patience,
             early_stopping_min_delta=early_stopping_min_delta,
             early_stopping_monitor=prepared.early_stopping_monitor,

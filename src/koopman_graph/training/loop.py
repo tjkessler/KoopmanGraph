@@ -23,6 +23,7 @@ from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
     eval_one_epoch,
+    prepare_training_amp,
     train_one_epoch,
     train_windowed_epoch,
 )
@@ -39,6 +40,7 @@ from koopman_graph.training.schedules import resolve_loss_weights_for_epoch
 __all__ = [
     "bind_pending_orbit_ties",
     "eval_one_epoch",
+    "prepare_training_amp",
     "resolve_early_stopping_monitor",
     "resolve_lr_scheduler",
     "run_fit_loop",
@@ -200,6 +202,8 @@ def run_fit_loop(
     window_seed: int | None = None,
     sampler: WindowLikeSampler | None = None,
     max_grad_norm: float | None = None,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype | None = None,
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
     early_stopping_monitor: Literal["train", "val"] = "train",
@@ -263,6 +267,11 @@ def run_fit_loop(
         approximation over induced subgraphs.
     max_grad_norm : float or None, optional
         Global gradient-norm clip before each optimizer step.
+    use_amp : bool, optional
+        Enable CUDA automatic mixed precision (autocast + GradScaler).
+        On CPU/MPS, warns once and runs FP32. Default is ``False``.
+    amp_dtype : torch.dtype or None, optional
+        Autocast dtype when AMP is active (default ``torch.float16``).
     early_stopping_patience : int or None, optional
         Stop after this many non-improving epochs. Disabled when ``None``.
     early_stopping_min_delta : float, optional
@@ -315,6 +324,18 @@ def run_fit_loop(
 
     optim = optimizer(module.parameters(), lr=lr, **optimizer_kwargs)
     scheduler = resolve_lr_scheduler(lr_scheduler, optim)
+    amp_enabled, resolved_amp_dtype, grad_scaler = prepare_training_amp(
+        use_amp,
+        train_device,
+        amp_dtype,
+    )
+    # Epoch helpers also accept use_amp; pass the resolved scaler so state
+    # persists across epochs when AMP is active.
+    amp_kwargs = {
+        "use_amp": amp_enabled,
+        "amp_dtype": resolved_amp_dtype,
+        "grad_scaler": grad_scaler,
+    }
     window_sampler: WindowLikeSampler | None
     if sampler is not None:
         sampler.sequences = [
@@ -395,6 +416,7 @@ def run_fit_loop(
                 max_grad_norm=max_grad_norm,
                 rollout_horizon=rollout_horizon,
                 rollout_start_indices=epoch_rollout_starts,
+                **amp_kwargs,
             )
         else:
             breakdown = train_windowed_epoch(
@@ -409,6 +431,7 @@ def run_fit_loop(
                 rollout_start_indices=rollout_start_indices,
                 rollout_starts_per_epoch=rollout_starts_per_epoch,
                 rollout_start_seed=rollout_start_seed,
+                **amp_kwargs,
             )
         if scheduler is not None:
             scheduler.step()

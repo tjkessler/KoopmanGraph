@@ -10,6 +10,7 @@ from koopman_graph.nn.gnn import (
     build_gcn_convs,
     build_sage_convs,
     build_transformer_convs,
+    clear_diff_conv_support_caches,
     validate_diffusion_steps,
     validate_gat_attention,
     validate_optional_edge_dim,
@@ -261,7 +262,9 @@ class DiffConvDecoder(BaseGNNModule):
     Constructor arguments mirror
     :class:`~koopman_graph.nn.encoder.DiffConvEncoder` with I/O dimensions
     swapped. Asymmetric ``edge_weight`` values are consumed by each
-    :class:`~koopman_graph.nn.gnn.DiffusionConv` layer.
+    :class:`~koopman_graph.nn.gnn.DiffusionConv` layer. Dense supports are
+    cached per layer; use :meth:`clear_support_cache` after in-place topology
+    edits.
 
     Attributes
     ----------
@@ -335,6 +338,17 @@ class DiffConvDecoder(BaseGNNModule):
                 diffusion_steps=diffusion_steps,
             ),
         )
+
+    def clear_support_cache(self) -> None:
+        """Clear dense diffusion supports on every DiffConv layer.
+
+        See :meth:`~koopman_graph.nn.gnn.DiffusionConv.clear_support_cache`.
+
+        Notes
+        -----
+        Fan-out helper for in-place topology edits across the decoder stack.
+        """
+        clear_diff_conv_support_caches(self.convs)
 
 
 class GraphTransformerDecoder(BaseGNNModule):

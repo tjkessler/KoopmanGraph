@@ -107,6 +107,7 @@ def test_public_all_excludes_power_user_modules() -> None:
     assert callable(graph_utils.propagate_latent)
     assert callable(graph_utils.pack_rollout_snapshots)
     assert callable(graph_utils.dense_symmetric_normalized_laplacian)
+    assert callable(graph_utils.clear_hyperedge_cache)
     assert graph_utils.topology is not None
     assert graph_utils.propagation is not None
     assert gnn.BaseGNNModule is not None

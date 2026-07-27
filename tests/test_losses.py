@@ -403,6 +403,38 @@ def test_rollout_multi_start_loss_averages_origins(
     assert torch.allclose(multi, expected)
 
 
+def test_rollout_multi_start_encodes_each_origin_once(
+    trainable_model: GraphKoopmanModel,
+    synthetic_edge_index: torch.Tensor,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-start without cache encodes each distinct origin once (TASK-1514)."""
+    from koopman_graph.losses import rollout_multi_start_loss
+
+    snapshots = [
+        Data(x=torch.ones(5, 3) * (0.9**t), edge_index=synthetic_edge_index)
+        for t in range(8)
+    ]
+    sequence = GraphSnapshotSequence(snapshots)
+    hits = {"count": 0}
+    original_encode_at = trainable_model.encode_at
+
+    def _counting(seq, index, **kwargs):
+        hits["count"] += 1
+        return original_encode_at(seq, index, **kwargs)
+
+    monkeypatch.setattr(trainable_model, "encode_at", _counting)
+    starts = [0, 2, 4, 2]
+    loss = rollout_multi_start_loss(
+        trainable_model,
+        sequence,
+        horizon=2,
+        start_indices=starts,
+    )
+    assert torch.isfinite(loss)
+    assert hits["count"] == len(set(starts))
+
+
 def test_compute_training_loss_with_rollout_weight(
     trainable_model: GraphKoopmanModel,
     scaling_sequence: GraphSnapshotSequence,

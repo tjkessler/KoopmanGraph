@@ -7,6 +7,7 @@ per-node controls are indexed by the pooling ``perm`` chain.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -19,6 +20,7 @@ from torch_geometric.utils import subgraph
 from koopman_graph.graph_utils import snapshot_edge_weight
 
 PoolingKind = Literal["topk", "sag"]
+PoolSchedule = Literal["per_snapshot", "hold_perm"]
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,40 @@ def apply_pool_layer(
         # Pooling may leave multi-dim edge_attr; keep scalar weights only.
         edge_attr_c = edge_attr_c.view(edge_attr_c.size(0), -1)[:, 0]
     return x_c, edge_c, edge_attr_c, perm
+
+
+def pool_features_with_steps(features: Tensor, steps: Sequence[PoolStep]) -> Data:
+    """Pool node features by indexing through held :class:`PoolStep` perms.
+
+    Reuses each step's coarse topology from the reference pool. Does **not**
+    re-run TopK/SAG score nets — suitable for ``pool_schedule="hold_perm"``.
+
+    Parameters
+    ----------
+    features : Tensor
+        Fine node features ``(N, F)``.
+    steps : sequence of PoolStep
+        Fine→coarse metadata from a reference :meth:`pool_down` (or equivalent).
+
+    Returns
+    -------
+    Data
+        Coarse snapshot whose ``x`` is ``features`` indexed by the perm chain
+        and whose topology matches the last step.
+
+    Raises
+    ------
+    ValueError
+        If ``steps`` is empty.
+    """
+    if len(steps) == 0:
+        msg = "steps must contain at least one PoolStep"
+        raise ValueError(msg)
+    x = features
+    for step in steps:
+        x = x[step.perm]
+    last = steps[-1]
+    return snapshot_from_features(x, last.edge_index, last.edge_weight)
 
 
 class ScatterUnpool(nn.Module):
