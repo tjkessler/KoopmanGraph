@@ -14,11 +14,11 @@ repository-code: "https://github.com/tjkessler/KoopmanGraph"
 url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
 version: 0.7.0
-date-released: 2026-07-26
-doi: 10.5281/zenodo.21584577
+date-released: 2026-07-27
+doi: 10.5281/zenodo.21613378
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.21584577
+    value: 10.5281/zenodo.21613378
     description: "Archived software (version DOI)"
 keywords:
   - koopman-operator
