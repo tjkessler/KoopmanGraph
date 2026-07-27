@@ -1,5 +1,5 @@
 ---
-title: 'KoopmanGraph: Graph Neural Networks with Koopman Operator Theory for Spatiotemporal Graph Dynamics'
+title: 'KoopmanGraph: Topology-Aware Koopman Autoencoders for Networked Dynamics'
 tags:
   - Python
   - Koopman operator
