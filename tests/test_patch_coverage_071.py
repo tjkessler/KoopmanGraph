@@ -26,7 +26,9 @@ from koopman_graph.operators.discrete import KoopmanOperator
 from koopman_graph.operators.hypergraph import HypergraphKoopmanOperator
 from koopman_graph.training import LossWeights
 from koopman_graph.training.epochs import prepare_training_amp, train_windowed_epoch
-from koopman_graph.training.extra_objectives import compute_worst_case_reconstruction_loss
+from koopman_graph.training.extra_objectives import (
+    compute_worst_case_reconstruction_loss,
+)
 from koopman_graph.training.pair_objectives import (
     _dense_networked_inverse_for_snapshot,
     _reconstruction_from_predictions,
@@ -311,9 +313,7 @@ def test_worst_case_predictions_guard_short_sequence() -> None:
     model = _tiny_model()
     short = _sequence(1)
     with pytest.raises(ValueError, match="at least 2 snapshots"):
-        compute_worst_case_reconstruction_loss(
-            model, short, weight=1.0, predictions=[]
-        )
+        compute_worst_case_reconstruction_loss(model, short, weight=1.0, predictions=[])
 
 
 def test_structural_assembly_factors_dense_returns_empty() -> None:
