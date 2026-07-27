@@ -332,6 +332,10 @@ def reset_bilinear_parameters(module: nn.Module) -> None:
 def bilinear_coupling_tensor(module: nn.Module) -> Tensor:
     """Assemble full bilinear couplings ``N`` with shape ``(C, D, D)``.
 
+    Low-rank ``P`` / ``Q`` factors reuse an ephemeral einsum cache on
+    ``module`` while ``P._version`` and ``Q._version`` are unchanged.
+    Full-rank ``N`` is returned directly (no cache).
+
     Parameters
     ----------
     module : nn.Module
@@ -353,8 +357,16 @@ def bilinear_coupling_tensor(module: nn.Module) -> Tensor:
     bilinear_p = getattr(module, "P", None)
     bilinear_q = getattr(module, "Q", None)
     if isinstance(bilinear_p, Tensor) and isinstance(bilinear_q, Tensor):
+        key = (bilinear_p._version, bilinear_q._version)
+        cached = getattr(module, "_bilinear_coupling_cache", None)
+        cached_key = getattr(module, "_bilinear_coupling_cache_key", None)
+        if cached is not None and cached_key == key:
+            return cached
         # N_i = P_i @ Q_i.T  →  (D, R) @ (R, D) = (D, D)
-        return torch.einsum("cdr,cer->cde", bilinear_p, bilinear_q)
+        coupling = torch.einsum("cdr,cer->cde", bilinear_p, bilinear_q)
+        module._bilinear_coupling_cache = coupling
+        module._bilinear_coupling_cache_key = key
+        return coupling
     msg = f"{type(module).__name__} has no bilinear factors (N or P/Q)"
     raise AttributeError(msg)
 

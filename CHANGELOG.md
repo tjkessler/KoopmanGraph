@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-27
+
+Performance and training-path reuse. Same public scientific defaults; no
+claimed wall-time percentages.
+
+### Added
+
+- Opt-in CUDA automatic mixed precision on ``GraphKoopmanModel.fit`` /
+  ``run_fit_loop`` (``use_amp``, ``amp_dtype``; FP32 fallback on CPU/MPS).
+- Hierarchical ``pool_schedule="hold_perm"`` to amortize TopK / SAG
+  pooling across a sequence (default remains ``"per_snapshot"``).
+- ``clear_hyperedge_cache`` for the ephemeral Zhou ``Ĥ`` cache; DiffConv
+  ``clear_support_cache`` for diffusion supports.
+
+### Changed
+
+- ``compute_training_loss`` shares sequence latents across pair terms
+  (``SequenceLatentCache``); reconstruction / PDE / worst-case terms share
+  one-step predictions when composed together.
+- Networked dense inverse, continuous ``Φ`` / ``L_eff``, structural ``K`` /
+  ``L``, and low-rank bilinear assemblies reuse ephemeral keyed buffers
+  within an evaluation (not checkpointed).
+- Self-adaptive topology materializes at most once per top-level
+  ``forward`` / ``encode_rollout_origin``; multi-start rollout encodes each
+  distinct origin once.
+- Fit / epoch loops use ``zero_grad(set_to_none=True)``.
+- Sphinx docs: Scale / Training performance / architecture contracts / FAQ
+  entries for large-``N`` cost, ``block_diagonal``, AMP, hierarchical pool
+  schedule, and hypergraph ``Ĥ`` caching.
+
 ## [0.7.0] - 2026-07-26
 
 ### Added
@@ -288,6 +318,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.7.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.1
 [0.7.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.0
 [0.6.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.6.0
 [0.5.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.5.0

@@ -132,6 +132,90 @@ incidence). Self-adaptive topology and orbit-tied ``K_{\mathrm{self}}`` are
 separate options and are not substitutes for directed normalization. See
 :doc:`architecture` (adjacency contract) and :doc:`limitations`.
 
+Why is training slow on large :math:`N`?
+----------------------------------------
+
+Several training paths still assemble or multiply dense structures whose
+size grows with :math:`N` (or :math:`N\cdot d`), even when latents and
+supports are cached within an evaluation:
+
+* Exact spectrum / inverse and continuous dense
+  :math:`\Phi=\exp(\Delta t\, L_{\mathrm{eff}})` on
+  :math:`(N\cdot d)\times(N\cdot d)` matrices
+* DiffConv diffusion supports and hypergraph Zhou :math:`\hat{H}` as dense
+  :math:`N\times N` tensors
+* Eigenvalue hinge on dense / ODO networked operators
+  (:math:`O((N\cdot d)^3)` eigendecomposition)
+* Self-adaptive topology materializing full :math:`N^2` COO
+
+Shared pair latents, inverse / support / :math:`\hat{H}` / :math:`\Phi`
+reuse, and PDE/worst-case prediction sharing reduce repeated work; they
+do not change those representation sizes. See :doc:`limitations` (Scale)
+and :doc:`capabilities` (Training performance).
+
+When should I use ``sparsity="block_diagonal"``?
+------------------------------------------------
+
+Use ``sparsity="block_diagonal"`` on graph / hypergraph / continuous-graph
+operators when the dense :math:`N\cdot d` path dominates wall time and a
+self-dominated (Jacobi-style) approximation is acceptable for your
+advance / inverse / spectrum use case. Prefer ``sparsity="dense"`` when you
+need the full coupled effective map. Tutorial:
+``examples/29_large_graph_block_diagonal.ipynb``.
+
+How do I enable automatic mixed precision (AMP)?
+------------------------------------------------
+
+Pass ``use_amp=True`` to ``GraphKoopmanModel.fit`` (or ``run_fit_loop``).
+Optional ``amp_dtype`` selects the autocast dtype (default
+``torch.float16``). AMP is supported on **CUDA** only; on CPU or MPS the
+fit loop warns once and continues in FP32. AMP does not change loss
+definitions — only numeric precision during the forward / backward pass.
+
+Hierarchical pooling: ``per_snapshot`` vs ``hold_perm``
+-------------------------------------------------------
+
+``HierarchicalGraphKoopmanModel`` defaults to
+``pool_schedule="per_snapshot"``: TopK / SAG scores are recomputed each
+timestep from that snapshot's features (0.7.0-compatible). Set
+``pool_schedule="hold_perm"`` to pool from the first snapshot and reuse
+that permutation for the rest of the sequence — fewer pool passes, but
+pool assignments no longer track per-timestep feature changes.
+
+Hypergraph dense :math:`\hat{H}` and ``clear_hyperedge_cache``
+--------------------------------------------------------------
+
+``koopman="hypergraph"`` advances through a dense Zhou :math:`\hat{H}`
+(:math:`N\times N`). Static incidence reuses a pointer-keyed cache shared
+by advance, eigen, and dense inverse assembly. Call
+``clear_hyperedge_cache()`` (or
+``HypergraphKoopmanOperator.clear_hyperedge_cache()``) after in-place
+edits to ``hyperedge_index`` / ``hyperedge_weight`` that keep the same
+storage pointers. New incidence tensors invalidate automatically.
+Caching does **not** remove the dense :math:`O(N^2)` ceiling — see
+:doc:`limitations`.
+
+Training cost: eigenvalue loss and continuous dense :math:`\Phi`
+----------------------------------------------------------------
+
+Two training terms can dominate on large graphs:
+
+* **Eigenvalue hinge** (``LossWeights.eigenvalue > 0``) with dense or ODO
+  ``koopman="graph"`` / ``"hypergraph"`` / continuous-graph peers builds the
+  effective :math:`N\cdot d` operator and calls ``torch.linalg.eigvals``.
+  Cost is cubic in :math:`N\cdot d`. Prefer structural parameterizations
+  (``schur``, ``lyapunov``, ``dissipative``) or keep :math:`N` modest when
+  this weight is non-zero.
+* **Continuous dense advance** (``dynamics_mode="continuous"`` with
+  ``koopman="graph"`` / ``"continuous_graph"`` and ``sparsity="dense"``)
+  forms :math:`\Phi=\exp(\Delta t\, L_{\mathrm{eff}})`. For large :math:`N`,
+  prefer ``sparsity="block_diagonal"`` (self-only shortcut). The dense path
+  caches :math:`\Phi` for repeated topology / :math:`\Delta t` within a
+  single ``compute_training_loss`` evaluation and clears that cache at the
+  next evaluation so optimizer steps never see a stale transition.
+
+See :doc:`limitations` (Scale) and :doc:`capabilities`.
+
 Checkpoint format and load failures
 -----------------------------------
 

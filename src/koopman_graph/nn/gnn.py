@@ -497,6 +497,52 @@ def _diffusion_supports(
     return supports
 
 
+def _diffusion_support_cache_key(
+    edge_index: Tensor,
+    edge_weight: Tensor | None,
+    num_nodes: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    diffusion_steps: int,
+) -> tuple[int, int, int | None, torch.dtype, torch.device, int]:
+    """Build a cheap topology fingerprint for dense support reuse.
+
+    Uses tensor storage pointers. Callers that mutate ``edge_index`` /
+    ``edge_weight`` storage in place without changing pointers must call
+    :meth:`DiffusionConv.clear_support_cache`.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        COO edge index with shape ``(2, num_edges)``.
+    edge_weight : Tensor or None
+        Optional scalar edge weights with shape ``(num_edges,)``.
+    num_nodes : int
+        Number of graph nodes.
+    dtype : torch.dtype
+        Feature / support floating dtype.
+    device : torch.device
+        Device of the feature tensor.
+    diffusion_steps : int
+        Number of forward/backward random-walk hops (excluding identity).
+
+    Returns
+    -------
+    tuple
+        Cache key ``(N, edge_ptr, weight_ptr, dtype, device, steps)``.
+    """
+    weight_ptr = None if edge_weight is None else edge_weight.data_ptr()
+    return (
+        num_nodes,
+        edge_index.data_ptr(),
+        weight_ptr,
+        dtype,
+        device,
+        diffusion_steps,
+    )
+
+
 class DiffusionConv(nn.Module):
     """Bidirectional diffusion convolution (DCRNN-style supports).
 
@@ -505,6 +551,12 @@ class DiffusionConv(nn.Module):
     building the adjacency, so directional grids (e.g.
     :class:`~koopman_graph.datasets.grid.AnisotropicAdvectionGridBenchmark`)
     can bias spatial mixing.
+
+    Dense supports are cached per layer for a static topology fingerprint
+    (node count, edge/weight storage pointers, dtype, device). They are
+    ephemeral and excluded from checkpoints; call
+    :meth:`clear_support_cache` after in-place topology edits that keep the
+    same storage pointers.
 
     Attributes
     ----------
@@ -550,6 +602,25 @@ class DiffusionConv(nn.Module):
         )
         self.bias = nn.Parameter(torch.zeros(out_channels))
         nn.init.xavier_uniform_(self.weights)
+        # Ephemeral; not registered as buffers (must not enter state_dict).
+        self._cached_supports: list[Tensor] | None = None
+        self._cache_key: (
+            tuple[int, int, int | None, torch.dtype, torch.device, int] | None
+        ) = None
+
+    def clear_support_cache(self) -> None:
+        """Drop cached dense diffusion supports for this layer.
+
+        Call after in-place edits to ``edge_index`` / ``edge_weight`` storage
+        that do not change tensor ``data_ptr`` values. Ordinary topology swaps
+        (new tensors) invalidate automatically on the next forward.
+
+        Notes
+        -----
+        Supports are ephemeral and never written to ``state_dict``.
+        """
+        self._cached_supports = None
+        self._cache_key = None
 
     def forward(
         self,
@@ -573,18 +644,43 @@ class DiffusionConv(nn.Module):
         Tensor
             Diffused features with shape ``(num_nodes, out_channels)``.
         """
-        supports = _diffusion_supports(
+        num_nodes = x.shape[0]
+        key = _diffusion_support_cache_key(
             edge_index,
             edge_weight,
-            x.shape[0],
-            self.diffusion_steps,
+            num_nodes,
             dtype=x.dtype,
             device=x.device,
+            diffusion_steps=self.diffusion_steps,
         )
-        out = x.new_zeros(x.shape[0], self.out_channels)
+        if self._cached_supports is None or self._cache_key != key:
+            self._cached_supports = _diffusion_supports(
+                edge_index,
+                edge_weight,
+                num_nodes,
+                self.diffusion_steps,
+                dtype=x.dtype,
+                device=x.device,
+            )
+            self._cache_key = key
+        supports = self._cached_supports
+        out = x.new_zeros(num_nodes, self.out_channels)
         for support, weight in zip(supports, self.weights, strict=True):
             out = out + (support @ x) @ weight
         return out + self.bias
+
+
+def clear_diff_conv_support_caches(convs: nn.ModuleList) -> None:
+    """Clear dense support caches on every :class:`DiffusionConv` in ``convs``.
+
+    Parameters
+    ----------
+    convs : nn.ModuleList
+        Layer stack that may contain :class:`DiffusionConv` modules.
+    """
+    for conv in convs:
+        if isinstance(conv, DiffusionConv):
+            conv.clear_support_cache()
 
 
 def build_diff_convs(

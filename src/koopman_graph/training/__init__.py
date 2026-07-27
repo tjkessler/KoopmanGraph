@@ -16,6 +16,12 @@ Capability layout
 ``pair_objectives``
     One-step / pair reconstruction and forward/backward consistency
     composition over :mod:`koopman_graph.losses`.
+``timestep_encode``
+    Private ``encode_at_timestep`` helper shared by pair losses and the
+    latent cache (not exported from this package ``__all__``).
+``latent_cache``
+    Private sequence latent cache helpers for shared teacher-forced
+    encodings (not exported from this package ``__all__``).
 ``extra_objectives``
     Lie / PDE / sparsity / worst-case composition helpers.
 ``objectives``

@@ -622,3 +622,143 @@ def test_contract_structural_helpers_are_exported() -> None:
     inv = safe_diagonal_inverse(values)
     assert inv.shape == (3, 3)
     assert torch.allclose(inv.diag() * values, torch.ones(3), atol=1e-5)
+
+
+def test_dense_k_still_returns_parameter() -> None:
+    """Dense parameterization returns the learnable Parameter (TASK-1513)."""
+    op = KoopmanOperator(3, parameterization="dense")
+    assert op.K is op._parameters["K"]
+    cont = ContinuousKoopmanOperator(3, parameterization="dense")
+    assert cont.L is cont._parameters["L"]
+
+
+def test_structural_k_cache_assembles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated ``.K`` hits reuse one structural assembly within a version."""
+    op = KoopmanOperator(4, parameterization="schur", init_mode="identity")
+    calls = {"count": 0}
+    original = op._assemble_matrix
+
+    def _counting() -> torch.Tensor:
+        calls["count"] += 1
+        return original()
+
+    monkeypatch.setattr(op, "_assemble_matrix", _counting)
+    first = op.K
+    second = op.K
+    assert calls["count"] == 1
+    assert first is second
+
+
+def test_structural_k_cache_matches_forced_reassemble() -> None:
+    """Cached structural ``K`` matches a cleared rebuild (parity)."""
+    torch.manual_seed(40)
+    op = KoopmanOperator(4, parameterization="odo", init_mode="xavier", init_scale=0.1)
+    cached = op.K.detach().clone()
+    op._assembled_k_cache = None
+    op._assembled_k_cache_key = None
+    rebuilt = op.K
+    torch.testing.assert_close(cached, rebuilt, rtol=0.0, atol=0.0)
+
+
+def test_structural_advance_matches_uncached_assembly() -> None:
+    """Advance with structural cache matches advance after cache clear."""
+    torch.manual_seed(41)
+    op = KoopmanOperator(3, parameterization="schur", init_mode="identity")
+    z = torch.randn(5, 3)
+    out_cached = op.advance(z)
+    op._assembled_k_cache = None
+    op._assembled_k_cache_key = None
+    out_fresh = op.advance(z)
+    torch.testing.assert_close(out_cached, out_fresh, rtol=1e-6, atol=1e-6)
+
+
+def test_structural_l_cache_assembles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated continuous ``.L`` hits reuse one assembly within a version."""
+    op = ContinuousKoopmanOperator(4, parameterization="schur", init_mode="identity")
+    calls = {"count": 0}
+    original = op._assemble_generator
+
+    def _counting() -> torch.Tensor:
+        calls["count"] += 1
+        return original()
+
+    monkeypatch.setattr(op, "_assemble_generator", _counting)
+    first = op.L
+    second = op.L
+    assert calls["count"] == 1
+    assert first is second
+
+
+def test_structural_cache_invalidates_after_optimizer_step() -> None:
+    """Adam updates bump factor versions so assembled ``K`` is not stale."""
+    torch.manual_seed(42)
+    op = KoopmanOperator(3, parameterization="schur", init_mode="identity")
+    before = op.K.detach().clone()
+    z = torch.randn(4, 3, requires_grad=True)
+    loss = op.advance(z).pow(2).sum()
+    loss.backward()
+    opt = torch.optim.Adam(op.parameters(), lr=1e-1)
+    opt.step()
+    after = op.K
+    assert not torch.allclose(after, before, atol=1e-6)
+
+
+def test_bilinear_coupling_cache_and_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Low-rank bilinear ``N`` caches einsum and invalidates on ``P`` edits."""
+    from koopman_graph.operators.control import bilinear_coupling_tensor
+
+    op = KoopmanOperator(
+        3,
+        control_dim=2,
+        control_mode="bilinear",
+        bilinear_rank=1,
+    )
+    with torch.no_grad():
+        op.P.copy_(torch.randn_like(op.P))
+        op.Q.copy_(torch.randn_like(op.Q))
+    calls = {"count": 0}
+    original = torch.einsum
+
+    def _counting(*args, **kwargs):
+        # Count only the bilinear assembly pattern.
+        if args and args[0] == "cdr,cer->cde":
+            calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "einsum", _counting)
+    first = bilinear_coupling_tensor(op)
+    second = bilinear_coupling_tensor(op)
+    assert calls["count"] == 1
+    assert first is second
+    with torch.no_grad():
+        op.P.add_(0.5)
+    third = bilinear_coupling_tensor(op)
+    assert calls["count"] == 2
+    assert not torch.allclose(first, third, atol=1e-6)
+    fresh = original("cdr,cer->cde", op.P, op.Q)
+    torch.testing.assert_close(third, fresh, rtol=0.0, atol=0.0)
+
+
+def test_assembly_caches_excluded_from_state_dict() -> None:
+    """Ephemeral K/L / bilinear caches are absent from checkpoints."""
+    op = KoopmanOperator(
+        3,
+        parameterization="schur",
+        control_dim=1,
+        control_mode="bilinear",
+        bilinear_rank=1,
+    )
+    _ = op.K
+    from koopman_graph.operators.control import bilinear_coupling_tensor
+
+    _ = bilinear_coupling_tensor(op)
+    state = op.state_dict()
+    assert all(
+        "assembled" not in key and "bilinear_coupling" not in key for key in state
+    )

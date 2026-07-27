@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -26,6 +27,8 @@ def rollout_sequence_loss(
     *,
     horizon: int,
     start: int = 0,
+    cache: Any | None = None,
+    origin_latent: Tensor | None = None,
 ) -> Tensor:
     """Compute autoregressive rollout reconstruction loss from one start snapshot.
 
@@ -53,6 +56,17 @@ def rollout_sequence_loss(
         Number of rollout steps (must be >= 1).
     start : int, optional
         Index of the initial snapshot. Default is ``0``.
+    cache : object or None, optional
+        Optional
+        :class:`~koopman_graph.training.latent_cache.SequenceLatentCache`
+        (or duck-typed object with ``.z``). When set, the origin uses
+        ``cache.z[start]``; subsequent autoregressive latents are still
+        produced by Koopman advance (not replaced by ``cache.z[t]``).
+        Typed as ``Any`` so :mod:`koopman_graph.losses` does not import
+        :mod:`koopman_graph.training`.
+    origin_latent : Tensor or None, optional
+        Pre-encoded origin latent. When set, skips encode / cache lookup
+        (used by :func:`rollout_multi_start_loss` to share origins).
 
     Returns
     -------
@@ -77,9 +91,14 @@ def rollout_sequence_loss(
         )
         raise ValueError(msg)
 
-    initial = sequence[start]
-    encode_at = getattr(model, "encode_at", None)
-    z = encode_at(sequence, start) if callable(encode_at) else model.encode(initial)
+    if origin_latent is not None:
+        z = origin_latent
+    elif cache is not None:
+        z = cache.z[start]
+    else:
+        initial = sequence[start]
+        encode_at = getattr(model, "encode_at", None)
+        z = encode_at(sequence, start) if callable(encode_at) else model.encode(initial)
 
     time_step = float(model.resolve_delta_t(None))
     targets = [sequence[start + step] for step in range(1, horizon + 1)]
@@ -130,14 +149,45 @@ def rollout_sequence_loss(
     return total_loss / horizon
 
 
+def _encode_rollout_origin_latent(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    start: int,
+) -> Tensor:
+    """Encode the rollout origin at ``start``.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``encode_at`` or ``encode``.
+    sequence : GraphSnapshotSequence
+        Source trajectory.
+    start : int
+        Origin timestep index.
+
+    Returns
+    -------
+    Tensor
+        Latent features at the rollout origin.
+    """
+    encode_at = getattr(model, "encode_at", None)
+    if callable(encode_at):
+        return encode_at(sequence, start)
+    return model.encode(sequence[start])
+
+
 def rollout_multi_start_loss(
     model: TrainableKoopmanModel,
     sequence: GraphSnapshotSequence,
     *,
     horizon: int,
     start_indices: Sequence[int],
+    cache: Any | None = None,
 ) -> Tensor:
     """Average rollout reconstruction loss over multiple start snapshots.
+
+    When ``cache`` is omitted, each distinct origin is encoded once and shared
+    across duplicate starts; autoregressive decode remains per-origin.
 
     Parameters
     ----------
@@ -152,6 +202,8 @@ def rollout_multi_start_loss(
         Number of rollout steps (must be >= 1).
     start_indices : sequence of int
         Zero-based origin indices for each rollout.
+    cache : object or None, optional
+        Optional shared latent cache (see :func:`rollout_sequence_loss`).
 
     Returns
     -------
@@ -168,6 +220,15 @@ def rollout_multi_start_loss(
         raise ValueError(msg)
 
     device = next(model.parameters()).device
+    origin_latents: dict[int, Tensor] | None = None
+    if cache is None:
+        origin_latents = {}
+        for start in start_indices:
+            if start not in origin_latents:
+                origin_latents[start] = _encode_rollout_origin_latent(
+                    model, sequence, start
+                )
+
     total_loss = torch.zeros((), device=device)
     for start in start_indices:
         total_loss = total_loss + rollout_sequence_loss(
@@ -175,5 +236,7 @@ def rollout_multi_start_loss(
             sequence,
             horizon=horizon,
             start=start,
+            cache=cache,
+            origin_latent=(None if origin_latents is None else origin_latents[start]),
         )
     return total_loss / len(start_indices)

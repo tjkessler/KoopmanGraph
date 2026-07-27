@@ -95,14 +95,47 @@ Spectral analysis
 Scale
 -----
 
+Training reuses shared latents and several ephemeral operator / support
+caches (see :doc:`capabilities` and :doc:`architecture`), but those
+optimizations do **not** remove the dense representation ceilings below.
+For large :math:`N`, prefer ``sparsity="block_diagonal"`` where applicable,
+modest latent width, and optional CUDA automatic mixed precision
+(``use_amp=True`` on ``fit`` / ``run_fit_loop``); see :doc:`faq`.
+
 * **Exact spectrum and exact inverse** of networked operators assemble an
   effective dense matrix of size :math:`(N \cdot d) \times (N \cdot d)`.
   Prefer modest :math:`N` or ``sparsity="block_diagonal"`` (approximate
-  Jacobi / self-dominated path) when that cost dominates.
+  Jacobi / self-dominated path) when that cost dominates. Static topology
+  may reuse a precomputed dense inverse within a training-loss evaluation;
+  the assembly size is unchanged.
+* **Eigenvalue regularization** with a non-zero
+  ``LossWeights.eigenvalue`` on dense or ODO networked operators runs an
+  :math:`O((N \cdot d)^3)` eigendecomposition of the effective map. Prefer
+  structural parameterizations (``schur`` / ``lyapunov`` / ``dissipative``)
+  or modest :math:`N` when that term is enabled.
 * **``sparsity="distributed"`` is not implemented** and continues to raise
   ``ValueError``.
-* **Continuous-graph matrix exponentials** share the dense
-  :math:`N \cdot d` cost caveat; see :doc:`capabilities`.
+* **DiffConv** bidirectional diffusion supports are dense
+  :math:`N \times N` tensors for static graphs. Identical
+  ``edge_index`` / weight storage may reuse cached supports
+  (``clear_support_cache``); caching does not sparsify the representation.
+* **Continuous-graph dense advances** form
+  :math:`\Phi = \exp(\Delta t\, L_{\mathrm{eff}})` on the same
+  :math:`(N \cdot d) \times (N \cdot d)` scale. Prefer
+  ``sparsity="block_diagonal"`` (self-dominated shortcut) for large
+  :math:`N`. Within one training-loss evaluation the dense path may reuse
+  :math:`\Phi` (and assembled :math:`L_{\mathrm{eff}}`) for repeated
+  topology / :math:`\Delta t` keys; see :doc:`faq`.
+* **Hypergraph Zhou** :math:`\hat{H}` is a dense :math:`N \times N`
+  matrix on the advance / eigen path. Static incidence may reuse a cached
+  :math:`\hat{H}` (see ``clear_hyperedge_cache``); caching does not remove
+  the :math:`O(N^2)` representation or the dense networked
+  :math:`(N \cdot d)` ceiling above.
+* **Hierarchical pooling** (``HierarchicalGraphKoopmanModel``) recomputes
+  feature-dependent TopK / SAG scores every snapshot under the default
+  ``pool_schedule="per_snapshot"``. ``pool_schedule="hold_perm"`` holds the
+  first-snapshot permutation for the sequence (amortized pooling; scores
+  no longer track per-timestep features).
 
 Uncertainty
 -----------

@@ -83,6 +83,32 @@ Forecasting and training
 * Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via
   ``koopman_graph.metrics.evaluate_forecast``
 
+Training performance
+~~~~~~~~~~~~~~~~~~~~
+
+Internal training-path reuse (same scientific defaults; see
+:doc:`architecture` and :doc:`limitations`):
+
+* Shared sequence latents (``SequenceLatentCache``) when multiple pair
+  losses share a window — each timestep is encoded once per
+  ``compute_training_loss`` evaluation
+* Networked dense inverse reuse for static topology; DiffConv support
+  cache (``clear_support_cache``); hypergraph Zhou :math:`\hat{H}` cache
+  (``clear_hyperedge_cache``)
+* Continuous dense :math:`\Phi` / :math:`L_{\mathrm{eff}}` reuse within
+  one training-loss evaluation
+* Shared one-step predictions across reconstruction / PDE / worst-case
+  terms when those losses are active together
+* Opt-in CUDA automatic mixed precision: ``use_amp=True`` on
+  ``GraphKoopmanModel.fit`` / ``run_fit_loop`` (FP32 fallback on
+  CPU/MPS)
+* Hierarchical ``pool_schedule="hold_perm"`` to amortize TopK / SAG
+  pooling across a sequence
+* Ephemeral structural ``K`` / ``L`` and low-rank bilinear assemblies;
+  learned-topology materialize at most once per top-level
+  ``forward`` / rollout-origin encode; multi-start rollout encodes each
+  distinct origin once
+
 Analysis
 ~~~~~~~~
 

@@ -1108,3 +1108,236 @@ def test_dual_random_walk_learns_directed_advection_better_than_symmetric() -> N
     err_symmetric = _fit_mse("symmetric")
     assert err_dual < 1e-3
     assert err_dual <= 0.5 * err_symmetric
+
+
+def test_dense_effective_inverse_matches_per_call_inverse_advance() -> None:
+    """Precomputed dense inverse agrees with uncached inverse_advance (TASK-1503)."""
+    torch.manual_seed(3)
+    num_nodes = 4
+    latent_dim = 3
+    edge_index = _path_edge_index(num_nodes)
+    op = GraphKoopmanOperator(latent_dim, init_mode="xavier", init_scale=0.15)
+    z = torch.randn(num_nodes, latent_dim)
+    z_next = op.advance(z, edge_index=edge_index)
+    inverse = op.dense_effective_inverse(edge_index, num_nodes)
+    recovered_shared = op.inverse_advance(
+        z_next, edge_index=edge_index, inverse_matrix=inverse
+    )
+    recovered_fresh = op.inverse_advance(z_next, edge_index=edge_index)
+    # Same effective map; float32 solve noise.
+    torch.testing.assert_close(recovered_shared, recovered_fresh, rtol=0.0, atol=1e-5)
+    torch.testing.assert_close(recovered_shared, z, rtol=0.0, atol=1e-5)
+
+
+def test_dense_effective_inverse_rejects_block_diagonal() -> None:
+    """dense_effective_inverse is dense-sparsity only."""
+    op = GraphKoopmanOperator(2, sparsity="block_diagonal")
+    with pytest.raises(ValueError, match="sparsity='dense'"):
+        op.dense_effective_inverse(_path_edge_index(3), 3)
+
+
+def test_backward_sequence_precomputes_one_dense_graph_inverse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Static dense graph: one dense_inverse_or_pinv per backward sequence loss."""
+    import koopman_graph.operators.graph as graph_mod
+    from koopman_graph.training.pair_objectives import (
+        compute_backward_consistency_sequence_loss,
+    )
+
+    calls = {"count": 0}
+    original = graph_mod.dense_inverse_or_pinv
+
+    def _counting(matrix: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return original(matrix)
+
+    monkeypatch.setattr(graph_mod, "dense_inverse_or_pinv", _counting)
+
+    torch.manual_seed(4)
+    edge_index = _path_edge_index(5)
+    snapshots = [Data(x=torch.randn(5, 3), edge_index=edge_index) for _ in range(4)]
+    sequence = GraphSnapshotSequence(snapshots)
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="graph",
+    )
+    assert isinstance(model.koopman, GraphKoopmanOperator)
+    assert model.koopman.sparsity == "dense"
+    model.eval()
+    with torch.no_grad():
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+    assert torch.isfinite(loss)
+    # One evaluation-scoped inverse for the whole sequence (not per pair).
+    assert calls["count"] == 1
+
+
+def test_backward_sequence_skips_precompute_for_block_diagonal_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """block_diagonal backward path does not call dense_effective_inverse."""
+    from koopman_graph.training.pair_objectives import (
+        compute_backward_consistency_sequence_loss,
+    )
+
+    torch.manual_seed(5)
+    edge_index = _path_edge_index(4)
+    snapshots = [Data(x=torch.randn(4, 3), edge_index=edge_index) for _ in range(3)]
+    sequence = GraphSnapshotSequence(snapshots)
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=3),
+        decoder=GNNDecoder(latent_dim=3, hidden_channels=8, out_channels=3),
+        latent_dim=3,
+        time_step=0.1,
+        koopman="graph",
+        koopman_sparsity="block_diagonal",
+    )
+    assert isinstance(model.koopman, GraphKoopmanOperator)
+    assert model.koopman.sparsity == "block_diagonal"
+    hits = {"count": 0}
+    original = model.koopman.dense_effective_inverse
+
+    def _spy(*args, **kwargs):
+        hits["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model.koopman, "dense_effective_inverse", _spy)
+    model.eval()
+    with torch.no_grad():
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+    assert torch.isfinite(loss)
+    assert hits["count"] == 0
+
+
+def test_graph_forward_does_not_use_dense_effective_inverse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sparse forward advance must not assemble/invert the dense map."""
+    torch.manual_seed(6)
+    edge_index = _path_edge_index(4)
+    op = GraphKoopmanOperator(3, init_mode="xavier", init_scale=0.1)
+    hits = {"count": 0}
+    original = op.dense_effective_inverse
+
+    def _spy(*args, **kwargs):
+        hits["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(op, "dense_effective_inverse", _spy)
+    z = torch.randn(4, 3)
+    _ = op.advance(z, edge_index=edge_index)
+    assert hits["count"] == 0
+
+
+def test_topologies_equal_content_fingerprint() -> None:
+    """Topology fingerprint is content equality, not storage pointer identity."""
+    from koopman_graph.training.pair_objectives import topologies_equal
+
+    edges_a = _path_edge_index(4)
+    edges_b = edges_a.clone()
+    assert edges_a.data_ptr() != edges_b.data_ptr()
+    assert topologies_equal(edges_a, None, edges_b, None)
+    weights = torch.ones(edges_a.shape[1])
+    assert topologies_equal(edges_a, weights, edges_b, weights.clone())
+    assert not topologies_equal(edges_a, weights, edges_b, 2.0 * weights)
+    cycle = torch.tensor(
+        [[0, 1, 2, 3], [1, 2, 3, 0]],
+        dtype=torch.long,
+    )
+    assert not topologies_equal(edges_a, None, cycle, None)
+
+
+def test_backward_sequence_reuses_inverse_per_distinct_dynamic_topology(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dynamic topology: one inverse per distinct pair-target key (TASK-1504)."""
+    import koopman_graph.operators.graph as graph_mod
+    from koopman_graph.training.pair_objectives import (
+        compute_backward_consistency_sequence_loss,
+    )
+
+    calls = {"count": 0}
+    original = graph_mod.dense_inverse_or_pinv
+
+    def _counting(matrix: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return original(matrix)
+
+    monkeypatch.setattr(graph_mod, "dense_inverse_or_pinv", _counting)
+
+    torch.manual_seed(8)
+    num_nodes = 5
+    edges_a = _path_edge_index(num_nodes)
+    edges_b = torch.tensor(
+        [
+            [i for i in range(num_nodes)],
+            [(i + 1) % num_nodes for i in range(num_nodes)],
+        ],
+        dtype=torch.long,
+    )
+    # Pair targets are sequence[t+1]: B, A, B → two distinct topologies.
+    snapshots = [
+        Data(
+            x=torch.randn(num_nodes, 3),
+            edge_index=(edges_a if t % 2 == 0 else edges_b).clone(),
+        )
+        for t in range(4)
+    ]
+    sequence = GraphSnapshotSequence(snapshots, allow_dynamic_topology=True)
+    assert sequence.is_dynamic_topology
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=0.1,
+        koopman="graph",
+    )
+    model.eval()
+    with torch.no_grad():
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+    assert torch.isfinite(loss)
+    assert calls["count"] == 2
+
+
+def test_backward_sequence_bilinear_does_not_share_inverse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bilinear control: inverse count equals num_pairs (no shared precompute)."""
+    import koopman_graph.operators.graph as graph_mod
+    from koopman_graph.training.pair_objectives import (
+        compute_backward_consistency_sequence_loss,
+    )
+
+    calls = {"count": 0}
+    original = graph_mod.dense_inverse_or_pinv
+
+    def _counting(matrix: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return original(matrix)
+
+    monkeypatch.setattr(graph_mod, "dense_inverse_or_pinv", _counting)
+
+    torch.manual_seed(9)
+    edge_index = _path_edge_index(4)
+    snapshots = [Data(x=torch.randn(4, 3), edge_index=edge_index) for _ in range(4)]
+    sequence = GraphSnapshotSequence(snapshots, control_inputs=torch.randn(4, 1))
+    model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=3),
+        decoder=GNNDecoder(latent_dim=3, hidden_channels=8, out_channels=3),
+        latent_dim=3,
+        time_step=0.1,
+        koopman="graph",
+        control_dim=1,
+        control_mode="bilinear",
+    )
+    assert model.koopman.control_mode == "bilinear"
+    model.eval()
+    with torch.no_grad():
+        loss = compute_backward_consistency_sequence_loss(model, sequence)
+    assert torch.isfinite(loss)
+    num_pairs = sequence.num_timesteps - 1
+    # Each pair folds control into K_self and inverts independently.
+    assert calls["count"] == num_pairs

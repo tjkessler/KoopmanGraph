@@ -129,7 +129,13 @@ leading-underscore helpers across peer modules.
 * ``device`` — ``resolve_device``, ``sequence_to_device``
 * ``pair_objectives`` — one-step / pair reconstruction and
   forward/backward consistency composition over
-  :mod:`koopman_graph.losses`
+  :mod:`koopman_graph.losses` (re-exports ``encode_at_timestep`` for
+  stable deep imports)
+* ``timestep_encode`` — private ``encode_at_timestep`` leaf shared by
+  pair losses and the latent cache (not package-exported; keeps
+  ``latent_cache`` and ``pair_objectives`` acyclic)
+* ``latent_cache`` — private ``SequenceLatentCache`` /
+  ``encode_sequence_latents`` helpers (not package-exported)
 * ``extra_objectives`` — Lie / PDE / sparsity / worst-case composition
   helpers over ``ExtraLosses`` / ``LossWeights``
 * ``objectives`` — thin ``compute_training_loss`` orchestrator plus
@@ -151,6 +157,47 @@ leading-underscore helpers across peer modules.
 Do not invent a ``training/objectives/`` or ``training/loop/`` subtree.
 Prefer ``from koopman_graph.training import …``. Do not import
 leading-underscore helpers across training peers.
+
+Training-path contracts (performance)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These contracts describe evaluation-scoped reuse. They do not change
+public scientific defaults or checkpoint payloads.
+
+* **Shared latents.** When ``compute_training_loss`` evaluates multiple
+  pair terms on one sequence, a ``SequenceLatentCache`` encodes each
+  timestep once per evaluation. Stochastic encoders (e.g. dropout)
+  therefore sample once per timestep rather than once per pair endpoint
+  call. Autoregressive rollout still advances from the origin; it does
+  not replace future latents with teacher-forced cache entries.
+* **Ephemeral operator / support caches.** Dense networked inverses,
+  DiffConv diffusion supports, hypergraph Zhou :math:`\hat{H}`,
+  continuous :math:`\Phi` / :math:`L_{\mathrm{eff}}`, and structural /
+  low-rank bilinear assemblies may be reused when topology / incidence /
+  factor keys match. Caches are module- or evaluation-scoped, keyed
+  (often by storage pointers), and **not** written to ``state_dict``.
+  In-place mutations that keep the same ``data_ptr`` require the matching
+  clear API (``clear_support_cache``, ``clear_hyperedge_cache``, or the
+  next ``compute_training_loss`` evaluation for continuous
+  :math:`\Phi`).
+* **Shared one-step predictions.** Reconstruction, PDE residual, and
+  worst-case terms that need the same one-step decode share a single
+  prediction pass when composed through ``compute_training_loss``.
+* **AMP.** ``GraphKoopmanModel.fit`` and ``run_fit_loop`` accept
+  ``use_amp`` / ``amp_dtype``. Mixed precision is CUDA-only; non-CUDA
+  devices warn once and continue in FP32. Optimizer steps use
+  ``zero_grad(set_to_none=True)``.
+* **Hierarchical pool schedule.**
+  ``HierarchicalGraphKoopmanModel(pool_schedule=...)`` defaults to
+  ``"per_snapshot"`` (feature-dependent scores every timestep).
+  ``"hold_perm"`` pools once from the first snapshot and reuses that
+  permutation for the sequence.
+* **Learned topology / multi-start.** Self-adaptive
+  ``materialize_learned_topology`` runs at most once per top-level
+  ``forward`` or ``encode_rollout_origin`` (``encode`` accepts
+  ``resolve_learned_topology=False`` when edges are already resolved).
+  ``rollout_multi_start_loss`` encodes each distinct origin once when no
+  sequence cache is supplied.
 
 ``koopman_graph.losses`` package layout (peer training objectives):
 

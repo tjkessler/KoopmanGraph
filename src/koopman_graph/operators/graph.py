@@ -21,6 +21,7 @@ from koopman_graph.operators.control import (
     per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.discrete_propagation import dense_inverse_or_pinv
 from koopman_graph.operators.graph_types import (
     GRAPH_ADJACENCY_MODES,
     GraphAdjacency,
@@ -640,6 +641,57 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         self_blocks = torch.block_diag(*k_self_blocks.unbind(0))
         return self_blocks + neighbor
 
+    def dense_effective_inverse(
+        self,
+        edge_index: Tensor,
+        num_nodes: int,
+        *,
+        edge_weight: Tensor | None = None,
+        k_self: Tensor | None = None,
+        k_self_blocks: Tensor | None = None,
+    ) -> Tensor:
+        """Assemble and invert the dense effective networked operator.
+
+        Intended for evaluation-scoped reuse in backward consistency (static
+        topology, ``sparsity="dense"``). Pair-local bilinear overrides should
+        be passed explicitly; otherwise default tied self blocks are used.
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        edge_weight : Tensor or None, optional
+            Optional edge weights ``(E,)``.
+        k_self : Tensor or None, optional
+            Optional shared self-coupling override (see
+            :meth:`effective_matrix`).
+        k_self_blocks : Tensor or None, optional
+            Optional per-node self blocks (see :meth:`effective_matrix`).
+
+        Returns
+        -------
+        Tensor
+            Dense inverse (or pseudoinverse) with shape ``(N·d, N·d)``.
+
+        Raises
+        ------
+        ValueError
+            If ``sparsity`` is not ``"dense"``.
+        """
+        if self.sparsity != "dense":
+            msg = "dense_effective_inverse requires sparsity='dense'"
+            raise ValueError(msg)
+        effective = self.effective_matrix(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            k_self=k_self,
+            k_self_blocks=k_self_blocks,
+        )
+        return dense_inverse_or_pinv(effective)
+
     def spectrum(
         self,
         edge_index: Tensor,
@@ -923,17 +975,13 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             k_self_override, k_self_blocks = _bilinear_self_factors()
             if k_self_blocks is None and k_self_override is None:
                 k_self_blocks = self.tied_self_blocks(num_nodes)
-            effective = self.effective_matrix(
+            inverse_matrix = self.dense_effective_inverse(
                 edge_index,
                 num_nodes,
                 edge_weight=edge_weight,
                 k_self=k_self_override,
                 k_self_blocks=k_self_blocks,
             )
-            try:
-                inverse_matrix = torch.linalg.inv(effective)
-            except RuntimeError:
-                inverse_matrix = torch.linalg.pinv(effective)
 
         flat = adjusted.reshape(-1)
         recovered = (inverse_matrix @ flat).view_as(adjusted)

@@ -509,3 +509,250 @@ def test_continuous_graph_api_guards_and_properties() -> None:
     )
     soft.reset_parameters()
     assert soft.L_nbr.shape == (2, 2)
+
+
+def test_transition_matrix_cache_matches_fresh_matrix_exp() -> None:
+    """Cached Φ matches a cleared rebuild within float32 tolerance (TASK-1507)."""
+    torch.manual_seed(11)
+    num_nodes = 4
+    edge_index = _path_edge_index(num_nodes)
+    op = ContinuousGraphKoopmanOperator(3, init_mode="xavier", init_scale=0.1)
+    op.clear_transition_cache()
+    phi_first = op.transition_matrix(0.25, edge_index, num_nodes)
+    phi_cached = op.transition_matrix(0.25, edge_index, num_nodes)
+    torch.testing.assert_close(phi_first, phi_cached, rtol=0.0, atol=0.0)
+    op.clear_transition_cache()
+    phi_rebuilt = op.transition_matrix(0.25, edge_index, num_nodes)
+    # Same generator; float32 exp noise vs exact cache hit above.
+    torch.testing.assert_close(phi_first, phi_rebuilt, rtol=1e-5, atol=1e-5)
+
+
+def test_transition_matrix_cache_keys_distinct_delta_t(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distinct Δt values each call matrix_exp once."""
+    calls = {"count": 0}
+    original = torch.linalg.matrix_exp
+
+    def _counting(matrix: torch.Tensor) -> torch.Tensor:
+        calls["count"] += 1
+        return original(matrix)
+
+    monkeypatch.setattr(torch.linalg, "matrix_exp", _counting)
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    op.clear_transition_cache()
+    op.transition_matrix(0.1, edge_index, 3)
+    op.transition_matrix(0.1, edge_index, 3)
+    assert calls["count"] == 1
+    op.transition_matrix(0.2, edge_index, 3)
+    assert calls["count"] == 2
+
+
+def test_stale_phi_cleared_after_parameter_update() -> None:
+    """clear_transition_cache prevents poisoned Φ after parameter edits."""
+    torch.manual_seed(12)
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    op.clear_transition_cache()
+    phi_before = op.transition_matrix(0.1, edge_index, 3).detach().clone()
+    with torch.no_grad():
+        # Dense parameterization stores a leaf generator on the self factor.
+        op._self.L.add_(0.5 * torch.eye(2))
+    # Without clear, the evaluation cache still returns the old Φ.
+    phi_stale = op.transition_matrix(0.1, edge_index, 3)
+    assert torch.equal(phi_stale, phi_before)
+    op.clear_transition_cache()
+    phi_fresh = op.transition_matrix(0.1, edge_index, 3)
+    assert not torch.allclose(phi_fresh, phi_before, atol=1e-5)
+
+
+def test_cached_phi_advance_grads_match_cleared_path() -> None:
+    """Reused Φ within one evaluation yields the same grads as cleared rebuilds."""
+    torch.manual_seed(13)
+    edge_index = _path_edge_index(3)
+    z = torch.randn(3, 2)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="xavier", init_scale=0.05)
+    op.clear_transition_cache()
+    out_cached = op.advance(z, 0.15, edge_index=edge_index) + op.advance(
+        z, 0.15, edge_index=edge_index
+    )
+    loss_cached = out_cached.pow(2).sum()
+    grads_cached = torch.autograd.grad(loss_cached, list(op.parameters()))
+
+    op.clear_transition_cache()
+    out1 = op.advance(z, 0.15, edge_index=edge_index)
+    op.clear_transition_cache()
+    out2 = op.advance(z, 0.15, edge_index=edge_index)
+    loss_fresh = (out1 + out2).pow(2).sum()
+    grads_fresh = torch.autograd.grad(loss_fresh, list(op.parameters()))
+    for left, right in zip(grads_cached, grads_fresh, strict=True):
+        torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-5)
+
+
+def test_compute_training_loss_clears_transition_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """compute_training_loss clears continuous Φ cache at evaluation start."""
+    from koopman_graph.data import GraphSnapshotSequence
+    from koopman_graph.training import LossWeights, compute_training_loss
+
+    model = _tiny_continuous_graph_model(seed=14)
+    assert isinstance(model.koopman, ContinuousGraphKoopmanOperator)
+    edge_index = _path_edge_index(5)
+    model.koopman.transition_matrix(0.1, edge_index, 5)
+    assert len(model.koopman._phi_cache) == 1
+    hits = {"count": 0}
+    original = model.koopman.clear_transition_cache
+
+    def _spy() -> None:
+        hits["count"] += 1
+        original()
+
+    monkeypatch.setattr(model.koopman, "clear_transition_cache", _spy)
+    snapshots = [Data(x=torch.randn(5, 2), edge_index=edge_index) for _ in range(3)]
+    sequence = GraphSnapshotSequence(snapshots)
+    model.eval()
+    with torch.no_grad():
+        breakdown = compute_training_loss(
+            model, sequence, LossWeights(reconstruction=1.0)
+        )
+    assert torch.isfinite(breakdown.total)
+    assert hits["count"] == 1
+
+
+def test_transition_cache_excluded_from_state_dict() -> None:
+    """Φ / L_eff caches are ephemeral and absent from checkpoints."""
+    op = ContinuousGraphKoopmanOperator(2)
+    edge_index = _path_edge_index(3)
+    op.transition_matrix(0.1, edge_index, 3)
+    assert len(op._phi_cache) == 1
+    assert len(op._leff_cache) == 1
+    state = op.state_dict()
+    assert all("phi" not in key and "leff" not in key for key in state)
+
+
+def test_effective_generator_assembly_once_across_delta_t(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same topology / distinct Δt rebuild L_eff once (TASK-1511 / G7)."""
+    calls = {"count": 0}
+    original = ContinuousGraphKoopmanOperator._dense_neighbor_coupling
+
+    def _counting(
+        self: ContinuousGraphKoopmanOperator,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        *,
+        edge_weight: torch.Tensor | None,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        calls["count"] += 1
+        return original(
+            self,
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+        )
+
+    monkeypatch.setattr(
+        ContinuousGraphKoopmanOperator, "_dense_neighbor_coupling", _counting
+    )
+    edge_index = _path_edge_index(4)
+    op = ContinuousGraphKoopmanOperator(3, init_mode="identity")
+    op.clear_transition_cache()
+    op.transition_matrix(0.1, edge_index, 4)
+    op.transition_matrix(0.2, edge_index, 4)
+    op.transition_matrix(0.1, edge_index, 4)  # Φ hit; must not rebuild L_eff
+    assert calls["count"] == 1
+
+
+def test_effective_generator_cache_matches_cleared_rebuild() -> None:
+    """Cached L_eff matches a cleared rebuild within float32 tolerance."""
+    torch.manual_seed(31)
+    edge_index = _path_edge_index(4)
+    op = ContinuousGraphKoopmanOperator(3, init_mode="xavier", init_scale=0.1)
+    op.clear_transition_cache()
+    first = op.effective_generator(edge_index, 4)
+    second = op.effective_generator(edge_index, 4)
+    torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
+    op.clear_transition_cache()
+    rebuilt = op.effective_generator(edge_index, 4)
+    torch.testing.assert_close(first, rebuilt, rtol=0.0, atol=0.0)
+
+
+def test_stale_leff_cleared_after_parameter_update() -> None:
+    """clear_transition_cache drops poisoned L_eff after parameter edits."""
+    torch.manual_seed(32)
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    op.clear_transition_cache()
+    before = op.effective_generator(edge_index, 3).detach().clone()
+    with torch.no_grad():
+        op._self.L.add_(0.5 * torch.eye(2))
+    stale = op.effective_generator(edge_index, 3)
+    assert torch.equal(stale, before)
+    op.clear_transition_cache()
+    fresh = op.effective_generator(edge_index, 3)
+    assert not torch.allclose(fresh, before, atol=1e-5)
+
+
+def test_cached_leff_advance_grads_match_cleared_path() -> None:
+    """Shared L_eff across Δt yields grads matching cleared rebuilds."""
+    torch.manual_seed(33)
+    edge_index = _path_edge_index(3)
+    z = torch.randn(3, 2)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="xavier", init_scale=0.05)
+    op.clear_transition_cache()
+    out_cached = op.advance(z, 0.1, edge_index=edge_index) + op.advance(
+        z, 0.2, edge_index=edge_index
+    )
+    loss_cached = out_cached.pow(2).sum()
+    grads_cached = torch.autograd.grad(loss_cached, list(op.parameters()))
+
+    op.clear_transition_cache()
+    out1 = op.advance(z, 0.1, edge_index=edge_index)
+    op.clear_transition_cache()
+    out2 = op.advance(z, 0.2, edge_index=edge_index)
+    loss_fresh = (out1 + out2).pow(2).sum()
+    grads_fresh = torch.autograd.grad(loss_fresh, list(op.parameters()))
+    for left, right in zip(grads_cached, grads_fresh, strict=True):
+        torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-5)
+
+
+def test_bilinear_override_skips_leff_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """l_self overrides do not populate or hit the L_eff cache."""
+    calls = {"count": 0}
+    original = ContinuousGraphKoopmanOperator._dense_neighbor_coupling
+
+    def _counting(
+        self: ContinuousGraphKoopmanOperator,
+        edge_index: torch.Tensor,
+        num_nodes: int,
+        *,
+        edge_weight: torch.Tensor | None,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        calls["count"] += 1
+        return original(
+            self,
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+            dtype=dtype,
+        )
+
+    monkeypatch.setattr(
+        ContinuousGraphKoopmanOperator, "_dense_neighbor_coupling", _counting
+    )
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    op.clear_transition_cache()
+    override = torch.eye(2)
+    op.effective_generator(edge_index, 3, l_self=override)
+    op.effective_generator(edge_index, 3, l_self=override)
+    assert calls["count"] == 2
+    assert len(op._leff_cache) == 0

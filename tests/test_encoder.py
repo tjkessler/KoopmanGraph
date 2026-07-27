@@ -442,6 +442,141 @@ def test_diffconv_exported_from_package() -> None:
     assert ExportedDiffConvEncoder is DiffConvEncoder
 
 
+def test_diffusion_conv_support_cache_bit_identical_float64() -> None:
+    """Cached supports match a cleared rebuild on float64 CPU (TASK-1505)."""
+    from koopman_graph.nn.gnn import DiffusionConv
+
+    torch.manual_seed(0)
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    x = torch.randn(3, 2, dtype=torch.float64)
+    edge_weight = torch.tensor([1.0, 0.1, 2.0, 0.5], dtype=torch.float64)
+    conv = DiffusionConv(2, 4, diffusion_steps=2).double()
+    conv.eval()
+    with torch.no_grad():
+        out_first = conv(x, edge_index, edge_weight)
+        out_cached = conv(x, edge_index, edge_weight)
+        conv.clear_support_cache()
+        out_rebuilt = conv(x, edge_index, edge_weight)
+    # Exact match: same dense supports and weights (float64 CPU).
+    torch.testing.assert_close(out_first, out_cached, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(out_first, out_rebuilt, rtol=0.0, atol=0.0)
+
+
+def test_diffusion_conv_second_forward_skips_support_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Second forward with the same topology does not rebuild supports."""
+    import koopman_graph.nn.gnn as gnn_mod
+    from koopman_graph.nn.gnn import DiffusionConv
+
+    calls = {"count": 0}
+    original = gnn_mod._diffusion_supports
+
+    def _counting(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gnn_mod, "_diffusion_supports", _counting)
+    edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+    other_edges = torch.tensor([[0, 2], [2, 0]], dtype=torch.long)
+    x = torch.randn(3, 2)
+    conv = DiffusionConv(2, 3, diffusion_steps=1)
+    conv.eval()
+    with torch.no_grad():
+        conv(x, edge_index)
+        assert calls["count"] == 1
+        conv(x, edge_index)
+        assert calls["count"] == 1
+        # New edge_index tensor → new data_ptr → rebuild.
+        conv(x, other_edges)
+        assert calls["count"] == 2
+        conv.clear_support_cache()
+        conv(x, other_edges)
+        assert calls["count"] == 3
+
+
+def test_diffusion_conv_checkpoint_excludes_support_cache() -> None:
+    """state_dict / load does not persist or restore dense supports."""
+    from koopman_graph.nn.gnn import DiffusionConv
+
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    x = torch.randn(2, 3)
+    conv = DiffusionConv(3, 2, diffusion_steps=1)
+    conv.eval()
+    with torch.no_grad():
+        conv(x, edge_index)
+    assert conv._cached_supports is not None
+    state = conv.state_dict()
+    assert all("cached" not in key and "cache_key" not in key for key in state)
+    restored = DiffusionConv(3, 2, diffusion_steps=1)
+    restored.load_state_dict(state)
+    assert restored._cached_supports is None
+    assert restored._cache_key is None
+
+
+def test_diffconv_encoder_clear_support_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encoder clear_support_cache drops caches on all DiffConv layers."""
+    import koopman_graph.nn.gnn as gnn_mod
+
+    calls = {"count": 0}
+    original = gnn_mod._diffusion_supports
+
+    def _counting(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gnn_mod, "_diffusion_supports", _counting)
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    x = torch.randn(3, 3)
+    encoder = DiffConvEncoder(
+        in_channels=3,
+        hidden_channels=4,
+        latent_dim=2,
+        num_layers=2,
+        diffusion_steps=1,
+    )
+    encoder.eval()
+    with torch.no_grad():
+        encoder(x, edge_index)
+        # One rebuild per DiffConv layer.
+        assert calls["count"] == 2
+        encoder(x, edge_index)
+        assert calls["count"] == 2
+        encoder.clear_support_cache()
+        encoder(x, edge_index)
+        assert calls["count"] == 4
+
+
+def test_diffconv_decoder_clear_support_cache() -> None:
+    """Decoder clear_support_cache clears every layer cache (TASK-1505)."""
+    from koopman_graph.nn import DiffConvDecoder
+    from koopman_graph.nn.gnn import DiffusionConv
+
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    z = torch.randn(2, 4)
+    decoder = DiffConvDecoder(
+        latent_dim=4,
+        hidden_channels=6,
+        out_channels=3,
+        num_layers=2,
+        diffusion_steps=1,
+    )
+    decoder.eval()
+    with torch.no_grad():
+        decoder(z, edge_index)
+    assert all(
+        isinstance(conv, DiffusionConv) and conv._cached_supports is not None
+        for conv in decoder.convs
+    )
+    decoder.clear_support_cache()
+    assert all(
+        isinstance(conv, DiffusionConv) and conv._cached_supports is None
+        for conv in decoder.convs
+    )
+
+
 def test_transformer_forward_and_shapes(synthetic_graph: Data) -> None:
     """Verify Transformer encoder shapes for Data and multi-layer stacks."""
     encoder = GraphTransformerEncoder(

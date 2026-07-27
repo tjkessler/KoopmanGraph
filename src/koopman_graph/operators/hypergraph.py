@@ -22,6 +22,7 @@ from koopman_graph.operators.control import (
     per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.discrete_propagation import dense_inverse_or_pinv
 from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
@@ -54,6 +55,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     :class:`~koopman_graph.operators.GraphKoopmanOperator` by
     ``Ĥ = ½(I + Â)`` (unweighted), which implies a matching factor map
     (see tests).
+
+    Dense Zhou ``Ĥ`` for a static incidence may be reused across advances
+    via :func:`~koopman_graph.graph_utils.clear_hyperedge_cache` /
+    :meth:`clear_hyperedge_cache`. Caching does not remove the dense
+    :math:`O(N^2)` representation of ``Ĥ``.
 
     Attributes
     ----------
@@ -214,6 +220,22 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         self.reset_orbit_selves()
         self._hedge.reset_parameters()
         self._reset_hyperedge_parameters()
+
+    def clear_hyperedge_cache(self) -> None:
+        """Drop the shared dense Zhou ``Ĥ`` cache used by advance / eigen.
+
+        Thin wrapper around
+        :func:`~koopman_graph.graph_utils.clear_hyperedge_cache`. Call after
+        in-place incidence or hyperedge-weight edits that keep the same
+        storage pointers.
+
+        Notes
+        -----
+        The cache is ephemeral and never written to ``state_dict``.
+        """
+        from koopman_graph.graph_utils import clear_hyperedge_cache
+
+        clear_hyperedge_cache()
 
     @property
     def K_self(self) -> Tensor:
@@ -409,6 +431,57 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             raise ValueError(msg)
         self_blocks = torch.block_diag(*k_self_blocks.unbind(0))
         return self_blocks + hedge
+
+    def dense_effective_inverse(
+        self,
+        hyperedge_index: Tensor,
+        num_nodes: int,
+        *,
+        hyperedge_weight: Tensor | None = None,
+        k_self: Tensor | None = None,
+        k_self_blocks: Tensor | None = None,
+    ) -> Tensor:
+        """Assemble and invert the dense effective hyperedge-coupled operator.
+
+        Intended for evaluation-scoped reuse in backward consistency (static
+        incidence, ``sparsity="dense"``). Pair-local bilinear overrides should
+        be passed explicitly; otherwise default tied self blocks are used.
+
+        Parameters
+        ----------
+        hyperedge_index : Tensor
+            Bipartite incidence ``(2, nnz)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        hyperedge_weight : Tensor or None, optional
+            Optional hyperedge weights ``(M,)``.
+        k_self : Tensor or None, optional
+            Optional shared self-coupling override (see
+            :meth:`effective_matrix`).
+        k_self_blocks : Tensor or None, optional
+            Optional per-node self blocks (see :meth:`effective_matrix`).
+
+        Returns
+        -------
+        Tensor
+            Dense inverse (or pseudoinverse) with shape ``(N·d, N·d)``.
+
+        Raises
+        ------
+        ValueError
+            If ``sparsity`` is not ``"dense"``.
+        """
+        if self.sparsity != "dense":
+            msg = "dense_effective_inverse requires sparsity='dense'"
+            raise ValueError(msg)
+        effective = self.effective_matrix(
+            hyperedge_index,
+            num_nodes,
+            hyperedge_weight=hyperedge_weight,
+            k_self=k_self,
+            k_self_blocks=k_self_blocks,
+        )
+        return dense_inverse_or_pinv(effective)
 
     def spectrum(
         self,
@@ -718,17 +791,13 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             k_self_override, k_self_blocks = _bilinear_self_factors()
             if k_self_blocks is None and k_self_override is None:
                 k_self_blocks = self.tied_self_blocks(num_nodes)
-            effective = self.effective_matrix(
+            inverse_matrix = self.dense_effective_inverse(
                 hyperedge_index,
                 num_nodes,
                 hyperedge_weight=hyperedge_weight,
                 k_self=k_self_override,
                 k_self_blocks=k_self_blocks,
             )
-            try:
-                inverse_matrix = torch.linalg.inv(effective)
-            except RuntimeError:
-                inverse_matrix = torch.linalg.pinv(effective)
 
         flat = adjusted.reshape(-1)
         recovered = (inverse_matrix @ flat).view_as(adjusted)

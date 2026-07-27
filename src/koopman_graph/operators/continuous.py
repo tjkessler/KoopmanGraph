@@ -270,6 +270,10 @@ class ContinuousKoopmanOperator(nn.Module):
             raise ValueError(msg)
 
         self.reset_parameters()
+        # Ephemeral assembled-L reuse for structural modes (keyed by factor
+        # ``_version``); never written to ``state_dict``.
+        self._assembled_l_cache: Tensor | None = None
+        self._assembled_l_cache_key: tuple[object, ...] | None = None
 
         if control_dim > 0:
             self.B = nn.Parameter(torch.empty(control_dim, latent_dim))
@@ -330,10 +334,47 @@ class ContinuousKoopmanOperator(nn.Module):
             num_nodes=num_nodes,
         )
 
+    def _structural_assembly_factors(self) -> tuple[Tensor, ...]:
+        """Return learnable tensors that feed non-dense ``L`` assembly.
+
+        Returns
+        -------
+        tuple of Tensor
+            Factor tensors for the active structural / soft parameterization.
+        """
+        if self.parameterization == "odo":
+            return (self.cayley_O1, self.cayley_O2, self.diag_raw)
+        if self.parameterization == "schur":
+            return (self.cayley_Q, self.schur_diag_raw, self.schur_off_raw)
+        if self.parameterization == "dissipative":
+            return (self.dissipative_L,)
+        if self.parameterization == "lyapunov":
+            return (self.cayley_Q, self.lyap_diag_raw, self.lyap_p_raw)
+        return ()
+
+    def _assembled_l_key(self) -> tuple[object, ...]:
+        """Build the cache key for structural ``L``.
+
+        Returns
+        -------
+        tuple
+            Parameterization name, stability bound, and factor ``_version``
+            integers.
+        """
+        return (
+            self.parameterization,
+            float(self.max_real_eigenvalue),
+            *(factor._version for factor in self._structural_assembly_factors()),
+        )
+
     @property
     def L(self) -> Tensor:
         """Assembled generator matrix with shape ``(latent_dim, latent_dim)``.
 
+        For ``parameterization="dense"`` this is the learnable parameter.
+        Other fixed modes assemble ``L`` from factorized parameters and may
+        reuse an ephemeral cache while factor ``_version`` values are unchanged
+        (invalidated automatically after in-place / optimizer updates).
         Prefer :attr:`matrix` when writing code against
         :class:`~koopman_graph.operators.KoopmanOperatorContract`.
 
@@ -360,7 +401,13 @@ class ContinuousKoopmanOperator(nn.Module):
             if dense_l is None:
                 raise AttributeError("L")
             return dense_l
-        return self._assemble_generator()
+        key = self._assembled_l_key()
+        if self._assembled_l_cache is not None and self._assembled_l_cache_key == key:
+            return self._assembled_l_cache
+        generator = self._assemble_generator()
+        self._assembled_l_cache = generator
+        self._assembled_l_cache_key = key
+        return generator
 
     @property
     def matrix(self) -> Tensor:

@@ -387,6 +387,7 @@ _DOCUMENTED_GRAPH_UTILS_EXPORTS = (
     "apply_orbit_self",
     "assemble_orbit_self_blocks",
     "autoregressive_latent_rollout",
+    "clear_hyperedge_cache",
     "degree_support_mask",
     "dense_hyperedge_normalized_adjacency",
     "dense_random_walk_normalized_adjacency",

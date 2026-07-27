@@ -21,12 +21,14 @@ from torch_geometric.data import Data
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.hierarchical.pooling import (
     PoolingKind,
+    PoolSchedule,
     PoolStep,
     ScatterUnpool,
     apply_pool_layer,
     build_pool_layer,
     pool_control,
     pool_control_sequence,
+    pool_features_with_steps,
     resolve_snapshot_inputs,
     snapshot_from_features,
 )
@@ -110,6 +112,12 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     refine_unpool : bool, optional
         Identity-initialized linear refine after scatter-unpool. Default
         ``True``.
+    pool_schedule : {"per_snapshot", "hold_perm"}, optional
+        How :meth:`fit` pools the training sequence. ``"per_snapshot"``
+        (default) re-runs TopK/SAG on every timestep so feature-dependent
+        scores stay patch-compatible with 0.7.0. ``"hold_perm"`` pools
+        ``sequence[0]`` once and reuses that perm / coarse topology for all
+        timesteps (faster on static graphs; scores are not recomputed).
     """
 
     def __init__(
@@ -120,6 +128,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         pooling: PoolingKind = "topk",
         in_channels: int | None = None,
         refine_unpool: bool = True,
+        pool_schedule: PoolSchedule = "per_snapshot",
     ) -> None:
         """Store the composed model and build pool / unpool modules.
 
@@ -136,6 +145,8 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             See the function signature / summary for ``in_channels``.
         refine_unpool : bool
             See the function signature / summary for ``refine_unpool``.
+        pool_schedule : PoolSchedule
+            See the function signature / summary for ``pool_schedule``.
 
         Notes
         -----
@@ -145,9 +156,16 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         if len(pool_ratios) == 0:
             msg = "pool_ratios must contain at least one ratio"
             raise ValueError(msg)
+        if pool_schedule not in ("per_snapshot", "hold_perm"):
+            msg = (
+                "pool_schedule must be 'per_snapshot' or 'hold_perm', "
+                f"got {pool_schedule!r}"
+            )
+            raise ValueError(msg)
         self.model = model
         self.pool_ratios = tuple(float(r) for r in pool_ratios)
         self.pooling: PoolingKind = pooling
+        self.pool_schedule: PoolSchedule = pool_schedule
         channels = _encoder_in_channels(model) if in_channels is None else in_channels
         self.in_channels = channels
         out_channels = _encoder_out_channels(model)
@@ -487,23 +505,44 @@ class HierarchicalGraphKoopmanModel(nn.Module):
     ) -> tuple[GraphSnapshotSequence, list[list[PoolStep]]]:
         """Pool every snapshot and retain per-step metadata.
 
+        Under ``pool_schedule="per_snapshot"``, runs :meth:`pool_down` once per
+        timestep (feature-dependent TopK/SAG scores). Under ``"hold_perm"``,
+        pools ``sequence[0]`` once and applies those perms / coarse edges to
+        every timestep via :func:`pool_features_with_steps`.
+
         Parameters
         ----------
-
         sequence : GraphSnapshotSequence
-            See the function signature / summary for ``sequence``.
+            Fine-resolution training sequence.
 
         Returns
         -------
-
         tuple
-            Coarse sequence and pooling metadata for every snapshot."""
+            Coarse sequence and pooling metadata for every snapshot.
+        """
+        if sequence.num_timesteps < 1:
+            msg = "sequence must contain at least one snapshot"
+            raise ValueError(msg)
+
         coarse_snaps: list[Data] = []
         all_steps: list[list[PoolStep]] = []
-        for snap in sequence:
-            coarse, steps = self.pool_down(snap)
-            coarse_snaps.append(coarse)
-            all_steps.append(steps)
+        if self.pool_schedule == "hold_perm":
+            _, held_steps = self.pool_down(sequence[0])
+            for snap in sequence:
+                x = snap.x
+                if x is None:
+                    msg = "hold_perm pooling requires snapshot.x"
+                    raise ValueError(msg)
+                coarse_snaps.append(pool_features_with_steps(x, held_steps))
+                all_steps.append(held_steps)
+            allow_dynamic_topology = False
+        else:
+            for snap in sequence:
+                coarse, steps = self.pool_down(snap)
+                coarse_snaps.append(coarse)
+                all_steps.append(steps)
+            # Feature-dependent TopK/SAG perms can change coarse edges over time.
+            allow_dynamic_topology = True
 
         control_inputs = None
         if sequence.has_controls:
@@ -512,8 +551,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             control_inputs = pool_control_sequence(sequence.control_inputs, perms)
 
         kwargs: dict[str, Any] = {
-            # Feature-dependent TopK/SAG perms can change coarse edges over time.
-            "allow_dynamic_topology": True,
+            "allow_dynamic_topology": allow_dynamic_topology,
         }
         if sequence.timestamps is not None:
             kwargs["timestamps"] = sequence.timestamps
@@ -591,7 +629,9 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Pooling scores are held fixed (eval) during the composed ``fit`` so the
         coarse topology stays a consistent reduction for the inner training
-        loop. Unpool refine layers are trained afterward to map coarse features
+        loop. How often :meth:`pool_down` runs is controlled by
+        :attr:`pool_schedule` (default ``"per_snapshot"``; see class docs).
+        Unpool refine layers are trained afterward to map coarse features
         back toward fine node features.
 
         Parameters
@@ -643,6 +683,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             {
                 "pool_ratios": list(self.pool_ratios),
                 "pooling": self.pooling,
+                "pool_schedule": self.pool_schedule,
                 "in_channels": self.in_channels,
                 "out_channels": self.out_channels,
                 "pool_state_dict": self.pool_layers.state_dict(),
@@ -657,6 +698,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             "member_format": "GraphKoopmanModel.save",
             "pool_ratios": list(self.pool_ratios),
             "pooling": self.pooling,
+            "pool_schedule": self.pool_schedule,
         }
         (root / _MANIFEST_NAME).write_text(
             json.dumps(manifest, indent=2) + "\n",
@@ -705,6 +747,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             pool_ratios=payload["pool_ratios"],
             pooling=payload["pooling"],
             in_channels=payload["in_channels"],
+            pool_schedule=payload.get("pool_schedule", "per_snapshot"),
         )
         inst.pool_layers.load_state_dict(payload["pool_state_dict"])
         inst.unpool_layers.load_state_dict(payload["unpool_state_dict"])
