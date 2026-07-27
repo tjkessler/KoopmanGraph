@@ -15,10 +15,10 @@ url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
 version: 0.7.1
 date-released: 2026-07-27
-doi: 10.5281/zenodo.21613378
+doi: 10.5281/zenodo.21629381
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.21613378
+    value: 10.5281/zenodo.21629381
     description: "Archived software (version DOI)"
 keywords:
   - koopman-operator
