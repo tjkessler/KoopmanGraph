@@ -49,6 +49,7 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 - **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, anomaly helpers, SINDy, and spectral clustering
 - **Control and adaptation** — additive/bilinear control, Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
 - **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, conformal UQ, and reproducible graph benchmarks
+- **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, and Ray ensemble helpers under `koopman_graph.distributed` (power-user; see [installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) extras `lightning` / `ray` / `distributed`)
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
@@ -135,7 +136,7 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.7.1: see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.8.0: see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -160,7 +161,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21629381},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.7.1},
+  version      = {0.8.0},
 }
 ```
 

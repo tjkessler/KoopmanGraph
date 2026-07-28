@@ -101,6 +101,31 @@ Optional extras for Koopman model-predictive control (OSQP QP solver):
 
    pip install -e ".[mpc]"
 
+Optional extras for distributed *trainer orchestration* (Lightning Fabric,
+Ray, and Dask). Native PyTorch DistributedDataParallel (DDP) /
+``torchrun`` paths use core PyTorch only — no extra required:
+
+.. code-block:: bash
+
+   pip install -e ".[lightning]"      # Fabric + KoopmanLightningModule (Trainer)
+   pip install -e ".[ray]"            # fit_ensemble_with_ray (ensemble members)
+   pip install -e ".[dask]"           # reserved pin (no library helpers in 0.8.0)
+   pip install -e ".[distributed]"    # meta-extra: lightning + ray + dask
+
+These trainer extras are **not** related to operator
+``sparsity="distributed"`` (that sparsity mode remains unimplemented and
+raises ``ValueError``; see :doc:`faq` and :doc:`limitations`). The
+``[lightning]`` extra covers Fabric and the optional
+:class:`~koopman_graph.distributed.KoopmanLightningModule` Trainer sugar.
+The ``[ray]`` extra covers
+:func:`~koopman_graph.distributed.fit_ensemble_with_ray` (parallel
+independent ensemble member fits; sequential remains default) and is also
+used by the examples-only Tune script
+``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
+script; no library Tune / AutoML API). Dask is **docs-only** in 0.8.0 —
+no library prep helpers or training loop; the ``[dask]`` extra is a
+reserved pin for optional future use (see :doc:`faq`).
+
 uv (project sync)
 ~~~~~~~~~~~~~~~~~
 
@@ -117,12 +142,14 @@ need a non-default accelerator; otherwise sync is enough for CPU development:
    uv run pytest
 
 Documentation and optional capability extras (``uv.lock`` includes ``mpc`` /
-``symmetry`` for frozen sync):
+``symmetry`` for frozen sync; add ``lightning`` / ``distributed`` when you
+need Fabric locally):
 
 .. code-block:: bash
 
    uv sync --extra docs
    uv sync --extra mpc --extra symmetry
+   uv sync --extra lightning
    cd docs && make html
 
 pip-compatible uv installs (after creating a venv) mirror the pip commands:

@@ -10,6 +10,7 @@ is an approximation (loss over induced subgraphs, not the full graph);
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from typing import NamedTuple
 
 import torch
 from torch import Tensor
@@ -18,6 +19,71 @@ from torch_geometric.utils import k_hop_subgraph
 
 from koopman_graph.data.containers import GraphSnapshotSequence
 from koopman_graph.graph_utils import snapshot_edge_weight
+
+
+class WindowOrigin(NamedTuple):
+    """Index of one valid fixed-length temporal window.
+
+    Attributes
+    ----------
+    sequence_index : int
+        Index into the source trajectory list.
+    start : int
+        Inclusive start timestep of the window within that trajectory.
+    """
+
+    sequence_index: int
+    start: int
+
+
+def build_window_index_list(
+    sequences: Sequence[GraphSnapshotSequence],
+    window_length: int,
+) -> list[WindowOrigin]:
+    """Build the list of valid temporal window origins for ``sequences``.
+
+    Parameters
+    ----------
+    sequences : sequence of GraphSnapshotSequence
+        Source trajectories. Each must contain at least ``window_length``
+        snapshots.
+    window_length : int
+        Number of snapshots per window. Must be at least ``2``.
+
+    Returns
+    -------
+    list of WindowOrigin
+        Every valid ``(sequence_index, start)`` pair in trajectory order.
+
+    Raises
+    ------
+    ValueError
+        If ``window_length < 2``, ``sequences`` is empty, or any trajectory
+        is shorter than ``window_length``.
+    """
+    if window_length < 2:
+        msg = f"window_length must be >= 2, got {window_length}"
+        raise ValueError(msg)
+    sequence_list = list(sequences)
+    if not sequence_list:
+        msg = "sequences must contain at least one trajectory"
+        raise ValueError(msg)
+    short_lengths = [
+        sequence.num_timesteps
+        for sequence in sequence_list
+        if sequence.num_timesteps < window_length
+    ]
+    if short_lengths:
+        msg = (
+            f"every sequence must contain at least {window_length} snapshots; "
+            f"shortest has {min(short_lengths)}"
+        )
+        raise ValueError(msg)
+    return [
+        WindowOrigin(sequence_index, start)
+        for sequence_index, sequence in enumerate(sequence_list)
+        for start in range(sequence.num_timesteps - window_length + 1)
+    ]
 
 
 class WindowSampler:
@@ -68,9 +134,6 @@ class WindowSampler:
         seed : int or None, optional
             Base seed for reproducible epoch-specific shuffling.
         """
-        if window_length < 2:
-            msg = f"window_length must be >= 2, got {window_length}"
-            raise ValueError(msg)
         if batch_size < 1:
             msg = f"batch_size must be >= 1, got {batch_size}"
             raise ValueError(msg)
@@ -82,21 +145,6 @@ class WindowSampler:
             sequence_list = [sequences]
         else:
             sequence_list = list(sequences)
-        if not sequence_list:
-            msg = "sequences must contain at least one trajectory"
-            raise ValueError(msg)
-
-        short_lengths = [
-            sequence.num_timesteps
-            for sequence in sequence_list
-            if sequence.num_timesteps < window_length
-        ]
-        if short_lengths:
-            msg = (
-                f"every sequence must contain at least {window_length} snapshots; "
-                f"shortest has {min(short_lengths)}"
-            )
-            raise ValueError(msg)
 
         self.sequences = sequence_list
         self.window_length = window_length
@@ -104,11 +152,7 @@ class WindowSampler:
         self.windows_per_epoch = windows_per_epoch
         self.shuffle = shuffle
         self.seed = seed
-        self._origins = [
-            (sequence_index, start)
-            for sequence_index, sequence in enumerate(sequence_list)
-            for start in range(sequence.num_timesteps - window_length + 1)
-        ]
+        self._origins = build_window_index_list(sequence_list, window_length)
 
     @property
     def num_windows(self) -> int:
@@ -161,11 +205,11 @@ class WindowSampler:
         for offset in range(0, len(selected), self.batch_size):
             batch = []
             for origin_index in selected[offset : offset + self.batch_size]:
-                sequence_index, start = self._origins[origin_index]
+                origin = self._origins[origin_index]
                 batch.append(
-                    self.sequences[sequence_index].slice(
-                        start,
-                        start + self.window_length,
+                    self.sequences[origin.sequence_index].slice(
+                        origin.start,
+                        origin.start + self.window_length,
                     )
                 )
             yield batch

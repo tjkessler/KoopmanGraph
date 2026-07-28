@@ -71,6 +71,40 @@ def test_import_package() -> None:
     assert _VERSION_PATTERN.match(koopman_graph.__version__)
 
 
+def test_distributed_optional_extras_declared() -> None:
+    """0.8.0 trainer extras exist and stay off the core dependency set."""
+    dist = importlib.metadata.distribution("koopman-graph")
+    extras = set(dist.metadata.get_all("Provides-Extra") or [])
+    expected = {"lightning", "ray", "dask", "distributed"}
+    assert expected <= extras
+
+    requires = importlib.metadata.requires("koopman-graph") or []
+    # packaging emits markers like ``extra == "lightning"``.
+    core_requires = [req for req in requires if "extra ==" not in req]
+    core_joined = ";".join(core_requires).lower()
+    for name in ("lightning", "ray", "dask"):
+        assert name not in core_joined
+
+    def _extra_requirement_names(extra: str) -> set[str]:
+        names: set[str] = set()
+        marker = f'extra == "{extra}"'
+        marker_alt = f"extra == '{extra}'"
+        for req in requires:
+            if marker not in req and marker_alt not in req:
+                continue
+            # Requirement before environment marker.
+            dep = req.split(";", maxsplit=1)[0].strip().lower()
+            pkg = re.split(r"[<>=!~\[]", dep, maxsplit=1)[0].strip()
+            names.add(pkg)
+        return names
+
+    assert "lightning" in _extra_requirement_names("lightning")
+    assert "ray" in _extra_requirement_names("ray")
+    assert "dask" in _extra_requirement_names("dask")
+    meta = _extra_requirement_names("distributed")
+    assert {"lightning", "ray", "dask"} <= meta
+
+
 def test_public_all_excludes_power_user_modules() -> None:
     """Power-user modules stay importable but out of the stable ``__all__``."""
     power_user = {

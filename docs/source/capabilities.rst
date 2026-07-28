@@ -109,6 +109,60 @@ Internal training-path reuse (same scientific defaults; see
   ``forward`` / rollout-origin encode; multi-start rollout encodes each
   distinct origin once
 
+Distributed training (optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Optional multi-process / multi-GPU *trainer orchestration* around the same
+scientific fit loop (``run_fit_loop`` / epoch helpers /
+``compute_training_loss``). Import from
+:mod:`koopman_graph.distributed` (power-user; not on root ``__all__``).
+This is **not** the unimplemented operator flag ``sparsity="distributed"``
+(see :doc:`faq` and :doc:`limitations`).
+
+* Native PyTorch DDP via :func:`~koopman_graph.distributed.run_ddp_fit_loop`
+  or ``GraphKoopmanModel.fit(..., strategy="ddp")`` (core install;
+  typically launched with ``torchrun``)
+* Lightning Fabric via :func:`~koopman_graph.distributed.fit_with_fabric`
+  (requires ``pip install "koopman-graph[lightning]"``)
+* Optional Lightning ``Trainer`` sugar via
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` (same
+  ``[lightning]`` extra). Prefer Fabric / native DDP when you need full
+  loss schedules, :class:`~koopman_graph.distributed.DistributedWindowSampler`,
+  or the shared epoch driver. The module composes a
+  :class:`~koopman_graph.model.GraphKoopmanModel`, accepts batches of
+  :class:`~koopman_graph.data.GraphSnapshotSequence` (or a list thereof),
+  and exports format-1 checkpoints with ``export_format1_checkpoint``
+* Rank-aware window sampling
+  (:class:`~koopman_graph.distributed.DistributedWindowSampler`) and
+  trajectory sharding helpers
+* Optional Ray parallel ensemble member fits via
+  :func:`~koopman_graph.distributed.fit_ensemble_with_ray` or
+  ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
+  member_factory=...)`` (requires ``pip install "koopman-graph[ray]"``).
+  Sequential ensemble fit remains the default. This does **not** change
+  UQ coverage guarantees — members stay independent fits. Prefer native
+  DDP / Fabric for multi-GPU *model* training (Ray Train is out of scope)
+* Example script (outside ``nbmake`` CI)::
+
+    torchrun --standalone --nproc_per_node=2 \\
+      examples/scripts/ddp_fit_torchrun.py
+
+  See ``examples/scripts/README.md``. Multi-process smoke tests are
+  opt-in (``KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1``); default PR CI does not
+  require multi-node hardware.
+
+Ray Tune is **examples-only**: see
+``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
+script; the library does not expose a Tune / AutoML API). Dask is
+**docs-only** in 0.8.0: there is no library ``dask_prep`` API and no Dask
+training loop. Use Dask in *user* code to materialize trajectories or
+window lists offline, then pass in-memory
+:class:`~koopman_graph.data.GraphSnapshotSequence` objects into ``fit`` /
+:class:`~koopman_graph.distributed.DistributedWindowSampler` (see
+:doc:`faq`). The ``[dask]`` extra remains a reserved dependency pin.
+Distributed data-parallel training does **not** reduce dense
+:math:`N\cdot d` operator ceilings — see :doc:`limitations` (Scale).
+
 Analysis
 ~~~~~~~~
 

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-28
+
+Optional multi-process / multi-GPU *trainer orchestration* around the same
+scientific fit loop. No claimed wall-time percentages. Operator flag
+`sparsity="distributed"` remains unimplemented and unrelated.
+
+### Added
+
+- Power-user package `koopman_graph.distributed`: rank / world-size helpers,
+  `seed_everything`, `DistributedWindowSampler`,
+  `shard_sequences_for_rank` (off root `__all__`).
+- Native PyTorch DDP via `run_ddp_fit_loop` and
+  `GraphKoopmanModel.fit(..., strategy="ddp")` (core install; typically
+  `torchrun`). Example: `examples/scripts/ddp_fit_torchrun.py`.
+- Lightning Fabric adapter `fit_with_fabric` (`[lightning]` extra).
+- Optional Lightning `Trainer` sugar: `KoopmanLightningModule` with
+  `export_format1_checkpoint` (`[lightning]`; prefer Fabric / DDP for
+  full loss schedules and rank-aware sampling).
+- Ray parallel ensemble member fits: `fit_ensemble_with_ray` and
+  `EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
+  member_factory=...)` (`[ray]`; sequential ensemble fit remains the
+  default). Does not change UQ coverage guarantees.
+- Examples-only Ray Tune script
+  `examples/scripts/ray_tune_koopman_example.py` (search space stays in
+  the script; no library Tune / AutoML API).
+- Optional extras `lightning`, `ray`, reserved `dask`, and meta
+  `distributed` (Lightning + Ray + Dask pins).
+- Sphinx: installation extras, capabilities (Distributed training),
+  limitations / FAQ (multi-GPU, sparsity disambiguation, Dask pattern),
+  architecture (`distributed/` layout and dependency rule), tutorials
+  scripts pointer.
+
+### Changed
+
+- `GraphKoopmanModel.fit` accepts optional `strategy="ddp"` that
+  delegates to `run_ddp_fit_loop` without importing Lightning into
+  `model/`. Default `fit` / `run_fit_loop` remain single-process.
+- Format-1 checkpoints from DDP / Trainer paths snapshot the unwrapped
+  module (no `module.` prefix).
+
+### Notes
+
+- **Dask:** docs-only in 0.8.0; `[dask]` extra reserved; no library
+  `dask_prep` API and no Dask training loop (offline materialization in
+  user code only).
+- **Ray Train** as a multi-GPU *model* DDP backend is out of scope; use
+  native DDP or Fabric.
+- Data-parallel training does **not** reduce dense \(N \cdot d\)
+  operator ceilings.
+- Multi-process smoke tests are opt-in
+  (`KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1`); default CI stays single-process.
+
 ## [0.7.1] - 2026-07-27
 
 Performance and training-path reuse. Same public scientific defaults; no
@@ -318,6 +370,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.8.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.0
 [0.7.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.1
 [0.7.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.0
 [0.6.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.6.0
