@@ -22,18 +22,13 @@ from koopman_graph.graph_utils import snapshot_edge_weight
 
 
 class WindowOrigin(NamedTuple):
-    """Index of one valid fixed-length temporal window.
-
-    Attributes
-    ----------
-    sequence_index : int
-        Index into the source trajectory list.
-    start : int
-        Inclusive start timestep of the window within that trajectory.
-    """
+    """Index of one valid fixed-length temporal window."""
 
     sequence_index: int
+    """Index into the source trajectory list."""
+
     start: int
+    """Inclusive start timestep of the window within that trajectory."""
 
 
 def build_window_index_list(
