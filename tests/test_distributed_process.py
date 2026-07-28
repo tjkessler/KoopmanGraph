@@ -27,8 +27,13 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "koopman_graph" / "distribu
 
 
 def test_package_import_and_all() -> None:
-    """Capability package exports the process/seed surface."""
-    assert set(distributed_pkg.__all__) == {
+    """Capability package exports the process/seed surface.
+
+    Lazy optional-extra symbols stay listed in ``__all__`` but may raise
+    ``ImportError`` on attribute access when Lightning / Ray are absent;
+    ``hasattr`` is therefore only asserted for core (non-extra) exports.
+    """
+    expected = {
         "DistributedWindowSampler",
         "KoopmanLightningModule",
         "all_reduce_mean",
@@ -45,8 +50,14 @@ def test_package_import_and_all() -> None:
         "shard_sequences_for_rank",
         "unwrap_model",
     }
-    for name in distributed_pkg.__all__:
+    assert set(distributed_pkg.__all__) == expected
+    optional_extra_exports = frozenset(
+        {"KoopmanLightningModule", "fit_ensemble_with_ray"}
+    )
+    for name in expected - optional_extra_exports:
         assert hasattr(distributed_pkg, name)
+    # Fabric helper is eagerly bound; Lightning/Ray remain lazy.
+    assert hasattr(distributed_pkg, "fit_with_fabric")
 
 
 def test_root_all_excludes_distributed_symbols() -> None:
