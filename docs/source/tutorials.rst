@@ -145,6 +145,24 @@ Control, observation, and advanced dynamics
    * - `25_kalman_koopman_state_estimation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/25_kalman_koopman_state_estimation.ipynb>`_
      - Kalman-Koopman observer / imputation under masks
 
+Example scripts
+---------------
+
+Non-notebook entry points live under
+`examples/scripts/ <https://github.com/tjkessler/KoopmanGraph/tree/main/examples/scripts>`_
+(not collected by ``nbmake``). For native DDP / ``torchrun``::
+
+   torchrun --standalone --nproc_per_node=2 \\
+     examples/scripts/ddp_fit_torchrun.py
+
+For examples-only Ray Tune HPO (requires ``[ray]``; search space stays in
+the script)::
+
+   python examples/scripts/ray_tune_koopman_example.py --epochs 1 --num-samples 2
+
+See ``examples/scripts/README.md`` and :doc:`capabilities` (Distributed
+training).
+
 Related pages
 -------------
 

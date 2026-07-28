@@ -57,14 +57,17 @@ Use ``.[dev]`` for local testing and ``.[docs]`` before ``cd docs && make html``
 The ``[dev]`` and ``[docs]`` extras do not replace the PyTorch / PyG prerequisite
 order above when you need a non-default (non-CPU) accelerator.
 
-Optional feature extras (0.6)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Optional feature extras
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   pip install "koopman-graph[mpc]"        # OSQP for KoopmanMPC
-   pip install "koopman-graph[symmetry]"   # networkx for auto node orbits
-   pip install "koopman-graph[rl]"         # Gymnasium / Stable-Baselines3
+   pip install "koopman-graph[mpc]"          # OSQP for KoopmanMPC
+   pip install "koopman-graph[symmetry]"     # networkx for auto node orbits
+   pip install "koopman-graph[rl]"           # Gymnasium / Stable-Baselines3
+   pip install "koopman-graph[lightning]"    # Fabric + KoopmanLightningModule
+   pip install "koopman-graph[ray]"          # parallel ensemble member fits
+   pip install "koopman-graph[distributed]"  # meta: lightning + ray + dask
 
 * **MPC:** ``from koopman_graph.mpc import KoopmanMPC``. Construction works
   without OSQP; ``solve`` / ``rollout`` raise with install guidance if OSQP
@@ -73,6 +76,15 @@ Optional feature extras (0.6)
   (``method="auto"``). Without ``[symmetry]``, ``node_orbit_partition``
   warns and returns the identity partition (no tying). Exact orbits need
   optional ``pynauty`` separately.
+* **Distributed trainers:** native DDP / ``torchrun`` need only core
+  PyTorch. Fabric and optional
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` Trainer sugar
+  need ``[lightning]``. Parallel ensemble member fits need ``[ray]``
+  (:func:`~koopman_graph.distributed.fit_ensemble_with_ray`). Prefer
+  Fabric / DDP for multi-GPU *model* training and full loss schedules.
+  ``[dask]`` is a reserved pin (docs-only in 0.8.0; see “Can I use Dask?”
+  below). See :doc:`installation` and :doc:`capabilities` (Distributed
+  training).
 * See :doc:`installation` for the full extras table.
 
 Import paths after 0.6
@@ -171,6 +183,84 @@ Optional ``amp_dtype`` selects the autocast dtype (default
 ``torch.float16``). AMP is supported on **CUDA** only; on CPU or MPS the
 fit loop warns once and continues in FP32. AMP does not change loss
 definitions — only numeric precision during the forward / backward pass.
+With Lightning Fabric, prefer Fabric ``precision`` **or** ``use_amp`` —
+not both stacked (``fit_with_fabric`` raises if both own autocast).
+
+How do I use multiple GPUs or processes?
+----------------------------------------
+
+Use the power-user :mod:`koopman_graph.distributed` helpers (not root
+``__all__``):
+
+* **Native DDP / ``torchrun``** (core install)::
+
+      torchrun --standalone --nproc_per_node=2 \\
+        examples/scripts/ddp_fit_torchrun.py
+
+  Or call ``model.fit(..., strategy="ddp")`` /
+  :func:`~koopman_graph.distributed.run_ddp_fit_loop` under a process
+  group. Prefer
+  :class:`~koopman_graph.distributed.DistributedWindowSampler` (or
+  ``window_length=...``) so a single trajectory can shard across ranks;
+  full-sequence mode requires at least as many trajectories as ranks.
+* **Lightning Fabric** — :func:`~koopman_graph.distributed.fit_with_fabric`
+  after ``pip install "koopman-graph[lightning]"``.
+* **Lightning Trainer** (optional sugar) —
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` wraps a
+  composed :class:`~koopman_graph.model.GraphKoopmanModel`. Collate
+  ``DataLoader`` batches as a ``GraphSnapshotSequence`` or a list of
+  sequences; export with ``export_format1_checkpoint``. Prefer Fabric /
+  DDP when you need full loss schedules or
+  :class:`~koopman_graph.distributed.DistributedWindowSampler`.
+* **Ray ensemble members** (optional) —
+  :func:`~koopman_graph.distributed.fit_ensemble_with_ray` after
+  ``pip install "koopman-graph[ray]"``, or
+  ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
+  member_factory=...)``. Sequential ensemble fit remains the default.
+  Prefer a picklable (ideally module-level) factory. This does **not**
+  change UQ coverage guarantees. Use DDP / Fabric for multi-GPU model
+  training — Ray Train is out of scope.
+* **Ray Tune HPO** (examples-only) —
+  ``examples/scripts/ray_tune_koopman_example.py``. The search space stays
+  in the script; KoopmanGraph does not expose a Tune / AutoML API.
+
+Default ``fit`` / ``run_fit_loop`` remain single-process when
+``strategy`` is unset. Distributed training does **not** reduce dense
+:math:`N\cdot d` ceilings (see :doc:`limitations`). Multi-node behavior
+is not covered by default CI.
+
+Is trainer “distributed” the same as ``sparsity="distributed"``?
+----------------------------------------------------------------
+
+**No.** They are unrelated:
+
+* **Trainer orchestration** — optional DDP / Fabric /
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` paths under
+  :mod:`koopman_graph.distributed` (data-parallel gradients / devices).
+* **``sparsity="distributed"``** — a reserved *operator* sparsity mode on
+  graph / hypergraph / continuous-graph constructors. It is **not
+  implemented** and continues to raise ``ValueError``.
+
+Can I use Dask with KoopmanGraph?
+---------------------------------
+
+**Yes, for offline data prep in your own code** — not as a second training
+runtime. Version 0.8.0 ships **no** library Dask helpers (no ``dask_prep``
+API) and does not import Dask from ``training``. The ``[dask]`` extra is a
+reserved dependency pin only.
+
+Typical pattern: materialize partitions with a threaded or distributed
+scheduler, then hand in-memory sequences to ``fit`` or
+:class:`~koopman_graph.distributed.DistributedWindowSampler`::
+
+   import dask
+
+   delayed_seqs = [dask.delayed(load_sequence)(path) for path in paths]
+   sequences = dask.compute(*delayed_seqs, scheduler="threads")
+   model.fit(list(sequences), epochs=10)  # or windowed / DDP fit
+
+Do **not** replace :func:`~koopman_graph.training.run_fit_loop` /
+DDP / Fabric with a Dask-worker training loop.
 
 Hierarchical pooling: ``per_snapshot`` vs ``hold_perm``
 -------------------------------------------------------

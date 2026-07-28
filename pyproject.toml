@@ -67,6 +67,23 @@ mpc = [
     "osqp>=0.6.0",
     "scipy>=1.11.0",
 ]
+# Optional distributed-training adapters (0.8.0). Native DDP uses torch only;
+# these extras gate Lightning Fabric / Trainer, Ray jobs, and optional Dask prep.
+# Exclude Lightning 2.6.2 / 2.6.3 (compromised releases on PyPI).
+lightning = [
+    "lightning>=2.4.0,!=2.6.2,!=2.6.3",
+]
+ray = [
+    "ray>=2.9.0",
+]
+dask = [
+    "dask[distributed]>=2024.1.0",
+]
+distributed = [
+    "lightning>=2.4.0,!=2.6.2,!=2.6.3",
+    "ray>=2.9.0",
+    "dask[distributed]>=2024.1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/tjkessler/KoopmanGraph"
@@ -85,6 +102,9 @@ testpaths = ["tests"]
 addopts = "-v"
 filterwarnings = [
     "ignore::tqdm.std.TqdmWarning",
+]
+markers = [
+    "distributed: multi-process gloo/DDP smoke (opt-in via KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1)",
 ]
 
 [tool.coverage.run]

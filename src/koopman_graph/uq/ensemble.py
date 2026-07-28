@@ -389,6 +389,8 @@ class EnsembleGraphKoopmanModel:
         data_sequence: Any,
         *,
         seeds: Sequence[int] | None = None,
+        parallel_backend: str | None = None,
+        member_factory: MemberFactory | None = None,
         **fit_kwargs: Any,
     ) -> list[FitHistory]:
         """Fit each member independently (optionally under distinct seeds).
@@ -399,7 +401,16 @@ class EnsembleGraphKoopmanModel:
             Training input forwarded to each member's ``fit``.
         seeds : sequence of int or None, optional
             When provided, ``torch.manual_seed`` is set before each member
-            ``fit``. Length must equal :attr:`n_members`.
+            ``fit`` (sequential path), or forwarded to Ray workers (Ray
+            path). Length must equal :attr:`n_members`.
+        parallel_backend : {None, ``"sequential"``, ``"ray"``}, optional
+            Fitting orchestration. Default ``None`` / ``"sequential"`` keeps
+            the single-process loop (no Ray import). ``"ray"`` requires
+            ``member_factory`` and the ``[ray]`` extra; see
+            :func:`~koopman_graph.distributed.fit_ensemble_with_ray`.
+        member_factory : callable or None, optional
+            Zero-argument factory required when ``parallel_backend="ray"``.
+            Prefer a module-level callable for Ray serialization.
         **fit_kwargs
             Forwarded unchanged to
             :meth:`~koopman_graph.model.GraphKoopmanModel.fit`.
@@ -408,6 +419,14 @@ class EnsembleGraphKoopmanModel:
         -------
         list of FitHistory
             Per-member training histories in member order.
+
+        Raises
+        ------
+        ValueError
+            If ``seeds`` length mismatches, ``parallel_backend`` is unknown,
+            or ``member_factory`` is missing for the Ray path.
+        ImportError
+            If ``parallel_backend="ray"`` and Ray is not installed.
         """
         if seeds is not None and len(seeds) != self.n_members:
             msg = (
@@ -416,12 +435,39 @@ class EnsembleGraphKoopmanModel:
             )
             raise ValueError(msg)
 
-        histories: list[FitHistory] = []
-        for index, member in enumerate(self._members):
-            if seeds is not None:
-                torch.manual_seed(int(seeds[index]))
-            histories.append(member.fit(data_sequence, **fit_kwargs))
-        return histories
+        backend = "sequential" if parallel_backend is None else parallel_backend
+        if backend == "sequential":
+            histories: list[FitHistory] = []
+            for index, member in enumerate(self._members):
+                if seeds is not None:
+                    torch.manual_seed(int(seeds[index]))
+                histories.append(member.fit(data_sequence, **fit_kwargs))
+            return histories
+        if backend == "ray":
+            if member_factory is None:
+                msg = (
+                    "member_factory is required when parallel_backend='ray'; "
+                    "pass a zero-argument GraphKoopmanModel factory "
+                    "(prefer module-level for Ray serialization)"
+                )
+                raise ValueError(msg)
+            from koopman_graph.distributed.ray_jobs import fit_ensemble_with_ray
+
+            state_dicts, histories = fit_ensemble_with_ray(
+                member_factory,
+                data_sequence,
+                num_members=self.n_members,
+                seeds=seeds,
+                **fit_kwargs,
+            )
+            for member, state_dict in zip(self._members, state_dicts, strict=True):
+                member.load_state_dict(state_dict)
+            return histories
+        msg = (
+            "parallel_backend must be None, 'sequential', or 'ray'; "
+            f"got {parallel_backend!r}"
+        )
+        raise ValueError(msg)
 
     def predict(
         self,

@@ -114,7 +114,21 @@ modest latent width, and optional CUDA automatic mixed precision
   structural parameterizations (``schur`` / ``lyapunov`` / ``dissipative``)
   or modest :math:`N` when that term is enabled.
 * **``sparsity="distributed"`` is not implemented** and continues to raise
-  ``ValueError``.
+  ``ValueError``. Do not confuse this reserved operator flag with optional
+  *trainer* orchestration under :mod:`koopman_graph.distributed` (native
+  DDP / Lightning Fabric). Trainer DDP shards data and synchronizes
+  gradients; it does **not** shrink the dense :math:`N\cdot d`
+  representation ceilings above.
+* **Multi-process / multi-GPU CI is not guaranteed.** Default test jobs
+  stay single-process. Optional gloo smokes are opt-in
+  (``KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1`` / ``@pytest.mark.distributed``).
+  Multi-node launches and measured speedups are outside the documented
+  contract.
+* **No Dask training loop.** Dask is docs-only in 0.8.0: the library does
+  not import Dask on the training path, and the ``[dask]`` extra is unused
+  by public APIs (reserved pin). Offline materialization of trajectories
+  or window lists may use Dask in user code; training remains PyTorch /
+  :mod:`koopman_graph.distributed` (see :doc:`faq`).
 * **DiffConv** bidirectional diffusion supports are dense
   :math:`N \times N` tensors for static graphs. Identical
   ``edge_index`` / weight storage may reuse cached supports

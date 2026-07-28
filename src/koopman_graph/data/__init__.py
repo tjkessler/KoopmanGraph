@@ -20,7 +20,10 @@ Capability layout
 ``sampling``
     ``WindowSampler`` for fixed-length temporal windows;
     ``NeighborWindowSampler`` for k-hop subgraph windows on large static
-    graphs (training approximation; not on root ``__all__``).
+    graphs (training approximation; not on root ``__all__``);
+    :class:`~koopman_graph.data.WindowOrigin` /
+    :func:`~koopman_graph.data.build_window_index_list` for pure origin
+    planning (also used by distributed samplers).
 ``splits``
     ``TemporalSplit`` and :func:`temporal_split`.
 ``rollout``
@@ -35,7 +38,9 @@ from koopman_graph.data.rollout import (
 from koopman_graph.data.sampling import (
     NeighborWindowSampler,
     WindowLikeSampler,
+    WindowOrigin,
     WindowSampler,
+    build_window_index_list,
 )
 from koopman_graph.data.splits import TemporalSplit, temporal_split
 from koopman_graph.data.trajectories import (
@@ -52,8 +57,10 @@ __all__ = [
     "RolloutStartIndices",
     "TemporalSplit",
     "WindowLikeSampler",
+    "WindowOrigin",
     "WindowSampler",
     "as_multi_trajectory",
+    "build_window_index_list",
     "resolve_pair_delta_t",
     "resolve_rollout_start_indices",
     "resolve_sequence",

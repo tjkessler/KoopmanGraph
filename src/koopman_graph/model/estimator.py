@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from torch import Tensor, nn
@@ -104,6 +104,9 @@ from .online_adaptation import (
     run_adapt_step,
 )
 from .validation import prepare_fit_inputs, uses_hypergraph_modules
+
+if TYPE_CHECKING:
+    from koopman_graph.distributed import DistributedWindowSampler
 
 
 class GraphKoopmanModel(nn.Module):
@@ -1456,7 +1459,7 @@ class GraphKoopmanModel(nn.Module):
         batch_size: int = 8,
         windows_per_epoch: int | None = None,
         window_seed: int | None = None,
-        sampler: WindowLikeSampler | None = None,
+        sampler: WindowLikeSampler | DistributedWindowSampler | None = None,
         max_grad_norm: float | None = None,
         use_amp: bool = False,
         amp_dtype: torch.dtype | None = None,
@@ -1466,13 +1469,16 @@ class GraphKoopmanModel(nn.Module):
         validation_sequence: ValidationInput = None,
         restore_best_weights: bool = False,
         checkpoint_path: str | Path | None = None,
+        strategy: Literal["ddp"] | None = None,
         **optimizer_kwargs: Any,
     ) -> FitHistory:
         """Train encoder, Koopman operator, and decoder end-to-end.
 
-        Thin façade over :func:`~koopman_graph.training.run_fit_loop`: validates
-        inputs and control layouts, then delegates epoch orchestration,
-        device placement, early stopping, and history assembly.
+        Thin façade over :func:`~koopman_graph.training.run_fit_loop` (default)
+        or :func:`~koopman_graph.distributed.run_ddp_fit_loop` when
+        ``strategy="ddp"``: validates inputs and control layouts, then
+        delegates epoch orchestration, device placement, early stopping, and
+        history assembly.
 
         Minimizes a weighted sum of one-step MSE plus optional forward /
         backward consistency, multi-step rollout, and eigenvalue
@@ -1557,11 +1563,15 @@ Data
             window across all trajectories.
         window_seed : int or None, optional
             Base seed for reproducible epoch-specific window shuffling.
-        sampler : WindowSampler, NeighborWindowSampler, or None, optional
+        sampler : WindowSampler, NeighborWindowSampler, \
+DistributedWindowSampler, or None, optional
             Pre-built temporal or neighbor-subgraph window sampler. When set,
             use instead of ``window_length``. Neighbor sampling trains on
             induced subgraphs (approximation); ``predict`` / ``evaluate`` stay
-            full-graph.
+            full-graph. With ``strategy="ddp"``, pass
+            :class:`~koopman_graph.distributed.DistributedWindowSampler` (or
+            ``window_length``); plain :class:`~koopman_graph.data.WindowSampler`
+            / :class:`~koopman_graph.data.NeighborWindowSampler` are rejected.
         max_grad_norm : float or None, optional
             When set, clip the global gradient norm before each optimizer step.
         use_amp : bool, optional
@@ -1591,6 +1601,14 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         checkpoint_path : str, Path, or None, optional
             When set, write a checkpoint at the lowest-loss epoch using
             :meth:`save`. Default is ``None``.
+        strategy : {"ddp"} or None, optional
+            Training orchestration backend. ``None`` (default) uses
+            :func:`~koopman_graph.training.run_fit_loop` (single-process,
+            unchanged from 0.7.1). ``"ddp"`` delegates to
+            :func:`~koopman_graph.distributed.run_ddp_fit_loop` for native
+            PyTorch DDP / ``torchrun`` launches; at world size 1 wrapping is
+            skipped. See also
+            :func:`~koopman_graph.distributed.prepare_ddp_model`.
         **optimizer_kwargs
             Additional keyword arguments forwarded to the optimizer constructor.
 
@@ -1607,8 +1625,9 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         ValueError
             If ``epochs < 1``, ``early_stopping_patience < 1`` when set,
             ``early_stopping_monitor="val"`` without ``validation_sequence``,
-            validation list length mismatches training trajectories, or fewer
-            than two snapshots are provided for training or validation.
+            validation list length mismatches training trajectories, fewer
+            than two snapshots are provided for training or validation, or
+            ``strategy`` is not ``None`` / ``"ddp"``.
         """
         prepared = prepare_fit_inputs(
             control_dim=self.control_dim,
@@ -1622,37 +1641,46 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
                 or self.uses_hypergraph_koopman
             ),
         )
-        return run_fit_loop(
-            self,
-            prepared.train_sequences,
-            epochs=epochs,
-            lr=lr,
-            optimizer=optimizer,
-            device=device,
-            loss_weights=loss_weights,
-            loss_weight_schedule=loss_weight_schedule,
-            extra_losses=extra_losses,
-            rollout_horizon=rollout_horizon,
-            rollout_start_indices=rollout_start_indices,
-            rollout_starts_per_epoch=rollout_starts_per_epoch,
-            rollout_start_seed=rollout_start_seed,
-            lr_scheduler=lr_scheduler,
-            window_length=window_length,
-            batch_size=batch_size,
-            windows_per_epoch=windows_per_epoch,
-            window_seed=window_seed,
-            sampler=sampler,
-            max_grad_norm=max_grad_norm,
-            use_amp=use_amp,
-            amp_dtype=amp_dtype,
-            early_stopping_patience=early_stopping_patience,
-            early_stopping_min_delta=early_stopping_min_delta,
-            early_stopping_monitor=prepared.early_stopping_monitor,
-            val_sequences=prepared.val_sequences,
-            restore_best_weights=restore_best_weights,
-            checkpoint_path=checkpoint_path,
+        loop_kwargs: dict[str, Any] = {
+            "epochs": epochs,
+            "lr": lr,
+            "optimizer": optimizer,
+            "device": device,
+            "loss_weights": loss_weights,
+            "loss_weight_schedule": loss_weight_schedule,
+            "extra_losses": extra_losses,
+            "rollout_horizon": rollout_horizon,
+            "rollout_start_indices": rollout_start_indices,
+            "rollout_starts_per_epoch": rollout_starts_per_epoch,
+            "rollout_start_seed": rollout_start_seed,
+            "lr_scheduler": lr_scheduler,
+            "window_length": window_length,
+            "batch_size": batch_size,
+            "windows_per_epoch": windows_per_epoch,
+            "window_seed": window_seed,
+            "sampler": sampler,
+            "max_grad_norm": max_grad_norm,
+            "use_amp": use_amp,
+            "amp_dtype": amp_dtype,
+            "early_stopping_patience": early_stopping_patience,
+            "early_stopping_min_delta": early_stopping_min_delta,
+            "early_stopping_monitor": prepared.early_stopping_monitor,
+            "val_sequences": prepared.val_sequences,
+            "restore_best_weights": restore_best_weights,
+            "checkpoint_path": checkpoint_path,
             **optimizer_kwargs,
+        }
+        if strategy is None:
+            return run_fit_loop(self, prepared.train_sequences, **loop_kwargs)
+        if strategy == "ddp":
+            from koopman_graph.distributed import run_ddp_fit_loop
+
+            return run_ddp_fit_loop(self, prepared.train_sequences, **loop_kwargs)
+        msg = (
+            f"unsupported fit strategy {strategy!r}; expected None or 'ddp' "
+            "(see koopman_graph.distributed.run_ddp_fit_loop)"
         )
+        raise ValueError(msg)
 
     def to_latent_env(
         self,

@@ -87,6 +87,9 @@ latent propagation/rollout peers).
 reconstruction / physics / rollout peers).
 ``model/`` is a same-named capability package (estimator / factory /
 validation / timing / encoding / inference / online_adaptation peers).
+``distributed/`` is a capability package for optional multi-process /
+multi-GPU *trainer* adapters (native DDP, Lightning Fabric, an optional
+``KoopmanLightningModule`` Trainer façade, and Ray ensemble member jobs).
 
 ``koopman_graph.adaptation`` package layout:
 
@@ -157,6 +160,38 @@ leading-underscore helpers across peer modules.
 Do not invent a ``training/objectives/`` or ``training/loop/`` subtree.
 Prefer ``from koopman_graph.training import …``. Do not import
 leading-underscore helpers across training peers.
+
+``koopman_graph.distributed`` package layout:
+
+* ``process`` — rank / world-size helpers,
+  ``init_process_group_from_env``, ``barrier``, ``is_main_process``
+* ``seed`` — ``seed_everything`` (optional rank offset)
+* ``sampling`` — ``DistributedWindowSampler``,
+  ``shard_sequences_for_rank``
+* ``ddp`` — ``prepare_ddp_model``, ``run_ddp_fit_loop``,
+  ``unwrap_model``, metric ``all_reduce_mean`` (uses an attribute-forwarding
+  DDP subclass so training can access ``.koopman`` / ``.encode``; checkpoints
+  always snapshot the unwrapped module — no ``module.`` prefix in format-1)
+* ``fabric`` — ``fit_with_fabric`` (lazy Lightning import)
+* ``lightning_module`` — ``KoopmanLightningModule`` (lazy Lightning import;
+  Trainer sugar that composes ``GraphKoopmanModel``; prefer Fabric / DDP
+  for full schedules and rank-aware sampling)
+* ``ray_jobs`` — ``fit_ensemble_with_ray`` (lazy Ray import; parallel
+  independent ensemble member fits; not a multi-GPU model DDP backend)
+* ``_fit_epochs`` — private shared epoch driver used by DDP and Fabric
+  (not public ``__all__``)
+* No ``dask_prep`` peer in 0.8.0 — Dask remains docs-only (offline prep in
+  user code; see :doc:`faq`)
+
+**Dependency rule:** ``distributed`` may import ``training``, ``data``,
+``model``, and ``uq`` (ensemble helpers only). ``training`` must **not**
+import Lightning, Ray, Dask, or ``koopman_graph.distributed``. Prefer
+``from koopman_graph.distributed import …``. Symbols stay off root
+``__all__`` (power-user tier). Optional thin
+``GraphKoopmanModel.fit(..., strategy="ddp")`` delegates to
+``run_ddp_fit_loop`` without importing Lightning into ``model/``.
+``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray")`` lazy-imports
+``fit_ensemble_with_ray`` only on the Ray path.
 
 Training-path contracts (performance)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -701,6 +736,10 @@ Examples:
 
 * :mod:`koopman_graph.training` — loss schedules, ``train_one_epoch``,
   ``run_fit_loop``, ``resolve_device``, and related helpers
+* :mod:`koopman_graph.distributed` — optional DDP / Fabric trainer
+  adapters, ``KoopmanLightningModule`` Trainer sugar,
+  ``fit_ensemble_with_ray``, rank helpers, and rank-aware window sampling
+  (not in root ``__all__``; do not reverse-import from ``training``)
 * :mod:`koopman_graph.serialization` — checkpoint build/load internals behind
   ``GraphKoopmanModel.save`` / ``load``
 * :mod:`koopman_graph.datasets.dynamics` — Laplacian diffusion primitives and
@@ -1418,6 +1457,19 @@ Who moves tensors
 * **Callers of ``predict`` / ``evaluate``** are responsible for placing the
   model and inputs consistently. These APIs do not silently relocate the model
   the way ``fit`` does; keep inputs on the same device as the model parameters.
+* **Distributed trainers** —
+  :func:`~koopman_graph.distributed.run_ddp_fit_loop` honors ``LOCAL_RANK``
+  when CUDA is available (as set by ``torchrun``), moves sequences with
+  :func:`~koopman_graph.training.sequence_to_device`, and writes checkpoints
+  only on the main process from the **unwrapped** module.
+  :func:`~koopman_graph.distributed.fit_with_fabric` uses Fabric's device /
+  precision setup. Rank-aware sampling uses Fabric or process-group rank /
+  world size.
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` defers device
+  placement to Lightning ``Trainer``; export format-1 checkpoints with
+  ``export_format1_checkpoint`` (composed model, no ``module.`` prefix).
+  Compose adapters around ``GraphKoopmanModel``; do not subclass the façade
+  for DDP / Fabric / Trainer.
 
 Façade vs functional training ownership
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2126,6 +2178,17 @@ new operator classes are the 0.6.0 root additions).
 * ``[mpc]`` — OSQP for :class:`~koopman_graph.mpc.KoopmanMPC`
 * ``[symmetry]`` — ``networkx`` for approximate node-orbit partitions
 * ``[rl]`` — Gymnasium / Stable-Baselines3 (unchanged)
+* ``[lightning]`` — Lightning for
+  :func:`~koopman_graph.distributed.fit_with_fabric` and
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` (native DDP
+  needs only core PyTorch)
+* ``[ray]`` — Ray for
+  :func:`~koopman_graph.distributed.fit_ensemble_with_ray`; Tune remains
+  examples-only (``examples/scripts/ray_tune_koopman_example.py``; no
+  library search-space DSL)
+* ``[dask]`` — reserved dependency pin; **docs-only** in 0.8.0 (no library
+  ``dask_prep`` API or Dask training loop)
+* ``[distributed]`` — meta-extra (``lightning`` + ``ray`` + ``dask``)
 * ``[dev]`` / ``[docs]`` — tests and Sphinx (unchanged)
 
 **Checkpoint note (format-1 baseline)**
