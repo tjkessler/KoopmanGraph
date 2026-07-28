@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-28
+
+Patch re-release so Zenodo can archive the 0.8.0 software surface after the
+GitHub→Zenodo webhook for tag `0.8.0` failed during Zenodo downtime (draft
+ingest missing `KoopmanGraph-0.8.0.zip`). No scientific API changes relative
+to 0.8.0.
+
+### Notes
+
+- Prefer installing `koopman-graph==0.8.1` (or latest 0.8.x) from PyPI; the
+  Zenodo version DOI for this tag will be recorded once the archive succeeds.
+
 ## [0.8.0] - 2026-07-28
 
 Optional multi-process / multi-GPU *trainer orchestration* around the same
@@ -370,6 +382,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.8.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.1
 [0.8.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.0
 [0.7.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.1
 [0.7.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.0
