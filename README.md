@@ -136,7 +136,7 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.8.1: see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.8.2: see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -161,7 +161,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21629381},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.8.1},
+  version      = {0.8.2},
 }
 ```
 

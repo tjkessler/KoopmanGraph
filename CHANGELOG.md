@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-28
+
+Second patch re-release for Zenodo GitHub archival after tag `0.8.1` failed
+with the same missing-zip ingest error (`KoopmanGraph-0.8.1.zip`, draft
+`21656413`). No scientific API changes relative to 0.8.0.
+
+### Notes
+
+- Prefer installing `koopman-graph==0.8.2` (or latest 0.8.x) from PyPI; the
+  Zenodo version DOI will be recorded once an archive succeeds.
+
 ## [0.8.1] - 2026-07-28
 
 Patch re-release so Zenodo can archive the 0.8.0 software surface after the
@@ -16,8 +27,8 @@ to 0.8.0.
 
 ### Notes
 
-- Prefer installing `koopman-graph==0.8.1` (or latest 0.8.x) from PyPI; the
-  Zenodo version DOI for this tag will be recorded once the archive succeeds.
+- Zenodo ingest for this tag later failed (missing `KoopmanGraph-0.8.1.zip`);
+  see 0.8.2 for the follow-up archive retry.
 
 ## [0.8.0] - 2026-07-28
 
@@ -382,6 +393,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.8.2]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.2
 [0.8.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.1
 [0.8.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.0
 [0.7.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.7.1
