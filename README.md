@@ -9,7 +9,7 @@
 **Topology-aware Koopman autoencoders for forecasting and analyzing networked dynamics**
 
 [![Tests](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/tjkessler/KoopmanGraph/actions/workflows/ci.yml)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21629381.svg)](https://doi.org/10.5281/zenodo.21629381)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21682959.svg)](https://doi.org/10.5281/zenodo.21682959)
 [![PyPI version](https://img.shields.io/pypi/v/koopman-graph)](https://pypi.org/project/koopman-graph/)
 [![codecov](https://codecov.io/gh/tjkessler/KoopmanGraph/graph/badge.svg)](https://codecov.io/gh/tjkessler/KoopmanGraph)
 [![Documentation Status](https://readthedocs.org/projects/koopmangraph/badge/?version=latest)](https://koopmangraph.readthedocs.io/en/latest/?badge=latest)
@@ -159,7 +159,7 @@ If you use KoopmanGraph in research, please cite:
   title        = {KoopmanGraph: Topology-Aware Koopman Autoencoders for Networked Dynamics},
   year         = {2026},
   publisher    = {Zenodo},
-  doi          = {10.5281/zenodo.21629381},
+  doi          = {10.5281/zenodo.21682959},
   url          = {https://github.com/tjkessler/KoopmanGraph},
   version      = {0.8.2},
 }
