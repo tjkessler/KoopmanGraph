@@ -15,8 +15,8 @@ with the same missing-zip ingest error (`KoopmanGraph-0.8.1.zip`, draft
 
 ### Notes
 
-- Prefer installing `koopman-graph==0.8.2` (or latest 0.8.x) from PyPI; the
-  Zenodo version DOI will be recorded once an archive succeeds.
+- Zenodo version DOI (manual upload after GitHub→Zenodo ingest failures):
+  [10.5281/zenodo.21682959](https://doi.org/10.5281/zenodo.21682959).
 
 ## [0.8.1] - 2026-07-28
 
