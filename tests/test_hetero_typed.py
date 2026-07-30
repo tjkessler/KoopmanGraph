@@ -949,8 +949,6 @@ def test_per_type_self_blocks_stay_distinct_after_relgraph_fit() -> None:
 
     untied.fit(train, epochs=300, lr=5e-3, loss_weights=weights)
     gap = float(
-        torch.linalg.norm(
-            untied_op.k_self_for("a") - untied_op.k_self_for("b")
-        ).item()
+        torch.linalg.norm(untied_op.k_self_for("a") - untied_op.k_self_for("b")).item()
     )
     assert gap > 1e-3
