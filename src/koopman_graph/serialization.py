@@ -8,7 +8,8 @@ Checkpoint format versions
     embeddings, and built-in operator kinds (per-node / graph / hypergraph /
     global_local / continuous_graph). Encoder/decoder ``type`` strings include
     ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-    ``"hyper_enc"``, and ``"hyper_dec"``; missing decoder ``type`` defaults to
+    ``"hyper_enc"``, ``"hyper_dec"``, ``"relgraph_enc"``, and
+    ``"relgraph_dec"``; missing decoder ``type`` defaults to
     ``"gcn"``. Hybrid ``physics`` blocks own ``dim``, ``preset``, and
     ``position``; ``position`` is round-tripped and validated on load
     (currently only ``"prepend"``). Missing ``position`` defaults to
@@ -22,7 +23,13 @@ Checkpoint format versions
     ``None``), ``learn_topology`` (``None`` or ``"self_adaptive"``) with
     ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
     ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
-    graph / hypergraph operators).
+    graph / hypergraph operators). When ``koopman_kind="hetero_graph"``,
+    additive keys ``node_types``, ``edge_types`` (JSON ``(src, rel, dst)``
+    triples), ``relation_tying`` (``"independent"`` / ``"basis"``),
+    ``basis_size``, and
+    ``relation_normalization`` (``"rgcn_in_degree"`` /
+    ``"random_walk"``) are required on load; homogeneous checkpoints omit
+    and ignore these keys.
 
 Beta policy
     While the package is pre-1.0, ``FORMAT_VERSION`` stays at ``1``. Incomplete
@@ -60,6 +67,8 @@ from koopman_graph.nn import (
     GraphTransformerEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    RelGraphDecoder,
+    RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
 )
@@ -75,6 +84,7 @@ from koopman_graph.operators import (
     ContinuousKoopmanOperator,
     GlobalLocalKoopmanOperator,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
     KoopmanOperator,
     resolve_factory_stability_bound,
@@ -121,6 +131,7 @@ Decoder = (
     | DiffConvDecoder
     | GraphTransformerDecoder
     | HypergraphDecoder
+    | RelGraphDecoder
 )
 BaseEncoder = (
     GNNEncoder
@@ -129,6 +140,7 @@ BaseEncoder = (
     | DiffConvEncoder
     | GraphTransformerEncoder
     | HypergraphEncoder
+    | RelGraphEncoder
 )
 _SERIALIZABLE_KOOPMAN_TYPES = (
     KoopmanOperator,
@@ -137,8 +149,21 @@ _SERIALIZABLE_KOOPMAN_TYPES = (
     HypergraphKoopmanOperator,
     GlobalLocalKoopmanOperator,
     ContinuousGraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
 )
 _RESERVED_KOOPMAN_KINDS: dict[str, str] = {}
+
+_HETERO_REQUIRED_KEYS = frozenset(
+    {
+        "node_types",
+        "edge_types",
+        "relation_tying",
+        "basis_size",
+        "relation_normalization",
+    }
+)
+_RELATION_NORMALIZATION_MODES = frozenset({"rgcn_in_degree", "random_walk"})
+_RELATION_TYING_MODES = frozenset({"independent", "basis"})
 
 
 _NETWORKED_ADJACENCY_KINDS = frozenset({"graph", "continuous_graph"})
@@ -248,6 +273,8 @@ def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str,
     """
     if format_version == 1:
         _require_format1_schema(config)
+        if config.get("koopman_kind") == "hetero_graph":
+            _require_hetero_schema(config)
         return config
 
     msg = (
@@ -255,6 +282,107 @@ def _migrate_config(config: dict[str, Any], *, format_version: int) -> dict[str,
         f"supported versions: {sorted(SUPPORTED_FORMAT_VERSIONS)}"
     )
     raise ValueError(msg)
+
+
+def _require_hetero_schema(config: dict[str, Any]) -> None:
+    """Reject incomplete or unsupported hetero format-1 payloads.
+
+    Parameters
+    ----------
+    config : dict
+        Architecture configuration block from a checkpoint.
+
+    Raises
+    ------
+    ValueError
+        If required hetero keys are missing or malformed, or if
+        ``relation_tying`` / ``basis_size`` are inconsistent.
+    """
+    missing = sorted(_HETERO_REQUIRED_KEYS - config.keys())
+    if missing:
+        msg = (
+            "Incomplete hetero checkpoint schema: missing required "
+            f"fields: {', '.join(missing)}. Hetero checkpoints require "
+            "node_types and edge_types; re-save with the current package."
+        )
+        raise ValueError(msg)
+
+    node_types = config["node_types"]
+    edge_types = config["edge_types"]
+    if not isinstance(node_types, (list, tuple)) or not node_types:
+        msg = "Checkpoint config.node_types must be a non-empty sequence of strings"
+        raise ValueError(msg)
+    if any(not isinstance(name, str) or not name for name in node_types):
+        msg = "Checkpoint config.node_types entries must be non-empty strings"
+        raise ValueError(msg)
+    if not isinstance(edge_types, (list, tuple)) or not edge_types:
+        msg = (
+            "Checkpoint config.edge_types must be a non-empty sequence of "
+            "(src, rel, dst) triples"
+        )
+        raise ValueError(msg)
+    for entry in edge_types:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            msg = (
+                "Checkpoint config.edge_types entries must be "
+                f"(src, rel, dst) triples; got {entry!r}"
+            )
+            raise ValueError(msg)
+        if any(not isinstance(part, str) or not part for part in entry):
+            msg = "Checkpoint config.edge_types triples must use non-empty strings"
+            raise ValueError(msg)
+
+    relation_tying = config["relation_tying"]
+    if relation_tying not in _RELATION_TYING_MODES:
+        accepted = ", ".join(sorted(_RELATION_TYING_MODES))
+        msg = (
+            "Checkpoint config.relation_tying must be one of "
+            f"{{{accepted}}}, got {relation_tying!r}"
+        )
+        raise ValueError(msg)
+    basis_size = config["basis_size"]
+    if relation_tying == "independent":
+        if basis_size is not None:
+            msg = (
+                "Checkpoint config.basis_size must be null when "
+                "relation_tying='independent'"
+            )
+            raise ValueError(msg)
+    else:
+        if not isinstance(basis_size, int) or isinstance(basis_size, bool):
+            msg = (
+                "Checkpoint config.basis_size must be a positive int when "
+                f"relation_tying='basis'; got {basis_size!r}"
+            )
+            raise ValueError(msg)
+        if basis_size < 1:
+            msg = (
+                "Checkpoint config.basis_size must be a positive int when "
+                f"relation_tying='basis'; got {basis_size!r}"
+            )
+            raise ValueError(msg)
+
+    relation_normalization = config["relation_normalization"]
+    if relation_normalization not in _RELATION_NORMALIZATION_MODES:
+        accepted = ", ".join(sorted(_RELATION_NORMALIZATION_MODES))
+        msg = (
+            "Checkpoint config.relation_normalization must be one of "
+            f"{{{accepted}}}, got {relation_normalization!r}"
+        )
+        raise ValueError(msg)
+
+    encoder = config.get("encoder")
+    if (
+        isinstance(encoder, dict)
+        and "normalization" in encoder
+        and encoder["normalization"] != relation_normalization
+    ):
+        msg = (
+            "Checkpoint config.relation_normalization "
+            f"({relation_normalization!r}) must match "
+            f"encoder.normalization ({encoder['normalization']!r})"
+        )
+        raise ValueError(msg)
 
 
 def _parse_symmetry_config(
@@ -325,6 +453,7 @@ _SUPPORTED_ENCODER_TYPES: dict[str, type[BaseEncoder]] = {
     "diffconv": DiffConvEncoder,
     "transformer": GraphTransformerEncoder,
     "hyper_enc": HypergraphEncoder,
+    "relgraph_enc": RelGraphEncoder,
 }
 
 _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
@@ -334,6 +463,7 @@ _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
     "diffconv": DiffConvDecoder,
     "transformer": GraphTransformerDecoder,
     "hyper_dec": HypergraphDecoder,
+    "relgraph_dec": RelGraphDecoder,
 }
 
 
@@ -350,7 +480,7 @@ def _encoder_type(encoder: BaseEncoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        or ``"hyper_enc"``.
+        ``"hyper_enc"``, or ``"relgraph_enc"``.
 
     Raises
     ------
@@ -369,6 +499,8 @@ def _encoder_type(encoder: BaseEncoder) -> str:
         return "gcn"
     if isinstance(encoder, HypergraphEncoder):
         return "hyper_enc"
+    if isinstance(encoder, RelGraphEncoder):
+        return "relgraph_enc"
     msg = f"Unsupported encoder type: {type(encoder).__name__}"
     raise TypeError(msg)
 
@@ -420,6 +552,7 @@ def _unwrap_base_encoder(
             DiffConvEncoder,
             GraphTransformerEncoder,
             HypergraphEncoder,
+            RelGraphEncoder,
         ),
     ):
         return encoder, 1
@@ -440,7 +573,7 @@ def _decoder_type(decoder: Decoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        or ``"hyper_dec"``.
+        ``"hyper_dec"``, or ``"relgraph_dec"``.
 
     Raises
     ------
@@ -459,6 +592,8 @@ def _decoder_type(decoder: Decoder) -> str:
         return "gcn"
     if isinstance(decoder, HypergraphDecoder):
         return "hyper_dec"
+    if isinstance(decoder, RelGraphDecoder):
+        return "relgraph_dec"
     msg = f"Unsupported decoder type: {type(decoder).__name__}"
     raise TypeError(msg)
 
@@ -484,11 +619,11 @@ def _require_serializable_koopman(model: ModeShapeModel) -> None:
     msg = (
         "Checkpoint serialization supports only built-in KoopmanOperator, "
         "ContinuousKoopmanOperator, GraphKoopmanOperator, "
-        "HypergraphKoopmanOperator, GlobalLocalKoopmanOperator, and "
-        "ContinuousGraphKoopmanOperator instances. Custom injected operators "
-        "are not round-trippable; save the operator state separately or "
-        "reconstruct the model with koopman=... after load. "
-        f"Got {type(model.koopman).__name__}."
+        "HypergraphKoopmanOperator, GlobalLocalKoopmanOperator, "
+        "ContinuousGraphKoopmanOperator, and HeteroGraphKoopmanOperator "
+        "instances. Custom injected operators are not round-trippable; "
+        "save the operator state separately or reconstruct the model with "
+        f"koopman=... after load. Got {type(model.koopman).__name__}."
     )
     raise TypeError(msg)
 
@@ -532,6 +667,16 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         encoder_config["edge_dim"] = encoder.edge_dim
     if isinstance(encoder, DiffConvEncoder):
         encoder_config["diffusion_steps"] = encoder.diffusion_steps
+    if isinstance(encoder, RelGraphEncoder):
+        encoder_config["num_relations"] = encoder.num_relations
+        encoder_config["normalization"] = encoder.normalization
+        encoder_config["root_weight"] = encoder.root_weight
+        if encoder.node_types is not None:
+            encoder_config["node_types"] = list(encoder.node_types)
+        if encoder.edge_types is not None:
+            encoder_config["edge_types"] = [
+                list(triple) for triple in encoder.edge_types
+            ]
 
     decoder_config: dict[str, Any] = {
         "type": _decoder_type(decoder),
@@ -548,6 +693,16 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         decoder_config["edge_dim"] = decoder.edge_dim
     if isinstance(decoder, DiffConvDecoder):
         decoder_config["diffusion_steps"] = decoder.diffusion_steps
+    if isinstance(decoder, RelGraphDecoder):
+        decoder_config["num_relations"] = decoder.num_relations
+        decoder_config["normalization"] = decoder.normalization
+        decoder_config["root_weight"] = decoder.root_weight
+        if decoder.node_types is not None:
+            decoder_config["node_types"] = list(decoder.node_types)
+        if decoder.edge_types is not None:
+            decoder_config["edge_types"] = [
+                list(triple) for triple in decoder.edge_types
+            ]
 
     physics_config: dict[str, Any] | None = None
     if model.physics_dim > 0:
@@ -559,7 +714,7 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
 
     sparsity = getattr(model.koopman, "sparsity", "dense")
     adjacency = getattr(model.koopman, "adjacency", None)
-    return {
+    config: dict[str, Any] = {
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
         "dynamics_mode": model.dynamics_mode,
@@ -613,6 +768,14 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
             else None
         ),
     }
+    if isinstance(model.koopman, HeteroGraphKoopmanOperator):
+        config["node_types"] = list(model.koopman.node_types)
+        config["edge_types"] = [list(triple) for triple in model.koopman.edge_types]
+        config["relation_tying"] = model.koopman.relation_tying
+        config["basis_size"] = model.koopman.basis_size
+        config["relation_normalization"] = model.koopman.normalization
+        config["adjacency"] = None
+    return config
 
 
 def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
@@ -669,6 +832,15 @@ def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
         )
     if encoder_type == "hyper_enc":
         return HypergraphEncoder(**common_kwargs)
+    if encoder_type == "relgraph_enc":
+        return RelGraphEncoder(
+            **common_kwargs,
+            num_relations=config["num_relations"],
+            normalization=config.get("normalization", "rgcn_in_degree"),
+            root_weight=config.get("root_weight", True),
+            node_types=config.get("node_types"),
+            edge_types=config.get("edge_types"),
+        )
     return GNNEncoder(**common_kwargs)
 
 
@@ -728,6 +900,15 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
         )
     if decoder_type == "hyper_dec":
         return HypergraphDecoder(**common_kwargs)
+    if decoder_type == "relgraph_dec":
+        return RelGraphDecoder(
+            **common_kwargs,
+            num_relations=config["num_relations"],
+            normalization=config.get("normalization", "rgcn_in_degree"),
+            root_weight=config.get("root_weight", True),
+            node_types=config.get("node_types"),
+            edge_types=config.get("edge_types"),
+        )
     return GNNDecoder(**common_kwargs)
 
 
@@ -802,6 +983,14 @@ def reconstruct_model(
 
     learn_topology = config.get("learn_topology")
     topology_embedding_dim = config.get("topology_embedding_dim")
+    hetero_node_types = (
+        list(config["node_types"]) if koopman_kind == "hetero_graph" else None
+    )
+    hetero_edge_types = (
+        [list(triple) for triple in config["edge_types"]]
+        if koopman_kind == "hetero_graph"
+        else None
+    )
     return GraphKoopmanModel(
         encoder=encoder,
         decoder=decoder,
@@ -840,6 +1029,18 @@ def reconstruct_model(
         physics_dim=physics_dim,
         physics_position=physics_position,
         n_delays=int(config.get("n_delays", 1)),
+        koopman_node_types=hetero_node_types,
+        koopman_edge_types=hetero_edge_types,
+        koopman_relation_tying=(
+            str(config["relation_tying"])
+            if koopman_kind == "hetero_graph"
+            else "independent"
+        ),
+        koopman_basis_size=(
+            None
+            if koopman_kind != "hetero_graph" or config["basis_size"] is None
+            else int(config["basis_size"])
+        ),
     )
 
 

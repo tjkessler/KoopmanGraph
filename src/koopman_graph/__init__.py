@@ -10,6 +10,8 @@ Public API
     Graph Transformer encoder (PyG ``TransformerConv``; edges×heads cost).
 ``HypergraphEncoder``
     Hypergraph encoder (PyG ``HypergraphConv``; static hyperedge incidence).
+``RelGraphEncoder``
+    Multiplex relational encoder (R-GCN-lite; per-relation message banks).
 ``DelayEmbeddingEncoder``
     Hankel / delay-coordinate wrapper around a sized base encoder.
 ``GNNDecoder``, ``GATDecoder``, ``SAGEDecoder``, ``DiffConvDecoder``
@@ -18,6 +20,8 @@ Public API
     Graph Transformer decoder peer.
 ``HypergraphDecoder``
     Hypergraph decoder peer.
+``RelGraphDecoder``
+    Multiplex relational decoder peer.
 ``KoopmanOperator``
     Learnable finite-dimensional Koopman matrix.
 ``ContinuousKoopmanOperator``
@@ -82,6 +86,8 @@ from koopman_graph.nn import (
     GraphTransformerEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    RelGraphDecoder,
+    RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
 )
@@ -116,9 +122,11 @@ __all__ = [
     "KoopmanOperator",
     "KoopmanSpectrum",
     "MultiTrajectory",
+    "RelGraphDecoder",
+    "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.8.2"
+__version__ = "0.9.0"

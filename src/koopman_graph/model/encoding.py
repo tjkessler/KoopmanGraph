@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.data.delay_windows import (
@@ -28,14 +28,14 @@ from koopman_graph.observables import (
 from .validation import as_data
 
 EncodeFn = Callable[
-    [Tensor | Data, Tensor | None, Tensor | None],
+    [Tensor | Data | HeteroData, Tensor | None, Tensor | None],
     Tensor,
 ]
 
 
 def encode_features(
     encoder: Callable[..., Tensor],
-    x_or_data: Tensor | Data,
+    x_or_data: Tensor | Data | HeteroData,
     edge_index: Tensor | None = None,
     edge_weight: Tensor | None = None,
     *,
@@ -50,10 +50,12 @@ def encode_features(
     ----------
     encoder
         Topology-aware encoder callable ``(x, edge_index, edge_weight) -> z``.
-    x_or_data : Tensor or Data
-        Node features, delay window, or a PyG ``Data`` snapshot.
+    x_or_data : Tensor, Data, or HeteroData
+        Node features, delay window, a homogeneous ``Data`` snapshot, or a
+        multiplex ``HeteroData`` snapshot (RelGraph peers).
     edge_index : Tensor or None, optional
-        Edge index required when ``x_or_data`` is a tensor.
+        Edge index required when ``x_or_data`` is a tensor. For RelGraph
+        tensor input, pass relation banks (sequence / mapping) instead.
     edge_weight : Tensor or None, optional
         Optional scalar edge weights for tensor input.
     physics_lifting_fn : callable or None, optional
@@ -76,8 +78,17 @@ def encode_features(
     ------
     ValueError
         If delay-window tensor input lacks ``edge_index``, or physics lifting
-        is requested with a raw delay-window tensor.
+        is requested with a raw delay-window tensor or ``HeteroData``.
     """
+    if isinstance(x_or_data, HeteroData):
+        if physics_lifting_fn is not None:
+            msg = (
+                "physics-informed observables are unsupported with "
+                "HeteroData / RelGraph encode paths"
+            )
+            raise ValueError(msg)
+        return encoder(x_or_data, edge_index, edge_weight)
+
     if isinstance(x_or_data, Tensor) and x_or_data.ndim == 3:
         if edge_index is None:
             msg = "edge_index is required for delay-window tensor input"

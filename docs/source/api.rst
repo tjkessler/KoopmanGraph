@@ -77,6 +77,23 @@ under :mod:`koopman_graph.nn.encoder` / ``decoder``.
    :members:
    :show-inheritance:
 
+Heterogeneous / RelGraph Encoders / Decoders
+---------------------------------------------
+
+Multiplex and typed RelGraph peers
+(:class:`~koopman_graph.nn.RelGraphEncoder`,
+:class:`~koopman_graph.nn.RelGraphDecoder`) are root-stable ``__all__``
+members. Prefer ``from koopman_graph import RelGraphEncoder, RelGraphDecoder``
+with factory ``koopman="hetero_graph"`` on
+:class:`~koopman_graph.data.HeteroGraphSnapshotSequence`. Optional HGT peers
+(:class:`~koopman_graph.nn.HGTEncoder`,
+:class:`~koopman_graph.nn.HGTDecoder`) are imported from
+:mod:`koopman_graph.nn` only (not factory defaults; not on the root façade).
+
+.. automodule:: koopman_graph.nn.heterogeneous
+   :members:
+   :show-inheritance:
+
 Adaptive Topology (power-user)
 ------------------------------
 
@@ -130,12 +147,14 @@ Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
 ``control``, ``discrete``, ``discrete_parameterizations``,
 ``discrete_propagation``, ``continuous``, ``continuous_van_loan``,
 ``continuous_parameterizations``, ``continuous_propagation``,
-``auxiliary_spectral``, ``graph``, ``hypergraph``, ``global_local``,
-``continuous_graph``). Prefer
+``auxiliary_spectral``, ``graph``, ``hypergraph``, ``heterogeneous``,
+``global_local``, ``continuous_graph``). Prefer
 ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
 ContinuousGraphKoopmanOperator`` (root-stable ``__all__`` members) or
-``from koopman_graph.operators import …``. Former deep imports
+``from koopman_graph.operators import …`` (includes
+:class:`~koopman_graph.operators.HeteroGraphKoopmanOperator` for
+``koopman="hetero_graph"``). Former deep imports
 ``koopman_graph.operator`` / ``koopman_graph.continuous`` were removed in
 v0.3.0.
 
@@ -158,10 +177,13 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``spectral_residuals``, ``SpectralResidualReport``,
 ``identify_sparse_dynamics``, ``SINDyReport``,
 ``koopman_spectral_clustering``, ``ClusteringResult``,
-``estimate_coupling_from_snapshots``, ``CouplingEstimate``) are imported from
+``estimate_coupling_from_snapshots``, ``CouplingEstimate``,
+``attribute_mode_energy``, ``ModeEnergyAttribution``) are imported from
 :mod:`koopman_graph.analysis` only. The helpers live in the ``spectrum`` /
 ``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` / ``sindy`` /
 ``clustering`` / ``topology_estimation`` submodules.
+``attribute_mode_energy`` is an interpretive diagnostic on assembled
+:math:`K_{\mathrm{eff}}` (not a causal claim; not a ResDMD residual).
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
 

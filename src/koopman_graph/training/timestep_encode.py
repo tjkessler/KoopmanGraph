@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from torch import Tensor
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import SnapshotSequence
 from koopman_graph.protocols import TrainableKoopmanModel
 
 
 def encode_at_timestep(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     index: int,
 ) -> Tensor:
     """Encode with delay history when the model exposes ``encode_at``.
@@ -28,7 +28,7 @@ def encode_at_timestep(
     ----------
     model : TrainableKoopmanModel
         Trainable model; may implement ``encode_at(sequence, index)``.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Source trajectory.
     index : int
         Timestep to encode (window end).

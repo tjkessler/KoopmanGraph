@@ -17,7 +17,11 @@ from torch import Tensor
 from torch_geometric.data import Data
 from torch_geometric.utils import k_hop_subgraph
 
-from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.data.containers import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+)
+from koopman_graph.data.trajectories import SnapshotSequence
 from koopman_graph.graph_utils import snapshot_edge_weight
 
 
@@ -34,15 +38,40 @@ class WindowOrigin(NamedTuple):
     start: int
 
 
+def as_trajectory_list(
+    sequences: SnapshotSequence | Sequence[SnapshotSequence],
+) -> list[SnapshotSequence]:
+    """Normalize a single trajectory or sequence of trajectories to a list.
+
+    A lone :class:`~koopman_graph.data.GraphSnapshotSequence` or
+    :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` is wrapped as
+    one element (not expanded via snapshot iteration).
+
+    Parameters
+    ----------
+    sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
+        One trajectory or an ordered collection of trajectories (including
+        :class:`~koopman_graph.data.MultiTrajectory`).
+
+    Returns
+    -------
+    list of GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Trajectory list suitable for window indexing / sharding.
+    """
+    if isinstance(sequences, (GraphSnapshotSequence, HeteroGraphSnapshotSequence)):
+        return [sequences]
+    return list(sequences)
+
+
 def build_window_index_list(
-    sequences: Sequence[GraphSnapshotSequence],
+    sequences: Sequence[SnapshotSequence],
     window_length: int,
 ) -> list[WindowOrigin]:
     """Build the list of valid temporal window origins for ``sequences``.
 
     Parameters
     ----------
-    sequences : sequence of GraphSnapshotSequence
+    sequences : sequence of GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Source trajectories. Each must contain at least ``window_length``
         snapshots.
     window_length : int
@@ -89,7 +118,7 @@ class WindowSampler:
 
     Parameters
     ----------
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+    sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
         Source trajectories. Each must contain at least ``window_length``
         snapshots.
     window_length : int
@@ -107,7 +136,7 @@ class WindowSampler:
 
     def __init__(
         self,
-        sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+        sequences: SnapshotSequence | Sequence[SnapshotSequence],
         *,
         window_length: int,
         batch_size: int = 8,
@@ -119,7 +148,7 @@ class WindowSampler:
 
         Parameters
         ----------
-        sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+        sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
             Source trajectories.
         window_length : int
             Number of snapshots per sampled window.
@@ -139,10 +168,7 @@ class WindowSampler:
             msg = f"windows_per_epoch must be >= 1 when set, got {windows_per_epoch}"
             raise ValueError(msg)
 
-        if isinstance(sequences, GraphSnapshotSequence):
-            sequence_list = [sequences]
-        else:
-            sequence_list = list(sequences)
+        sequence_list = as_trajectory_list(sequences)
 
         self.sequences = sequence_list
         self.window_length = window_length
@@ -223,26 +249,31 @@ class WindowSampler:
         return self.iter_epoch(0)
 
 
-def _require_static_pairwise_graph(sequence: GraphSnapshotSequence) -> None:
+def _require_static_pairwise_graph(sequence: SnapshotSequence) -> None:
     """Reject sequences unsupported by neighbor-subgraph sampling.
 
     Parameters
     ----------
-
-    sequence : GraphSnapshotSequence
-        See the function signature / summary for ``sequence``.
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Candidate source trajectory.
 
     Returns
     -------
-
     None
-        See summary line.
+        Nothing; raises on unsupported inputs.
 
     Raises
     ------
-
     ValueError
-        Raised when inputs are invalid."""
+        If ``sequence`` is multiplex / typed hetero, dynamic-topology, or
+        hyperedge-carrying.
+    """
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        msg = (
+            "NeighborWindowSampler does not support HeteroGraphSnapshotSequence; "
+            "use homogeneous GraphSnapshotSequence trajectories"
+        )
+        raise ValueError(msg)
     if sequence.is_dynamic_topology:
         msg = (
             "NeighborWindowSampler requires static pairwise topology; "
@@ -353,7 +384,7 @@ class NeighborWindowSampler:
 
     def __init__(
         self,
-        sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+        sequences: SnapshotSequence | Sequence[SnapshotSequence],
         *,
         window_length: int,
         num_nodes: int,
@@ -367,8 +398,8 @@ class NeighborWindowSampler:
 
         Parameters
         ----------
-        sequences : GraphSnapshotSequence | Sequence[GraphSnapshotSequence]
-            See signature.
+        sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+            Homogeneous source trajectories (hetero rejected).
         window_length : int
             See signature.
         num_nodes : int
@@ -377,22 +408,24 @@ class NeighborWindowSampler:
             See signature.
         batch_size : int
             See signature.
-        windows_per_epoch : int | None
+        windows_per_epoch : int or None
             See signature.
         shuffle : bool
             See signature.
-        seed : int | None
+        seed : int or None
             See signature.
 
         Returns
         -------
         None
-            See summary line.
+            Nothing.
 
         Raises
         ------
         ValueError
-            Raised when inputs are invalid."""
+            If configuration is invalid or any trajectory is hetero /
+            dynamic / hyperedge-carrying.
+        """
         if num_nodes < 1:
             msg = f"num_nodes must be >= 1, got {num_nodes}"
             raise ValueError(msg)
@@ -400,16 +433,18 @@ class NeighborWindowSampler:
             msg = f"num_hops must be >= 0, got {num_hops}"
             raise ValueError(msg)
 
+        sequence_list = as_trajectory_list(sequences)
+        for sequence in sequence_list:
+            _require_static_pairwise_graph(sequence)
+
         self._temporal = WindowSampler(
-            sequences,
+            sequence_list,
             window_length=window_length,
             batch_size=batch_size,
             windows_per_epoch=windows_per_epoch,
             shuffle=shuffle,
             seed=seed,
         )
-        for sequence in self._temporal.sequences:
-            _require_static_pairwise_graph(sequence)
 
         self.num_nodes = num_nodes
         self.num_hops = num_hops

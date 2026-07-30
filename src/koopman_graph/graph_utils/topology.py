@@ -4,9 +4,10 @@ Shared degree / adjacency / Laplacian mathematics and graph-input resolution.
 Import from :mod:`koopman_graph.graph_utils` (package re-exports) unless you
 need the peer module explicitly.
 
-Includes symmetric normalization (``D^{-1/2} A D^{-1/2}``) and directed
+Includes symmetric normalization (``D^{-1/2} A D^{-1/2}``), directed
 random-walk normalization (``D_{\\mathrm{out}}^{-1} A`` /
-``D_{\\mathrm{in}}^{-1} A^{\\top}``).
+``D_{\\mathrm{in}}^{-1} A^{\\top}``), and per-relation R-GCN-style
+in-degree normalization for multiplex / heterogeneous graphs.
 """
 
 from __future__ import annotations
@@ -15,9 +16,13 @@ from typing import Literal
 
 import torch
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 RandomWalkDirection = Literal["forward", "backward"]
+RelationNormalization = Literal["rgcn_in_degree", "random_walk"]
+RELATION_NORMALIZATION_MODES: frozenset[str] = frozenset(
+    {"rgcn_in_degree", "random_walk"}
+)
 
 # Match DiffConv / DCRNN-style row normalization (nn.gnn legacy floor).
 _RANDOM_WALK_DEGREE_FLOOR = 1e-6
@@ -810,6 +815,218 @@ def random_walk_normalized_adjacency_matvec(
     return out
 
 
+def _relation_normalization_to_rw_direction(
+    normalization: RelationNormalization,
+) -> RandomWalkDirection:
+    """Map hetero relation normalization to a random-walk direction.
+
+    Parameters
+    ----------
+    normalization : {"rgcn_in_degree", "random_walk"}
+        Relation normalization mode.
+
+    Returns
+    -------
+    {"forward", "backward"}
+        Matching :data:`RandomWalkDirection`.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is not a supported mode.
+    """
+    if normalization == "rgcn_in_degree":
+        # R-GCN in-degree at the destination: D_in^{-1} A^T in library layout.
+        return "backward"
+    if normalization == "random_walk":
+        return "forward"
+    msg = (
+        "normalization must be one of "
+        f"{sorted(RELATION_NORMALIZATION_MODES)}, got {normalization!r}"
+    )
+    raise ValueError(msg)
+
+
+def relation_degree_normalize(
+    edge_index: Tensor,
+    *,
+    num_nodes: int,
+    edge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+    normalization: RelationNormalization = "rgcn_in_degree",
+) -> Tensor:
+    """Return per-edge weights for one relation under hetero normalization.
+
+    ``normalization="rgcn_in_degree"`` (default) implements R-GCN-style
+    destination in-degree scaling: for edge ``j -> i`` the weight is
+    ``w / c_{i,r}`` where ``c_{i,r}`` is the weighted in-degree of node ``i``
+    under this relation (Schlichtkrull et al., R-GCN; normalization only —
+    not a full paper reproduction). ``num_nodes`` is the **destination**
+    node-type cardinality (shared ``N`` for multiplex).
+
+    ``normalization="random_walk"`` uses forward out-degree scaling
+    ``D_{out}^{-1} A`` (same convention as homogeneous
+    ``adjacency="random_walk"``). Reverse relations are **not** synthesized
+    here; callers add explicit reverse edge types when needed.
+
+    Isolated destinations produce zero contribution (zero row), not an
+    identity fill. Empty relation banks (``num_edges == 0``) return an empty
+    weight tensor. The degree floor matches
+    :func:`random_walk_normalized_adjacency_edge_weights` (``1e-6``).
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Relation edge index with shape ``(2, num_edges)`` (row 0 = source,
+        row 1 = destination).
+    num_nodes : int
+        Destination-type node count used for degree vectors.
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``. Defaults to ones.
+    dtype : torch.dtype
+        Floating dtype for the returned weights.
+    device : torch.device or None, optional
+        Device for the computation. Defaults to ``edge_index.device``.
+    normalization : {"rgcn_in_degree", "random_walk"}, optional
+        Relation normalization mode. Default is ``"rgcn_in_degree"``.
+
+    Returns
+    -------
+    Tensor
+        Per-edge normalized weights with shape ``(num_edges,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is unsupported.
+    """
+    direction = _relation_normalization_to_rw_direction(normalization)
+    return random_walk_normalized_adjacency_edge_weights(
+        edge_index,
+        num_nodes=num_nodes,
+        edge_weight=edge_weight,
+        dtype=dtype,
+        device=device,
+        direction=direction,
+    )
+
+
+def dense_relation_normalized_adjacency(
+    edge_index: Tensor,
+    num_nodes: int,
+    *,
+    edge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    normalization: RelationNormalization = "rgcn_in_degree",
+) -> Tensor:
+    """Assemble dense per-relation normalized adjacency.
+
+    See :func:`relation_degree_normalize` for mode semantics. For
+    ``"rgcn_in_degree"``, ``(Â x)_i = sum_j A_{ij} / c_{i,r} · x_j`` with
+    messages along ``j -> i``.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Relation edge index with shape ``(2, num_edges)``.
+    num_nodes : int
+        Destination-type node count.
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    normalization : {"rgcn_in_degree", "random_walk"}, optional
+        Relation normalization mode. Default is ``"rgcn_in_degree"``.
+
+    Returns
+    -------
+    Tensor
+        Dense matrix with shape ``(num_nodes, num_nodes)``.
+
+    Raises
+    ------
+    ValueError
+        If ``normalization`` is unsupported.
+    """
+    direction = _relation_normalization_to_rw_direction(normalization)
+    return dense_random_walk_normalized_adjacency(
+        edge_index,
+        num_nodes,
+        edge_weight=edge_weight,
+        dtype=dtype,
+        direction=direction,
+    )
+
+
+def relation_normalized_adjacency_matvec(
+    edge_index: Tensor,
+    x: Tensor,
+    *,
+    edge_weight: Tensor | None = None,
+    num_nodes: int | None = None,
+    normalization: RelationNormalization = "rgcn_in_degree",
+) -> Tensor:
+    """Apply per-relation normalized adjacency without a dense matrix.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Relation edge index with shape ``(2, num_edges)``.
+    x : Tensor
+        Node features with shape ``(num_nodes, feature_dim)``. For typed
+        cross-relations, ``x`` is the **source**-type feature matrix and
+        ``num_nodes`` must be the destination cardinality when it differs
+        (multiplex: shared ``N``).
+    edge_weight : Tensor or None, optional
+        Non-negative edge weights with shape ``(num_edges,)``.
+    num_nodes : int or None, optional
+        Destination-type node count. Inferred from ``x`` when omitted
+        (multiplex / same-type relations).
+    normalization : {"rgcn_in_degree", "random_walk"}, optional
+        Relation normalization mode. Default is ``"rgcn_in_degree"``.
+
+    Returns
+    -------
+    Tensor
+        Aggregated features with shape ``(num_nodes, feature_dim)``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2D or ``normalization`` is unsupported.
+    """
+    direction = _relation_normalization_to_rw_direction(normalization)
+    if normalization == "rgcn_in_degree":
+        # Destination aggregation; allow num_nodes to differ from x.size(0)
+        # only when callers pass it explicitly (typed path).
+        node_count = num_nodes if num_nodes is not None else x.size(0)
+        if x.dim() != 2:
+            msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
+            raise ValueError(msg)
+        row, col = edge_index
+        norm_weights = relation_degree_normalize(
+            edge_index,
+            num_nodes=node_count,
+            edge_weight=edge_weight,
+            dtype=x.dtype,
+            device=x.device,
+            normalization=normalization,
+        )
+        out = x.new_zeros((node_count, x.size(1)))
+        if row.numel() == 0:
+            return out
+        out.index_add_(0, col, x[row] * norm_weights.unsqueeze(-1))
+        return out
+    return random_walk_normalized_adjacency_matvec(
+        edge_index,
+        x,
+        edge_weight=edge_weight,
+        num_nodes=num_nodes,
+        direction=direction,
+    )
+
+
 def symmetric_normalized_laplacian_matvec(
     edge_index: Tensor,
     x: Tensor,
@@ -957,25 +1174,31 @@ def resolve_graph_inputs(
     return x_or_data, resolved_edge_index, edge_weight
 
 
-def snapshot_to_device(snapshot: Data, device: torch.device) -> Data:
+def snapshot_to_device(
+    snapshot: Data | HeteroData,
+    device: torch.device,
+) -> Data | HeteroData:
     """Move a graph snapshot to a target device, preserving topology fields.
 
-    Copies ``x``, ``edge_index``, optional ``edge_weight``, and optional
-    hyperedge incidence (``hyperedge_index`` / ``hyperedge_weight``) when
-    present.
+    Homogeneous ``Data`` copies ``x``, ``edge_index``, optional ``edge_weight``,
+    and optional hyperedge incidence when present. Multiplex ``HeteroData``
+    uses PyG ``HeteroData.to(device)`` so node/edge stores stay intact.
 
     Parameters
     ----------
-    snapshot : Data
+    snapshot : Data or HeteroData
         Graph snapshot to transfer.
     device : torch.device
         Destination device.
 
     Returns
     -------
-    Data
+    Data or HeteroData
         Snapshot with tensors moved to ``device``.
     """
+    if isinstance(snapshot, HeteroData):
+        return snapshot.to(device)
+
     fields: dict[str, Tensor] = {
         "x": snapshot.x.to(device),
         "edge_index": snapshot.edge_index.to(device),

@@ -23,12 +23,30 @@ Graph structure
   (forward plus reverse walks). Hypergraph operators keep Zhou-style
   symmetric incidence normalization; directed hypergraph coupling is out of
   scope.
-* **Fixed node cardinality per sequence.** ``GraphSnapshotSequence`` locks
-  :math:`N` to the first snapshot. Unobserved nodes are handled with
-  ``observation_masks``; variable node cardinality / node churn is not
+* **Fixed node cardinality per sequence.** Homogeneous
+  ``GraphSnapshotSequence`` locks :math:`N` to the first snapshot.
+  Heterogeneous ``HeteroGraphSnapshotSequence`` locks per-type counts
+  :math:`N_\tau` and the edge-type set. Unobserved nodes are handled with
+  observation masks; **variable node cardinality / node churn** is not
   supported.
-* **Homogeneous single edge type.** Heterogeneous and multiplex graphs
-  (multiple node or edge types) are out of scope.
+* **Heterogeneous / multiplex graphs are supported (opt-in).** Use
+  ``koopman="hetero_graph"`` with
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder` on
+  :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` (PyG
+  ``HeteroData``). Multiplex (one node type, :math:`|R|\ge 1` relations)
+  and typed multi-node graphs at a **shared** latent width :math:`d` are
+  in scope. The latent operator stays linear and time-invariant; encode /
+  decode may be nonlinear and relation-/type-aware. Optional HGT peers
+  under :mod:`koopman_graph.nn` are **not** required. See
+  :doc:`capabilities`, :doc:`architecture`, and
+  ``examples/39_heterogeneous_relational_koopman.ipynb``.
+* **Hetero deferred (still out of scope in this release).** Per-type
+  latent widths :math:`d_\tau` / rectangular relation maps; automatic
+  reverse-relation synthesis; continuous-time hetero operators; joint
+  structural certificates on :math:`\rho(K_{\mathrm{eff}})` from
+  factor-wise modes; and full env / conformal / hierarchical parity for
+  ``HeteroData`` (those paths raise clear homogeneous-only errors).
 * **Hypergraphs, not simplicial complexes.** Incidence-based hypergraph
   encode / decode / operators are supported. Simplicial, cell-complex,
   sheaf, and Hodge-Laplacian layers are out of scope.
@@ -56,6 +74,19 @@ Operator and theory
   approximately :math:`0.59` via ``dynamical_similarity``). The joint arm is
   not a second end-to-end trained model. See
   ``examples/38_operator_factorization_ablation.ipynb``.
+* **Relational factorization must earn its keep.** The multiplex operator
+  :math:`K_{\mathrm{eff}} = I_N \otimes K_{\mathrm{self}} + \sum_r
+  \widehat{A}_r \otimes K_r` (typed: block-diagonal per-type self blocks)
+  does **not** guarantee forecasting wins. Ablate against union-adjacency /
+  dense-joint controls; negative relational results are allowed. Mode-energy
+  attribution in :mod:`koopman_graph.analysis` is an interpretive diagnostic,
+  not a causal claim and not a ResDMD residual bound. See
+  ``examples/39_heterogeneous_relational_koopman.ipynb``.
+* **Per-factor structural modes do not certify joint stability.** Soft /
+  structural parameterizations on individual ``K_self`` / ``K_r`` blocks do
+  **not** certify :math:`\rho(K_{\mathrm{eff}})`. Prefer assembled
+  eigenvalue regularization or spectrum diagnostics on the effective map
+  when joint Schur behavior matters.
 * **Orbit ties are an inductive bias**, not isotypic / irreducible-
   representation block diagonalization. A representation-theoretic reduction
   would require automorphism generators beyond orbit labels and is out of
@@ -102,12 +133,23 @@ For large :math:`N`, prefer ``sparsity="block_diagonal"`` where applicable,
 modest latent width, and optional CUDA automatic mixed precision
 (``use_amp=True`` on ``fit`` / ``run_fit_loop``); see :doc:`faq`.
 
-* **Exact spectrum and exact inverse** of networked operators assemble an
-  effective dense matrix of size :math:`(N \cdot d) \times (N \cdot d)`.
+* **Exact spectrum and exact inverse** of networked operators (including
+  relational ``hetero_graph``) assemble an effective dense matrix of size
+  :math:`(N \cdot d) \times (N \cdot d)` (typed: :math:`N=\sum_\tau N_\tau`).
   Prefer modest :math:`N` or ``sparsity="block_diagonal"`` (approximate
   Jacobi / self-dominated path) when that cost dominates. Static topology
   may reuse a precomputed dense inverse within a training-loss evaluation;
-  the assembly size is unchanged.
+  the assembly size is unchanged. Multi-GPU *trainer* orchestration
+  (DDP / Fabric / Lightning / Ray) shards data and synchronizes gradients;
+  it does **not** shrink this dense ceiling.
+* **Hetero × 0.8 trainers.** Multiplex / typed models compose with native
+  DDP (``strategy="ddp"``), Lightning Fabric, optional Lightning
+  ``Trainer``, and Ray ensemble helpers under
+  :mod:`koopman_graph.distributed`. ``find_unused_parameters`` defaults to
+  ``True`` for hetero RelGraph stacks. Single-process windowed
+  ``run_fit_loop`` still rejects windowed hetero; use DDP / Fabric window
+  sampling when needed. Do not confuse trainer orchestration with the
+  unimplemented operator flag ``sparsity="distributed"``.
 * **Eigenvalue regularization** with a non-zero
   ``LossWeights.eigenvalue`` on dense or ODO networked operators runs an
   :math:`O((N \cdot d)^3)` eigendecomposition of the effective map. Prefer
@@ -174,9 +216,9 @@ Benchmarks and baselines
   acquisition and license cards).
 * **Simulated or surrogate dynamics:** synthetic Laplacian / advection
   graphs, networked SIR, Lorenz-96, Kuramoto–Sivashinsky, IEEE 118 voltage /
-  load diffusion, and the Hopf / Stuart–Landau cylinder-wake teaching
-  surrogate. IEEE 118 uses a real bus topology with *simulated* dynamics, not
-  SCADA telemetry.
+  load diffusion (homogeneous and typed generator / load / slack helpers),
+  and the Hopf / Stuart–Landau cylinder-wake teaching surrogate. IEEE 118
+  uses a real bus topology with *simulated* dynamics, not SCADA telemetry.
 * **In-repo GNN forecasters** (STGCN, DCRNN, Graph WaveNet in
   ``koopman_graph.baselines.gnn``) are **teaching baselines**, not
   reproductions of dedicated-library state-of-the-art (SOTA) implementations.

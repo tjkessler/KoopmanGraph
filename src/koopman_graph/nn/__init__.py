@@ -21,6 +21,14 @@ Capability layout
 ``hypergraph``
     :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
     :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`.
+``heterogeneous``
+    :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
+    :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
+    (multiplex / typed R-GCN-lite peers; factory-supported for
+    ``koopman="hetero_graph"``) and optional
+    :class:`~koopman_graph.nn.heterogeneous.HGTEncoder` /
+    :class:`~koopman_graph.nn.heterogeneous.HGTDecoder` (typed PyG
+    ``HGTConv`` peers; not required for hetero support).
 ``delay``
     :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` Hankel wrapper and
     delay-window helpers.
@@ -68,6 +76,15 @@ from koopman_graph.nn.gnn import (
     validate_optional_edge_dim,
     validate_positive_dims,
 )
+from koopman_graph.nn.heterogeneous import (
+    HGTDecoder,
+    HGTEncoder,
+    RelGraphConv,
+    RelGraphDecoder,
+    RelGraphEncoder,
+    build_hgt_convs,
+    build_relgraph_convs,
+)
 from koopman_graph.nn.hypergraph import (
     HypergraphDecoder,
     HypergraphEncoder,
@@ -89,15 +106,22 @@ __all__ = [
     "GNNEncoder",
     "GraphTransformerDecoder",
     "GraphTransformerEncoder",
+    "HGTDecoder",
+    "HGTEncoder",
     "HypergraphDecoder",
     "HypergraphEncoder",
+    "RelGraphConv",
+    "RelGraphDecoder",
+    "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
     "bind_hypergraph_decoder",
     "build_diff_convs",
     "build_gat_convs",
     "build_gcn_convs",
+    "build_hgt_convs",
     "build_hypergraph_convs",
+    "build_relgraph_convs",
     "build_sage_convs",
     "build_transformer_convs",
     "validate_diffusion_steps",

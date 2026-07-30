@@ -22,7 +22,12 @@ Parameterization = Literal[
 DynamicsMode = Literal["discrete", "continuous"]
 #: Built-in discrete factory kind for :class:`~koopman_graph.model.GraphKoopmanModel`.
 KoopmanKind = Literal[
-    "pernode", "graph", "hypergraph", "global_local", "continuous_graph"
+    "pernode",
+    "graph",
+    "hypergraph",
+    "hetero_graph",
+    "global_local",
+    "continuous_graph",
 ]
 
 STABILITY_EPS_MARGIN = 1e-4

@@ -27,8 +27,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from koopman_graph.data import (
-    GraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
 )
 from koopman_graph.distributed._fit_epochs import (
@@ -60,6 +60,7 @@ from koopman_graph.training.loop import bind_pending_orbit_ties, resolve_lr_sche
 __all__ = [
     "all_reduce_mean",
     "prepare_ddp_model",
+    "resolve_find_unused_parameters",
     "run_ddp_fit_loop",
     "unwrap_model",
 ]
@@ -141,11 +142,37 @@ def all_reduce_mean(value: float) -> float:
     return float(tensor.item())
 
 
+def resolve_find_unused_parameters(
+    model: TrainableKoopmanModel,
+    find_unused_parameters: bool | None,
+) -> bool:
+    """Resolve DDP ``find_unused_parameters`` with hetero-aware defaults.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model whose ``koopman_kind`` selects the default when the argument is
+        ``None``.
+    find_unused_parameters : bool or None
+        Explicit override, or ``None`` for the kind-dependent default.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``koopman_kind == "hetero_graph"`` and the argument is
+        ``None``; otherwise ``False`` when ``None``; explicit booleans pass
+        through.
+    """
+    if find_unused_parameters is not None:
+        return bool(find_unused_parameters)
+    return getattr(model, "koopman_kind", "pernode") == "hetero_graph"
+
+
 def prepare_ddp_model(
     model: TrainableKoopmanModel,
     *,
     device: torch.device,
-    find_unused_parameters: bool = False,
+    find_unused_parameters: bool | None = None,
 ) -> nn.Module:
     """Move ``model`` to ``device`` and wrap with DDP when a group is active.
 
@@ -155,9 +182,10 @@ def prepare_ddp_model(
         Trainable Koopman façade (also an ``nn.Module``).
     device : torch.device
         Target device for parameters.
-    find_unused_parameters : bool, optional
+    find_unused_parameters : bool or None, optional
         Forwarded to :class:`~torch.nn.parallel.DistributedDataParallel`.
-        Default is ``False``.
+        ``None`` (default) resolves to ``True`` for
+        ``koopman_kind="hetero_graph"`` and ``False`` otherwise.
 
     Returns
     -------
@@ -170,6 +198,7 @@ def prepare_ddp_model(
     RuntimeError
         If ``world_size > 1`` but the process group is not initialized.
     """
+    resolved_unused = resolve_find_unused_parameters(model, find_unused_parameters)
     module = cast(nn.Module, model)
     module.to(device)
     if get_world_size() == 1 and not (dist.is_available() and dist.is_initialized()):
@@ -187,11 +216,11 @@ def prepare_ddp_model(
             module,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=find_unused_parameters,
+            find_unused_parameters=resolved_unused,
         )
     return _AttributeForwardDDP(
         module,
-        find_unused_parameters=find_unused_parameters,
+        find_unused_parameters=resolved_unused,
     )
 
 
@@ -241,7 +270,7 @@ def _resolve_ddp_device(
 
 def run_ddp_fit_loop(
     model: TrainableKoopmanModel,
-    train_sequences: Sequence[GraphSnapshotSequence],
+    train_sequences: Sequence[SnapshotSequence],
     *,
     epochs: int = 100,
     lr: float = 1e-3,
@@ -266,10 +295,10 @@ def run_ddp_fit_loop(
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
     early_stopping_monitor: Literal["train", "val"] = "train",
-    val_sequences: Sequence[GraphSnapshotSequence] | None = None,
+    val_sequences: Sequence[SnapshotSequence] | None = None,
     restore_best_weights: bool = False,
     checkpoint_path: str | Path | None = None,
-    find_unused_parameters: bool = False,
+    find_unused_parameters: bool | None = None,
     **optimizer_kwargs: Any,
 ) -> FitHistory:
     """Run a rank-aware multi-epoch fit using native PyTorch DDP.
@@ -284,7 +313,7 @@ def run_ddp_fit_loop(
     ----------
     model : TrainableKoopmanModel
         Trainable Koopman façade.
-    train_sequences : sequence of GraphSnapshotSequence
+    train_sequences : sequence of SnapshotSequence
         Already-validated training trajectories (all ranks receive the full
         list; sharding happens inside this helper).
     epochs : int, optional
@@ -333,14 +362,16 @@ def run_ddp_fit_loop(
         Minimum improvement delta.
     early_stopping_monitor : {"train", "val"}, optional
         Resolved monitor (not ``"auto"``).
-    val_sequences : sequence of GraphSnapshotSequence or None, optional
-        Held-out trajectories (evaluated in full on every rank).
+    val_sequences : sequence of SnapshotSequence or None, optional
+        Held-out homogeneous or multiplex trajectories (evaluated in full on
+        every rank).
     restore_best_weights : bool, optional
         Restore best unwrapped weights at the end.
     checkpoint_path : str, Path, or None, optional
         Rank-0 checkpoint destination.
-    find_unused_parameters : bool, optional
-        DDP ``find_unused_parameters``. Default is ``False``.
+    find_unused_parameters : bool or None, optional
+        DDP ``find_unused_parameters``. ``None`` (default) resolves to
+        ``True`` for ``koopman_kind="hetero_graph"`` and ``False`` otherwise.
     **optimizer_kwargs
         Extra optimizer constructor kwargs.
 
@@ -391,7 +422,7 @@ def run_ddp_fit_loop(
             sequence_to_device(sequence, train_device)
             for sequence in window_sampler.sequences
         ]
-        train_shard: Sequence[GraphSnapshotSequence] = train_sequences
+        train_shard: Sequence[SnapshotSequence] = train_sequences
     else:
         train_shard = shard_sequences_for_rank(train_sequences)
 

@@ -8,15 +8,17 @@ non-private names (no cross-module leading-underscore imports).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.data import (
     GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
     resolve_pair_delta_t,
 )
 from koopman_graph.graph_utils import (
@@ -30,10 +32,15 @@ from koopman_graph.losses import (
     ForwardConsistencyLoss,
     masked_mse_loss,
 )
-from koopman_graph.nn import HypergraphDecoder
+from koopman_graph.nn import HypergraphDecoder, RelGraphDecoder, RelGraphEncoder
+from koopman_graph.nn.heterogeneous import (
+    resolve_multiplex_relation_inputs,
+    resolve_typed_relation_inputs,
+)
 from koopman_graph.operators import (
     GlobalLocalKoopmanOperator,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
 )
 from koopman_graph.operators.global_local import stack_latent_window
@@ -47,7 +54,371 @@ if TYPE_CHECKING:
 _FORWARD_CONSISTENCY_LOSS = ForwardConsistencyLoss()
 _BACKWARD_CONSISTENCY_LOSS = BackwardConsistencyLoss()
 
-PairLossFn = Callable[[TrainableKoopmanModel, GraphSnapshotSequence, int], Tensor]
+PairLossFn = Callable[[TrainableKoopmanModel, SnapshotSequence, int], Tensor]
+
+
+def _is_hetero_sequence(sequence: SnapshotSequence) -> bool:
+    """Return whether ``sequence`` is a multiplex hetero container.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Candidate training sequence.
+
+    Returns
+    -------
+    bool
+        ``True`` when ``sequence`` is a
+        :class:`~koopman_graph.data.HeteroGraphSnapshotSequence`.
+    """
+    return isinstance(sequence, HeteroGraphSnapshotSequence)
+
+
+def multiplex_node_features(snapshot: HeteroData) -> Tensor:
+    """Return the sole node-type feature matrix from a multiplex snapshot.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Multiplex hetero snapshot (exactly one node type).
+
+    Returns
+    -------
+    Tensor
+        Node features with shape ``(num_nodes, in_channels)``.
+
+    Raises
+    ------
+    ValueError
+        If ``snapshot`` is not multiplex or is missing ``x``.
+    """
+    node_types = tuple(snapshot.node_types)
+    if len(node_types) != 1:
+        msg = (
+            "multiplex training requires HeteroData with exactly one node "
+            f"type; got {node_types!r}"
+        )
+        raise ValueError(msg)
+    features = snapshot[node_types[0]].x
+    if features is None:
+        msg = f"HeteroData node type {node_types[0]!r} is missing feature matrix x"
+        raise ValueError(msg)
+    return features
+
+
+def _relation_banks_from_snapshot(
+    snapshot: HeteroData,
+    *,
+    num_relations: int,
+) -> tuple[list[Tensor], list[Tensor | None]]:
+    """Resolve ordered relation banks from a multiplex ``HeteroData`` snapshot.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Multiplex snapshot supplying edge types.
+    num_relations : int
+        Expected relation-bank length ``|R|``.
+
+    Returns
+    -------
+    tuple of list
+        Ordered ``edge_indices`` and optional ``edge_weights`` banks.
+    """
+    _, edge_indices, edge_weights = resolve_multiplex_relation_inputs(
+        snapshot,
+        num_relations=num_relations,
+    )
+    return edge_indices, edge_weights
+
+
+def _hetero_num_relations(model: TrainableKoopmanModel) -> int:
+    """Return ``|R|`` from the active hetero operator or RelGraph decoder.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing a hetero Koopman operator or RelGraph decoder.
+
+    Returns
+    -------
+    int
+        Number of relations ``|R|``.
+
+    Raises
+    ------
+    TypeError
+        If neither a hetero operator nor RelGraph decoder is present.
+    """
+    koopman = model.koopman
+    if isinstance(koopman, HeteroGraphKoopmanOperator):
+        return int(koopman.num_relations)
+    decoder = getattr(model, "decoder", None)
+    if isinstance(decoder, RelGraphDecoder):
+        return int(decoder.num_relations)
+    msg = (
+        "hetero training requires HeteroGraphKoopmanOperator or RelGraphDecoder "
+        "to resolve num_relations"
+    )
+    raise TypeError(msg)
+
+
+def typed_hetero_node_types(model: TrainableKoopmanModel) -> tuple[str, ...] | None:
+    """Return ordered node types when ``model`` uses the typed hetero path.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model whose RelGraph peers are inspected.
+
+    Returns
+    -------
+    tuple of str or None
+        Stacking order of node types, or ``None`` for the multiplex path.
+    """
+    for module in (getattr(model, "encoder", None), getattr(model, "decoder", None)):
+        if (
+            isinstance(module, (RelGraphEncoder, RelGraphDecoder))
+            and module.is_typed
+            and module.node_types is not None
+        ):
+            return tuple(module.node_types)
+    return None
+
+
+def _typed_hetero_edge_types(
+    model: TrainableKoopmanModel,
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Return the declared relation-bank order for a typed hetero model.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model whose encoder / decoder / operator declare relation order.
+
+    Returns
+    -------
+    tuple of tuple of str or None
+        Ordered ``(src, rel, dst)`` triples, or ``None`` when unavailable.
+    """
+    for module in (getattr(model, "encoder", None), getattr(model, "decoder", None)):
+        declared = getattr(module, "edge_types", None)
+        if declared is not None:
+            return tuple(tuple(triple) for triple in declared)  # type: ignore[misc]
+    koopman = model.koopman
+    if isinstance(koopman, HeteroGraphKoopmanOperator):
+        return tuple(tuple(triple) for triple in koopman.edge_types)  # type: ignore[misc]
+    return None
+
+
+def typed_node_features(
+    snapshot: HeteroData,
+    node_types: Sequence[str],
+) -> dict[str, Tensor]:
+    """Return per-type feature matrices from a typed hetero snapshot.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Typed hetero snapshot.
+    node_types : sequence of str
+        Ordered node-type names to extract.
+
+    Returns
+    -------
+    dict of str to Tensor
+        Feature matrix ``(N_τ, F_τ)`` per node type.
+
+    Raises
+    ------
+    ValueError
+        If a node type or its ``x`` matrix is missing.
+    """
+    features: dict[str, Tensor] = {}
+    available = set(snapshot.node_types)
+    for name in node_types:
+        if name not in available:
+            msg = (
+                f"HeteroData snapshot is missing node type {name!r}; "
+                f"available types are {sorted(available)!r}"
+            )
+            raise ValueError(msg)
+        block = snapshot[name].x
+        if block is None:
+            msg = f"HeteroData node type {name!r} is missing feature matrix x"
+            raise ValueError(msg)
+        features[name] = block
+    return features
+
+
+def _hetero_relation_banks(
+    model: TrainableKoopmanModel,
+    snapshot: HeteroData,
+    *,
+    num_relations: int,
+) -> tuple[list[Tensor], list[Tensor | None], dict[str, int] | None]:
+    """Resolve relation banks (and typed counts) from a hetero snapshot.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model providing typed metadata.
+    snapshot : HeteroData
+        Snapshot supplying edge stores.
+    num_relations : int
+        Expected relation-bank length ``|R|``.
+
+    Returns
+    -------
+    tuple
+        ``(edge_indices, edge_weights, num_nodes_dict)`` with
+        ``num_nodes_dict`` set only for the typed path.
+    """
+    node_types = typed_hetero_node_types(model)
+    if node_types is None:
+        edge_indices, edge_weights = _relation_banks_from_snapshot(
+            snapshot,
+            num_relations=num_relations,
+        )
+        return edge_indices, edge_weights, None
+    _, edge_indices, edge_weights, num_nodes_dict = resolve_typed_relation_inputs(
+        snapshot,
+        node_types=node_types,
+        edge_types=_typed_hetero_edge_types(model),
+        num_relations=num_relations,
+    )
+    return edge_indices, edge_weights, num_nodes_dict
+
+
+def stack_typed_masks(
+    masks: Mapping[str, Tensor],
+    node_types: Sequence[str],
+) -> Tensor:
+    """Stack per-type boolean node masks into the shared stacked order.
+
+    Parameters
+    ----------
+    masks : mapping of str to Tensor
+        Boolean masks with shape ``(N_τ,)`` per node type.
+    node_types : sequence of str
+        Stacking order.
+
+    Returns
+    -------
+    Tensor
+        Boolean mask with shape ``(N,)`` where ``N = Σ_τ N_τ``.
+
+    Raises
+    ------
+    ValueError
+        If a node type is missing from ``masks``.
+    """
+    blocks: list[Tensor] = []
+    for name in node_types:
+        if name not in masks:
+            msg = f"observation masks are missing node type {name!r}"
+            raise ValueError(msg)
+        blocks.append(masks[name].reshape(-1))
+    return torch.cat(blocks, dim=0)
+
+
+def _hetero_pair_mask(
+    sequence: SnapshotSequence,
+    timestep: int,
+    node_types: Sequence[str] | None,
+) -> Tensor | None:
+    """Return the stacked latent pair mask for a hetero sequence.
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Hetero training sequence.
+    timestep : int
+        Index of the source snapshot in the pair.
+    node_types : sequence of str or None
+        Typed stacking order, or ``None`` for the multiplex path.
+
+    Returns
+    -------
+    Tensor or None
+        Boolean mask over stacked rows, or ``None`` when masks are absent.
+    """
+    if not sequence.has_observation_masks:
+        return None
+    masks = sequence.pair_observation_mask(timestep)
+    assert isinstance(masks, Mapping)
+    order = tuple(masks) if node_types is None else tuple(node_types)
+    return stack_typed_masks(masks, order)
+
+
+def _hetero_target_masks(
+    sequence: SnapshotSequence,
+    timestep: int,
+) -> dict[str, Tensor] | None:
+    """Return per-type target masks at ``timestep`` for a hetero sequence.
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Hetero training sequence.
+    timestep : int
+        Snapshot index of the prediction target.
+
+    Returns
+    -------
+    dict of str to Tensor or None
+        Per-type boolean masks, or ``None`` when masks are absent.
+    """
+    if not sequence.has_observation_masks:
+        return None
+    masks = sequence.observation_mask_at(timestep)
+    assert isinstance(masks, Mapping)
+    return dict(masks)
+
+
+def _hetero_prediction_loss(
+    prediction: Tensor | Mapping[str, Tensor],
+    target_snapshot: HeteroData,
+    *,
+    node_types: Sequence[str] | None,
+    target_masks: Mapping[str, Tensor] | None,
+) -> Tensor:
+    """Average reconstruction MSE for a multiplex or typed prediction.
+
+    Parameters
+    ----------
+    prediction : Tensor or mapping of str to Tensor
+        Decoded features (per-type mapping for typed decoders).
+    target_snapshot : HeteroData
+        Target snapshot supplying ``x`` per node type.
+    node_types : sequence of str or None
+        Typed stacking order, or ``None`` for the multiplex path.
+    target_masks : mapping of str to Tensor or None
+        Optional per-type observation masks at the target snapshot.
+
+    Returns
+    -------
+    Tensor
+        Scalar loss (mean over node types for the typed path).
+    """
+    if node_types is None or isinstance(prediction, Tensor):
+        target = multiplex_node_features(target_snapshot)
+        assert isinstance(prediction, Tensor)
+        if target_masks is None:
+            return nn.functional.mse_loss(prediction, target)
+        sole = tuple(target_snapshot.node_types)[0]
+        return masked_mse_loss(prediction, target, target_masks[sole])
+    targets = typed_node_features(target_snapshot, node_types)
+    total = None
+    for name in node_types:
+        block = (
+            nn.functional.mse_loss(prediction[name], targets[name])
+            if target_masks is None
+            else masked_mse_loss(prediction[name], targets[name], target_masks[name])
+        )
+        total = block if total is None else total + block
+    assert total is not None
+    return total / len(tuple(node_types))
 
 
 def teacher_forced_latent_window(
@@ -89,7 +460,7 @@ def teacher_forced_latent_window(
 
 def _pair_latents(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     cache: SequenceLatentCache | None,
@@ -100,7 +471,7 @@ def _pair_latents(
     ----------
     model : TrainableKoopmanModel
         Model whose encoder produces latents when ``cache`` is absent.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot window aligned with ``cache`` when provided.
     timestep : int
         Index ``t`` of the first latent in the pair.
@@ -122,7 +493,7 @@ def _pair_latents(
 
 def _pair_latent_window(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     cache: SequenceLatentCache | None,
@@ -134,7 +505,7 @@ def _pair_latent_window(
     model : TrainableKoopmanModel
         Model used when ``cache`` is ``None`` or to detect global/local
         operators.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot window aligned with ``cache`` when provided.
     timestep : int
         Index ``t`` of the state being advanced.
@@ -175,12 +546,12 @@ def model_default_delta_t(model: TrainableKoopmanModel) -> float:
     return float(model.resolve_delta_t(None))
 
 
-def pair_control(sequence: GraphSnapshotSequence, timestep: int) -> Tensor | None:
+def pair_control(sequence: SnapshotSequence, timestep: int) -> Tensor | None:
     """Return the control input for transition ``timestep -> timestep + 1``.
 
     Parameters
     ----------
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence that may carry controls.
     timestep : int
         Index of the source snapshot in the transition pair.
@@ -189,15 +560,28 @@ def pair_control(sequence: GraphSnapshotSequence, timestep: int) -> Tensor | Non
     -------
     Tensor or None
         Control tensor when present, otherwise ``None``.
+
+    Raises
+    ------
+    ValueError
+        If a hetero sequence carries controls (``control_at`` is not
+        implemented for multiplex containers yet).
     """
     if not sequence.has_controls:
         return None
-    return sequence.control_at(timestep)
+    control_at = getattr(sequence, "control_at", None)
+    if not callable(control_at):
+        msg = (
+            "controlled HeteroGraphSnapshotSequence training is unsupported; "
+            "omit control_inputs for multiplex fit"
+        )
+        raise ValueError(msg)
+    return control_at(timestep)
 
 
 def mean_pair_sequence_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     pair_fn: PairLossFn,
 ) -> Tensor:
     """Average a pair-wise loss function over consecutive snapshots.
@@ -238,8 +622,8 @@ _encode_at = encode_at_timestep
 
 def one_step_loss(
     model: TrainableKoopmanModel,
-    snapshot_t: Data,
-    snapshot_t1: Data,
+    snapshot_t: Data | HeteroData,
+    snapshot_t1: Data | HeteroData,
     *,
     control: Tensor | None = None,
     delta_t: float | Tensor | None = None,
@@ -251,9 +635,9 @@ def one_step_loss(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    snapshot_t : Data
+    snapshot_t : Data or HeteroData
         Graph snapshot at time ``t``.
-    snapshot_t1 : Data
+    snapshot_t1 : Data or HeteroData
         Graph snapshot at time ``t+1`` (prediction target).
     control : Tensor or None, optional
         Control input driving the transition from ``t`` to ``t+1``.
@@ -262,6 +646,7 @@ def one_step_loss(
     target_mask : Tensor or None, optional
         Boolean node mask with shape ``(num_nodes,)``. When provided, the loss
         averages only over observed nodes at the target snapshot.
+        Homogeneous-only today.
 
     Returns
     -------
@@ -269,6 +654,16 @@ def one_step_loss(
         Scalar mean-squared error loss.
     """
     prediction = model(snapshot_t, control=control, delta_t=delta_t)
+    if isinstance(snapshot_t1, HeteroData):
+        if target_mask is not None:
+            msg = "target_mask is unsupported for HeteroData one-step loss"
+            raise ValueError(msg)
+        return _hetero_prediction_loss(
+            prediction,
+            snapshot_t1,
+            node_types=typed_hetero_node_types(model),
+            target_masks=None,
+        )
     target = snapshot_t1.x
     if target_mask is None:
         return nn.functional.mse_loss(prediction, target)
@@ -277,7 +672,7 @@ def one_step_loss(
 
 def _forward_consistency_pair(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     cache: SequenceLatentCache | None = None,
@@ -288,7 +683,7 @@ def _forward_consistency_pair(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence containing the consecutive pair.
     timestep : int
         Index of the source snapshot ``t`` in the pair ``(t, t+1)``.
@@ -309,6 +704,28 @@ def _forward_consistency_pair(
         default_time_step=default_delta_t,
     )
     control = pair_control(sequence, timestep)
+    if _is_hetero_sequence(sequence):
+        assert isinstance(snapshot_t1, HeteroData)
+        node_types = typed_hetero_node_types(model)
+        edge_indices, edge_weights, num_nodes_dict = _hetero_relation_banks(
+            model,
+            snapshot_t1,
+            num_relations=_hetero_num_relations(model),
+        )
+        return _FORWARD_CONSISTENCY_LOSS(
+            z_t,
+            z_t1,
+            model.koopman,
+            control=control,
+            delta_t=delta_t,
+            default_delta_t=default_delta_t,
+            mask=_hetero_pair_mask(sequence, timestep, node_types),
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
+            latent_window=_pair_latent_window(model, sequence, timestep, cache=cache),
+        )
+
     pair_mask = (
         sequence.pair_observation_mask(timestep)
         if sequence.has_observation_masks
@@ -335,7 +752,7 @@ def _forward_consistency_pair(
 
 def _backward_consistency_pair(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     inverse_matrix: Tensor | None = None,
@@ -347,7 +764,7 @@ def _backward_consistency_pair(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence containing the consecutive pair.
     timestep : int
         Index of the source snapshot ``t`` in the pair ``(t, t+1)``.
@@ -360,7 +777,18 @@ def _backward_consistency_pair(
     -------
     Tensor
         Scalar backward consistency loss for the pair.
+
+    Raises
+    ------
+    ValueError
+        If ``sequence`` is multiplex hetero (unsupported in this release).
     """
+    if _is_hetero_sequence(sequence):
+        msg = (
+            "backward consistency is unsupported for HeteroGraphSnapshotSequence "
+            "/ koopman='hetero_graph'; set loss_weights.backward=0"
+        )
+        raise ValueError(msg)
     snapshot_t1 = sequence[timestep + 1]
     z_t, z_t1 = _pair_latents(model, sequence, timestep, cache=cache)
     default_delta_t = model_default_delta_t(model)
@@ -395,11 +823,11 @@ def _backward_consistency_pair(
 
 def one_step_prediction(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     cache: SequenceLatentCache | None = None,
-) -> Tensor:
+) -> Tensor | dict[str, Tensor]:
     """Decode the one-step forecast for pair ``(timestep, timestep + 1)``.
 
     When ``cache`` is set (or delay / global-local requires it), uses
@@ -410,7 +838,7 @@ def one_step_prediction(
     ----------
     model : TrainableKoopmanModel
         Model implementing encode / advance / decode (or a single-step forward).
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence that may carry control inputs.
     timestep : int
         Index of the source snapshot in the transition pair.
@@ -420,9 +848,58 @@ def one_step_prediction(
 
     Returns
     -------
-    Tensor
-        Decoded node features at the predicted next step.
+    Tensor or dict of str to Tensor
+        Decoded node features at the predicted next step (one tensor per node
+        type for typed hetero models).
     """
+    if _is_hetero_sequence(sequence):
+        snapshot_t = sequence[timestep]
+        snapshot_t1 = sequence[timestep + 1]
+        assert isinstance(snapshot_t, HeteroData)
+        assert isinstance(snapshot_t1, HeteroData)
+        if cache is not None:
+            z = cache.z[timestep]
+        else:
+            z = encode_at_timestep(model, sequence, timestep)
+        default_delta_t = model_default_delta_t(model)
+        delta_t = resolve_pair_delta_t(
+            sequence,
+            timestep,
+            default_time_step=default_delta_t,
+        )
+        num_relations = _hetero_num_relations(model)
+        edge_indices_t1, edge_weights_t1, num_nodes_dict = _hetero_relation_banks(
+            model,
+            snapshot_t1,
+            num_relations=num_relations,
+        )
+        edge_indices_t, edge_weights_t, _ = _hetero_relation_banks(
+            model,
+            snapshot_t,
+            num_relations=num_relations,
+        )
+        z_next = propagate_latent(
+            model.koopman,
+            z,
+            control=pair_control(sequence, timestep),
+            delta_t=delta_t,
+            default_delta_t=default_delta_t,
+            edge_indices=edge_indices_t1,
+            edge_weights=edge_weights_t1,
+            num_nodes_dict=num_nodes_dict,
+        )
+        if not isinstance(model.decoder, RelGraphDecoder):
+            msg = "hetero one-step prediction requires RelGraphDecoder"
+            raise TypeError(msg)
+        if model.decoder.is_typed:
+            return model.decoder(
+                z_next,
+                edge_indices_t,
+                edge_weights_t,
+                num_nodes_dict=num_nodes_dict,
+            )
+        return model.decoder(z_next, edge_indices_t, edge_weights_t)
+
     n_delays = int(getattr(model, "n_delays", 1))
     uses_global_local = isinstance(model.koopman, GlobalLocalKoopmanOperator)
     use_encode_path = (
@@ -484,24 +961,24 @@ def one_step_prediction(
 
 def one_step_predictions(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     cache: SequenceLatentCache,
-) -> list[Tensor]:
+) -> list[Tensor | dict[str, Tensor]]:
     """Build one-step decoded forecasts for every consecutive pair.
 
     Parameters
     ----------
     model : TrainableKoopmanModel
         Model used for advance / decode.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Time-ordered snapshots with at least two timesteps.
     cache : SequenceLatentCache
         Shared teacher-forced latents (required so each pair reuses ``z_t``).
 
     Returns
     -------
-    list of Tensor
+    list of Tensor or dict of str to Tensor
         Length ``sequence.num_timesteps - 1``; index ``t`` is the forecast
         from timestep ``t`` to ``t + 1``.
 
@@ -511,7 +988,7 @@ def one_step_predictions(
         If ``sequence`` contains fewer than two snapshots.
     """
     if sequence.num_timesteps < 2:
-        msg = "GraphSnapshotSequence must contain at least 2 snapshots for training"
+        msg = "snapshot sequence must contain at least 2 snapshots for training"
         raise ValueError(msg)
     return [
         one_step_prediction(model, sequence, timestep, cache=cache)
@@ -521,8 +998,8 @@ def one_step_predictions(
 
 def _reconstruction_from_predictions(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
-    predictions: Sequence[Tensor],
+    sequence: SnapshotSequence,
+    predictions: Sequence[Tensor | Mapping[str, Tensor]],
 ) -> Tensor:
     """Average masked MSE between shared predictions and target snapshots.
 
@@ -530,7 +1007,7 @@ def _reconstruction_from_predictions(
     ----------
     model : TrainableKoopmanModel
         Model used only for device placement of the accumulator.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Target snapshots and optional observation masks.
     predictions : sequence of Tensor
         One-step decoded forecasts with length ``num_timesteps - 1``.
@@ -547,7 +1024,7 @@ def _reconstruction_from_predictions(
         does not match the number of pairs.
     """
     if sequence.num_timesteps < 2:
-        msg = "GraphSnapshotSequence must contain at least 2 snapshots for training"
+        msg = "snapshot sequence must contain at least 2 snapshots for training"
         raise ValueError(msg)
     num_pairs = sequence.num_timesteps - 1
     if len(predictions) != num_pairs:
@@ -558,14 +1035,27 @@ def _reconstruction_from_predictions(
         raise ValueError(msg)
 
     total_loss = torch.zeros((), device=next(model.parameters()).device)
+    node_types = (
+        typed_hetero_node_types(model) if _is_hetero_sequence(sequence) else None
+    )
     for timestep in range(num_pairs):
-        target = sequence[timestep + 1].x
+        target_snapshot = sequence[timestep + 1]
+        prediction = predictions[timestep]
+        if isinstance(target_snapshot, HeteroData):
+            total_loss = total_loss + _hetero_prediction_loss(
+                prediction,
+                target_snapshot,
+                node_types=node_types,
+                target_masks=_hetero_target_masks(sequence, timestep + 1),
+            )
+            continue
+        assert isinstance(prediction, Tensor)
+        target = target_snapshot.x
         target_mask = (
             sequence.observation_mask_at(timestep + 1)
             if sequence.has_observation_masks
             else None
         )
-        prediction = predictions[timestep]
         if target_mask is None:
             total_loss = total_loss + nn.functional.mse_loss(prediction, target)
         else:
@@ -575,7 +1065,7 @@ def _reconstruction_from_predictions(
 
 def _one_step_pair(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     timestep: int,
     *,
     cache: SequenceLatentCache | None = None,
@@ -586,7 +1076,7 @@ def _one_step_pair(
     ----------
     model : TrainableKoopmanModel
         Model implementing a single-step forward pass.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence that may carry control inputs.
     timestep : int
         Index of the source snapshot in the transition pair.
@@ -599,6 +1089,28 @@ def _one_step_pair(
     Tensor
         Scalar one-step reconstruction loss.
     """
+    if _is_hetero_sequence(sequence):
+        target_masks = _hetero_target_masks(sequence, timestep + 1)
+        if cache is None and target_masks is None:
+            return one_step_loss(
+                model,
+                sequence[timestep],
+                sequence[timestep + 1],
+                control=pair_control(sequence, timestep),
+                delta_t=resolve_pair_delta_t(
+                    sequence,
+                    timestep,
+                    default_time_step=model_default_delta_t(model),
+                ),
+            )
+        prediction = one_step_prediction(model, sequence, timestep, cache=cache)
+        return _hetero_prediction_loss(
+            prediction,
+            sequence[timestep + 1],
+            node_types=typed_hetero_node_types(model),
+            target_masks=target_masks,
+        )
+
     target_mask = None
     if sequence.has_observation_masks:
         target_mask = sequence.observation_mask_at(timestep + 1)
@@ -635,7 +1147,7 @@ def _one_step_pair(
 
 def compute_sequence_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     cache: SequenceLatentCache | None = None,
     predictions: Sequence[Tensor] | None = None,
@@ -677,7 +1189,7 @@ def compute_sequence_loss(
 
 def compute_forward_consistency_sequence_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     cache: SequenceLatentCache | None = None,
 ) -> Tensor:
@@ -687,7 +1199,7 @@ def compute_forward_consistency_sequence_loss(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Time-ordered snapshots with at least two timesteps.
     cache : SequenceLatentCache or None, optional
         Shared teacher-forced latents. When omitted, encodes per pair as before.
@@ -875,7 +1387,7 @@ def _lookup_networked_inverse(
 
 def compute_backward_consistency_sequence_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     cache: SequenceLatentCache | None = None,
 ) -> Tensor:
@@ -890,8 +1402,9 @@ def compute_backward_consistency_sequence_loss(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
-        Time-ordered snapshots with at least two timesteps.
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Time-ordered snapshots with at least two timesteps. Multiplex hetero
+        sequences raise (unsupported).
     cache : SequenceLatentCache or None, optional
         Shared teacher-forced latents. When omitted, encodes per pair as before.
 

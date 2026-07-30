@@ -49,10 +49,16 @@ The constructor factory-builds a discrete :class:`~koopman_graph.operators.Koopm
 from string-mode settings (``dynamics_mode``, ``koopman_parameterization``, …).
 Pass ``koopman="graph"`` for a networked
 :class:`~koopman_graph.operators.GraphKoopmanOperator` (discrete only) so
-``edge_index`` enters the linear step. To inject a pre-built or custom operator
-instead, pass ``koopman=...`` (module) and leave those factory kwargs at their
-defaults. Custom operators are not checkpoint round-trippable; see the
-architecture page.
+``edge_index`` enters the linear step. For multiplex / typed graphs, use
+``koopman="hetero_graph"`` with
+:class:`~koopman_graph.nn.RelGraphEncoder` /
+:class:`~koopman_graph.nn.RelGraphDecoder` on
+:class:`~koopman_graph.data.HeteroGraphSnapshotSequence` (see
+``examples/39_heterogeneous_relational_koopman.ipynb`` and
+:doc:`capabilities`). To inject a pre-built or custom operator instead, pass
+``koopman=...`` (module) and leave those factory kwargs at their defaults.
+Custom operators are not checkpoint round-trippable; see the architecture
+page.
 
 Train
 -----

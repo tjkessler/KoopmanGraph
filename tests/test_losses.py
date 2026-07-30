@@ -785,6 +785,75 @@ def test_compute_eigenvalue_regularization_dynamic_pair_mean(
     assert got.item() == pytest.approx(expected.item(), abs=1e-5)
 
 
+def test_compute_eigenvalue_regularization_hetero_requires_hetero_sequence() -> None:
+    """Hetero dense eig-reg requires HeteroGraphSnapshotSequence topology."""
+    from torch_geometric.data import HeteroData
+
+    from koopman_graph.data import HeteroGraphSnapshotSequence
+    from koopman_graph.operators import HeteroGraphKoopmanOperator
+    from koopman_graph.training import compute_eigenvalue_regularization_loss
+
+    def _snap() -> HeteroData:
+        data = HeteroData()
+        data["node"].x = torch.randn(4, 2)
+        data["node", "r1", "node"].edge_index = torch.tensor(
+            [[0, 1, 2], [1, 2, 3]],
+            dtype=torch.long,
+        )
+        data["node", "r2", "node"].edge_index = torch.tensor(
+            [[3, 2, 0], [2, 0, 1]],
+            dtype=torch.long,
+        )
+        return data
+
+    from koopman_graph.nn import RelGraphDecoder, RelGraphEncoder
+
+    encoder = RelGraphEncoder(
+        in_channels=2,
+        hidden_channels=4,
+        latent_dim=2,
+        num_relations=2,
+        num_layers=1,
+    )
+    decoder = RelGraphDecoder(
+        latent_dim=2,
+        hidden_channels=4,
+        out_channels=2,
+        num_relations=2,
+        num_layers=1,
+    )
+    hetero_op = HeteroGraphKoopmanOperator(2, num_relations=2, init_mode="identity")
+    hetero_op.set_dense_matrices(
+        0.5 * torch.eye(2),
+        [1.5 * torch.eye(2), 1.5 * torch.eye(2)],
+    )
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=2,
+        time_step=0.1,
+        koopman=hetero_op,
+    )
+    assert isinstance(model.koopman, HeteroGraphKoopmanOperator)
+    with pytest.raises(ValueError, match="HeteroGraphSnapshotSequence"):
+        compute_eigenvalue_regularization_loss(model)
+    with pytest.raises(ValueError, match="HeteroGraphSnapshotSequence"):
+        compute_eigenvalue_regularization_loss(
+            model,
+            GraphSnapshotSequence(
+                [
+                    Data(x=torch.randn(4, 2), edge_index=torch.tensor([[0], [1]])),
+                    Data(x=torch.randn(4, 2), edge_index=torch.tensor([[0], [1]])),
+                ]
+            ),
+        )
+
+    sequence = HeteroGraphSnapshotSequence([_snap(), _snap()])
+    eig = compute_eigenvalue_regularization_loss(model, sequence)
+    assert eig.ndim == 0
+    assert eig.item() > 0.0
+
+
 def test_backward_consistency_dense_precomputes_inverse(
     trainable_model: GraphKoopmanModel,
     scaling_sequence: GraphSnapshotSequence,

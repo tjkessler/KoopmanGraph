@@ -9,19 +9,28 @@ from urllib.error import URLError
 import pytest
 import torch
 
-from koopman_graph.datasets import IEEE118DynamicBenchmark, TopologyPayload
+from koopman_graph.data import HeteroGraphSnapshotSequence
+from koopman_graph.datasets import (
+    IEEE118DynamicBenchmark,
+    TopologyPayload,
+    TypedIEEE118Topology,
+)
 from koopman_graph.datasets.ieee118 import (
     NUM_BUSES,
+    SIMULATED_DYNAMICS_DISCLAIMER,
     _build_edge_index,
     _bus_id_map,
     _default_topology_path,
     _extract_matrix_block,
     _initial_bus_features,
     _parse_numeric_rows,
+    bus_type_name,
     download_matpower_case118,
     ensure_topology_cache,
+    homogeneous_features_to_typed_hetero,
     load_topology,
     parse_matpower_case,
+    partition_buses_by_type,
     topology_from_matpower_text,
 )
 
@@ -119,6 +128,8 @@ def test_topology_from_matpower_text_builds_tensors() -> None:
     assert topology.edge_index.shape[0] == 2
     assert topology.initial_features is not None
     assert topology.initial_features.shape == (2, 4)
+    assert topology.bus_types is not None
+    assert topology.bus_types.tolist() == [3, 2]
 
 
 def test_build_edge_index_skips_inactive_branches() -> None:
@@ -208,3 +219,64 @@ def test_ieee118_generate_rejects_wrong_bus_count(
     )
     with pytest.raises(ValueError, match=str(NUM_BUSES)):
         IEEE118DynamicBenchmark.generate(num_timesteps=2)
+
+
+def test_bus_type_name_and_partition() -> None:
+    """MATPOWER codes map to typed names and tile every bus index."""
+    assert bus_type_name(1) == "load"
+    assert bus_type_name(2) == "generator"
+    assert bus_type_name(3) == "slack"
+    with pytest.raises(ValueError, match="Unsupported"):
+        bus_type_name(4)
+
+    codes = torch.tensor([2, 1, 3, 1], dtype=torch.long)
+    partitions = partition_buses_by_type(codes)
+    assert partitions["generator"].tolist() == [0]
+    assert partitions["load"].tolist() == [1, 3]
+    assert partitions["slack"].tolist() == [2]
+    covered = sorted(
+        int(index) for indices in partitions.values() for index in indices.tolist()
+    )
+    assert covered == [0, 1, 2, 3]
+
+
+def test_homogeneous_features_to_typed_hetero_minimal() -> None:
+    """Tiny MATPOWER fixture converts to typed HeteroData with local edges."""
+    topology = topology_from_matpower_text(MINIMAL_MATPOWER)
+    assert topology.initial_features is not None
+    assert topology.bus_types is not None
+    hetero = homogeneous_features_to_typed_hetero(
+        topology.initial_features,
+        topology.edge_index,
+        topology.bus_types,
+    )
+    assert set(hetero.node_types) == {"generator", "slack"}
+    assert hetero["generator"].x.shape == (1, 4)
+    assert hetero["slack"].x.shape == (1, 4)
+    assert ("slack", "branch", "generator") in hetero.edge_types
+    assert ("generator", "branch", "slack") in hetero.edge_types
+
+
+def test_load_typed_topology_partitions_all_buses() -> None:
+    """Cached IEEE 118 typed topology covers every bus exactly once."""
+    typed = IEEE118DynamicBenchmark.load_typed_topology()
+    assert isinstance(typed, TypedIEEE118Topology)
+    assert typed.node_type_names == ("generator", "load", "slack")
+    assert sum(typed.num_nodes_dict.values()) == NUM_BUSES
+    assert typed.num_nodes_dict == {"generator": 53, "load": 64, "slack": 1}
+    assert all(width == 4 for width in typed.feature_dims.values())
+    assert "simulated" in typed.dynamics_disclaimer.lower()
+    assert "simulated" in SIMULATED_DYNAMICS_DISCLAIMER.lower()
+
+
+def test_generate_typed_seeded_smoke() -> None:
+    """Seeded typed generate returns a HeteroGraphSnapshotSequence."""
+    first = IEEE118DynamicBenchmark.generate_typed(num_timesteps=4, seed=11)
+    second = IEEE118DynamicBenchmark.generate_typed(num_timesteps=4, seed=11)
+    assert isinstance(first, HeteroGraphSnapshotSequence)
+    assert first.num_timesteps == 4
+    assert first.num_nodes_total == NUM_BUSES
+    assert first.node_type_names == ("generator", "load", "slack")
+    for name in first.node_type_names:
+        assert torch.allclose(first[0][name].x, second[0][name].x)
+        assert first[0][name].x.shape[-1] == 4

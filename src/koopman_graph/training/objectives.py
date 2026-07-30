@@ -16,7 +16,11 @@ from typing import TYPE_CHECKING
 import torch
 from torch import Tensor
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
+)
 from koopman_graph.graph_utils import snapshot_edge_weight
 from koopman_graph.losses import (
     EigenvalueRegularizationLoss,
@@ -26,6 +30,7 @@ from koopman_graph.losses import (
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
 )
 from koopman_graph.protocols import TrainableKoopmanModel
@@ -166,27 +171,118 @@ def _graph_eigenvalue_regularization_over_sequence(
     return total / num_pairs
 
 
+def _hetero_relation_banks(
+    sequence: HeteroGraphSnapshotSequence,
+) -> tuple[list[Tensor], list[Tensor | None]]:
+    """Return ordered relation edge banks matching RelGraph / hetero advance.
+
+    Banks are ordered by sorted edge-type ``repr`` (same convention as
+    :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder`).
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Static-topology multiplex sequence.
+
+    Returns
+    -------
+    tuple of (list of Tensor, list of Tensor or None)
+        Ordered ``edge_indices`` and optional ``edge_weights``.
+
+    Raises
+    ------
+    ValueError
+        If the sequence uses dynamic topology.
+    """
+    if sequence.is_dynamic_topology:
+        msg = (
+            "dynamic-topology HeteroGraphSnapshotSequence eigenvalue "
+            "regularization is not supported yet; use static relation banks"
+        )
+        raise ValueError(msg)
+    edge_types = tuple(sorted(sequence.edge_types, key=repr))
+    edge_index_dict = sequence.edge_index_dict
+    edge_indices = [edge_index_dict[edge_type] for edge_type in edge_types]
+    snapshot = sequence[0]
+    edge_weights: list[Tensor | None] = [
+        snapshot[edge_type].get("edge_weight", None) for edge_type in edge_types
+    ]
+    return edge_indices, edge_weights
+
+
+def _hetero_eigenvalue_regularization_over_sequence(
+    model: TrainableKoopmanModel,
+    sequence: HeteroGraphSnapshotSequence,
+) -> Tensor:
+    """Evaluate hetero dense/ODO eigenvalue hinge on static relation banks.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model whose ``koopman`` is a :class:`HeteroGraphKoopmanOperator`.
+    sequence : HeteroGraphSnapshotSequence
+        Training window or trajectory supplying relation topology.
+
+    Returns
+    -------
+    Tensor
+        Scalar eigenvalue hinge (may be zero above the assembled-size ceiling).
+
+    Raises
+    ------
+    ValueError
+        If ``sequence`` has fewer than two snapshots, dynamic topology, or
+        relation count mismatches the operator.
+    """
+    if sequence.num_timesteps < 2:
+        msg = (
+            "HeteroGraphSnapshotSequence must contain at least 2 snapshots for "
+            "hetero eigenvalue regularization"
+        )
+        raise ValueError(msg)
+    koopman = model.koopman
+    assert isinstance(koopman, HeteroGraphKoopmanOperator)
+    edge_indices, edge_weights = _hetero_relation_banks(sequence)
+    if len(edge_indices) != koopman.num_relations:
+        msg = (
+            f"HeteroGraphKoopmanOperator has num_relations="
+            f"{koopman.num_relations}, but sequence provides "
+            f"{len(edge_indices)} edge types"
+        )
+        raise ValueError(msg)
+    return _EIGENVALUE_REGULARIZATION_LOSS(
+        koopman,
+        dynamics_mode=model.dynamics_mode,
+        edge_indices=edge_indices,
+        num_nodes=sequence.num_nodes,
+        edge_weights=edge_weights,
+    )
+
+
 def compute_eigenvalue_regularization_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence | None = None,
+    sequence: GraphSnapshotSequence | HeteroGraphSnapshotSequence | None = None,
 ) -> Tensor:
     """Compute the eigenvalue hinge penalty for the model Koopman operator.
 
     Ordinary / custom operators use the per-node contract matrix (or structural
-    ``bound_metric``). For :class:`~koopman_graph.operators.GraphKoopmanOperator`
-    dense/ODO modes, regularizes the topology-coupled effective operator:
-    pass ``sequence`` so training can resolve pair/window topology. Structural
-    graph modes still use factor-level ``bound_metric`` and do not require
-    topology (they are **not** whole-network certificates).
+    ``bound_metric``). For networked dense/ODO modes
+    (:class:`~koopman_graph.operators.GraphKoopmanOperator`,
+    :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
+    :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`), regularizes
+    the topology-coupled effective operator: pass ``sequence`` so training can
+    resolve topology. Structural modes still use factor-level
+    ``bound_metric`` and do not require topology (they are **not**
+    whole-network / joint ``ρ(K_eff)`` certificates).
 
     Parameters
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence or None, optional
-        Trajectory or window providing topology for graph dense/ODO
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence or None, optional
+        Trajectory or window providing topology for networked dense/ODO
         regularization. Required when ``model.koopman`` is a dense/ODO
-        :class:`~koopman_graph.operators.GraphKoopmanOperator`.
+        networked operator.
 
     Returns
     -------
@@ -196,7 +292,9 @@ def compute_eigenvalue_regularization_loss(
     Raises
     ------
     ValueError
-        If a graph dense/ODO operator is regularized without ``sequence``.
+        If a networked dense/ODO operator is regularized without ``sequence``,
+        or a hetero operator is paired with a homogeneous sequence (or vice
+        versa).
     """
     koopman = model.koopman
     if isinstance(koopman, GraphKoopmanOperator) and koopman.parameterization in {
@@ -210,6 +308,12 @@ def compute_eigenvalue_regularization_loss(
                 "effective operator); pass the training sequence/window"
             )
             raise ValueError(msg)
+        if isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "GraphKoopmanOperator eigenvalue regularization requires a "
+                "homogeneous GraphSnapshotSequence, not HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
         return _graph_eigenvalue_regularization_over_sequence(model, sequence)
 
     if isinstance(
@@ -221,6 +325,12 @@ def compute_eigenvalue_regularization_loss(
                 "ContinuousGraphKoopmanOperator dense/odo modes "
                 "(topology-coupled effective generator); pass the training "
                 "sequence/window"
+            )
+            raise ValueError(msg)
+        if isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "ContinuousGraphKoopmanOperator eigenvalue regularization "
+                "requires a homogeneous GraphSnapshotSequence"
             )
             raise ValueError(msg)
         return _EIGENVALUE_REGULARIZATION_LOSS(
@@ -242,6 +352,12 @@ def compute_eigenvalue_regularization_loss(
                 "effective operator); pass the training sequence/window"
             )
             raise ValueError(msg)
+        if isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "HypergraphKoopmanOperator eigenvalue regularization requires "
+                "a homogeneous GraphSnapshotSequence with hyperedges"
+            )
+            raise ValueError(msg)
         if not sequence.has_hyperedges:
             msg = (
                 "HypergraphKoopmanOperator eigenvalue regularization requires "
@@ -255,15 +371,102 @@ def compute_eigenvalue_regularization_loss(
             num_nodes=sequence.num_nodes,
             hyperedge_weight=sequence.hyperedge_weight,
         )
+
+    if isinstance(koopman, HeteroGraphKoopmanOperator) and koopman.parameterization in {
+        "dense",
+        "odo",
+    }:
+        if sequence is None:
+            msg = (
+                "sequence is required for eigenvalue regularization of "
+                "HeteroGraphKoopmanOperator dense/odo modes (topology-coupled "
+                "effective operator); pass a HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
+        if not isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "HeteroGraphKoopmanOperator eigenvalue regularization requires "
+                "a HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
+        return _hetero_eigenvalue_regularization_over_sequence(model, sequence)
+
     return _EIGENVALUE_REGULARIZATION_LOSS(
         koopman,
         dynamics_mode=model.dynamics_mode,
     )
 
 
+def _validate_hetero_fit_surface(
+    sequence: HeteroGraphSnapshotSequence,
+    loss_weights: LossWeights,
+    *,
+    extra_losses: ExtraLosses | None,
+) -> None:
+    """Reject hetero fit features that would silently use wrong topology.
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Multiplex or typed training trajectory.
+    loss_weights : LossWeights
+        Active loss weights for this step.
+    extra_losses : ExtraLosses or None
+        Optional Lie / PDE callables.
+
+    Raises
+    ------
+    ValueError
+        If unsupported hetero fit options are requested.
+    """
+    if sequence.is_dynamic_topology:
+        msg = (
+            "dynamic-topology HeteroGraphSnapshotSequence fit is unsupported; "
+            "use static relation banks"
+        )
+        raise ValueError(msg)
+    if sequence.has_controls:
+        msg = (
+            "controlled HeteroGraphSnapshotSequence fit is unsupported; "
+            "omit control_inputs"
+        )
+        raise ValueError(msg)
+    if sequence.has_timestamps:
+        msg = (
+            "timestamped HeteroGraphSnapshotSequence fit is unsupported; "
+            "omit timestamps"
+        )
+        raise ValueError(msg)
+    if loss_weights.backward != 0.0:
+        msg = (
+            "backward consistency is unsupported for koopman='hetero_graph'; "
+            "set loss_weights.backward=0"
+        )
+        raise ValueError(msg)
+    if (
+        loss_weights.lie != 0.0
+        or loss_weights.pde != 0.0
+        or loss_weights.worst_case != 0.0
+    ):
+        msg = (
+            "lie / pde / worst_case losses are unsupported for "
+            "HeteroGraphSnapshotSequence fit"
+        )
+        raise ValueError(msg)
+    if extra_losses is not None and (
+        extra_losses.lie_dynamics_fn is not None
+        or extra_losses.pde_residual_fn is not None
+    ):
+        msg = (
+            "extra_losses lie_dynamics_fn / pde_residual_fn are unsupported for "
+            "HeteroGraphSnapshotSequence fit"
+        )
+        raise ValueError(msg)
+
+
 def compute_rollout_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     horizon: int,
     start_indices: Sequence[int],
@@ -275,7 +478,7 @@ def compute_rollout_loss(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Training snapshots.
     horizon : int
         Number of rollout steps.
@@ -308,7 +511,7 @@ def compute_rollout_loss(
 
 def compute_training_loss(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     loss_weights: LossWeights,
     *,
     extra_losses: ExtraLosses | None = None,
@@ -327,7 +530,7 @@ def compute_training_loss(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequence : :class:`~koopman_graph.data.GraphSnapshotSequence`
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Time-ordered snapshots with at least two timesteps.
     loss_weights : :class:`~koopman_graph.training.LossWeights`
         Weights for reconstruction, forward, backward, and rollout terms.
@@ -349,6 +552,13 @@ def compute_training_loss(
     koopman = model.koopman
     if isinstance(koopman, ContinuousGraphKoopmanOperator):
         koopman.clear_transition_cache()
+
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        _validate_hetero_fit_surface(
+            sequence,
+            loss_weights,
+            extra_losses=extra_losses,
+        )
 
     device = next(model.parameters()).device
     needs_shared_predictions = (

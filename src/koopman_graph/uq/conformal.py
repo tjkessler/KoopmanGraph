@@ -47,9 +47,13 @@ from typing import Literal
 
 import torch
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    resolve_sequence,
+)
 from koopman_graph.graph_utils import random_walk_normalized_adjacency_matvec
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
@@ -306,6 +310,12 @@ class ConformalKoopmanUQ:
             if not 0.0 <= float(neighbor_smoothing) <= 1.0:
                 msg = f"neighbor_smoothing must lie in [0, 1], got {neighbor_smoothing}"
                 raise ValueError(msg)
+        if getattr(model, "uses_hetero_koopman", False):
+            msg = (
+                "ConformalKoopmanUQ is homogeneous-only; multiplex / "
+                "koopman='hetero_graph' models are not supported yet"
+            )
+            raise TypeError(msg)
         self.model = model
         self.method: ConformalMethod = method
         self.score: ConformalScore = score
@@ -417,6 +427,16 @@ class ConformalKoopmanUQ:
         if not calibration_sequences:
             msg = "calibration_sequences must be non-empty"
             raise ValueError(msg)
+        for seq in calibration_sequences:
+            if isinstance(seq, HeteroGraphSnapshotSequence) or (
+                isinstance(seq, Sequence) and seq and isinstance(seq[0], HeteroData)
+            ):
+                msg = (
+                    "ConformalKoopmanUQ is homogeneous-only; "
+                    "HeteroData / HeteroGraphSnapshotSequence calibration "
+                    "is not supported yet"
+                )
+                raise TypeError(msg)
 
         resolved = [resolve_sequence(seq) for seq in calibration_sequences]
         if self.score == "node_wise":
@@ -671,6 +691,8 @@ class ConformalKoopmanUQ:
 
         Raises
         ------
+        TypeError
+            If ``initial_graph`` is multiplex ``HeteroData``.
         RuntimeError
             If not calibrated.
         ValueError
@@ -679,6 +701,12 @@ class ConformalKoopmanUQ:
         if self._quantiles is None or self._alpha is None:
             msg = "ConformalKoopmanUQ is not calibrated; call calibrate() first"
             raise RuntimeError(msg)
+        if isinstance(initial_graph, HeteroData):
+            msg = (
+                "ConformalKoopmanUQ is homogeneous-only; HeteroData origins "
+                "are not supported yet"
+            )
+            raise TypeError(msg)
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
             raise ValueError(msg)

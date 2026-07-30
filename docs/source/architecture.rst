@@ -183,6 +183,15 @@ leading-underscore helpers across training peers.
 * No ``dask_prep`` peer in 0.8.0 — Dask remains docs-only (offline prep in
   user code; see :doc:`faq`)
 
+**Hetero composition (0.9):** device movers, window sampling / sharding,
+DDP, Fabric, Lightning, and Ray ensemble paths accept
+:class:`~koopman_graph.data.HeteroGraphSnapshotSequence` /
+``HeteroData`` without silent cast to homogeneous ``Data``.
+``find_unused_parameters`` defaults to ``True`` for RelGraph hetero
+stacks on the DDP path. Single-process windowed ``run_fit_loop`` still
+rejects windowed hetero (use DDP / Fabric samplers). Dense
+:math:`N\cdot d` ceilings are unchanged.
+
 **Dependency rule:** ``distributed`` may import ``training``, ``data``,
 ``model``, and ``uq`` (ensemble helpers only). ``training`` must **not**
 import Lightning, Ray, Dask, or ``koopman_graph.distributed``. Prefer
@@ -252,7 +261,10 @@ power-user losses stay package imports outside root ``__all__``.
 ``koopman_graph.data`` package layout (kept separate from
 :mod:`koopman_graph.datasets`):
 
-* ``containers`` — ``GraphSnapshotSequence``
+* ``containers`` — ``GraphSnapshotSequence``,
+  ``HeteroGraphSnapshotSequence`` (PyG ``HeteroData`` multiplex / typed
+  sequences; static edge-type set by default; see
+  :mod:`koopman_graph.data.hetero_layout` for typed stacked latents)
 * ``construction`` — array / dynamic-array / Hankel-window builders
   (``build_snapshots_from_arrays``, ``build_snapshots_from_dynamic_arrays``,
   ``build_windowed_snapshots``, ``ConstructedSnapshots``) used by container
@@ -273,6 +285,16 @@ power-user losses stay package imports outside root ``__all__``.
   import **down** into ``data``. :mod:`koopman_graph.data` must **not**
   import :mod:`koopman_graph.nn` (eager or lazy). Power-user submodule; not
   promoted on the package or root ``__all__``.
+* ``hetero_layout`` — stacked typed-node layout contract
+  (``node_type_offsets``, ``node_type_slices``, ``stack_typed_features`` /
+  ``unstack_typed_features``, ``offset_edge_index``,
+  ``global_relation_edge_indices``, ``snapshot_num_nodes_dict``,
+  ``mask_hetero_snapshot_features``). Node-level quantities for a typed
+  hetero graph stack row-wise into one ``N = Σ_τ N_τ`` block in
+  ``node_type_names`` order at a **shared** latent width ``d``; per-relation
+  ``edge_index`` tensors are type-local and must be offset into that global
+  numbering. Owned here so ``nn`` / ``operators`` / ``training`` import
+  **down** into ``data``.
 * ``sampling`` — ``WindowSampler`` (full-graph temporal windows);
   ``NeighborWindowSampler`` (k-hop subgraph windows for large static graphs;
   training approximation only — package export, not root ``__all__``)
@@ -363,6 +385,15 @@ power-user losses stay package imports outside root ``__all__``.
   :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
   (discrete hyperedge-coupled advance; select via ``koopman="hypergraph"``;
   ``sparsity="block_diagonal"`` shares the Jacobi approximate inverse path)
+* ``heterogeneous`` —
+  :class:`~koopman_graph.operators.heterogeneous.HeteroGraphKoopmanOperator`
+  (discrete relational multiplex / typed advance
+  :math:`K_{\mathrm{eff}} = I\otimes K_{\mathrm{self}} + \sum_r
+  \widehat{A}_r \otimes K_r`; select via ``koopman="hetero_graph"`` with
+  RelGraph encode/decode by default). Shared latent width :math:`d`;
+  typed self is block-diagonal per type. Factor-wise structural modes do
+  **not** certify joint :math:`\rho(K_{\mathrm{eff}})`. Dense
+  :math:`N\cdot d` spectrum / inverse ceiling unchanged by trainers
 * ``global_local`` —
   :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
   (discrete global backbone ``K_g`` plus low-rank local window correction
@@ -397,6 +428,20 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
 * ``hypergraph`` — :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
   :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
   (PyG ``HypergraphConv``; static ``hyperedge_index`` / ``hyperedge_weight``)
+* ``heterogeneous`` — :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
+  (multiplex / typed R-GCN-lite; per-relation linear messages with
+  :func:`~koopman_graph.graph_utils.relation_degree_normalize`. Mapping
+  ``in_channels`` / ``out_channels`` selects the typed path: per-type
+  ``Linear`` projections onto one shared latent width and per-type output
+  heads, with node-level quantities stacked as described in
+  :mod:`koopman_graph.data.hetero_layout`). Optional
+  :class:`~koopman_graph.nn.heterogeneous.HGTEncoder` /
+  :class:`~koopman_graph.nn.heterogeneous.HGTDecoder` wrap PyG ``HGTConv``
+  for the typed path only (same stacked latent contract); they are
+  ``koopman_graph.nn`` power-user peers and are **not** required for hetero
+  Koopman support or factory ``koopman="hetero_graph"`` (RelGraph remains
+  the supported pair)
 * ``delay`` — :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`
   delay-coordinate wrapper (compose with a base encoder sized as
   ``in_channels = n_delays * feature_dim``; optional
@@ -644,7 +689,7 @@ code stays valid; capability packages
 alternate import paths. Do not silently demote either without a separately
 versioned breaking migration.
 
-**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 25):
+**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 27):
 
 * :class:`~koopman_graph.model.GraphKoopmanModel`
 * :class:`~koopman_graph.nn.encoder.GNNEncoder`,
@@ -653,13 +698,15 @@ versioned breaking migration.
   :class:`~koopman_graph.nn.encoder.DiffConvEncoder`,
   :class:`~koopman_graph.nn.encoder.GraphTransformerEncoder`,
   :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder`,
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder`,
   :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`,
   :class:`~koopman_graph.nn.decoder.GNNDecoder`,
   :class:`~koopman_graph.nn.decoder.GATDecoder`,
   :class:`~koopman_graph.nn.decoder.SAGEDecoder`,
   :class:`~koopman_graph.nn.decoder.DiffConvDecoder`,
   :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`,
-  :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
+  :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`,
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
   (also via :mod:`koopman_graph.nn`)
 * :class:`~koopman_graph.operators.KoopmanOperator`,
   :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
@@ -667,8 +714,14 @@ versioned breaking migration.
   :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`,
   :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
   :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`
+  (hetero operator is a package export —
+  ``HeteroGraphKoopmanOperator`` via
+  ``from koopman_graph.operators import …`` / factory
+  ``koopman="hetero_graph"``; not on root ``__all__``)
 * Data I/O for ``fit``: :class:`~koopman_graph.data.GraphSnapshotSequence`,
   :class:`~koopman_graph.data.MultiTrajectory`
+  (hetero sequences use package-export ``HeteroGraphSnapshotSequence``;
+  ``MultiTrajectory`` is homo-only or hetero-only; mixes rejected)
 * Primary spectrum entrypoints:
   :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`,
   :func:`~koopman_graph.analysis.compute_spectrum`
@@ -1126,10 +1179,18 @@ spectral analysis uses the explicit helpers ``effective_matrix`` /
   ``dynamics_mode="continuous"``).
 * Hypergraph — assemble ``I_N ⊗ K_self + Ĥ ⊗ K_hedge`` on a supplied
   ``hyperedge_index`` / ``hyperedge_weight`` (Zhou ``Ĥ`` semantics as advance).
+* Heterogeneous / multiplex — assemble
+  :math:`I_N \otimes K_{\mathrm{self}} + \sum_r \widehat{A}_r \otimes K_r`
+  (typed: block-diagonal per-type self) on ordered relation banks
+  (``edge_indices`` / optional ``edge_weights``;
+  ``normalization="rgcn_in_degree"`` default). Optional
+  ``relation_tying="basis"``. Linear latent advance only — RelGraph / HGT
+  nonlinearities stay in encode/decode.
 
 :meth:`~koopman_graph.model.GraphKoopmanModel.spectrum` requires those
 topology arguments when ``koopman="graph"``, ``koopman="continuous_graph"``,
-or ``koopman="hypergraph"`` and never silently substitutes the self-term.
+``koopman="hypergraph"``, or ``koopman="hetero_graph"`` and never silently
+substitutes the self-term.
 :class:`~koopman_graph.losses.EigenvalueRegularizationLoss` follows the same
 split: ``dense`` / ``odo`` hinge on ``eigvals`` of the topology-coupled
 effective map / generator with required topology (training averages
@@ -1288,13 +1349,15 @@ when ``koopman`` is omitted.
   :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
   :class:`~koopman_graph.operators.GraphKoopmanOperator`,
   :class:`~koopman_graph.operators.HypergraphKoopmanOperator`,
-  :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`, and
-  :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`
+  :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator`,
+  :class:`~koopman_graph.operators.ContinuousGraphKoopmanOperator`, and
+  :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`
   (including ``koopman_kind``, control / bilinear / sparsity / adjacency /
-  symmetry / global-local factory metadata, and ``n_delays``). RLS
+  symmetry / global-local / hetero relation / tying factory metadata, and
+  ``n_delays``). RLS
   :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` seed and
   write-back is a **narrower** surface: dense built-in discrete and
-  continuous operators only (not networked graph / hypergraph /
+  continuous operators only (not networked graph / hypergraph / hetero /
   global-local / continuous-graph kinds, and not custom injections).
   Custom injected operators raise on save; reconstruct with
   ``koopman=...`` after loading encoder/decoder state separately if needed.
@@ -1425,13 +1488,18 @@ several trajectories of the same system. Prefer the explicit wrapper:
 Discrimination rules (used by
 :func:`~koopman_graph.training.resolve_training_sequences`):
 
-* :class:`~koopman_graph.data.MultiTrajectory` — multi-trajectory (required)
-* :class:`~koopman_graph.data.GraphSnapshotSequence` — single trajectory
+* :class:`~koopman_graph.data.MultiTrajectory` — multi-trajectory (required);
+  sequences are all-homogeneous **or** all-hetero (mixes raise)
+* :class:`~koopman_graph.data.GraphSnapshotSequence` — single homogeneous
+  trajectory
+* :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` — single hetero
+  trajectory (``HeteroData`` snapshots)
 * non-empty ``list`` / ``tuple`` of only ``Data`` — single trajectory of
-  snapshots
+  snapshots (homogeneous); bare ``HeteroData`` lists coerce similarly
 * bare ``list`` / ``tuple`` of :class:`~koopman_graph.data.GraphSnapshotSequence`
+  or :class:`~koopman_graph.data.HeteroGraphSnapshotSequence`
   — ``TypeError`` (wrap in ``MultiTrajectory``)
-* empty list or mixed ``GraphSnapshotSequence`` / ``Data`` — ``ValueError``
+* empty list or mixed sequence / ``Data`` kinds — ``ValueError``
 
 Validation input follows the same rules; a multi-trajectory validation
 container must match the training trajectory count, while a single validation
@@ -1460,16 +1528,17 @@ Who moves tensors
 * **Distributed trainers** —
   :func:`~koopman_graph.distributed.run_ddp_fit_loop` honors ``LOCAL_RANK``
   when CUDA is available (as set by ``torchrun``), moves sequences with
-  :func:`~koopman_graph.training.sequence_to_device`, and writes checkpoints
-  only on the main process from the **unwrapped** module.
+  :func:`~koopman_graph.training.sequence_to_device` (homo or hetero), and
+  writes checkpoints only on the main process from the **unwrapped** module.
   :func:`~koopman_graph.distributed.fit_with_fabric` uses Fabric's device /
   precision setup. Rank-aware sampling uses Fabric or process-group rank /
-  world size.
+  world size (including hetero windows).
   :class:`~koopman_graph.distributed.KoopmanLightningModule` defers device
   placement to Lightning ``Trainer``; export format-1 checkpoints with
   ``export_format1_checkpoint`` (composed model, no ``module.`` prefix).
   Compose adapters around ``GraphKoopmanModel``; do not subclass the façade
-  for DDP / Fabric / Trainer.
+  for DDP / Fabric / Trainer. Hetero RelGraph stacks default
+  ``find_unused_parameters=True`` on the DDP path.
 
 Façade vs functional training ownership
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2199,6 +2268,63 @@ checkpoints remain rejected with a clear re-save error. New 0.6.0 fields
 (``symmetry``, ``learn_topology``, hypergraph / global-local /
 continuous-graph kinds, local-window keys) round-trip under format 1; loaders
 still accept only ``{1}``.
+
+v0.9.0 capability architecture
+------------------------------
+
+v0.9.0 adds **opt-in** heterogeneous / multiplex graph Koopman support while
+preserving the linear, time-invariant latent-operator contract. Homogeneous
+defaults and bit-compatible paths are unchanged. RelGraph (R-GCN-lite
+motivation; Schlichtkrull et al. 2018) is the factory-supported encode/decode
+pair for ``koopman="hetero_graph"``. Optional HGT peers (Hu et al. 2020) wrap
+PyG ``HGTConv`` under :mod:`koopman_graph.nn` only. 0.8 trainer packages are
+**composed** with hetero inputs (Q9); do not re-implement orchestration and
+do not conflate trainers with ``sparsity="distributed"``.
+
+**Shipped capability list (0.9 peers)**
+
+* :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` +
+  :mod:`koopman_graph.data.hetero_layout` (stacked typed latents at shared
+  :math:`d`)
+* :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
+  :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder` (root façade)
+* Optional :class:`~koopman_graph.nn.heterogeneous.HGTEncoder` /
+  :class:`~koopman_graph.nn.heterogeneous.HGTDecoder` (``nn`` only)
+* :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`
+  (``koopman="hetero_graph"``; package export)
+* Hetero × DDP / Fabric / Lightning / Ray composition under
+  :mod:`koopman_graph.distributed`
+* Interpretive :func:`~koopman_graph.analysis.attribute_mode_energy`
+* Tutorial ``39_heterogeneous_relational_koopman.ipynb``; typed IEEE helpers
+* :doc:`limitations` — shipped vs deferred hetero items; trainer honesty
+
+**Capability and API-tier map (0.9 peers)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - Capability home
+     - API tier
+     - Contracts to preserve
+   * - :mod:`koopman_graph.data` (hetero sequence / layout)
+     - Package (sequence on ``data.__all__``)
+     - No silent ``HeteroData``→``Data`` cast; shared :math:`d`; static
+       edge-type set by default
+   * - :mod:`koopman_graph.nn.heterogeneous` (RelGraph)
+     - Public root façade
+     - Factory default for ``koopman="hetero_graph"``; multiplex + typed
+   * - :mod:`koopman_graph.nn.heterogeneous` (HGT)
+     - Power-user (``nn``)
+     - Optional; not factory default; typed path only
+   * - :mod:`koopman_graph.operators.heterogeneous`
+     - Package export
+     - Linear advance; joint-stability non-certificate; dense
+       :math:`N\cdot d` ceiling
+   * - :mod:`koopman_graph.distributed` (hetero)
+     - Power-user
+     - Compose 0.8 adapters; ``find_unused_parameters`` default ``True`` for
+       RelGraph hetero
 
 Related documentation
 ---------------------

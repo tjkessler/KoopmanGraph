@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-30
+
+Opt-in heterogeneous / multiplex graph Koopman operators and RelGraph
+encode/decode, composed with the 0.8 trainer adapters. Homogeneous defaults
+unchanged.
+
+### Added
+
+- `HeteroGraphSnapshotSequence` and typed stacked latent layout helpers
+  (`koopman_graph.data.hetero_layout`) for PyG `HeteroData` multiplex /
+  multi-node-type sequences at a shared latent width \(d\).
+- R-GCN-lite `RelGraphEncoder` / `RelGraphDecoder` and
+  `HeteroGraphKoopmanOperator` via factory `koopman="hetero_graph"`
+  (\(K_{\mathrm{eff}} = I\otimes K_{\mathrm{self}} + \sum_r \widehat{A}_r
+  \otimes K_r\); optional `relation_tying="basis"`).
+- Optional `HGTEncoder` / `HGTDecoder` under `koopman_graph.nn` (PyG
+  `HGTConv`; not factory defaults).
+- Hetero composition with native DDP (`strategy="ddp"`), Lightning Fabric,
+  optional Lightning `Trainer`, and Ray ensemble helpers; exposed
+  `find_unused_parameters` (default `True` for RelGraph hetero stacks).
+- Interpretive `attribute_mode_energy` / `ModeEnergyAttribution` in
+  `koopman_graph.analysis`.
+- Typed IEEE-118 topology helpers and tutorial
+  `examples/39_heterogeneous_relational_koopman.ipynb`.
+- Sphinx: limitations / FAQ / capabilities / architecture / API updates for
+  hetero and trainer composition.
+
+### Notes
+
+- Dense \(N\cdot d\) spectrum / inverse ceilings are unchanged by multi-GPU
+  *trainer* orchestration. Do not confuse trainers with the unimplemented
+  operator flag `sparsity="distributed"`.
+- Factor-wise Schur / Lyapunov / dissipative modes do **not** certify
+  \(\rho(K_{\mathrm{eff}})\). Relational factorization must earn its keep in
+  ablations (negative results allowed).
+- Deferred: per-type \(d_\tau\), auto reverse relations, continuous hetero
+  operators, env / conformal / hierarchical hetero parity, joint structural
+  certificates.
+
 ## [0.8.2] - 2026-07-28
 
 Second patch re-release for Zenodo GitHub archival after tag `0.8.1` failed
@@ -393,6 +432,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.9.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.8.2...0.9.0
 [0.8.2]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.2
 [0.8.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.1
 [0.8.0]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.0

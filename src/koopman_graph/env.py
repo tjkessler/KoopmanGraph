@@ -25,7 +25,7 @@ import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import GraphSnapshotSequence, HeteroGraphSnapshotSequence
 from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.graph_utils import (
     advance_and_decode,
@@ -249,6 +249,18 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         if model.control_dim <= 0:
             msg = "GraphKoopmanEnv requires model.control_dim > 0"
             raise ValueError(msg)
+        if getattr(model, "uses_hetero_koopman", False):
+            msg = (
+                "GraphKoopmanEnv is homogeneous-only; multiplex / "
+                "koopman='hetero_graph' models are not supported yet"
+            )
+            raise TypeError(msg)
+        if isinstance(reference_sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "GraphKoopmanEnv is homogeneous-only; "
+                "HeteroGraphSnapshotSequence is not supported yet"
+            )
+            raise TypeError(msg)
         if reference_sequence.num_timesteps < 1:
             msg = "reference_sequence must contain at least one snapshot"
             raise ValueError(msg)

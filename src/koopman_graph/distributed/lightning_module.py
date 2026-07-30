@@ -21,7 +21,11 @@ import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
+)
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training import (
     ExtraLosses,
@@ -35,6 +39,7 @@ __all__ = ["KoopmanLightningModule"]  # noqa: F822 — provided via __getattr__
 
 _LIGHTNING_INSTALL_HINT = 'pip install "koopman-graph[lightning]"'
 _MODULE_CLS: type[Any] | None = None
+_SNAPSHOT_SEQUENCE_TYPES = (GraphSnapshotSequence, HeteroGraphSnapshotSequence)
 
 
 def _import_lightning() -> Any:
@@ -61,18 +66,19 @@ def _import_lightning() -> Any:
 
 
 def _as_sequence_batch(
-    batch: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
-) -> list[GraphSnapshotSequence]:
+    batch: SnapshotSequence | Sequence[SnapshotSequence],
+) -> list[SnapshotSequence]:
     """Normalize a Trainer batch to a list of snapshot sequences.
 
     Parameters
     ----------
-    batch : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+    batch : SnapshotSequence or sequence of SnapshotSequence
         Collated batch from a DataLoader (single window or list of windows).
+        Accepts homogeneous or multiplex trajectories.
 
     Returns
     -------
-    list of GraphSnapshotSequence
+    list of SnapshotSequence
         Batch as a concrete list.
 
     Raises
@@ -80,23 +86,25 @@ def _as_sequence_batch(
     TypeError
         If ``batch`` is not a sequence container of snapshot sequences.
     """
-    if isinstance(batch, GraphSnapshotSequence):
+    if isinstance(batch, _SNAPSHOT_SEQUENCE_TYPES):
         return [batch]
     if isinstance(batch, Sequence) and not isinstance(batch, (str, bytes)):
         sequences = list(batch)
         if not sequences:
-            msg = "training batch must contain at least one GraphSnapshotSequence"
+            msg = "training batch must contain at least one SnapshotSequence"
             raise ValueError(msg)
         for item in sequences:
-            if not isinstance(item, GraphSnapshotSequence):
+            if not isinstance(item, _SNAPSHOT_SEQUENCE_TYPES):
                 msg = (
-                    "KoopmanLightningModule batches must be GraphSnapshotSequence "
+                    "KoopmanLightningModule batches must be SnapshotSequence "
+                    "(GraphSnapshotSequence or HeteroGraphSnapshotSequence) "
                     f"or list thereof; got {type(item)!r}"
                 )
                 raise TypeError(msg)
         return sequences
     msg = (
-        "KoopmanLightningModule batches must be GraphSnapshotSequence or "
+        "KoopmanLightningModule batches must be SnapshotSequence "
+        "(GraphSnapshotSequence or HeteroGraphSnapshotSequence) or "
         f"list thereof; got {type(batch)!r}"
     )
     raise TypeError(msg)
@@ -174,19 +182,22 @@ def _build_koopman_lightning_module() -> type[Any]:
 
         def _step_loss(
             self,
-            batch: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
-        ) -> torch.Tensor:
+            batch: SnapshotSequence | Sequence[SnapshotSequence],
+        ) -> tuple[torch.Tensor, int]:
             """Compute mean training loss over a batch of windows.
 
             Parameters
             ----------
-            batch : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-                Trainer batch to evaluate.
+            batch : SnapshotSequence or sequence of SnapshotSequence
+                Trainer batch to evaluate (homogeneous or multiplex).
 
             Returns
             -------
-            Tensor
+            loss : Tensor
                 Mean ``compute_training_loss(...).total`` over the batch.
+            batch_size : int
+                Number of sequences in the batch (for Lightning logging;
+                avoids ``HeteroData`` batch-size inference).
             """
             sequences = _as_sequence_batch(batch)
             breakdowns = [
@@ -200,19 +211,19 @@ def _build_koopman_lightning_module() -> type[Any]:
                 )
                 for sequence in sequences
             ]
-            return mean_training_loss_breakdown(breakdowns).total
+            return mean_training_loss_breakdown(breakdowns).total, len(sequences)
 
         def training_step(
             self,
-            batch: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+            batch: SnapshotSequence | Sequence[SnapshotSequence],
             batch_idx: int,
         ) -> torch.Tensor:
             """Lightning training step on window / trajectory batches.
 
             Parameters
             ----------
-            batch : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-                Collated training batch.
+            batch : SnapshotSequence or sequence of SnapshotSequence
+                Collated training batch (homogeneous or multiplex).
             batch_idx : int
                 Batch index (unused).
 
@@ -222,21 +233,28 @@ def _build_koopman_lightning_module() -> type[Any]:
                 Scalar training loss for automatic optimization.
             """
             del batch_idx
-            loss = self._step_loss(batch)
-            self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+            loss, batch_size = self._step_loss(batch)
+            self.log(
+                "train_loss",
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=batch_size,
+            )
             return loss
 
         def validation_step(
             self,
-            batch: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+            batch: SnapshotSequence | Sequence[SnapshotSequence],
             batch_idx: int,
         ) -> torch.Tensor:
             """Lightning validation step on window / trajectory batches.
 
             Parameters
             ----------
-            batch : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-                Collated validation batch.
+            batch : SnapshotSequence or sequence of SnapshotSequence
+                Collated validation batch (homogeneous or multiplex).
             batch_idx : int
                 Batch index (unused).
 
@@ -246,8 +264,15 @@ def _build_koopman_lightning_module() -> type[Any]:
                 Scalar validation loss.
             """
             del batch_idx
-            loss = self._step_loss(batch)
-            self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+            loss, batch_size = self._step_loss(batch)
+            self.log(
+                "val_loss",
+                loss,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                batch_size=batch_size,
+            )
             return loss
 
         def configure_optimizers(self) -> Optimizer | dict[str, Any]:

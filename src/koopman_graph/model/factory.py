@@ -23,6 +23,8 @@ from koopman_graph.nn import (
     GNNEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    RelGraphDecoder,
+    RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
 )
@@ -39,6 +41,7 @@ from koopman_graph.operators import (
     GlobalLocalKoopmanOperator,
     GraphAdjacency,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
     InitMode,
     KoopmanKind,
@@ -65,14 +68,23 @@ Encoder = (
     | SAGEEncoder
     | DiffConvEncoder
     | HypergraphEncoder
+    | RelGraphEncoder
     | DelayEmbeddingEncoder
 )
-Decoder = GNNDecoder | GATDecoder | SAGEDecoder | DiffConvDecoder | HypergraphDecoder
+Decoder = (
+    GNNDecoder
+    | GATDecoder
+    | SAGEDecoder
+    | DiffConvDecoder
+    | HypergraphDecoder
+    | RelGraphDecoder
+)
 KoopmanModule = (
     KoopmanOperator
     | ContinuousKoopmanOperator
     | GraphKoopmanOperator
     | HypergraphKoopmanOperator
+    | HeteroGraphKoopmanOperator
     | GlobalLocalKoopmanOperator
     | ContinuousGraphKoopmanOperator
 )
@@ -132,6 +144,77 @@ class ResolvedModelComponents:
     koopman_kind: KoopmanKind
 
 
+def validate_typed_relgraph_peers(
+    encoder: RelGraphEncoder,
+    decoder: Decoder,
+    operator: HeteroGraphKoopmanOperator,
+) -> None:
+    """Validate typed RelGraph peers against the hetero operator schema.
+
+    Typed graphs share one latent width ``d``; only the input / output feature
+    widths ``F_tau`` may differ per node type. Encoder and decoder node-type
+    order must equal the operator's ``node_types`` so stacked latent slices
+    line up with the per-type self blocks.
+
+    Parameters
+    ----------
+    encoder : RelGraphEncoder
+        Resolved relational encoder.
+    decoder : Decoder
+        Resolved decoder (validated only when it is a ``RelGraphDecoder``).
+    operator : HeteroGraphKoopmanOperator
+        Resolved hetero Koopman operator.
+
+    Raises
+    ------
+    ValueError
+        If typed node-type order mismatches the operator, if only one of the
+        peers is typed, or if the operator is typed while the peers are not.
+    """
+    operator_types = tuple(operator.node_types)
+    encoder_typed = bool(encoder.is_typed)
+    decoder_typed = isinstance(decoder, RelGraphDecoder) and bool(decoder.is_typed)
+    if encoder_typed != decoder_typed:
+        msg = (
+            "RelGraphEncoder and RelGraphDecoder must agree on typed channels; "
+            f"encoder typed={encoder_typed}, decoder typed={decoder_typed}"
+        )
+        raise ValueError(msg)
+    if not encoder_typed:
+        if len(operator_types) > 1:
+            msg = (
+                "HeteroGraphKoopmanOperator declares node types "
+                f"{operator_types!r} but RelGraph peers use a single shared "
+                "in_channels; pass a mapping of per-type feature widths"
+            )
+            raise ValueError(msg)
+        return
+    if tuple(encoder.node_types) != operator_types:
+        msg = (
+            f"RelGraphEncoder node types {tuple(encoder.node_types)!r} must "
+            f"match HeteroGraphKoopmanOperator node types {operator_types!r}"
+        )
+        raise ValueError(msg)
+    assert isinstance(decoder, RelGraphDecoder)
+    if tuple(decoder.node_types) != operator_types:
+        msg = (
+            f"RelGraphDecoder node types {tuple(decoder.node_types)!r} must "
+            f"match HeteroGraphKoopmanOperator node types {operator_types!r}"
+        )
+        raise ValueError(msg)
+    operator_edges = tuple(tuple(edge_type) for edge_type in operator.edge_types)
+    for module in (encoder, decoder):
+        declared = module.edge_types
+        if declared is None:
+            continue
+        if tuple(tuple(edge_type) for edge_type in declared) != operator_edges:
+            msg = (
+                f"{type(module).__name__} edge types {tuple(declared)!r} must "
+                f"match HeteroGraphKoopmanOperator edge types {operator_edges!r}"
+            )
+            raise ValueError(msg)
+
+
 def resolve_model_components(
     encoder: Encoder,
     decoder: Decoder,
@@ -163,6 +246,10 @@ def resolve_model_components(
     physics_dim: int = 0,
     physics_position: PhysicsPosition,
     n_delays: int = 1,
+    koopman_node_types: Sequence[str] | None = None,
+    koopman_edge_types: Sequence[Sequence[str]] | None = None,
+    koopman_relation_tying: str = "independent",
+    koopman_basis_size: int | None = None,
 ) -> ResolvedModelComponents:
     """Validate and assemble encoder / physics / Koopman construction inputs.
 
@@ -216,6 +303,15 @@ def resolve_model_components(
         Where physics features are concatenated.
     n_delays : int
         Delay-embedding depth (``1`` = no delay).
+    koopman_node_types : sequence of str or None, optional
+        Ordered node-type names for ``koopman="hetero_graph"``.
+    koopman_edge_types : sequence of sequence of str or None, optional
+        Ordered ``(src, rel, dst)`` triples for ``koopman="hetero_graph"``.
+    koopman_relation_tying : {"independent", "basis"}, optional
+        Relation-factor tying for ``koopman="hetero_graph"``. Default
+        ``"independent"``.
+    koopman_basis_size : int or None, optional
+        Basis size ``B`` when ``koopman_relation_tying="basis"``.
 
     Returns
     -------
@@ -279,6 +375,42 @@ def resolve_model_components(
         )
         raise ValueError(msg)
 
+    from koopman_graph.model.validation import uses_relgraph_modules
+
+    uses_relgraph = uses_relgraph_modules(encoder, decoder)
+    kind_preview, _ = parse_koopman_arg(koopman)
+    wants_hetero = kind_preview == "hetero_graph" or isinstance(
+        koopman, HeteroGraphKoopmanOperator
+    )
+    if wants_hetero and not uses_relgraph:
+        msg = (
+            "koopman='hetero_graph' (or an injected HeteroGraphKoopmanOperator) "
+            "requires RelGraphEncoder and RelGraphDecoder"
+        )
+        raise ValueError(msg)
+    if uses_relgraph and not wants_hetero:
+        msg = (
+            "RelGraphEncoder / RelGraphDecoder require koopman='hetero_graph' "
+            f"(got koopman={kind_preview!r})"
+        )
+        raise ValueError(msg)
+    if uses_relgraph and n_delays != 1:
+        msg = (
+            "RelGraphEncoder / RelGraphDecoder do not support n_delays > 1 "
+            f"(got n_delays={n_delays})"
+        )
+        raise ValueError(msg)
+    if uses_relgraph and physics_dim != 0:
+        msg = "physics-informed observables are unsupported with RelGraph peers"
+        raise ValueError(msg)
+
+    num_relations: int | None = None
+    relation_normalization = None
+    if uses_relgraph:
+        assert isinstance(encoder, RelGraphEncoder)
+        num_relations = encoder.num_relations
+        relation_normalization = encoder.normalization
+
     operator, koopman_kind = build_koopman(
         koopman=koopman,
         latent_dim=latent_dim,
@@ -299,7 +431,37 @@ def resolve_model_components(
         koopman_orbit_partition=koopman_orbit_partition,
         koopman_auto_orbits=koopman_auto_orbits,
         koopman_orbit_method=koopman_orbit_method,
+        num_relations=num_relations,
+        relation_normalization=relation_normalization,
+        node_types=koopman_node_types,
+        edge_types=koopman_edge_types,
+        relation_tying=koopman_relation_tying,
+        basis_size=koopman_basis_size,
     )
+    if isinstance(operator, HeteroGraphKoopmanOperator):
+        if not uses_relgraph:
+            msg = (
+                "HeteroGraphKoopmanOperator requires RelGraphEncoder and "
+                "RelGraphDecoder"
+            )
+            raise ValueError(msg)
+        assert isinstance(encoder, RelGraphEncoder)
+        if operator.num_relations != encoder.num_relations:
+            msg = (
+                "HeteroGraphKoopmanOperator.num_relations "
+                f"({operator.num_relations}) must match "
+                f"RelGraphEncoder.num_relations ({encoder.num_relations})"
+            )
+            raise ValueError(msg)
+        if operator.normalization != encoder.normalization:
+            msg = (
+                "HeteroGraphKoopmanOperator.normalization "
+                f"({operator.normalization!r}) must match "
+                f"RelGraphEncoder.normalization ({encoder.normalization!r})"
+            )
+            raise ValueError(msg)
+        validate_typed_relgraph_peers(encoder, decoder, operator)
+        koopman_kind = "hetero_graph"
     return ResolvedModelComponents(
         encoder=encoder,
         decoder=decoder,
@@ -380,13 +542,14 @@ def parse_koopman_arg(
             "pernode",
             "graph",
             "hypergraph",
+            "hetero_graph",
             "global_local",
             "continuous_graph",
         }:
             msg = (
                 "koopman string kind must be 'pernode', 'graph', "
-                "'hypergraph', 'global_local', or 'continuous_graph', "
-                f"got {koopman!r}"
+                "'hypergraph', 'hetero_graph', 'global_local', or "
+                f"'continuous_graph', got {koopman!r}"
             )
             raise ValueError(msg)
         return koopman, None
@@ -559,6 +722,9 @@ def resolve_injected_koopman(
     if isinstance(koopman, HypergraphKoopmanOperator) and dynamics_mode != "discrete":
         msg = "Injected HypergraphKoopmanOperator requires dynamics_mode='discrete'"
         raise ValueError(msg)
+    if isinstance(koopman, HeteroGraphKoopmanOperator) and dynamics_mode != "discrete":
+        msg = "Injected HeteroGraphKoopmanOperator requires dynamics_mode='discrete'"
+        raise ValueError(msg)
     if isinstance(koopman, GlobalLocalKoopmanOperator) and dynamics_mode != "discrete":
         msg = "Injected GlobalLocalKoopmanOperator requires dynamics_mode='discrete'"
         raise ValueError(msg)
@@ -646,6 +812,12 @@ def build_koopman(
     ),
     koopman_auto_orbits: bool = DEFAULT_KOOPMAN_AUTO_ORBITS,
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
+    num_relations: int | None = None,
+    relation_normalization: str | None = None,
+    node_types: Sequence[str] | None = None,
+    edge_types: Sequence[Sequence[str]] | None = None,
+    relation_tying: str = "independent",
+    basis_size: int | None = None,
 ) -> tuple[KoopmanOperatorContract, KoopmanKind]:
     """Construct or validate the model Koopman operator.
 
@@ -686,6 +858,21 @@ def build_koopman(
         See the function signature / summary for ``koopman_auto_orbits``.
     koopman_orbit_method : OrbitMethod
         See the function signature / summary for ``koopman_orbit_method``.
+    num_relations : int or None, optional
+        Relation count for ``koopman="hetero_graph"`` (resolved from RelGraph
+        peers by :func:`resolve_model_components`).
+    relation_normalization : str or None, optional
+        Per-relation normalization forwarded to
+        :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`
+        (defaults to ``"rgcn_in_degree"``).
+    node_types : sequence of str or None, optional
+        Ordered node-type names for ``koopman="hetero_graph"``.
+    edge_types : sequence of sequence of str or None, optional
+        Ordered ``(src, rel, dst)`` triples for ``koopman="hetero_graph"``.
+    relation_tying : {"independent", "basis"}, optional
+        Relation-factor tying for ``HeteroGraphKoopmanOperator``.
+    basis_size : int or None, optional
+        Basis size when ``relation_tying="basis"``.
 
     Returns
     -------
@@ -711,13 +898,13 @@ def build_koopman(
     resolved_local_dims = normalize_local_hidden_dims(koopman_local_hidden_dims)
 
     if (
-        kind not in {"graph", "hypergraph", "continuous_graph"}
+        kind not in {"graph", "hypergraph", "hetero_graph", "continuous_graph"}
         and koopman_sparsity != "dense"
     ):
         msg = (
             "koopman_sparsity is only meaningful for koopman='graph', "
-            f"'hypergraph', or 'continuous_graph'; got sparsity="
-            f"{koopman_sparsity!r} with koopman={kind!r}"
+            "'hypergraph', 'hetero_graph', or 'continuous_graph'; got "
+            f"sparsity={koopman_sparsity!r} with koopman={kind!r}"
         )
         raise ValueError(msg)
 
@@ -803,6 +990,8 @@ def build_koopman(
         )
         if isinstance(operator, ContinuousGraphKoopmanOperator):
             resolved_kind: KoopmanKind = "continuous_graph"
+        elif isinstance(operator, HeteroGraphKoopmanOperator):
+            resolved_kind = "hetero_graph"
         elif isinstance(operator, HypergraphKoopmanOperator):
             resolved_kind = "hypergraph"
         elif isinstance(operator, GraphKoopmanOperator):
@@ -814,11 +1003,11 @@ def build_koopman(
         return operator, resolved_kind
 
     if dynamics_mode == "continuous":
-        if kind in {"hypergraph", "global_local"}:
+        if kind in {"hypergraph", "hetero_graph", "global_local"}:
             msg = (
                 f"koopman={kind!r} requires dynamics_mode='discrete'; "
-                "continuous hypergraph / global_local operators are not "
-                "implemented"
+                "continuous hypergraph / hetero_graph / global_local "
+                "operators are not implemented"
             )
             raise ValueError(msg)
         if kind in {"graph", "continuous_graph"}:
@@ -931,6 +1120,46 @@ def build_koopman(
                 orbit_method=koopman_orbit_method,
             ),
             "hypergraph",
+        )
+
+    if kind == "hetero_graph":
+        if resolved_aux_dims is not None:
+            msg = (
+                "koopman_auxiliary_hidden_dims requires "
+                "dynamics_mode='continuous' and "
+                "koopman_parameterization='auxiliary_spectral'"
+            )
+            raise ValueError(msg)
+        if num_relations is None:
+            msg = (
+                "koopman='hetero_graph' requires RelGraphEncoder peers so "
+                "num_relations can be resolved"
+            )
+            raise ValueError(msg)
+        normalization = (
+            "rgcn_in_degree"
+            if relation_normalization is None
+            else relation_normalization
+        )
+        return (
+            HeteroGraphKoopmanOperator(
+                latent_dim,
+                num_relations,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+                sparsity=koopman_sparsity,  # type: ignore[arg-type]
+                normalization=normalization,  # type: ignore[arg-type]
+                node_types=node_types,
+                edge_types=edge_types,
+                relation_tying=relation_tying,  # type: ignore[arg-type]
+                basis_size=basis_size,
+            ),
+            "hetero_graph",
         )
 
     if kind == "global_local":

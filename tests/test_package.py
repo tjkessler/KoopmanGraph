@@ -37,6 +37,8 @@ _RETAINED_ROOT = frozenset(
         "KoopmanOperator",
         "KoopmanSpectrum",
         "MultiTrajectory",
+        "RelGraphDecoder",
+        "RelGraphEncoder",
         "SAGEDecoder",
         "SAGEEncoder",
         "__version__",

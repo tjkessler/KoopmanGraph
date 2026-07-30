@@ -13,9 +13,17 @@ from typing import Literal
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import (
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
+)
 from koopman_graph.data.validation import require_no_hyperedges
-from koopman_graph.nn import HypergraphDecoder, HypergraphEncoder
+from koopman_graph.nn import (
+    HypergraphDecoder,
+    HypergraphEncoder,
+    RelGraphDecoder,
+    RelGraphEncoder,
+)
 from koopman_graph.training import (
     EarlyStoppingMonitor,
     TrainingInput,
@@ -24,6 +32,55 @@ from koopman_graph.training import (
     resolve_training_sequences,
     resolve_validation_sequences,
 )
+
+
+def uses_relgraph_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
+    """Return whether encoder and decoder are a matched RelGraph pair.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder module.
+    decoder : nn.Module
+        Model decoder module.
+
+    Returns
+    -------
+    bool
+        ``True`` when both modules are RelGraph peers.
+
+    Raises
+    ------
+    ValueError
+        If exactly one of encoder/decoder is a RelGraph peer, or the peers
+        disagree on ``num_relations`` / ``normalization``.
+    """
+    enc_rel = isinstance(encoder, RelGraphEncoder)
+    dec_rel = isinstance(decoder, RelGraphDecoder)
+    if enc_rel != dec_rel:
+        msg = (
+            "RelGraphEncoder and RelGraphDecoder must be used together "
+            f"(got encoder={type(encoder).__name__}, "
+            f"decoder={type(decoder).__name__})"
+        )
+        raise ValueError(msg)
+    if not (enc_rel and dec_rel):
+        return False
+    if encoder.num_relations != decoder.num_relations:
+        msg = (
+            "RelGraphEncoder.num_relations "
+            f"({encoder.num_relations}) must match "
+            f"RelGraphDecoder.num_relations ({decoder.num_relations})"
+        )
+        raise ValueError(msg)
+    if encoder.normalization != decoder.normalization:
+        msg = (
+            "RelGraphEncoder.normalization "
+            f"({encoder.normalization!r}) must match "
+            f"RelGraphDecoder.normalization ({decoder.normalization!r})"
+        )
+        raise ValueError(msg)
+    return True
 
 
 def uses_hypergraph_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
@@ -59,7 +116,7 @@ def uses_hypergraph_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
 
 
 def validate_sequence_hyperedges(
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     allow_hyperedges: bool,
 ) -> None:
@@ -67,17 +124,28 @@ def validate_sequence_hyperedges(
 
     Parameters
     ----------
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Candidate fit/validation trajectory.
     allow_hyperedges : bool
         When ``True``, require static hyperedge incidence; when ``False``,
-        reject hyperedge-carrying sequences.
+        reject hyperedge-carrying sequences. Multiplex hetero sequences never
+        carry homogeneous hyperedges and are accepted when
+        ``allow_hyperedges=False``.
 
     Raises
     ------
     ValueError
         If the sequence violates the requested hyperedge policy.
     """
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        if allow_hyperedges:
+            msg = (
+                "HypergraphEncoder / HypergraphDecoder require a homogeneous "
+                "hyperedge-carrying GraphSnapshotSequence, not "
+                "HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
+        return
     if allow_hyperedges:
         if not sequence.has_hyperedges:
             msg = (
@@ -104,8 +172,8 @@ class PreparedFitInputs:
         Optional early-stopping callback state.
     """
 
-    train_sequences: list[GraphSnapshotSequence]
-    val_sequences: list[GraphSnapshotSequence] | None
+    train_sequences: list[SnapshotSequence]
+    val_sequences: list[SnapshotSequence] | None
     early_stopping_monitor: Literal["train", "val"]
 
 
@@ -176,7 +244,7 @@ def validate_controls(
 def validate_sequence_controls(
     *,
     control_dim: int,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
 ) -> None:
     """Validate sequence controls against a model control dimension.
 
@@ -184,7 +252,7 @@ def validate_sequence_controls(
     ----------
     control_dim : int
         Model control dimension.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Training or validation sequence.
 
     Raises

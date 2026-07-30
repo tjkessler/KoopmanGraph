@@ -153,6 +153,12 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Constructor parameters are documented on the class."""
         super().__init__()
+        if getattr(model, "uses_hetero_koopman", False):
+            msg = (
+                "HierarchicalGraphKoopmanModel is homogeneous-only; multiplex / "
+                "koopman='hetero_graph' models are not supported yet"
+            )
+            raise TypeError(msg)
         if len(pool_ratios) == 0:
             msg = "pool_ratios must contain at least one ratio"
             raise ValueError(msg)

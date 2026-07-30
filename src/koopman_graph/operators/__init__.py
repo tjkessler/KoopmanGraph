@@ -52,6 +52,9 @@ Capability layout
 ``hypergraph``
     :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
     (hyperedge-coupled discrete advance; supports ``block_diagonal``).
+``heterogeneous``
+    :class:`~koopman_graph.operators.heterogeneous.HeteroGraphKoopmanOperator`
+    (multiplex per-relation discrete advance; package export).
 ``global_local``
     :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
     (discrete global backbone + low-rank local window correction).
@@ -62,7 +65,8 @@ Capability layout
 
 Prefer ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
-ContinuousGraphKoopmanOperator`` or ``from koopman_graph.operators import …``.
+ContinuousGraphKoopmanOperator`` or ``from koopman_graph.operators import …``
+(including :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`).
 """
 
 from koopman_graph.operators.auxiliary_spectral import (
@@ -114,6 +118,7 @@ from koopman_graph.operators.global_local import (
 )
 from koopman_graph.operators.graph import GraphKoopmanOperator
 from koopman_graph.operators.graph_types import GraphAdjacency, GraphSparsity
+from koopman_graph.operators.heterogeneous import HeteroGraphKoopmanOperator
 from koopman_graph.operators.hypergraph import (
     HypergraphKoopmanOperator,
     HypergraphSparsity,
@@ -136,6 +141,7 @@ __all__ = [
     "GraphAdjacency",
     "GraphKoopmanOperator",
     "GraphSparsity",
+    "HeteroGraphKoopmanOperator",
     "HypergraphKoopmanOperator",
     "HypergraphSparsity",
     "InitMode",
