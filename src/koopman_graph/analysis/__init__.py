@@ -3,7 +3,9 @@
 Capability layout
 -----------------
 ``spectrum``
-    Analysis-owned :func:`~koopman_graph.analysis.decode_mode_shapes` plus
+    Analysis-owned :func:`~koopman_graph.analysis.decode_mode_shapes` and
+    :func:`~koopman_graph.analysis.attribute_mode_energy` (interpretive
+    type / relation energy fractions on assembled ``K_eff``) plus
     re-exports of neutral-leaf
     :func:`~koopman_graph.spectrum_types.compute_spectrum`,
     :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`, and
@@ -70,6 +72,8 @@ from koopman_graph.analysis.similarity import (
 )
 from koopman_graph.analysis.sindy import SINDyReport, identify_sparse_dynamics
 from koopman_graph.analysis.spectrum import (
+    ModeEnergyAttribution,
+    attribute_mode_energy,
     compute_generator_spectrum,
     compute_spectrum,
     decode_mode_shapes,
@@ -87,11 +91,13 @@ __all__ = [
     "ClusteringResult",
     "CouplingEstimate",
     "KoopmanSpectrum",
+    "ModeEnergyAttribution",
     "SINDyReport",
     "SpectralResidualReport",
     "SpectrumDistanceMethod",
     "SpectrumLimits",
     "SpectrumSource",
+    "attribute_mode_energy",
     "calibrate_anomaly_threshold",
     "compute_generator_spectrum",
     "compute_spectrum",

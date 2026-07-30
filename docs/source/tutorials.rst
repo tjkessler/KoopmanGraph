@@ -66,6 +66,8 @@ Forecasting and benchmarks
      - Given vs self-adaptive topology on PEMS-BAY (with DMD coupling diagnostic)
    * - `29_large_graph_block_diagonal.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/29_large_graph_block_diagonal.ipynb>`_
      - Block-diagonal sparsity + neighbor sampling on large PEMS / path graphs
+   * - `39_heterogeneous_relational_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb>`_
+     - RelGraph / ``hetero_graph`` multiplex ablation vs union and dense-joint controls
 
 Analysis and stability
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -162,6 +164,21 @@ the script)::
 
 See ``examples/scripts/README.md`` and :doc:`capabilities` (Distributed
 training).
+
+Heterogeneous (multi-relational) graphs
+---------------------------------------
+
+Factory ``koopman="hetero_graph"`` uses
+:class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
+:class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`. Optional typed
+:class:`~koopman_graph.nn.heterogeneous.HGTEncoder` /
+:class:`~koopman_graph.nn.heterogeneous.HGTDecoder` peers
+(``from koopman_graph.nn import HGTEncoder, HGTDecoder``) wrap PyG
+``HGTConv`` for custom encode/decode stacks; they are **not** required for
+hetero support and are not factory defaults. See
+`39_heterogeneous_relational_koopman.ipynb
+<https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb>`_
+for a multiplex RelGraph ablation (parameter counts and hold-out MSE).
 
 Related pages
 -------------

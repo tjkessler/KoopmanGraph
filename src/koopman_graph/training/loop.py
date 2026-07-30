@@ -10,10 +10,12 @@ import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from torch_geometric.data import HeteroData
 
 from koopman_graph.data import (
-    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
     WindowSampler,
     resolve_rollout_start_indices,
@@ -84,7 +86,7 @@ def resolve_early_stopping_monitor(
 
 def bind_pending_orbit_ties(
     model: nn.Module,
-    train_sequences: Sequence[GraphSnapshotSequence],
+    train_sequences: Sequence[SnapshotSequence],
 ) -> None:
     """Bind ``auto_orbits`` from the first train snapshot before the optimizer.
 
@@ -99,13 +101,30 @@ def bind_pending_orbit_ties(
         Trainable model that may expose a ``koopman`` submodule with
         :meth:`~koopman_graph.operators.orbit_ties.OrbitTiedSelfMixin.ensure_orbit_binding`
         (when present).
-    train_sequences : sequence of GraphSnapshotSequence
+    train_sequences : sequence of SnapshotSequence
         Training trajectories already placed on the training device. The first
-        snapshot of the first sequence supplies topology.
+        snapshot of the first sequence supplies topology. Multiplex hetero
+        sequences raise when ``auto_orbits`` is enabled (orbit ties are
+        homogeneous-only for the multiplex MVP).
+
+    Raises
+    ------
+    ValueError
+        If training sequences are multiplex and ``koopman.auto_orbits`` is
+        ``True``.
     """
     if not train_sequences:
         return
     koopman = getattr(model, "koopman", None)
+    if isinstance(train_sequences[0], HeteroGraphSnapshotSequence):
+        if koopman is not None and bool(getattr(koopman, "auto_orbits", False)):
+            msg = (
+                "auto_orbits / orbit binding is unsupported for "
+                "HeteroGraphSnapshotSequence; disable koopman_auto_orbits "
+                "(typed-node orbit ties are deferred)"
+            )
+            raise ValueError(msg)
+        return
     ensure = getattr(koopman, "ensure_orbit_binding", None)
     if koopman is None or ensure is None:
         return
@@ -114,6 +133,12 @@ def bind_pending_orbit_ties(
     if getattr(koopman, "orbit_partition", None) is not None:
         return
     snapshot = train_sequences[0][0]
+    if isinstance(snapshot, HeteroData):
+        msg = (
+            "auto_orbits / orbit binding requires homogeneous Data snapshots; "
+            "got HeteroData"
+        )
+        raise ValueError(msg)
     ensure(
         int(snapshot.num_nodes),
         edge_index=snapshot.edge_index,
@@ -182,7 +207,7 @@ def should_stop_early(
 
 def run_fit_loop(
     model: TrainableKoopmanModel,
-    train_sequences: Sequence[GraphSnapshotSequence],
+    train_sequences: Sequence[SnapshotSequence],
     *,
     epochs: int = 100,
     lr: float = 1e-3,
@@ -207,7 +232,7 @@ def run_fit_loop(
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
     early_stopping_monitor: Literal["train", "val"] = "train",
-    val_sequences: Sequence[GraphSnapshotSequence] | None = None,
+    val_sequences: Sequence[SnapshotSequence] | None = None,
     restore_best_weights: bool = False,
     checkpoint_path: str | Path | None = None,
     **optimizer_kwargs: Any,
@@ -303,6 +328,16 @@ def run_fit_loop(
         raise ValueError(msg)
     if sampler is not None and window_length is not None:
         msg = "pass sampler or window_length, not both"
+        raise ValueError(msg)
+    has_hetero_train = any(
+        isinstance(sequence, HeteroGraphSnapshotSequence)
+        for sequence in train_sequences
+    )
+    if has_hetero_train and (sampler is not None or window_length is not None):
+        msg = (
+            "windowed / sampler fit is unsupported for "
+            "HeteroGraphSnapshotSequence; omit sampler and window_length"
+        )
         raise ValueError(msg)
 
     # Lazy import: avoid training → serialization → model edges at module load.

@@ -20,8 +20,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from koopman_graph.data import (
-    GraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
 )
 from koopman_graph.distributed._fit_epochs import (
@@ -136,7 +136,7 @@ def _fabric_broadcast_module_state(fabric: Any, module: nn.Module) -> None:
 
 def fit_with_fabric(
     model: TrainableKoopmanModel,
-    train_sequences: Sequence[GraphSnapshotSequence],
+    train_sequences: Sequence[SnapshotSequence],
     *,
     fabric: Any | None = None,
     accelerator: str = "auto",
@@ -165,7 +165,7 @@ def fit_with_fabric(
     early_stopping_patience: int | None = None,
     early_stopping_min_delta: float = 0.0,
     early_stopping_monitor: Literal["train", "val"] = "train",
-    val_sequences: Sequence[GraphSnapshotSequence] | None = None,
+    val_sequences: Sequence[SnapshotSequence] | None = None,
     restore_best_weights: bool = False,
     checkpoint_path: str | Path | None = None,
     **optimizer_kwargs: Any,
@@ -175,14 +175,17 @@ def fit_with_fabric(
     Reuses the same scientific epoch driver as
     :func:`~koopman_graph.distributed.run_ddp_fit_loop`. Fabric owns device
     placement and (when ``precision`` is not FP32) autocast. Do not combine
-    non-FP32 ``precision`` with ``use_amp=True``.
+    non-FP32 ``precision`` with ``use_amp=True``. Homogeneous and multiplex
+    (``koopman='hetero_graph'``) sequences share the same device-mover,
+    sharding, and orbit-bind contracts as the DDP entry point.
 
     Parameters
     ----------
     model : TrainableKoopmanModel
         Trainable Koopman façade (composed, never subclassed for Fabric).
-    train_sequences : sequence of GraphSnapshotSequence
-        Training trajectories (sharded inside this helper).
+    train_sequences : sequence of SnapshotSequence
+        Homogeneous or multiplex training trajectories (sharded inside this
+        helper).
     fabric : lightning.fabric.Fabric or None, optional
         Pre-built Fabric. When ``None``, constructs one from ``accelerator``,
         ``devices``, ``precision``, and ``strategy``.
@@ -239,8 +242,8 @@ def fit_with_fabric(
         Minimum improvement delta.
     early_stopping_monitor : {"train", "val"}, optional
         Resolved monitor (not ``"auto"``).
-    val_sequences : sequence of GraphSnapshotSequence or None, optional
-        Held-out trajectories.
+    val_sequences : sequence of SnapshotSequence or None, optional
+        Held-out homogeneous or multiplex trajectories.
     restore_best_weights : bool, optional
         Restore best unwrapped weights at the end.
     checkpoint_path : str, Path, or None, optional
@@ -314,7 +317,7 @@ def fit_with_fabric(
             sequence_to_device(sequence, train_device)
             for sequence in window_sampler.sequences
         ]
-        train_shard: Sequence[GraphSnapshotSequence] = train_sequences
+        train_shard: Sequence[SnapshotSequence] = train_sequences
     else:
         train_shard = shard_sequences_for_rank(
             train_sequences,

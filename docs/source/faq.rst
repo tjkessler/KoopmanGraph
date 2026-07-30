@@ -229,6 +229,26 @@ Default ``fit`` / ``run_fit_loop`` remain single-process when
 :math:`N\cdot d` ceilings (see :doc:`limitations`). Multi-node behavior
 is not covered by default CI.
 
+Does heterogeneous / multiplex ``koopman="hetero_graph"`` work with DDP /
+Fabric / Lightning / Ray?
+--------------------------------------------------------------------------
+
+**Yes.** Version 0.9 composes RelGraph / ``HeteroGraphKoopmanOperator``
+models with the same 0.8 trainer adapters:
+
+* ``model.fit(..., strategy="ddp")`` /
+  :func:`~koopman_graph.distributed.run_ddp_fit_loop`
+* :func:`~koopman_graph.distributed.fit_with_fabric`
+* :class:`~koopman_graph.distributed.KoopmanLightningModule` (hetero
+  batches coerce via sequence helpers)
+* Ray ensemble member fits when members accept hetero inputs
+
+``find_unused_parameters`` defaults to ``True`` for hetero RelGraph stacks
+(override on the DDP fit path if you know every parameter is used).
+Single-process windowed ``run_fit_loop`` still rejects windowed hetero;
+use DDP / Fabric window sampling instead. Dense :math:`N\cdot d`
+ceilings are unchanged by multi-GPU training.
+
 Is trainer “distributed” the same as ``sparsity="distributed"``?
 ----------------------------------------------------------------
 

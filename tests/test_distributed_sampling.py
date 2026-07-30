@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import pytest
 import torch
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 import koopman_graph
 from koopman_graph.data import (
     GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    MultiTrajectory,
+    NeighborWindowSampler,
     WindowOrigin,
     WindowSampler,
     build_window_index_list,
@@ -237,3 +240,146 @@ def test_shard_sequences_rejects_empty() -> None:
     """Empty trajectory lists are rejected."""
     with pytest.raises(ValueError, match="at least one trajectory"):
         shard_sequences_for_rank([], rank=0, world_size=1)
+
+
+def _multiplex_snapshot(*, seed: int = 0, timesteps_mark: float = 0.0) -> HeteroData:
+    """Build a multiplex snapshot with marked node features."""
+    del seed  # features are deterministic from timesteps_mark
+    data = HeteroData()
+    data["node"].x = torch.full((4, 2), float(timesteps_mark))
+    data["node", "r1", "node"].edge_index = torch.tensor(
+        [[0, 1, 2], [1, 2, 0]],
+        dtype=torch.long,
+    )
+    data["node", "r2", "node"].edge_index = torch.tensor(
+        [[0, 2], [2, 3]],
+        dtype=torch.long,
+    )
+    return data
+
+
+def _hetero_feature_sequence(timesteps: int = 5) -> HeteroGraphSnapshotSequence:
+    """Build a multiplex sequence with timestep-valued node features."""
+    snapshots = [_multiplex_snapshot(timesteps_mark=float(t)) for t in range(timesteps)]
+    return HeteroGraphSnapshotSequence(snapshots)
+
+
+def test_as_trajectory_list_keeps_single_hetero_sequence() -> None:
+    """A lone hetero sequence is one trajectory, not a list of HeteroData."""
+    from koopman_graph.data.sampling import as_trajectory_list
+
+    sequence = _hetero_feature_sequence(3)
+    trajectories = as_trajectory_list(sequence)
+    assert len(trajectories) == 1
+    assert trajectories[0] is sequence
+
+
+def test_hetero_distributed_shards_are_disjoint() -> None:
+    """Hetero window shards are disjoint and cover the global capped set."""
+    sequence = _hetero_feature_sequence(5)
+    rank0 = DistributedWindowSampler(
+        sequence,
+        window_length=2,
+        batch_size=8,
+        windows_per_epoch=5,
+        shuffle=False,
+        seed=0,
+        rank=0,
+        world_size=2,
+    )
+    rank1 = DistributedWindowSampler(
+        sequence,
+        window_length=2,
+        batch_size=8,
+        windows_per_epoch=5,
+        shuffle=False,
+        seed=0,
+        rank=1,
+        world_size=2,
+    )
+    idx0 = rank0.rank_origin_indices(0)
+    idx1 = rank1.rank_origin_indices(0)
+    assert set(idx0).isdisjoint(idx1)
+    assert sorted(idx0 + idx1) == list(range(4))
+
+
+def test_hetero_seeded_shuffle_reproducible_per_rank() -> None:
+    """Hetero seeded shuffle is reproducible per rank and differs across ranks."""
+    sequence = _hetero_feature_sequence(5)
+    kwargs: dict[str, object] = {
+        "window_length": 2,
+        "batch_size": 1,
+        "shuffle": True,
+        "seed": 11,
+        "world_size": 2,
+    }
+    a = DistributedWindowSampler(sequence, rank=0, **kwargs)  # type: ignore[arg-type]
+    b = DistributedWindowSampler(sequence, rank=0, **kwargs)  # type: ignore[arg-type]
+    other = DistributedWindowSampler(sequence, rank=1, **kwargs)  # type: ignore[arg-type]
+    assert a.rank_origin_indices(0) == b.rank_origin_indices(0)
+    assert a.rank_origin_indices(0) != other.rank_origin_indices(0)
+
+
+def test_hetero_world_size_one_window_slices() -> None:
+    """World-size-1 hetero DistributedWindowSampler yields hetero windows."""
+    sequence = _hetero_feature_sequence(5)
+    sampler = DistributedWindowSampler(
+        sequence,
+        window_length=3,
+        batch_size=2,
+        shuffle=False,
+        seed=0,
+        rank=0,
+        world_size=1,
+    )
+    batches = list(sampler.iter_epoch(0))
+    assert batches
+    window = batches[0][0]
+    assert isinstance(window, HeteroGraphSnapshotSequence)
+    assert window.num_timesteps == 3
+    assert torch.equal(window[0]["node"].x, sequence[0]["node"].x)
+
+
+def test_shard_hetero_multi_trajectory_disjoint() -> None:
+    """Hetero MultiTrajectory shards via ``shard_sequences_for_rank``."""
+    trajectories = [_hetero_feature_sequence(4) for _ in range(4)]
+    multi = MultiTrajectory(tuple(trajectories))
+    rank0 = shard_sequences_for_rank(multi, rank=0, world_size=2)
+    rank1 = shard_sequences_for_rank(multi, rank=1, world_size=2)
+    assert len(rank0) == 2
+    assert len(rank1) == 2
+    assert rank0[0] is trajectories[0]
+    assert rank0[1] is trajectories[2]
+    assert rank1[0] is trajectories[1]
+    assert rank1[1] is trajectories[3]
+
+
+def test_shard_hetero_raises_when_fewer_than_world_size() -> None:
+    """Hetero undersized trajectory lists still raise (0.8 Q6)."""
+    with pytest.raises(ValueError, match="DistributedWindowSampler"):
+        shard_sequences_for_rank(
+            [_hetero_feature_sequence(3)],
+            rank=0,
+            world_size=2,
+        )
+
+
+def test_neighbor_window_sampler_rejects_hetero() -> None:
+    """NeighborWindowSampler stays homogeneous-only."""
+    sequence = _hetero_feature_sequence(4)
+    with pytest.raises(
+        ValueError, match="does not support HeteroGraphSnapshotSequence"
+    ):
+        NeighborWindowSampler(
+            sequence,
+            window_length=2,
+            num_nodes=2,
+            num_hops=1,
+        )
+
+
+def test_build_window_index_list_accepts_hetero() -> None:
+    """Origin planner enumerates hetero trajectories like homogeneous ones."""
+    sequence = _hetero_feature_sequence(4)
+    origins = build_window_index_list([sequence], window_length=3)
+    assert origins == [WindowOrigin(0, 0), WindowOrigin(0, 1)]

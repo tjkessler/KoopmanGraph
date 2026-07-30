@@ -41,7 +41,9 @@ AnisotropicAdvectionGridBenchmark
     Directional advection on a grid with asymmetric neighbor weights.
 IEEE118DynamicBenchmark
     IEEE 118-bus MATPOWER topology with simulated voltage/load dynamics
-    (``generate``).
+    (``generate`` / ``generate_typed``). Typed helpers partition buses by
+    MATPOWER ``BUS_TYPE`` (generator / load / slack); dynamics remain
+    simulated teaching trajectories, not real grid telemetry.
 MetrLaTrafficBenchmark
     METR-LA traffic-speed sensor graph with cached speed snapshots
     (``load_topology`` / ``load_sequence``).
@@ -73,7 +75,10 @@ from koopman_graph.datasets.grid import (
     AnisotropicAdvectionGridBenchmark,
     GridDynamicGraphBenchmark,
 )
-from koopman_graph.datasets.ieee118 import IEEE118DynamicBenchmark
+from koopman_graph.datasets.ieee118 import (
+    IEEE118DynamicBenchmark,
+    TypedIEEE118Topology,
+)
 from koopman_graph.datasets.kuramoto_sivashinsky import KuramotoSivashinskyBenchmark
 from koopman_graph.datasets.lorenz96 import Lorenz96GraphBenchmark
 from koopman_graph.datasets.metr_la import MetrLaTrafficBenchmark
@@ -95,4 +100,5 @@ __all__ = [
     "PemsTrafficBenchmark",
     "SyntheticDynamicGraphBenchmark",
     "TopologyPayload",
+    "TypedIEEE118Topology",
 ]

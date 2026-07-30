@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -51,6 +51,9 @@ class ForwardConsistencyLoss(nn.Module):
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
         latent_window: Tensor | None = None,
+        edge_indices: Sequence[Tensor] | None = None,
+        edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
     ) -> Tensor:
         """Compute forward consistency loss between consecutive latent states.
 
@@ -84,6 +87,12 @@ class ForwardConsistencyLoss(nn.Module):
             Optional hyperedge weights.
         latent_window : Tensor or None, optional
             Latent history for global/local operators.
+        edge_indices : sequence of Tensor or None, optional
+            Per-relation banks for multiplex / hetero operators.
+        edge_weights : sequence of Tensor or None, optional
+            Optional per-relation edge weights.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type node counts for typed hetero operators.
 
         Returns
         -------
@@ -101,6 +110,9 @@ class ForwardConsistencyLoss(nn.Module):
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
             latent_window=latent_window,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
         )
         if mask is None:
             return nn.functional.mse_loss(z_pred, z_t1)
@@ -159,6 +171,8 @@ class BackwardConsistencyLoss(nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        edge_indices: Sequence[Tensor] | None = None,
+        edge_weights: Sequence[Tensor | None] | None = None,
     ) -> Tensor:
         """Compute backward consistency loss between consecutive latent states.
 
@@ -194,6 +208,10 @@ class BackwardConsistencyLoss(nn.Module):
             Incidence for hypergraph operators.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        edge_indices : sequence of Tensor or None, optional
+            Per-relation banks for multiplex / hetero operators.
+        edge_weights : sequence of Tensor or None, optional
+            Optional per-relation edge weights.
 
         Returns
         -------
@@ -212,6 +230,8 @@ class BackwardConsistencyLoss(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
         )
         if mask is None:
             return nn.functional.mse_loss(z_recovered, z_t)

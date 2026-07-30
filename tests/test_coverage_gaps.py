@@ -847,7 +847,7 @@ def test_analysis_metrics_protocol_and_training_gaps() -> None:
         )
     with pytest.raises(TypeError, match="MultiTrajectory"):
         _classify_trajectory_items([seq, seq], empty_message="empty")
-    with pytest.raises(TypeError, match="must be GraphSnapshotSequence or Data"):
+    with pytest.raises(TypeError, match="GraphSnapshotSequence"):
         _classify_trajectory_items([seq, "bad"], empty_message="empty")  # type: ignore[list-item]
     with pytest.raises(ValueError, match="validation_sequence list length"):
         resolve_validation_sequences(

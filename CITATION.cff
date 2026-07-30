@@ -13,8 +13,8 @@ authors:
 repository-code: "https://github.com/tjkessler/KoopmanGraph"
 url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
-version: 0.8.2
-date-released: 2026-07-28
+version: 0.9.0
+date-released: 2026-07-30
 doi: 10.5281/zenodo.21682959
 identifiers:
   - type: doi

@@ -6,6 +6,10 @@ Used by :class:`~koopman_graph.operators.GraphKoopmanOperator` and
 hyperedge) message-passing matvec; this module only approximates
 ``inverse_advance`` with per-node ``d×d`` solves (one Jacobi step). Exact
 whole-network inversion remains the ``sparsity="dense"`` path.
+
+:class:`~koopman_graph.operators.HeteroGraphKoopmanOperator` reuses
+:func:`apply_self_inverse` for its self-dominated block-diagonal path
+(relation terms ignored; not a Jacobi subtract over relations).
 """
 
 from __future__ import annotations

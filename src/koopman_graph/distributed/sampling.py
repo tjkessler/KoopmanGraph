@@ -7,6 +7,10 @@ rank trains on a disjoint shard. ``windows_per_epoch`` is applied as a
 
 :func:`shard_sequences_for_rank` shards full trajectories for non-windowed
 multi-trajectory fit (raises when there are fewer trajectories than ranks).
+
+Both helpers accept homogeneous
+:class:`~koopman_graph.data.GraphSnapshotSequence` and multiplex
+:class:`~koopman_graph.data.HeteroGraphSnapshotSequence` trajectories.
 """
 
 from __future__ import annotations
@@ -15,8 +19,12 @@ from collections.abc import Iterator, Sequence
 
 import torch
 
-from koopman_graph.data import GraphSnapshotSequence
-from koopman_graph.data.sampling import WindowOrigin, build_window_index_list
+from koopman_graph.data import SnapshotSequence
+from koopman_graph.data.sampling import (
+    WindowOrigin,
+    as_trajectory_list,
+    build_window_index_list,
+)
 from koopman_graph.distributed.process import get_rank, get_world_size
 
 __all__ = [
@@ -26,11 +34,11 @@ __all__ = [
 
 
 def shard_sequences_for_rank(
-    sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+    sequences: SnapshotSequence | Sequence[SnapshotSequence],
     *,
     rank: int | None = None,
     world_size: int | None = None,
-) -> list[GraphSnapshotSequence]:
+) -> list[SnapshotSequence]:
     """Return this rank's shard of full trajectories for non-windowed fit.
 
     Partitions with ``sequences[rank::world_size]``. Use
@@ -39,8 +47,9 @@ def shard_sequences_for_rank(
 
     Parameters
     ----------
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
-        Training trajectories to shard.
+    sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
+        Training trajectories to shard (including
+        :class:`~koopman_graph.data.MultiTrajectory`).
     rank : int or None, optional
         Process rank. Defaults to
         :func:`~koopman_graph.distributed.get_rank`.
@@ -50,7 +59,7 @@ def shard_sequences_for_rank(
 
     Returns
     -------
-    list of GraphSnapshotSequence
+    list of GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Trajectories assigned to ``rank``.
 
     Raises
@@ -60,10 +69,7 @@ def shard_sequences_for_rank(
         ``len(sequences) < world_size`` (full-sequence DDP needs at least one
         trajectory per rank; prefer windowed sampling or fewer ranks).
     """
-    if isinstance(sequences, GraphSnapshotSequence):
-        sequence_list = [sequences]
-    else:
-        sequence_list = list(sequences)
+    sequence_list = as_trajectory_list(sequences)
 
     resolved_rank = get_rank() if rank is None else int(rank)
     resolved_world = get_world_size() if world_size is None else int(world_size)
@@ -98,7 +104,7 @@ class DistributedWindowSampler:
 
     Parameters
     ----------
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+    sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
         Source trajectories. Each must contain at least ``window_length``
         snapshots.
     window_length : int
@@ -131,7 +137,7 @@ class DistributedWindowSampler:
 
     def __init__(
         self,
-        sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+        sequences: SnapshotSequence | Sequence[SnapshotSequence],
         *,
         window_length: int,
         batch_size: int = 8,
@@ -145,7 +151,7 @@ class DistributedWindowSampler:
 
         Parameters
         ----------
-        sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+        sequences : GraphSnapshotSequence or HeteroGraphSnapshotSequence or sequence
             Source trajectories.
         window_length : int
             Number of snapshots per sampled window.
@@ -175,10 +181,7 @@ class DistributedWindowSampler:
             msg = f"windows_per_epoch must be >= 1 when set, got {windows_per_epoch}"
             raise ValueError(msg)
 
-        if isinstance(sequences, GraphSnapshotSequence):
-            sequence_list = [sequences]
-        else:
-            sequence_list = list(sequences)
+        sequence_list = as_trajectory_list(sequences)
 
         resolved_rank = get_rank() if rank is None else int(rank)
         resolved_world = get_world_size() if world_size is None else int(world_size)
@@ -277,7 +280,7 @@ class DistributedWindowSampler:
     def iter_epoch(
         self,
         epoch: int = 0,
-    ) -> Iterator[list[GraphSnapshotSequence]]:
+    ) -> Iterator[list[SnapshotSequence]]:
         """Yield batches of windows for one epoch on this rank's shard.
 
         Parameters
@@ -287,7 +290,7 @@ class DistributedWindowSampler:
 
         Yields
         ------
-        list of GraphSnapshotSequence
+        list of GraphSnapshotSequence or HeteroGraphSnapshotSequence
             A batch containing at most ``batch_size`` temporal windows.
         """
         shard = self.rank_origin_indices(epoch)
@@ -303,12 +306,12 @@ class DistributedWindowSampler:
                 )
             yield batch
 
-    def __iter__(self) -> Iterator[list[GraphSnapshotSequence]]:
+    def __iter__(self) -> Iterator[list[SnapshotSequence]]:
         """Yield the epoch-zero batch sequence for this rank.
 
         Yields
         ------
-        list of GraphSnapshotSequence
+        list of GraphSnapshotSequence or HeteroGraphSnapshotSequence
             A batch of fixed-length temporal windows.
         """
         return self.iter_epoch(0)

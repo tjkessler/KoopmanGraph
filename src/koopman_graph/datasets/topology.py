@@ -86,6 +86,9 @@ class TopologyPayload(Mapping[str, Any]):
         Optional initial node features (IEEE 118).
     bus_ids : Tensor, optional
         Optional MATPOWER bus identifiers (IEEE 118).
+    bus_types : Tensor, optional
+        Optional MATPOWER ``BUS_TYPE`` codes per bus (IEEE 118; ``1`` PQ,
+        ``2`` PV, ``3`` reference / slack).
     sensor_ids : list of str, optional
         Optional sensor identifiers (METR-LA).
     base_mva : float, optional
@@ -103,6 +106,7 @@ class TopologyPayload(Mapping[str, Any]):
     edge_weight: Tensor | None = None
     initial_features: Tensor | None = None
     bus_ids: Tensor | None = None
+    bus_types: Tensor | None = None
     sensor_ids: list[str] | None = None
     base_mva: float | None = None
     source_url: str | None = None
@@ -125,6 +129,7 @@ class TopologyPayload(Mapping[str, Any]):
             "edge_weight",
             "initial_features",
             "bus_ids",
+            "bus_types",
             "sensor_ids",
             "base_mva",
             "source_url",
@@ -213,6 +218,7 @@ class TopologyPayload(Mapping[str, Any]):
             edge_weight=data.get("edge_weight"),
             initial_features=data.get("initial_features"),
             bus_ids=data.get("bus_ids"),
+            bus_types=data.get("bus_types"),
             sensor_ids=data.get("sensor_ids"),
             base_mva=data.get("base_mva"),
             source_url=data.get("source_url"),

@@ -29,6 +29,7 @@ from koopman_graph.losses.reconstruction import (
     masked_mse_loss,
 )
 from koopman_graph.losses.regularization import (
+    MAX_ASSEMBLED_EIGREG_SIZE,
     EigenvalueRegularizationLoss,
     KoopmanSparsityLoss,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "ForwardConsistencyLoss",
     "KoopmanSparsityLoss",
     "LieConsistencyLoss",
+    "MAX_ASSEMBLED_EIGREG_SIZE",
     "PDEResidualLoss",
     "WorstCaseReconstructionLoss",
     "masked_mse_loss",

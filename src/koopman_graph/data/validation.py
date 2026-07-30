@@ -1,18 +1,19 @@
 """Snapshot coercion and validation helpers for graph sequences.
 
 Power-user helpers shared by :class:`~koopman_graph.data.GraphSnapshotSequence`
-construction. Prefer constructing sequences via the container APIs; import these
-symbols only when validating or coercing inputs outside that path.
+and :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` construction.
+Prefer constructing sequences via the container APIs; import these symbols only
+when validating or coercing inputs outside that path.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import torch
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.graph_utils import (
     snapshot_edge_weight,
@@ -21,6 +22,436 @@ from koopman_graph.graph_utils import (
 )
 
 ArrayLike = Tensor | np.ndarray
+EdgeTypeTriple = tuple[str, str, str]
+
+
+def _hetero_edge_weight(store: object) -> Tensor | None:
+    """Return optional ``edge_weight`` on a PyG edge store, if present.
+
+    Parameters
+    ----------
+    store : object
+        Edge store exposing optional ``edge_weight``.
+
+    Returns
+    -------
+    Tensor or None
+        Weight tensor when present, otherwise ``None``.
+
+    Raises
+    ------
+    TypeError
+        If ``edge_weight`` is present but not a :class:`~torch.Tensor`.
+    """
+    weight = getattr(store, "edge_weight", None)
+    if weight is None:
+        return None
+    if not isinstance(weight, Tensor):
+        msg = f"edge_weight must be a Tensor when present, got {type(weight).__name__}"
+        raise TypeError(msg)
+    return weight
+
+
+def _require_hetero_node_x(
+    snapshot: HeteroData,
+    node_type: str,
+    *,
+    index: int,
+) -> Tensor:
+    """Return node features for ``node_type``, raising a named error if absent.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Heterogeneous snapshot to inspect.
+    node_type : str
+        Node type name.
+    index : int
+        Snapshot index used in error messages.
+
+    Returns
+    -------
+    Tensor
+        Feature matrix with shape ``(N_τ, F_τ)``.
+
+    Raises
+    ------
+    ValueError
+        If the node type or feature tensor is missing or malformed.
+    """
+    if node_type not in snapshot.node_types:
+        msg = (
+            f"Snapshot {index} is missing node type {node_type!r}; "
+            f"expected types {list(snapshot.node_types)}"
+        )
+        raise ValueError(msg)
+    features = snapshot[node_type].x
+    if features is None:
+        msg = f"Snapshot {index} node type {node_type!r} has no feature tensor x"
+        raise ValueError(msg)
+    if features.ndim != 2:
+        msg = (
+            f"Snapshot {index} node type {node_type!r} features must have shape "
+            f"(num_nodes, in_channels), got {tuple(features.shape)}"
+        )
+        raise ValueError(msg)
+    return features
+
+
+def infer_hetero_schema(
+    snapshot: HeteroData,
+    *,
+    index: int = 0,
+) -> tuple[dict[str, int], dict[str, int], list[EdgeTypeTriple]]:
+    """Infer node feature dims, node counts, and ordered edge types.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Reference heterogeneous snapshot.
+    index : int, optional
+        Snapshot index used in error messages. Default is ``0``.
+
+    Returns
+    -------
+    node_feature_dims : dict of str to int
+        Mapping from node type name to feature dimension ``F_τ``.
+    num_nodes : dict of str to int
+        Mapping from node type name to node count ``N_τ``.
+    edge_types : list of (str, str, str)
+        Ordered ``(src_type, relation, dst_type)`` triples from the snapshot.
+
+    Raises
+    ------
+    ValueError
+        If the snapshot has no node types, no edge types, or missing features.
+    """
+    if not snapshot.node_types:
+        msg = f"Snapshot {index} has no node types"
+        raise ValueError(msg)
+    if not snapshot.edge_types:
+        msg = (
+            f"Snapshot {index} has no edge types; "
+            "HeteroGraphSnapshotSequence requires |R| >= 1"
+        )
+        raise ValueError(msg)
+
+    node_feature_dims: dict[str, int] = {}
+    num_nodes: dict[str, int] = {}
+    for node_type in snapshot.node_types:
+        features = _require_hetero_node_x(snapshot, node_type, index=index)
+        node_feature_dims[node_type] = int(features.shape[1])
+        num_nodes[node_type] = int(features.shape[0])
+
+    edge_types = [tuple(edge_type) for edge_type in snapshot.edge_types]
+    for edge_type in edge_types:
+        src_type, _relation, dst_type = edge_type
+        if src_type not in node_feature_dims:
+            msg = (
+                f"Snapshot {index} edge type {edge_type!r} references unknown "
+                f"source node type {src_type!r}"
+            )
+            raise ValueError(msg)
+        if dst_type not in node_feature_dims:
+            msg = (
+                f"Snapshot {index} edge type {edge_type!r} references unknown "
+                f"destination node type {dst_type!r}"
+            )
+            raise ValueError(msg)
+        store = snapshot[edge_type]
+        if store.edge_index is None:
+            msg = f"Snapshot {index} edge type {edge_type!r} has no edge_index"
+            raise ValueError(msg)
+        edge_index = store.edge_index
+        if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+            msg = (
+                f"Snapshot {index} edge type {edge_type!r} edge_index must have "
+                f"shape (2, num_edges), got {tuple(edge_index.shape)}"
+            )
+            raise ValueError(msg)
+    return node_feature_dims, num_nodes, edge_types
+
+
+def validate_hetero_snapshot_metadata(
+    snapshots: Sequence[HeteroData],
+) -> tuple[dict[str, int], dict[str, int], list[EdgeTypeTriple]]:
+    """Verify fixed node types, counts, feature dims, and edge-type set.
+
+    Parameters
+    ----------
+    snapshots : sequence of HeteroData
+        Heterogeneous graph snapshots to validate.
+
+    Returns
+    -------
+    node_feature_dims : dict of str to int
+        Mapping from node type to feature dimension from snapshot 0.
+    num_nodes : dict of str to int
+        Mapping from node type to node count from snapshot 0.
+    edge_types : list of (str, str, str)
+        Ordered edge-type triples from snapshot 0.
+
+    Raises
+    ------
+    ValueError
+        If the sequence is empty or any snapshot drifts in cardinality,
+        feature dimension, or edge-type set.
+    """
+    if not snapshots:
+        msg = "HeteroGraphSnapshotSequence requires at least one snapshot"
+        raise ValueError(msg)
+
+    node_feature_dims, num_nodes, edge_types = infer_hetero_schema(
+        snapshots[0],
+        index=0,
+    )
+    ref_node_types = set(node_feature_dims)
+    ref_edge_types = set(edge_types)
+
+    for idx, snapshot in enumerate(snapshots[1:], start=1):
+        other_dims, other_counts, other_edges = infer_hetero_schema(
+            snapshot,
+            index=idx,
+        )
+        if set(other_dims) != ref_node_types:
+            msg = (
+                f"Snapshot {idx} node types {sorted(other_dims)!r} differ from "
+                f"snapshot 0 types {sorted(ref_node_types)!r}"
+            )
+            raise ValueError(msg)
+        if set(other_edges) != ref_edge_types:
+            msg = (
+                f"Snapshot {idx} edge-type set {sorted(other_edges)!r} differs "
+                f"from snapshot 0 set {sorted(ref_edge_types)!r}"
+            )
+            raise ValueError(msg)
+        for node_type in node_feature_dims:
+            if other_counts[node_type] != num_nodes[node_type]:
+                msg = (
+                    f"Snapshot {idx} node type {node_type!r} has "
+                    f"{other_counts[node_type]} nodes, expected "
+                    f"{num_nodes[node_type]}"
+                )
+                raise ValueError(msg)
+            if other_dims[node_type] != node_feature_dims[node_type]:
+                msg = (
+                    f"Snapshot {idx} node type {node_type!r} has feature "
+                    f"dimension {other_dims[node_type]}, expected "
+                    f"{node_feature_dims[node_type]}"
+                )
+                raise ValueError(msg)
+    return node_feature_dims, num_nodes, edge_types
+
+
+def hetero_snapshots_have_dynamic_topology(
+    snapshots: Sequence[HeteroData],
+    edge_types: Sequence[EdgeTypeTriple],
+) -> bool:
+    """Return whether any relation's ``edge_index`` differs from snapshot 0.
+
+    Parameters
+    ----------
+    snapshots : sequence of HeteroData
+        Heterogeneous snapshots to inspect.
+    edge_types : sequence of (str, str, str)
+        Edge types to compare.
+
+    Returns
+    -------
+    bool
+        ``True`` when at least one relation differs in ``edge_index``.
+    """
+    if not snapshots:
+        return False
+    reference = snapshots[0]
+    for snapshot in snapshots[1:]:
+        for edge_type in edge_types:
+            if not torch.equal(
+                snapshot[edge_type].edge_index,
+                reference[edge_type].edge_index,
+            ):
+                return True
+    return False
+
+
+def validate_shared_hetero_topology(
+    snapshots: Sequence[HeteroData],
+) -> tuple[dict[str, int], dict[str, int], list[EdgeTypeTriple]]:
+    """Verify shared node schema and per-relation topology across snapshots.
+
+    Parameters
+    ----------
+    snapshots : sequence of HeteroData
+        Heterogeneous graph snapshots to validate.
+
+    Returns
+    -------
+    node_feature_dims, num_nodes, edge_types
+        Schema inferred from snapshot 0 (see
+        :func:`validate_hetero_snapshot_metadata`).
+
+    Raises
+    ------
+    ValueError
+        If metadata drifts or any relation's ``edge_index`` /
+        ``edge_weight`` differs from snapshot 0.
+    """
+    node_feature_dims, num_nodes, edge_types = validate_hetero_snapshot_metadata(
+        snapshots
+    )
+    reference = snapshots[0]
+    for idx, snapshot in enumerate(snapshots[1:], start=1):
+        for edge_type in edge_types:
+            if not torch.equal(
+                snapshot[edge_type].edge_index,
+                reference[edge_type].edge_index,
+            ):
+                msg = (
+                    f"Snapshot {idx} edge type {edge_type!r} has a different "
+                    "edge_index than snapshot 0"
+                )
+                raise ValueError(msg)
+            ref_weight = _hetero_edge_weight(reference[edge_type])
+            weight = _hetero_edge_weight(snapshot[edge_type])
+            if (ref_weight is None) != (weight is None):
+                msg = (
+                    f"Snapshot {idx} edge type {edge_type!r} edge_weight "
+                    "presence does not match snapshot 0"
+                )
+                raise ValueError(msg)
+            if ref_weight is not None and not torch.allclose(
+                weight,
+                ref_weight,
+                equal_nan=True,
+            ):
+                msg = (
+                    f"Snapshot {idx} edge type {edge_type!r} has a different "
+                    "edge_weight than snapshot 0"
+                )
+                raise ValueError(msg)
+    return node_feature_dims, num_nodes, edge_types
+
+
+def validate_hetero_observation_masks(
+    observation_masks: Mapping[str, Tensor],
+    *,
+    num_timesteps: int,
+    num_nodes: Mapping[str, int],
+) -> dict[str, Tensor]:
+    """Validate per-type observation masks for a hetero sequence.
+
+    Parameters
+    ----------
+    observation_masks : mapping of str to Tensor
+        Masks keyed by node type; each value has shape ``(T, N_τ)``.
+    num_timesteps : int
+        Expected number of snapshots.
+    num_nodes : mapping of str to int
+        Expected node count per type.
+
+    Returns
+    -------
+    dict of str to Tensor
+        Boolean masks for every node type in ``num_nodes``.
+
+    Raises
+    ------
+    ValueError
+        If keys, shapes, or observed-node constraints fail.
+    """
+    expected_types = set(num_nodes)
+    mask_types = set(observation_masks)
+    if mask_types != expected_types:
+        msg = (
+            "observation_masks keys must match node types exactly; "
+            f"got {sorted(mask_types)!r}, expected {sorted(expected_types)!r}"
+        )
+        raise ValueError(msg)
+    validated: dict[str, Tensor] = {}
+    for node_type, mask in observation_masks.items():
+        try:
+            validated[node_type] = validate_observation_masks(
+                mask,
+                num_timesteps=num_timesteps,
+                num_nodes=int(num_nodes[node_type]),
+            )
+        except ValueError as exc:
+            msg = f"observation_masks[{node_type!r}]: {exc}"
+            raise ValueError(msg) from exc
+    return validated
+
+
+def validate_hetero_control_inputs(
+    control_inputs: Tensor | Mapping[str, Tensor],
+    *,
+    num_timesteps: int,
+    num_nodes: Mapping[str, int],
+) -> None:
+    """Validate global or per-type control inputs for a hetero sequence.
+
+    Parameters
+    ----------
+    control_inputs : Tensor or mapping of str to Tensor
+        Global controls use shape ``(T, C)``. A single-node-type sequence may
+        also use ``(T, N, C)``. Per-type dict values use ``(T, C)`` or
+        ``(T, N_τ, C)``.
+    num_timesteps : int
+        Expected number of snapshots.
+    num_nodes : mapping of str to int
+        Node counts per type.
+
+    Raises
+    ------
+    ValueError
+        If shapes or dict keys are invalid.
+    """
+    if isinstance(control_inputs, Mapping):
+        if not control_inputs:
+            msg = "control_inputs dict must be non-empty when provided"
+            raise ValueError(msg)
+        unknown = set(control_inputs) - set(num_nodes)
+        if unknown:
+            msg = (
+                "control_inputs dict has unknown node types "
+                f"{sorted(unknown)!r}; valid types are {sorted(num_nodes)!r}"
+            )
+            raise ValueError(msg)
+        control_dims: set[int] = set()
+        for node_type, controls in control_inputs.items():
+            try:
+                validate_control_inputs(
+                    controls,
+                    num_timesteps=num_timesteps,
+                    num_nodes=int(num_nodes[node_type]),
+                )
+            except ValueError as exc:
+                msg = f"control_inputs[{node_type!r}]: {exc}"
+                raise ValueError(msg) from exc
+            if controls.ndim == 2:
+                control_dims.add(int(controls.shape[1]))
+            else:
+                control_dims.add(int(controls.shape[2]))
+        if len(control_dims) != 1:
+            msg = (
+                "per-type control_inputs must share a common control_dim, "
+                f"got dimensions {sorted(control_dims)!r}"
+            )
+            raise ValueError(msg)
+        return
+
+    if control_inputs.ndim == 3 and len(num_nodes) != 1:
+        msg = (
+            "tensor control_inputs with shape (T, N, C) require a single node "
+            f"type; got {len(num_nodes)} types {sorted(num_nodes)!r} "
+            "(use a dict of per-type controls or global (T, C))"
+        )
+        raise ValueError(msg)
+    single_n = next(iter(num_nodes.values())) if len(num_nodes) == 1 else 0
+    validate_control_inputs(
+        control_inputs,
+        num_timesteps=num_timesteps,
+        num_nodes=int(single_n),
+    )
 
 
 def coerce_hyperedge_index(

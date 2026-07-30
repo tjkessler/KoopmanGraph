@@ -44,12 +44,12 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 ## Highlights
 
 - **Topology-aware learning** — GCN/GAT/hypergraph encoders and decoders, delay embeddings, dynamic topology, optional self-adaptive edges, and edge weights
-- **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, global/local, and continuous-graph operators, with soft or structural stability modes
+- **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, multiplex / typed hetero (`koopman="hetero_graph"` with RelGraph), global/local, and continuous-graph operators, with soft or structural stability modes
 - **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, and checkpointing
 - **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, anomaly helpers, SINDy, and spectral clustering
 - **Control and adaptation** — additive/bilinear control, Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
 - **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, conformal UQ, and reproducible graph benchmarks
-- **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, and Ray ensemble helpers under `koopman_graph.distributed` (power-user; see [installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) extras `lightning` / `ray` / `distributed`)
+- **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, and Ray ensemble helpers under `koopman_graph.distributed` (power-user; compose with homo or hetero models; see [installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) extras `lightning` / `ray` / `distributed`)
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
@@ -126,7 +126,7 @@ More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/qu
 
 <p align="center"><em>METR-LA aggregate RMSE vs in-repo STGCN / DCRNN / Graph WaveNet <strong>teaching baselines</strong> (not dedicated-library SOTA) from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb">examples/22_gnn_forecaster_comparison.ipynb</a>.</em></p>
 
-Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
+Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [39 hetero RelGraph](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
 
 ## Learn more
 
@@ -136,7 +136,9 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.8.2: see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.9.0: heterogeneous / multiplex RelGraph +
+  `koopman="hetero_graph"`, composed with 0.8 DDP / Fabric / Lightning / Ray
+  trainers — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -161,7 +163,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21682959},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.8.2},
+  version      = {0.9.0},
 }
 ```
 

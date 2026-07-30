@@ -11,7 +11,9 @@ from torch.optim import Optimizer
 
 from koopman_graph.data import (
     GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
     resolve_rollout_start_indices,
 )
@@ -122,7 +124,7 @@ def _backward_optimizer_step(
 
 def train_one_epoch(
     model: TrainableKoopmanModel,
-    sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+    sequences: SnapshotSequence | Sequence[SnapshotSequence],
     optimizer: Optimizer,
     loss_weights: LossWeights,
     *,
@@ -140,7 +142,7 @@ def train_one_epoch(
     ----------
     model : TrainableKoopmanModel
         Model satisfying :class:`~koopman_graph.protocols.TrainableKoopmanModel`.
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+    sequences : SnapshotSequence or sequence of SnapshotSequence
         One or more training trajectories.
     optimizer : Optimizer
         PyTorch optimizer used for the parameter update.
@@ -168,7 +170,7 @@ def train_one_epoch(
     TrainingLossBreakdown
         Mean loss breakdown across trajectories.
     """
-    if isinstance(sequences, GraphSnapshotSequence):
+    if isinstance(sequences, (GraphSnapshotSequence, HeteroGraphSnapshotSequence)):
         trajectory_list = [sequences]
     else:
         trajectory_list = list(sequences)
@@ -379,7 +381,7 @@ def train_windowed_epoch(
 
 def eval_one_epoch(
     model: TrainableKoopmanModel,
-    sequences: GraphSnapshotSequence | Sequence[GraphSnapshotSequence],
+    sequences: SnapshotSequence | Sequence[SnapshotSequence],
     loss_weights: LossWeights,
     *,
     extra_losses: ExtraLosses | None = None,
@@ -392,7 +394,7 @@ def eval_one_epoch(
     ----------
     model : TrainableKoopmanModel
         Model to evaluate.
-    sequences : GraphSnapshotSequence or sequence of GraphSnapshotSequence
+    sequences : SnapshotSequence or sequence of SnapshotSequence
         One or more validation trajectories.
     loss_weights : LossWeights
         Weights for reconstruction and consistency terms.
@@ -408,7 +410,7 @@ def eval_one_epoch(
     TrainingLossBreakdown
         Mean loss breakdown across trajectories.
     """
-    if isinstance(sequences, GraphSnapshotSequence):
+    if isinstance(sequences, (GraphSnapshotSequence, HeteroGraphSnapshotSequence)):
         trajectory_list = [sequences]
     else:
         trajectory_list = list(sequences)

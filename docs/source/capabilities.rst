@@ -24,6 +24,15 @@ Topology-aware learning
   per edge × heads)
 * ``HypergraphEncoder`` / ``HypergraphDecoder`` with incidence
   ``hyperedge_index`` (``koopman="hypergraph"``)
+* Heterogeneous / multiplex RelGraph peers
+  (``RelGraphEncoder`` / ``RelGraphDecoder``) with
+  ``koopman="hetero_graph"`` on ``HeteroGraphSnapshotSequence`` /
+  PyG ``HeteroData`` (R-GCN-lite per-relation messages; Schlichtkrull et
+  al. 2018 motivation only). Typed multi-node graphs use a shared latent
+  width :math:`d` and stacked layout
+  (:mod:`koopman_graph.data.hetero_layout`). Optional HGT peers
+  (``HGTEncoder`` / ``HGTDecoder`` in :mod:`koopman_graph.nn`) wrap PyG
+  ``HGTConv`` and are **not** required for hetero support
 * ``DelayEmbeddingEncoder`` / ``n_delays`` for Hankel-style partial
   observability
 * Per-snapshot ``edge_index`` (dynamic topology) and end-to-end
@@ -52,6 +61,12 @@ Dynamics
   ``config.adjacency``. Hypergraph operators stay Zhou-symmetric and do not
   expose ``adjacency``
 * Hypergraph ``HypergraphKoopmanOperator`` (``koopman="hypergraph"``)
+* Relational multiplex / typed
+  ``HeteroGraphKoopmanOperator`` (``koopman="hetero_graph"``):
+  :math:`K_{\mathrm{eff}} = I\otimes K_{\mathrm{self}} + \sum_r
+  \widehat{A}_r \otimes K_r` (typed: block-diagonal per-type self).
+  Optional ``relation_tying="basis"``. Dense :math:`N\cdot d` spectrum /
+  inverse ceiling unchanged — see :doc:`limitations`
 * Global/local non-stationary discrete operator
   (``GlobalLocalKoopmanOperator``; ``koopman="global_local"``)
 * Continuous-time ``ContinuousKoopmanOperator``
@@ -121,20 +136,26 @@ This is **not** the unimplemented operator flag ``sparsity="distributed"``
 
 * Native PyTorch DDP via :func:`~koopman_graph.distributed.run_ddp_fit_loop`
   or ``GraphKoopmanModel.fit(..., strategy="ddp")`` (core install;
-  typically launched with ``torchrun``)
+  typically launched with ``torchrun``). Homogeneous and hetero
+  (``HeteroData`` / ``HeteroGraphSnapshotSequence``) models compose on
+  this path; ``find_unused_parameters`` defaults to ``True`` for RelGraph
+  hetero stacks
 * Lightning Fabric via :func:`~koopman_graph.distributed.fit_with_fabric`
-  (requires ``pip install "koopman-graph[lightning]"``)
+  (requires ``pip install "koopman-graph[lightning]"``); accepts hetero
+  sequences
 * Optional Lightning ``Trainer`` sugar via
   :class:`~koopman_graph.distributed.KoopmanLightningModule` (same
   ``[lightning]`` extra). Prefer Fabric / native DDP when you need full
   loss schedules, :class:`~koopman_graph.distributed.DistributedWindowSampler`,
   or the shared epoch driver. The module composes a
   :class:`~koopman_graph.model.GraphKoopmanModel`, accepts batches of
-  :class:`~koopman_graph.data.GraphSnapshotSequence` (or a list thereof),
-  and exports format-1 checkpoints with ``export_format1_checkpoint``
+  :class:`~koopman_graph.data.GraphSnapshotSequence` /
+  :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` (or a list
+  thereof), and exports format-1 checkpoints with
+  ``export_format1_checkpoint``
 * Rank-aware window sampling
   (:class:`~koopman_graph.distributed.DistributedWindowSampler`) and
-  trajectory sharding helpers
+  trajectory sharding helpers (including hetero)
 * Optional Ray parallel ensemble member fits via
   :func:`~koopman_graph.distributed.fit_ensemble_with_ray` or
   ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
@@ -167,6 +188,9 @@ Analysis
 ~~~~~~~~
 
 * ``KoopmanSpectrum`` / ``compute_spectrum`` with mode decoding helpers
+* ``attribute_mode_energy`` / ``ModeEnergyAttribution`` — interpretive
+  type / relation energy fractions on assembled ``K_eff`` (not causal;
+  not a ResDMD residual on relation-attributed modes)
 * ``spectral_residuals`` / ``SpectralResidualReport`` — held-out data-driven
   residuals and ``trustworthy_mask()``; optional
   ``plot_spectrum(..., annotate_untrustworthy=True)``. Diagnostic in the
@@ -295,7 +319,10 @@ Built-in datasets
      - Hopf/Stuart–Landau cylinder-wake teaching surrogate
    * - ``IEEE118DynamicBenchmark``
      - Power systems
-     - IEEE 118-bus topology with simulated voltage/load dynamics
+     - IEEE 118-bus topology with simulated voltage/load dynamics;
+       typed helpers (``load_typed_topology`` / ``generate_typed``,
+       generator/load/slack) for hetero demos — simulated-dynamics
+       disclaimer applies
    * - ``MetrLaTrafficBenchmark``
      - Traffic
      - METR-LA sensor graph with cached speed snapshots

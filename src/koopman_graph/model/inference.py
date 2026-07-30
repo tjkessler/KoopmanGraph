@@ -6,7 +6,7 @@ the model façade; peer imports are for power-user / package-internal use.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
@@ -24,6 +24,7 @@ from koopman_graph.metrics import EvaluationResult, evaluate_forecast
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
 )
 from koopman_graph.operators.contract import KoopmanOperatorContract
@@ -55,8 +56,12 @@ def compute_model_spectrum(
     edge_weight: Tensor | None = None,
     uses_hypergraph_koopman: bool = False,
     uses_continuous_graph_koopman: bool = False,
+    uses_hetero_koopman: bool = False,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    edge_indices: Sequence[Tensor] | None = None,
+    edge_weights: Sequence[Tensor | None] | None = None,
+    num_nodes_dict: Mapping[str, int] | None = None,
 ) -> KoopmanSpectrum:
     """Analyze the active Koopman operator spectrum for a model configuration.
 
@@ -78,8 +83,12 @@ def compute_model_spectrum(
         Whether ``koopman`` is a :class:`HypergraphKoopmanOperator`.
     uses_continuous_graph_koopman : bool, optional
         Whether ``koopman`` is a :class:`ContinuousGraphKoopmanOperator`.
+    uses_hetero_koopman : bool, optional
+        Whether ``koopman`` is a :class:`HeteroGraphKoopmanOperator`.
     hyperedge_index, hyperedge_weight
         Topology arguments required for hypergraph operators.
+    edge_indices, edge_weights, num_nodes_dict
+        Topology arguments required for hetero / multiplex operators.
 
     Returns
     -------
@@ -92,6 +101,23 @@ def compute_model_spectrum(
         If networked-operator topology is missing or continuous
         ``auxiliary_spectral`` spectrum is requested.
     """
+    if uses_hetero_koopman:
+        if edge_indices is None or num_nodes is None:
+            msg = (
+                "edge_indices and num_nodes are required for "
+                "GraphKoopmanModel.spectrum when koopman='hetero_graph' "
+                "(topology-coupled effective operator); the per-node "
+                "contract matrix K_self is not a substitute"
+            )
+            raise ValueError(msg)
+        assert isinstance(koopman, HeteroGraphKoopmanOperator)
+        return koopman.spectrum(
+            edge_indices,
+            num_nodes,
+            edge_weights=edge_weights,
+            time_step=time_step,
+            num_nodes_dict=num_nodes_dict,
+        )
     if uses_continuous_graph_koopman:
         if edge_index is None or num_nodes is None:
             msg = (

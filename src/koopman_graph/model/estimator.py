@@ -2,24 +2,30 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.adaptation.rls import AdaptationStepResult, RecursiveKoopmanAdapter
 from koopman_graph.data import (
     GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
+    mask_hetero_snapshot_features,
 )
 from koopman_graph.graph_utils import (
     OrbitMethod,
+    autoregressive_hetero_latent_rollout,
+    hold_last_relation_topology_at,
+    pack_hetero_rollout_snapshots,
     propagate_latent,
     resolve_delta_t,
     resolve_edge_index,
@@ -34,9 +40,15 @@ from koopman_graph.nn import (
     DelayEmbeddingEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    RelGraphDecoder,
+    RelGraphEncoder,
     bind_hypergraph_decoder,
 )
 from koopman_graph.nn.delay import history_from_snapshots
+from koopman_graph.nn.heterogeneous import (
+    resolve_multiplex_relation_inputs,
+    resolve_typed_relation_inputs,
+)
 from koopman_graph.observables import (
     PHYSICS_POSITION,
     PhysicsLiftingFn,
@@ -45,6 +57,7 @@ from koopman_graph.observables import (
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     GraphKoopmanOperator,
+    HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
     InitMode,
     Parameterization,
@@ -103,7 +116,11 @@ from .online_adaptation import (
     freeze_modules,
     run_adapt_step,
 )
-from .validation import prepare_fit_inputs, uses_hypergraph_modules
+from .validation import (
+    prepare_fit_inputs,
+    uses_hypergraph_modules,
+    uses_relgraph_modules,
+)
 
 if TYPE_CHECKING:
     from koopman_graph.distributed import DistributedWindowSampler
@@ -184,6 +201,10 @@ class GraphKoopmanModel(nn.Module):
         n_delays: int = 1,
         learn_topology: str | None = None,
         topology_embedding_dim: int = DEFAULT_TOPOLOGY_EMBEDDING_DIM,
+        koopman_node_types: Sequence[str] | None = None,
+        koopman_edge_types: Sequence[Sequence[str]] | None = None,
+        koopman_relation_tying: str = "independent",
+        koopman_basis_size: int | None = None,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
@@ -322,6 +343,16 @@ class GraphKoopmanModel(nn.Module):
         topology_embedding_dim : int, optional
             Embedding width ``k`` for ``learn_topology="self_adaptive"``.
             Default ``8``. Ignored when ``learn_topology`` is ``None``.
+        koopman_node_types : sequence of str or None, optional
+            Ordered node-type names for ``koopman="hetero_graph"`` (defaults
+            to multiplex ``("node",)``).
+        koopman_edge_types : sequence of sequence of str or None, optional
+            Ordered ``(src, rel, dst)`` triples for ``koopman="hetero_graph"``.
+        koopman_relation_tying : {"independent", "basis"}, optional
+            Relation-factor tying for ``koopman="hetero_graph"``. Default
+            ``"independent"``.
+        koopman_basis_size : int or None, optional
+            Basis size ``B`` when ``koopman_relation_tying="basis"``.
 
         Raises
         ------
@@ -364,6 +395,10 @@ class GraphKoopmanModel(nn.Module):
             physics_dim=physics_dim,
             physics_position=physics_position,
             n_delays=n_delays,
+            koopman_node_types=koopman_node_types,
+            koopman_edge_types=koopman_edge_types,
+            koopman_relation_tying=koopman_relation_tying,
+            koopman_basis_size=koopman_basis_size,
         )
         apply_resolved_components(self, components)
         if learn_topology is not None and learn_topology != "self_adaptive":
@@ -375,6 +410,14 @@ class GraphKoopmanModel(nn.Module):
         if topology_embedding_dim < 1:
             msg = (
                 f"topology_embedding_dim must be positive, got {topology_embedding_dim}"
+            )
+            raise ValueError(msg)
+        if learn_topology is not None and uses_relgraph_modules(
+            components.encoder, components.decoder
+        ):
+            msg = (
+                "learn_topology is unsupported with RelGraphEncoder / "
+                "RelGraphDecoder (koopman='hetero_graph')"
             )
             raise ValueError(msg)
         self.learn_topology = learn_topology
@@ -408,6 +451,112 @@ class GraphKoopmanModel(nn.Module):
             :class:`~koopman_graph.operators.HypergraphKoopmanOperator`.
         """
         return isinstance(self.koopman, HypergraphKoopmanOperator)
+
+    @property
+    def uses_hetero_koopman(self) -> bool:
+        """Return whether latent advance uses the multiplex relational operator.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`koopman` is a
+            :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`.
+        """
+        return isinstance(self.koopman, HeteroGraphKoopmanOperator)
+
+    @property
+    def uses_typed_hetero(self) -> bool:
+        """Return whether the encode / advance path uses typed node types.
+
+        Returns
+        -------
+        bool
+            ``True`` when the encoder projects per-type features onto the
+            shared latent width (more than one node type).
+        """
+        return bool(getattr(self.encoder, "is_typed", False))
+
+    def _resolve_hetero_relation_inputs(
+        self,
+        x_or_data: Tensor | Data | HeteroData,
+        edge_index: Tensor | None,
+        edge_weight: Tensor | None,
+    ) -> tuple[list[Tensor], list[Tensor | None], dict[str, int] | None]:
+        """Resolve relation banks for multiplex or typed hetero input.
+
+        Parameters
+        ----------
+        x_or_data : Tensor, Data, or HeteroData
+            Hetero snapshot or stacked features with relation banks.
+        edge_index : Tensor or None
+            Relation banks for tensor input; ignored for ``HeteroData``.
+        edge_weight : Tensor or None
+            Optional relation weight banks for tensor input.
+
+        Returns
+        -------
+        tuple
+            ``(edge_indices, edge_weights, num_nodes_dict)`` where
+            ``num_nodes_dict`` is ``None`` for multiplex graphs.
+        """
+        encoder = self.encoder
+        if not isinstance(encoder, RelGraphEncoder):
+            msg = "HeteroData paths require RelGraphEncoder peers"
+            raise TypeError(msg)
+        if encoder.is_typed:
+            _, edge_indices, edge_weights, num_nodes_dict = (
+                resolve_typed_relation_inputs(
+                    cast("HeteroData | Mapping[str, Tensor]", x_or_data),
+                    edge_index,
+                    edge_weight,
+                    node_types=encoder.node_types,
+                    edge_types=encoder.edge_types,
+                    num_relations=encoder.num_relations,
+                )
+            )
+            return edge_indices, edge_weights, num_nodes_dict
+        _, edge_indices, edge_weights = resolve_multiplex_relation_inputs(
+            x_or_data,
+            edge_index,
+            edge_weight,
+            num_relations=encoder.num_relations,
+        )
+        return edge_indices, edge_weights, None
+
+    def _decode_hetero(
+        self,
+        z: Tensor,
+        edge_indices: Sequence[Tensor],
+        edge_weights: Sequence[Tensor | None],
+        num_nodes_dict: Mapping[str, int] | None,
+    ) -> Tensor | dict[str, Tensor]:
+        """Decode a stacked latent block with the hetero decoder.
+
+        Parameters
+        ----------
+        z : Tensor
+            Stacked latent block with shape ``(N, latent_dim)``.
+        edge_indices : sequence of Tensor
+            Ordered relation banks in stacked global numbering.
+        edge_weights : sequence of Tensor or None
+            Optional per-relation weights.
+        num_nodes_dict : mapping of str to int or None
+            Per-type node counts; required for typed decoders.
+
+        Returns
+        -------
+        Tensor or dict of str to Tensor
+            Reconstructed features (per-type mapping for typed decoders).
+        """
+        decoder = self.decoder
+        if isinstance(decoder, RelGraphDecoder) and decoder.is_typed:
+            return decoder(
+                z,
+                edge_indices,
+                edge_weights,
+                num_nodes_dict=num_nodes_dict,
+            )
+        return decoder(z, edge_indices, edge_weights)
 
     @property
     def uses_continuous_graph_koopman(self) -> bool:
@@ -448,6 +597,16 @@ class GraphKoopmanModel(nn.Module):
         if isinstance(encoder, DelayEmbeddingEncoder):
             encoder = encoder.base_encoder
         return isinstance(encoder, HypergraphEncoder)
+
+    def _uses_relgraph_encode(self) -> bool:
+        """Return whether the active encoder consumes relation edge banks.
+
+        Returns
+        -------
+        bool
+            ``True`` for :class:`~koopman_graph.nn.RelGraphEncoder` peers.
+        """
+        return isinstance(self.encoder, RelGraphEncoder)
 
     def materialize_learned_topology(
         self,
@@ -600,6 +759,9 @@ class GraphKoopmanModel(nn.Module):
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
         latent_window: Tensor | None = None,
+        edge_indices: Sequence[Tensor] | None = None,
+        edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
     ) -> Tensor:
         """Advance latent states with the active Koopman operator.
 
@@ -622,6 +784,12 @@ class GraphKoopmanModel(nn.Module):
             See the function signature / summary for ``hyperedge_weight``.
         latent_window : Tensor | None
             See the function signature / summary for ``latent_window``.
+        edge_indices : Sequence[Tensor] | None
+            Per-relation banks for ``koopman='hetero_graph'``.
+        edge_weights : Sequence[Tensor | None] | None
+            Optional per-relation weights for hetero advance.
+        num_nodes_dict : Mapping[str, int] | None
+            Per-type node counts for typed hetero advance.
 
         Returns
         -------
@@ -639,6 +807,9 @@ class GraphKoopmanModel(nn.Module):
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
             latent_window=latent_window,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
         )
 
     def spectrum(
@@ -650,6 +821,9 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        edge_indices: Sequence[Tensor] | None = None,
+        edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
     ) -> KoopmanSpectrum:
         """Analyze the learned Koopman operator spectrum.
 
@@ -666,14 +840,16 @@ class GraphKoopmanModel(nn.Module):
         ``dynamics_mode="continuous"``), analyzes ``I⊗L_self + Â⊗L_nbr`` with
         the same topology requirements. For ``koopman="hypergraph"``, analyzes
         ``I⊗K_self + Ĥ⊗K_hedge`` and **requires** ``hyperedge_index`` and
-        ``num_nodes``. Missing topology raises rather than silently returning
-        the self-term spectrum.
+        ``num_nodes``. For ``koopman="hetero_graph"``, analyzes the assembled
+        multiplex / typed ``K_eff`` and **requires** ``edge_indices`` and
+        ``num_nodes`` (plus ``num_nodes_dict`` when typed). Missing topology
+        raises rather than silently returning the self-term spectrum.
 
         Parameters
         ----------
         delta_t : float or None, optional
             Continuous integration horizon for generator → discrete spectrum.
-            Ignored for discrete / graph / hypergraph operators.
+            Ignored for discrete / graph / hypergraph / hetero operators.
         edge_index : Tensor or None, optional
             Topology for networked graph operators. Required when
             :attr:`uses_graph_koopman` or
@@ -688,6 +864,12 @@ class GraphKoopmanModel(nn.Module):
             :attr:`uses_hypergraph_koopman` is ``True``.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        edge_indices : sequence of Tensor or None, optional
+            Per-relation edge banks for ``koopman="hetero_graph"``.
+        edge_weights : sequence of Tensor or None, optional
+            Optional per-relation weights for hetero operators.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type node counts for typed hetero operators.
 
         Returns
         -------
@@ -721,6 +903,7 @@ class GraphKoopmanModel(nn.Module):
             uses_graph_koopman=self.uses_graph_koopman,
             uses_hypergraph_koopman=self.uses_hypergraph_koopman,
             uses_continuous_graph_koopman=self.uses_continuous_graph_koopman,
+            uses_hetero_koopman=self.uses_hetero_koopman,
             is_continuous=self.is_continuous,
             time_step=self.time_step,
             delta_t=delta_t,
@@ -729,11 +912,14 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
         )
 
     def encode(
         self,
-        x_or_data: Tensor | Data,
+        x_or_data: Tensor | Data | HeteroData,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         *,
@@ -751,12 +937,17 @@ class GraphKoopmanModel(nn.Module):
         :class:`~koopman_graph.data.GraphSnapshotSequence` so teacher-forced
         history is assembled correctly.
 
+        Multiplex ``HeteroData`` is accepted when RelGraph peers /
+        ``koopman="hetero_graph"`` are active.
+
         Parameters
         ----------
-        x_or_data : Tensor or Data
-            Node features, delay window, or a PyG ``Data`` snapshot.
+        x_or_data : Tensor, Data, or HeteroData
+            Node features, delay window, homogeneous ``Data``, or multiplex
+            ``HeteroData``.
         edge_index : Tensor or None, optional
-            Edge index required when ``x_or_data`` is a tensor.
+            Edge index required when ``x_or_data`` is a tensor. RelGraph
+            tensor input accepts relation banks instead.
         edge_weight : Tensor or None, optional
             Optional scalar edge weights for tensor input.
         resolve_learned_topology : bool, optional
@@ -770,6 +961,17 @@ class GraphKoopmanModel(nn.Module):
         Tensor
             Latent node features with shape ``(num_nodes, latent_dim)``.
         """
+        if isinstance(x_or_data, HeteroData) or self._uses_relgraph_encode():
+            return encode_features(
+                self.encoder,
+                x_or_data,
+                edge_index,
+                edge_weight,
+                physics_lifting_fn=self.physics_lifting_fn,
+                physics_dim=self.physics_dim,
+                physics_position=self.physics_position,
+                prefer_explicit_topology=False,
+            )
         replace = self.learns_pairwise_topology and not self._uses_hypergraph_encode()
         if replace and resolve_learned_topology:
             edge_index, edge_weight = self.materialize_learned_topology(
@@ -860,7 +1062,7 @@ class GraphKoopmanModel(nn.Module):
 
     def encode_at(
         self,
-        sequence: GraphSnapshotSequence,
+        sequence: SnapshotSequence,
         index: int,
         *,
         pad: bool = True,
@@ -873,9 +1075,13 @@ class GraphKoopmanModel(nn.Module):
         teacher-forced Hankel window from observed history — not from decoded
         rollouts.
 
+        :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` supports
+        ``n_delays == 1`` only; observation masks zero unobserved rows
+        per node type.
+
         Parameters
         ----------
-        sequence : GraphSnapshotSequence
+        sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
             Source trajectory.
         index : int
             Inclusive end index of the delay window.
@@ -890,7 +1096,26 @@ class GraphKoopmanModel(nn.Module):
         -------
         Tensor
             Latent node features with shape ``(num_nodes, latent_dim)``.
+
+        Raises
+        ------
+        ValueError
+            If a hetero sequence uses delays.
         """
+        if isinstance(sequence, HeteroGraphSnapshotSequence):
+            if self.n_delays != 1:
+                msg = (
+                    "HeteroGraphSnapshotSequence encode_at requires n_delays=1 "
+                    f"(got n_delays={self.n_delays})"
+                )
+                raise ValueError(msg)
+            snapshot = sequence[index]
+            if zero_unobserved and sequence.has_observation_masks:
+                snapshot = mask_hetero_snapshot_features(
+                    snapshot,
+                    sequence.observation_mask_at(index),
+                )
+            return self.encode(snapshot)
         return encode_at_index(
             self.encoder,
             self.encode,
@@ -1102,24 +1327,25 @@ class GraphKoopmanModel(nn.Module):
 
     def forward(
         self,
-        x_or_data: Tensor | Data,
+        x_or_data: Tensor | Data | HeteroData,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         control: Tensor | None = None,
         delta_t: float | Tensor | None = None,
-    ) -> Tensor:
+    ) -> Tensor | dict[str, Tensor]:
         """Predict the next graph snapshot from the current one.
 
         Performs encode → linear Koopman advance → decode for a single step.
 
         Parameters
         ----------
-        x_or_data : Tensor or Data
-            Either a PyG ``Data`` object or node features ``x`` of shape
-            ``(num_nodes, in_channels)``.
+        x_or_data : Tensor, Data, or HeteroData
+            Homogeneous ``Data`` / features, or multiplex ``HeteroData`` when
+            ``koopman="hetero_graph"``.
         edge_index : Tensor, optional
             Edge index with shape ``(2, num_edges)``. Required when
-            ``x_or_data`` is a tensor; ignored for ``Data`` input.
+            ``x_or_data`` is a tensor; ignored for ``Data`` / ``HeteroData``.
+            RelGraph tensor input accepts relation banks instead.
         edge_weight : Tensor, optional
             Scalar edge weights with shape ``(num_edges,)``. Required when
             ``x_or_data`` is a tensor and weights are used; ignored for
@@ -1133,9 +1359,35 @@ class GraphKoopmanModel(nn.Module):
 
         Returns
         -------
-        Tensor
+        Tensor or dict of str to Tensor
             Predicted node features of shape ``(num_nodes, out_channels)``.
+            Typed hetero models return one tensor per node type.
         """
+        if self.uses_hetero_koopman or isinstance(x_or_data, HeteroData):
+            if not isinstance(self.encoder, RelGraphEncoder):
+                msg = "HeteroData forward requires RelGraphEncoder peers"
+                raise TypeError(msg)
+            edge_indices, edge_weights, num_nodes_dict = (
+                self._resolve_hetero_relation_inputs(x_or_data, edge_index, edge_weight)
+            )
+            z = self.encode(
+                x_or_data,
+                edge_index,
+                edge_weight,
+                resolve_learned_topology=False,
+            )
+            z_next = self._advance_latent(
+                z,
+                control=control,
+                delta_t=delta_t,
+                edge_indices=edge_indices,
+                edge_weights=edge_weights,
+                num_nodes_dict=num_nodes_dict,
+            )
+            return self._decode_hetero(
+                z_next, edge_indices, edge_weights, num_nodes_dict
+            )
+
         edge_index, edge_weight = self.resolve_pairwise_topology(
             x_or_data, edge_index, edge_weight
         )
@@ -1167,14 +1419,122 @@ class GraphKoopmanModel(nn.Module):
             return self.decoder(z_next, hyperedge_index, hyperedge_weight)
         return self.decoder(z_next, edge_index, edge_weight)
 
-    def _rollout(
+    def _rollout_hetero(
         self,
-        x_or_data: Tensor | Data,
+        x_or_data: Tensor | HeteroData,
         steps: int,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
-        future_topologies: Sequence[Data] | None = None,
+        future_topologies: Sequence[HeteroData] | None = None,
+        step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
+    ) -> list[tuple[Tensor | dict[str, Tensor], list[Tensor], list[Tensor | None]]]:
+        """Autoregressive hetero rollout returning relation-bank tuples.
+
+        Parameters
+        ----------
+        x_or_data : Tensor or HeteroData
+            Multiplex origin features or ``HeteroData`` snapshot.
+        steps : int
+            Number of rollout steps (must be ``>= 1``).
+        edge_index : Tensor or None, optional
+            Relation banks when ``x_or_data`` is a tensor; ignored for
+            ``HeteroData``.
+        edge_weight : Tensor or None, optional
+            Optional relation weight banks for tensor input.
+        controls : sequence of Tensor or None, optional
+            Per-step controls when ``control_dim > 0``.
+        future_topologies : sequence of HeteroData or None, optional
+            Hold-last future multiplex topologies.
+        step_deltas : sequence of float or Tensor or None, optional
+            Optional per-step integration intervals.
+
+        Returns
+        -------
+        list of tuple
+            For each step: decoded prediction, relation edge banks, and
+            optional relation weights.
+
+        Raises
+        ------
+        ValueError
+            If ``steps`` / controls / ``step_deltas`` are invalid.
+        TypeError
+            If RelGraph peers are missing.
+        """
+        from koopman_graph.model.validation import validate_controls
+
+        if steps < 1:
+            msg = f"steps must be >= 1, got {steps}"
+            raise ValueError(msg)
+        if not isinstance(self.encoder, RelGraphEncoder):
+            msg = "Hetero rollout requires RelGraphEncoder peers"
+            raise TypeError(msg)
+        if not isinstance(self.decoder, RelGraphDecoder):
+            msg = "Hetero rollout requires RelGraphDecoder peers"
+            raise TypeError(msg)
+        validate_controls(control_dim=self.control_dim, controls=controls, steps=steps)
+        if step_deltas is not None and len(step_deltas) != steps:
+            msg = f"expected {steps} step_deltas for rollout, got {len(step_deltas)}"
+            raise ValueError(msg)
+
+        z = self.encode(x_or_data, edge_index, edge_weight)
+        edge_indices, edge_weights, num_nodes_dict = (
+            self._resolve_hetero_relation_inputs(x_or_data, edge_index, edge_weight)
+        )
+        control_at = None if controls is None else (lambda step: controls[step])
+        delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
+
+        def decode(
+            latent: Tensor,
+            banks: Sequence[Tensor],
+            weights: Sequence[Tensor | None],
+        ) -> Tensor | dict[str, Tensor]:
+            """Decode one rollout step with typed-aware plumbing.
+
+            Parameters
+            ----------
+            latent : Tensor
+                Advanced stacked latent block.
+            banks : sequence of Tensor
+                Ordered relation edge banks for this step.
+            weights : sequence of Tensor or None
+                Optional per-relation weights.
+
+            Returns
+            -------
+            Tensor or dict of str to Tensor
+                Reconstructed features for this step.
+            """
+            return self._decode_hetero(latent, banks, weights, num_nodes_dict)
+
+        return autoregressive_hetero_latent_rollout(
+            self.koopman,
+            decode,
+            z,
+            steps=steps,
+            topology_at=hold_last_relation_topology_at(
+                edge_indices,
+                edge_weights,
+                future_topologies,
+                num_relations=self.encoder.num_relations,
+                node_types=self.encoder.node_types,
+                edge_types=self.encoder.edge_types,
+            ),
+            control_at=control_at,
+            delta_t_at=delta_t_at,
+            default_delta_t=self.time_step,
+            num_nodes_dict=num_nodes_dict,
+        )
+
+    def _rollout(
+        self,
+        x_or_data: Tensor | Data | HeteroData,
+        steps: int,
+        edge_index: Tensor | None = None,
+        edge_weight: Tensor | None = None,
+        controls: Sequence[Tensor] | None = None,
+        future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
         step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
         history: Sequence[Data] | None = None,
     ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
@@ -1225,6 +1585,12 @@ class GraphKoopmanModel(nn.Module):
             If ``steps < 1`` or controls are missing/invalid for a controlled
             model.
         """
+        if self.uses_hetero_koopman or isinstance(x_or_data, HeteroData):
+            msg = (
+                "Use predict() for multiplex HeteroData rollouts; "
+                "_rollout is homogeneous-only"
+            )
+            raise TypeError(msg)
         decoder_fn: Any = self.decoder
         if isinstance(self.decoder, HypergraphDecoder):
             if isinstance(x_or_data, Data):
@@ -1273,14 +1639,14 @@ class GraphKoopmanModel(nn.Module):
 
     def predict(
         self,
-        initial_graph: Tensor | Data,
+        initial_graph: Tensor | Data | HeteroData,
         steps: int,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
-        future_topologies: Sequence[Data] | None = None,
+        future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
         history: Sequence[Data] | None = None,
-    ) -> list[Data]:
+    ) -> list[Data] | list[HeteroData]:
         """Autoregressively predict future graph snapshots.
 
         Encodes the initial graph once, advances the latent state with the
@@ -1305,17 +1671,20 @@ class GraphKoopmanModel(nn.Module):
         topology. Pass one ``Data`` object per rollout step (topology only; node
         features are ignored) to supply a known future rewiring schedule.
 
+        Multiplex ``HeteroData`` origins (``koopman="hetero_graph"``) return
+        ``list[HeteroData]`` preserving the origin node/edge-type schema.
+
         Parameters
         ----------
-        initial_graph : Tensor or Data
-            Either a PyG ``Data`` object or node features ``x`` of shape
-            ``(num_nodes, in_channels)``. Classical baselines accept ``Data``
-            only.
+        initial_graph : Tensor, Data, or HeteroData
+            Homogeneous snapshot / features, or multiplex ``HeteroData``.
+            Classical baselines accept ``Data`` only.
         steps : int
             Number of future snapshots to predict (must be >= 1).
         edge_index : Tensor, optional
             Edge index with shape ``(2, num_edges)``. Required when
-            ``initial_graph`` is a tensor; ignored for ``Data`` input.
+            ``initial_graph`` is a tensor; ignored for ``Data`` /
+            ``HeteroData``. RelGraph tensor input accepts relation banks.
         edge_weight : Tensor, optional
             Scalar edge weights with shape ``(num_edges,)``. Required when
             ``initial_graph`` is a tensor and weights are used; ignored for
@@ -1324,19 +1693,18 @@ class GraphKoopmanModel(nn.Module):
             Future control inputs for each rollout step. Required with length
             ``steps`` when :attr:`control_dim` is positive; optional (default
             ``None``) for uncontrolled models.
-        future_topologies : sequence of Data or None, optional
+        future_topologies : sequence of Data or HeteroData or None, optional
             Known topologies for rollout decode steps. Shorter sequences hold
             the last provided topology for remaining steps.
         history : sequence of Data or None, optional
             Prior observations (oldest → newest, excluding ``initial_graph``)
-            for delay embedding when ``n_delays > 1``.
+            for delay embedding when ``n_delays > 1``. Homogeneous-only.
 
         Returns
         -------
-        list of Data
-            ``steps`` predicted graph snapshots. Each ``Data.x`` has shape
-            ``(num_nodes, out_channels)`` and carries the ``edge_index`` (and
-            optional ``edge_weight``) used for that step's decode.
+        list of Data or list of HeteroData
+            ``steps`` predicted snapshots. Homogeneous paths return ``Data``;
+            multiplex paths return ``HeteroData``.
 
         Raises
         ------
@@ -1344,6 +1712,49 @@ class GraphKoopmanModel(nn.Module):
             If ``steps < 1`` or controls are missing/invalid for a controlled
             model.
         """
+        if self.uses_hetero_koopman or isinstance(initial_graph, HeteroData):
+            if history is not None:
+                msg = "history / delay embedding is unsupported for HeteroData predict"
+                raise ValueError(msg)
+            if not isinstance(initial_graph, HeteroData):
+                msg = (
+                    "koopman='hetero_graph' predict requires a HeteroData origin "
+                    "(tensor relation-bank packing is not implemented for "
+                    "predict; use forward for tensor banks)"
+                )
+                raise TypeError(msg)
+            was_training = self.training
+            self.eval()
+            try:
+                with torch.no_grad():
+                    rollout = self._rollout_hetero(
+                        initial_graph,
+                        steps,
+                        edge_index=edge_index,
+                        edge_weight=edge_weight,
+                        controls=controls,
+                        future_topologies=future_topologies,  # type: ignore[arg-type]
+                    )
+            finally:
+                self.train(was_training)
+            encoder = self.encoder
+            typed_node_types = (
+                encoder.node_types
+                if isinstance(encoder, RelGraphEncoder) and encoder.is_typed
+                else None
+            )
+            typed_edge_types = (
+                encoder.edge_types
+                if isinstance(encoder, RelGraphEncoder) and encoder.is_typed
+                else None
+            )
+            return pack_hetero_rollout_snapshots(
+                rollout,
+                template=initial_graph,
+                node_types=typed_node_types,
+                edge_types=typed_edge_types,
+            )
+
         return predict_snapshots(
             self,
             self._rollout,
@@ -1352,7 +1763,7 @@ class GraphKoopmanModel(nn.Module):
             edge_index=edge_index,
             edge_weight=edge_weight,
             controls=controls,
-            future_topologies=future_topologies,
+            future_topologies=future_topologies,  # type: ignore[arg-type]
             history=history,
         )
 
@@ -1470,6 +1881,7 @@ class GraphKoopmanModel(nn.Module):
         restore_best_weights: bool = False,
         checkpoint_path: str | Path | None = None,
         strategy: Literal["ddp"] | None = None,
+        find_unused_parameters: bool | None = None,
         **optimizer_kwargs: Any,
     ) -> FitHistory:
         """Train encoder, Koopman operator, and decoder end-to-end.
@@ -1609,6 +2021,11 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             PyTorch DDP / ``torchrun`` launches; at world size 1 wrapping is
             skipped. See also
             :func:`~koopman_graph.distributed.prepare_ddp_model`.
+        find_unused_parameters : bool or None, optional
+            DDP unused-parameter search when ``strategy="ddp"``. ``None``
+            (default) resolves to ``True`` for
+            ``koopman_kind="hetero_graph"`` and ``False`` otherwise. Ignored
+            for single-process ``strategy=None``.
         **optimizer_kwargs
             Additional keyword arguments forwarded to the optimizer constructor.
 
@@ -1675,7 +2092,12 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         if strategy == "ddp":
             from koopman_graph.distributed import run_ddp_fit_loop
 
-            return run_ddp_fit_loop(self, prepared.train_sequences, **loop_kwargs)
+            return run_ddp_fit_loop(
+                self,
+                prepared.train_sequences,
+                find_unused_parameters=find_unused_parameters,
+                **loop_kwargs,
+            )
         msg = (
             f"unsupported fit strategy {strategy!r}; expected None or 'ddp' "
             "(see koopman_graph.distributed.run_ddp_fit_loop)"

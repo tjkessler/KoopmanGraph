@@ -116,7 +116,9 @@ def fit_ensemble_with_ray(
         a **module-level** function so Ray's cloudpickle can serialize it.
     data_sequence
         Training input forwarded to each member's ``fit`` (put once via
-        ``ray.put``).
+        ``ray.put``). Accepts the same homogeneous or multiplex
+        snapshot sequences / multi-trajectory inputs as single-process
+        ``fit``.
     num_members : int
         Ensemble size (must be >= 1).
     seeds : sequence of int or None, optional

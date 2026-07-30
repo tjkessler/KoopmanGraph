@@ -45,10 +45,10 @@ callables; missing controls mean uncontrolled advance, and missing
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.graph_utils.topology import snapshot_edge_weight
 from koopman_graph.operators.contract import KoopmanOperatorContract
@@ -57,7 +57,12 @@ from koopman_graph.operators.contract import KoopmanOperatorContract
 KoopmanPropagator = KoopmanOperatorContract
 
 DecoderFn = Callable[[Tensor, Tensor, Tensor | None], Tensor]
+RelationDecoderFn = Callable[
+    [Tensor, Sequence[Tensor], Sequence[Tensor | None] | None],
+    Tensor | dict[str, Tensor],
+]
 TopologyAtFn = Callable[[int], tuple[Tensor, Tensor | None]]
+RelationTopologyAtFn = Callable[[int], tuple[list[Tensor], list[Tensor | None]]]
 ControlAtFn = Callable[[int], Tensor | None]
 DeltaTAtFn = Callable[[int], float | Tensor | None]
 
@@ -96,14 +101,20 @@ def _topology_kwargs_for(
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
     latent_window: Tensor | None = None,
-) -> dict[str, Tensor | None]:
+    edge_indices: Sequence[Tensor] | None = None,
+    edge_weights: Sequence[Tensor | None] | None = None,
+    num_nodes_dict: Mapping[str, int] | None = None,
+) -> dict[
+    str,
+    Tensor | None | Sequence[Tensor] | Sequence[Tensor | None] | Mapping[str, int],
+]:
     """Return topology / window kwargs accepted by ``method``.
 
     Built-in operators accept optional ``edge_index`` / ``edge_weight`` and/or
-    ``hyperedge_index`` / ``hyperedge_weight``, and global/local operators
-    accept ``latent_window``. Older custom injected operators may omit those
-    parameters; skip them so Protocol injection keeps working without forcing
-    every stub to update.
+    ``hyperedge_index`` / ``hyperedge_weight``, relational ``edge_indices`` /
+    ``edge_weights``, and global/local operators accept ``latent_window``.
+    Older custom injected operators may omit those parameters; skip them so
+    Protocol injection keeps working without forcing every stub to update.
 
     Parameters
     ----------
@@ -119,6 +130,12 @@ def _topology_kwargs_for(
         Optional hyperedge weights to forward when supported.
     latent_window : Tensor or None, optional
         Latent history window for global/local operators.
+    edge_indices : sequence of Tensor or None, optional
+        Per-relation edge banks for hetero / multiplex operators.
+    edge_weights : sequence of Tensor or None, optional
+        Optional per-relation edge weights.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type node counts for typed hetero operators.
 
     Returns
     -------
@@ -129,7 +146,10 @@ def _topology_kwargs_for(
     accepts_var_kw = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in params.values()
     )
-    kwargs: dict[str, Tensor | None] = {}
+    kwargs: dict[
+        str,
+        Tensor | None | Sequence[Tensor] | Sequence[Tensor | None] | Mapping[str, int],
+    ] = {}
     if accepts_var_kw or "edge_index" in params:
         kwargs["edge_index"] = edge_index
         if accepts_var_kw or "edge_weight" in params:
@@ -138,8 +158,14 @@ def _topology_kwargs_for(
         kwargs["hyperedge_index"] = hyperedge_index
         if accepts_var_kw or "hyperedge_weight" in params:
             kwargs["hyperedge_weight"] = hyperedge_weight
+    if accepts_var_kw or "edge_indices" in params:
+        kwargs["edge_indices"] = edge_indices
+        if accepts_var_kw or "edge_weights" in params:
+            kwargs["edge_weights"] = edge_weights
     if accepts_var_kw or "latent_window" in params:
         kwargs["latent_window"] = latent_window
+    if "num_nodes_dict" in params:
+        kwargs["num_nodes_dict"] = num_nodes_dict
     return kwargs
 
 
@@ -155,6 +181,9 @@ def propagate_latent(
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
     latent_window: Tensor | None = None,
+    edge_indices: Sequence[Tensor] | None = None,
+    edge_weights: Sequence[Tensor | None] | None = None,
+    num_nodes_dict: Mapping[str, int] | None = None,
 ) -> Tensor:
     """Advance latent states via the unified Koopman contract.
 
@@ -190,6 +219,13 @@ def propagate_latent(
         Optional hyperedge weights for hypergraph operators.
     latent_window : Tensor or None, optional
         Latent history for global/local operators (cold-start when omitted).
+    edge_indices : sequence of Tensor or None, optional
+        Per-relation edge banks for multiplex / hetero operators.
+    edge_weights : sequence of Tensor or None, optional
+        Optional per-relation edge weights.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type node counts for typed hetero operators (forwarded only when
+        the operator's ``advance`` declares the parameter).
 
     Returns
     -------
@@ -208,6 +244,9 @@ def propagate_latent(
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
             latent_window=latent_window,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
         ),
     )
 
@@ -225,6 +264,9 @@ def inverse_propagate_latent(
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
     latent_window: Tensor | None = None,
+    edge_indices: Sequence[Tensor] | None = None,
+    edge_weights: Sequence[Tensor | None] | None = None,
+    num_nodes_dict: Mapping[str, int] | None = None,
 ) -> Tensor:
     """Apply one inverse Koopman step via the unified contract.
 
@@ -259,6 +301,12 @@ def inverse_propagate_latent(
         See the function signature / summary for ``hyperedge_weight``.
     latent_window : Tensor | None
         See the function signature / summary for ``latent_window``.
+    edge_indices : sequence of Tensor or None, optional
+        Per-relation edge banks for multiplex / hetero operators.
+    edge_weights : sequence of Tensor or None, optional
+        Optional per-relation edge weights.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type node counts for typed hetero operators.
 
     Returns
     -------
@@ -276,8 +324,11 @@ def inverse_propagate_latent(
             edge_index=edge_index,
             edge_weight=edge_weight,
             latent_window=latent_window,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            num_nodes_dict=num_nodes_dict,
         ),
     )
 
@@ -568,3 +619,237 @@ def pack_rollout_snapshots(
             fields["edge_weight"] = step_edge_weight
         output_snapshots.append(Data(**fields))
     return output_snapshots
+
+
+def hold_last_relation_topology_at(
+    edge_indices: Sequence[Tensor],
+    edge_weights: Sequence[Tensor | None] | None = None,
+    future_topologies: Sequence[HeteroData] | None = None,
+    *,
+    num_relations: int,
+    node_types: Sequence[str] | None = None,
+    edge_types: Sequence[tuple[str, str, str]] | None = None,
+) -> RelationTopologyAtFn:
+    """Build a hold-last relation-bank schedule for hetero rollouts.
+
+    Parameters
+    ----------
+    edge_indices : sequence of Tensor
+        Initial ordered relation edge banks.
+    edge_weights : sequence of Tensor or None, optional
+        Initial optional per-relation weights.
+    future_topologies : sequence of HeteroData or None, optional
+        Optional known future topologies (node features ignored).
+    num_relations : int
+        Expected ``|R|`` (must match encoder / operator).
+    node_types : sequence of str or None, optional
+        Stack order for typed graphs. When given with more than one entry,
+        future topologies are resolved with global (offset) edge numbering.
+    edge_types : sequence of tuple of str or None, optional
+        Explicit relation order for typed graphs.
+
+    Returns
+    -------
+    callable
+        ``topology_at(step) -> (edge_indices, edge_weights)``.
+    """
+    from koopman_graph.nn.heterogeneous import (
+        resolve_multiplex_relation_inputs,
+        resolve_typed_relation_inputs,
+    )
+
+    typed = node_types is not None and len(tuple(node_types)) > 1
+    current_indices = list(edge_indices)
+    current_weights = (
+        [None] * num_relations if edge_weights is None else list(edge_weights)
+    )
+
+    def topology_at(step: int) -> tuple[list[Tensor], list[Tensor | None]]:
+        """Return the hold-last relation banks for one rollout step.
+
+        Parameters
+        ----------
+        step : int
+            Zero-based rollout step index.
+
+        Returns
+        -------
+        tuple[list[Tensor], list[Tensor | None]]
+            Ordered relation edge banks and optional weights.
+        """
+        nonlocal current_indices, current_weights
+        if future_topologies is not None and step < len(future_topologies):
+            if typed:
+                assert node_types is not None
+                _, current_indices, current_weights, _ = resolve_typed_relation_inputs(
+                    future_topologies[step],
+                    node_types=node_types,
+                    edge_types=edge_types,
+                    num_relations=num_relations,
+                )
+            else:
+                _, current_indices, current_weights = resolve_multiplex_relation_inputs(
+                    future_topologies[step],
+                    num_relations=num_relations,
+                )
+        return current_indices, current_weights
+
+    return topology_at
+
+
+def autoregressive_hetero_latent_rollout(
+    koopman: KoopmanPropagator,
+    decoder: RelationDecoderFn,
+    z: Tensor,
+    *,
+    steps: int,
+    topology_at: RelationTopologyAtFn,
+    control_at: ControlAtFn | None = None,
+    delta_t_at: DeltaTAtFn | None = None,
+    default_delta_t: float | Tensor = 1.0,
+    num_nodes_dict: Mapping[str, int] | None = None,
+) -> list[tuple[Tensor | dict[str, Tensor], list[Tensor], list[Tensor | None]]]:
+    """Run an autoregressive hetero advance/decode loop.
+
+    Parameters
+    ----------
+    koopman : KoopmanOperatorContract
+        Relational / multiplex operator.
+    decoder : callable
+        ``decoder(z, edge_indices, edge_weights) -> Tensor``.
+    z : Tensor
+        Encoded latent state at the rollout origin.
+    steps : int
+        Number of advance/decode steps (must be >= 1).
+    topology_at : callable
+        ``topology_at(step) -> (edge_indices, edge_weights)``.
+    control_at : callable or None, optional
+        Optional per-step control schedule.
+    delta_t_at : callable or None, optional
+        Optional per-step integration intervals.
+    default_delta_t : float or Tensor, optional
+        Fallback continuous integration interval.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type node counts for typed operators.
+
+    Returns
+    -------
+    list of tuple
+        For each step: decoded prediction (a tensor for multiplex, a per-type
+        mapping for typed decoders), relation edge banks, and optional
+        relation weights.
+
+    Raises
+    ------
+    ValueError
+        If ``steps < 1``.
+    """
+    if steps < 1:
+        msg = f"steps must be >= 1, got {steps}"
+        raise ValueError(msg)
+
+    outputs: list[tuple[Tensor | dict[str, Tensor], list[Tensor], list[Tensor | None]]]
+    outputs = []
+    latent = z
+    for step in range(steps):
+        edge_indices, edge_weights = topology_at(step)
+        control = None if control_at is None else control_at(step)
+        delta_t = None if delta_t_at is None else delta_t_at(step)
+        next_latent = propagate_latent(
+            koopman,
+            latent,
+            control=control,
+            delta_t=delta_t,
+            default_delta_t=default_delta_t,
+            edge_indices=edge_indices,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
+        )
+        prediction = decoder(next_latent, edge_indices, edge_weights)
+        latent = next_latent
+        outputs.append((prediction, edge_indices, edge_weights))
+    return outputs
+
+
+def pack_hetero_rollout_snapshots(
+    rollout: Sequence[
+        tuple[Tensor | Mapping[str, Tensor], list[Tensor], list[Tensor | None]]
+    ],
+    *,
+    template: HeteroData,
+    node_types: Sequence[str] | None = None,
+    edge_types: Sequence[tuple[str, str, str]] | None = None,
+) -> list[HeteroData]:
+    """Pack hetero rollout tuples into ``HeteroData`` snapshots.
+
+    Multiplex templates (exactly one node type) accept tensor predictions.
+    Typed templates require per-type mappings keyed by node type; the
+    relation banks recorded on each snapshot are written verbatim.
+
+    Parameters
+    ----------
+    rollout : sequence of tuple
+        Each entry is ``(prediction, edge_indices, edge_weights)`` where
+        ``prediction`` is a tensor (multiplex) or a per-type mapping (typed).
+    template : HeteroData
+        Schema template (node types + ordered edge types).
+    node_types : sequence of str or None, optional
+        Explicit node-type order. Defaults to ``template.node_types``.
+    edge_types : sequence of tuple of str or None, optional
+        Explicit relation order. Defaults to ``template`` edge types sorted
+        by ``repr``.
+
+    Returns
+    -------
+    list of HeteroData
+        Forecast snapshots preserving the template schema.
+
+    Raises
+    ------
+    ValueError
+        If relation counts mismatch, a typed template receives a tensor
+        prediction, or a typed prediction omits a node type.
+    """
+    resolved_node_types = (
+        tuple(template.node_types) if node_types is None else tuple(node_types)
+    )
+    if not resolved_node_types:
+        msg = "pack_hetero_rollout_snapshots requires at least one node type"
+        raise ValueError(msg)
+    resolved_edge_types = (
+        tuple(sorted(template.edge_types, key=repr))
+        if edge_types is None
+        else tuple(tuple(edge_type) for edge_type in edge_types)
+    )
+    packed: list[HeteroData] = []
+    for prediction, step_edge_index, step_edge_weight in rollout:
+        if len(step_edge_index) != len(resolved_edge_types):
+            msg = (
+                f"Expected {len(resolved_edge_types)} relation banks, "
+                f"got {len(step_edge_index)}"
+            )
+            raise ValueError(msg)
+        snap = HeteroData()
+        if isinstance(prediction, Tensor):
+            if len(resolved_node_types) != 1:
+                msg = (
+                    "Typed templates require per-type predictions keyed by node "
+                    f"type; got a tensor for node types {resolved_node_types!r}"
+                )
+                raise ValueError(msg)
+            snap[resolved_node_types[0]].x = prediction
+        else:
+            missing = [name for name in resolved_node_types if name not in prediction]
+            if missing:
+                msg = f"Prediction is missing node types {missing!r}"
+                raise ValueError(msg)
+            for name in resolved_node_types:
+                snap[name].x = prediction[name]
+        for edge_type, edges, weights in zip(
+            resolved_edge_types, step_edge_index, step_edge_weight, strict=True
+        ):
+            snap[edge_type].edge_index = edges
+            if weights is not None:
+                snap[edge_type].edge_weight = weights
+        packed.append(snap)
+    return packed

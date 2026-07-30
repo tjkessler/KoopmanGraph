@@ -30,7 +30,7 @@ from torch_geometric.nn import (
     TransformerConv,
 )
 
-from koopman_graph.graph_utils import (
+from koopman_graph.graph_utils.topology import (
     dense_random_walk_normalized_adjacency,
     resolve_graph_inputs,
 )

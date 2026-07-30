@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import SnapshotSequence
 from koopman_graph.operators.global_local import stack_latent_window
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.timestep_encode import encode_at_timestep
@@ -53,7 +53,7 @@ class SequenceLatentCache:
 
 def encode_sequence_latents(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
 ) -> SequenceLatentCache:
     """Encode every timestep of ``sequence`` exactly once.
 
@@ -61,7 +61,7 @@ def encode_sequence_latents(
     ----------
     model : TrainableKoopmanModel
         Model providing ``encode`` / ``encode_at``.
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Time-ordered snapshots (training window or full trajectory).
 
     Returns
@@ -73,7 +73,9 @@ def encode_sequence_latents(
     -----
     Rollout losses may reuse ``cache.z[start]`` as the origin latent but must
     **not** replace autoregressive advanced latents with teacher-forced
-    ``cache.z[t]`` after the first step.
+    ``cache.z[t]`` after the first step. Topology stays on the source
+    sequence (including multiplex relation banks); the cache stores only
+    latents.
     """
     latents = [
         encode_at_timestep(model, sequence, index)

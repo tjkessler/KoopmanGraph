@@ -3,16 +3,23 @@
 Capability layout
 -----------------
 ``containers``
-    ``GraphSnapshotSequence``.
+    ``GraphSnapshotSequence``, ``HeteroGraphSnapshotSequence``.
 ``construction``
     Array / dynamic-array / Hankel-window builders used by container
     classmethods. Power-user submodule; not promoted on this package
     ``__all__``.
 ``validation``
     Coercion and validation helpers for snapshot construction.
+``hetero_layout``
+    Stacked typed-node layout contract: ``node_type_slices``,
+    ``node_type_offsets``, ``latent_type_slices``, ``stack_typed_features`` /
+    ``unstack_typed_features``, ``offset_edge_index``,
+    ``global_relation_edge_indices``, ``snapshot_num_nodes_dict``, and
+    ``mask_hetero_snapshot_features``.
 ``trajectories``
     ``MultiTrajectory``, ``as_multi_trajectory``, ``resolve_sequence``,
-    and ``resolve_pair_delta_t``.
+    ``resolve_hetero_sequence``, ``SnapshotSequence``, and
+    ``resolve_pair_delta_t``.
 ``delay_windows``
     Hankel-style stack / flatten / observation-mask helpers shared by
     containers, ``nn.delay``, and model encode paths. Power-user submodule;
@@ -30,7 +37,21 @@ Capability layout
     Shared rollout-origin resolution for training and forecast evaluation.
 """
 
-from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.data.containers import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+)
+from koopman_graph.data.hetero_layout import (
+    global_relation_edge_indices,
+    latent_type_slices,
+    mask_hetero_snapshot_features,
+    node_type_offsets,
+    node_type_slices,
+    offset_edge_index,
+    snapshot_num_nodes_dict,
+    stack_typed_features,
+    unstack_typed_features,
+)
 from koopman_graph.data.rollout import (
     RolloutStartIndices,
     resolve_rollout_start_indices,
@@ -45,24 +66,38 @@ from koopman_graph.data.sampling import (
 from koopman_graph.data.splits import TemporalSplit, temporal_split
 from koopman_graph.data.trajectories import (
     MultiTrajectory,
+    SnapshotSequence,
     as_multi_trajectory,
+    resolve_hetero_sequence,
     resolve_pair_delta_t,
     resolve_sequence,
 )
 
 __all__ = [
     "GraphSnapshotSequence",
+    "HeteroGraphSnapshotSequence",
     "MultiTrajectory",
     "NeighborWindowSampler",
     "RolloutStartIndices",
+    "SnapshotSequence",
     "TemporalSplit",
     "WindowLikeSampler",
     "WindowOrigin",
     "WindowSampler",
     "as_multi_trajectory",
     "build_window_index_list",
+    "global_relation_edge_indices",
+    "latent_type_slices",
+    "mask_hetero_snapshot_features",
+    "node_type_offsets",
+    "node_type_slices",
+    "offset_edge_index",
+    "resolve_hetero_sequence",
     "resolve_pair_delta_t",
     "resolve_rollout_start_indices",
     "resolve_sequence",
+    "snapshot_num_nodes_dict",
+    "stack_typed_features",
     "temporal_split",
+    "unstack_typed_features",
 ]

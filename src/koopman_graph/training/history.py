@@ -10,9 +10,13 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence, MultiTrajectory
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    MultiTrajectory,
+)
 
 KnownDynamicsFn = Callable[[Data], Tensor]
 PDEResidualFn = Callable[[Tensor, Data], Tensor]
@@ -80,8 +84,14 @@ class LossWeights:
 LossWeightSchedule = Callable[[int], LossWeights]
 EarlyStoppingMonitor = Literal["auto", "train", "val"]
 LRSchedulerFactory = Callable[[Optimizer], LRScheduler]
-TrainingInput = GraphSnapshotSequence | MultiTrajectory | Sequence[Data]
-ValidationInput = GraphSnapshotSequence | MultiTrajectory | Sequence[Data] | None
+TrainingInput = (
+    GraphSnapshotSequence
+    | HeteroGraphSnapshotSequence
+    | MultiTrajectory
+    | Sequence[Data]
+    | Sequence[HeteroData]
+)
+ValidationInput = TrainingInput | None
 
 
 @dataclass(frozen=True)

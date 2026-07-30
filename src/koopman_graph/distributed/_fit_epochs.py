@@ -16,8 +16,8 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
 from koopman_graph.data import (
-    GraphSnapshotSequence,
     RolloutStartIndices,
+    SnapshotSequence,
     WindowLikeSampler,
     resolve_rollout_start_indices,
 )
@@ -45,7 +45,7 @@ UnwrapFn = Callable[[nn.Module], nn.Module]
 
 
 def resolve_distributed_window_sampler(
-    train_sequences: Sequence[GraphSnapshotSequence],
+    train_sequences: Sequence[SnapshotSequence],
     *,
     window_length: int | None,
     batch_size: int,
@@ -60,8 +60,8 @@ def resolve_distributed_window_sampler(
 
     Parameters
     ----------
-    train_sequences : sequence of GraphSnapshotSequence
-        Device-local training trajectories.
+    train_sequences : sequence of SnapshotSequence
+        Device-local homogeneous or multiplex training trajectories.
     window_length : int or None
         Window length when constructing a sampler.
     batch_size : int
@@ -124,7 +124,7 @@ def fit_epochs_distributed(
     trainable: TrainableKoopmanModel,
     train_module: nn.Module,
     *,
-    train_shard: Sequence[GraphSnapshotSequence],
+    train_shard: Sequence[SnapshotSequence],
     window_sampler: DistributedWindowSampler | None,
     optim: Optimizer,
     scheduler: LRScheduler | None,
@@ -141,7 +141,7 @@ def fit_epochs_distributed(
     early_stopping_patience: int | None,
     early_stopping_min_delta: float,
     early_stopping_monitor: Literal["train", "val"],
-    val_sequences: Sequence[GraphSnapshotSequence] | None,
+    val_sequences: Sequence[SnapshotSequence] | None,
     restore_best_weights: bool,
     checkpoint_path: str | Path | None,
     all_reduce_fn: AllReduceFn,
@@ -157,7 +157,7 @@ def fit_epochs_distributed(
         Model (possibly wrapped) passed to epoch helpers.
     train_module : nn.Module
         Same object as ``trainable`` for unwrap / checkpoint paths.
-    train_shard : sequence of GraphSnapshotSequence
+    train_shard : sequence of SnapshotSequence
         Per-rank full-sequence shard (ignored when ``window_sampler`` is set).
     window_sampler : DistributedWindowSampler or None
         Rank-aware window sampler when windowed.
@@ -178,8 +178,8 @@ def fit_epochs_distributed(
         Forwarded to epoch helpers (``use_amp``, ``amp_dtype``, ``grad_scaler``).
     early_stopping_patience, early_stopping_min_delta, early_stopping_monitor
         Early-stopping configuration (monitor must already be resolved).
-    val_sequences : sequence of GraphSnapshotSequence or None
-        Held-out trajectories.
+    val_sequences : sequence of SnapshotSequence or None
+        Held-out homogeneous or multiplex trajectories.
     restore_best_weights : bool
         Whether to leave best weights loaded at the end.
     checkpoint_path : str, Path, or None
