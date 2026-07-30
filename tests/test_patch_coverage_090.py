@@ -39,14 +39,23 @@ from koopman_graph.datasets.ieee118 import (
     homogeneous_features_to_typed_hetero,
     partition_buses_by_type,
 )
+from koopman_graph.graph_utils.propagation import (
+    autoregressive_hetero_latent_rollout,
+    pack_hetero_rollout_snapshots,
+)
 from koopman_graph.losses.rollout import (
     _bind_hetero_decoder,
     _hetero_rollout_step_loss,
     _multiplex_target_features,
     _relation_topology_at_from_targets,
     _typed_target_features,
+    rollout_sequence_loss,
 )
-from koopman_graph.model.factory import validate_typed_relgraph_peers
+from koopman_graph.model.factory import (
+    build_koopman,
+    resolve_model_components,
+    validate_typed_relgraph_peers,
+)
 from koopman_graph.model.validation import (
     uses_relgraph_modules,
     validate_sequence_hyperedges,
@@ -54,9 +63,11 @@ from koopman_graph.model.validation import (
 from koopman_graph.nn.heterogeneous import (
     HGTDecoder,
     RelGraphConv,
+    _lookup_typed_edge_index,
     _normalize_edge_type_order,
     _relgraph_message_passing,
     _resolve_hgt_activation,
+    _stack_typed_latents,
     resolve_hgt_typed_inputs,
     resolve_multiplex_relation_inputs,
     resolve_typed_relation_inputs,
@@ -1084,3 +1095,446 @@ def test_training_input_and_pair_objective_remaining_guards() -> None:
     )
     op.reset_parameters()
     assert op.num_relations == 1
+
+
+# ---------------------------------------------------------------------------
+# Fourth wave: Codecov still at 87.87% — convert remaining miss/partials
+# ---------------------------------------------------------------------------
+
+
+def test_hgt_activation_lookup_and_typed_edge_helpers() -> None:
+    """Hit HGT activation branches and typed edge-index lookup fallbacks."""
+    assert isinstance(_resolve_hgt_activation("sigmoid"), torch.nn.Sigmoid)
+    assert isinstance(_resolve_hgt_activation("tanh"), torch.nn.Tanh)
+
+    edge = torch.tensor([[0], [0]], dtype=torch.long)
+    assert torch.equal(
+        _lookup_typed_edge_index(
+            {("a", "r0", "b"): edge},
+            ("a", "r0", "b"),
+            expected_keys=(("a", "r0", "b"),),
+        ),
+        edge,
+    )
+
+    # Iterable non-tuple keys coerce via the fallback loop.
+    class _Triple:
+        def __iter__(self):
+            return iter(("a", "r0", "b"))
+
+        def __hash__(self) -> int:
+            return hash(("a", "r0", "b"))
+
+        def __eq__(self, other: object) -> bool:
+            return False
+
+    assert torch.equal(
+        _lookup_typed_edge_index(
+            {_Triple(): edge},
+            ("a", "r0", "b"),
+            expected_keys=(("a", "r0", "b"),),
+        ),
+        edge,
+    )
+    with pytest.raises(ValueError, match="missing edge type"):
+        _lookup_typed_edge_index(
+            {("a", "other", "b"): edge, 42: edge},
+            ("a", "r0", "b"),
+            expected_keys=(("a", "r0", "b"),),
+        )
+    with pytest.raises(ValueError, match="produced no embedding"):
+        _stack_typed_latents({"a": torch.randn(2, 2), "b": None}, ("a", "b"))
+
+    # Mapping topology path on HGTDecoder (num_nodes_dict present).
+    decoder = HGTDecoder(
+        latent_dim=2,
+        hidden_channels=4,
+        out_channels={"a": 2, "b": 2},
+        node_types=("a", "b"),
+        edge_types=(("a", "r0", "b"),),
+        num_layers=1,
+        heads=1,
+    )
+    edge_map = {
+        ("a", "r0", "b"): torch.tensor([[0, 1], [0, 1]], dtype=torch.long),
+    }
+    # Mapping + num_nodes_dict reaches the typed HGT bank path; HGTConv may
+    # omit source-type embeddings when only one directed relation is present.
+    with pytest.raises(ValueError, match="produced no embedding"):
+        decoder(
+            torch.randn(4, 2),
+            edge_map,
+            num_nodes_dict={"a": 2, "b": 2},
+        )
+
+    # Typed resolve with mapping + None edge_weight bank ordering.
+    feats = {"gen": torch.randn(2, 3), "load": torch.randn(3, 2)}
+    banks = {
+        ("gen", "feeds", "load"): torch.tensor([[0], [2]], dtype=torch.long),
+    }
+    _features, edges, weights, counts = resolve_typed_relation_inputs(
+        feats,
+        banks,
+        None,
+        num_relations=1,
+        node_types=("gen", "load"),
+        edge_types=(("gen", "feeds", "load"),),
+    )
+    assert counts == {"gen": 2, "load": 3}
+    assert weights == [None]
+    with pytest.raises(ValueError, match="Expected 2 edge types"):
+        resolve_typed_relation_inputs(
+            _typed_snapshot(),
+            num_relations=2,
+            node_types=("gen", "load"),
+            edge_types=None,
+        )
+    with pytest.raises(TypeError, match="expect HeteroData or a mapping"):
+        resolve_typed_relation_inputs(
+            torch.randn(2, 3),
+            num_relations=1,
+            node_types=("gen", "load"),
+            edge_types=(("gen", "feeds", "load"),),
+        )
+    with pytest.raises(ValueError, match="missing node type"):
+        resolve_typed_relation_inputs(
+            {"gen": torch.randn(2, 3)},
+            banks,
+            num_relations=1,
+            node_types=("gen", "load"),
+            edge_types=(("gen", "feeds", "load"),),
+        )
+    with pytest.raises(ValueError, match="must have shape"):
+        resolve_typed_relation_inputs(
+            {"gen": torch.randn(2), "load": torch.randn(3, 2)},
+            banks,
+            num_relations=1,
+            node_types=("gen", "load"),
+            edge_types=(("gen", "feeds", "load"),),
+        )
+
+
+def test_factory_and_operator_codecov_gap_guards() -> None:
+    """Cover factory RelGraph policy and hetero operator inverse/basis gaps."""
+    from unittest.mock import patch
+
+    enc = RelGraphEncoder(3, 4, 2, num_relations=1, num_layers=1)
+    dec = RelGraphDecoder(2, 4, 3, num_relations=1, num_layers=1)
+    with (
+        patch(
+            "koopman_graph.model.factory.resolve_delay_encoder",
+            side_effect=lambda encoder, n_delays: (encoder, n_delays),
+        ),
+        pytest.raises(ValueError, match="n_delays > 1"),
+    ):
+        resolve_model_components(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=1.0,
+            koopman="hetero_graph",
+            n_delays=2,
+            physics_position="concat",
+        )
+    physics_dec = RelGraphDecoder(3, 4, 3, num_relations=1, num_layers=1)
+    with pytest.raises(ValueError, match="physics-informed"):
+        resolve_model_components(
+            enc,
+            physics_dec,
+            latent_dim=3,
+            time_step=1.0,
+            koopman="hetero_graph",
+            physics_dim=1,
+            physics_lifting_fn=lambda features: features[:, :1],
+            physics_position="concat",
+        )
+    with pytest.raises(ValueError, match="requires RelGraphEncoder"):
+        resolve_model_components(
+            GNNEncoder(3, 4, 2),
+            GNNDecoder(2, 4, 3),
+            latent_dim=2,
+            time_step=1.0,
+            koopman=HeteroGraphKoopmanOperator(2, 1),
+            physics_position="concat",
+        )
+    bad_op = HeteroGraphKoopmanOperator(2, 2)
+    with pytest.raises(ValueError, match="num_relations"):
+        resolve_model_components(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=1.0,
+            koopman=bad_op,
+            physics_position="concat",
+        )
+    mismatched_norm = HeteroGraphKoopmanOperator(2, 1, normalization="random_walk")
+    with pytest.raises(ValueError, match="normalization"):
+        resolve_model_components(
+            enc,
+            dec,
+            latent_dim=2,
+            time_step=1.0,
+            koopman=mismatched_norm,
+            physics_position="concat",
+        )
+    from koopman_graph.model.factory import resolve_injected_koopman
+
+    with pytest.raises(ValueError, match="dynamics_mode='discrete'"):
+        resolve_injected_koopman(
+            HeteroGraphKoopmanOperator(2, 1),
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="continuous",
+            koopman_init_mode="identity_noise",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=None,
+        )
+    with pytest.raises(ValueError, match="koopman_auxiliary_hidden_dims"):
+        build_koopman(
+            koopman="hetero_graph",
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="discrete",
+            koopman_init_mode="identity",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=(4,),
+            num_relations=1,
+        )
+    with pytest.raises(ValueError, match="num_relations can be resolved"):
+        build_koopman(
+            koopman="hetero_graph",
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="discrete",
+            koopman_init_mode="identity",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=None,
+            num_relations=None,
+        )
+
+    # Sole non-default multiplex node type defaults edge types.
+    edges = _normalize_edge_types(None, node_types=("bus",), num_relations=2)
+    assert edges == (("bus", "r0", "bus"), ("bus", "r1", "bus"))
+
+    op = HeteroGraphKoopmanOperator(2, 1)
+    with pytest.raises(ValueError, match="_basis_modules"):
+        op._basis_modules()
+    with pytest.raises(IndexError, match="relation_index"):
+        op._assembled_relation_matrix(3)
+    with pytest.raises(ValueError, match="set_basis_factors"):
+        op.set_basis_factors([torch.eye(2)], torch.ones(1, 1))
+    basis_op = HeteroGraphKoopmanOperator(2, 2, relation_tying="basis", basis_size=1)
+    basis_op.reset_parameters()
+    with pytest.raises(ValueError, match="Expected 1 basis matrices"):
+        basis_op.set_basis_factors([torch.eye(2), torch.eye(2)], torch.ones(2, 1))
+    # Typed operator without num_nodes_dict.
+    typed_op = HeteroGraphKoopmanOperator(
+        2,
+        1,
+        node_types=("a", "b"),
+        edge_types=(("a", "r0", "b"),),
+    )
+    with pytest.raises(ValueError, match="requires num_nodes_dict"):
+        typed_op._require_num_nodes_dict(None, num_nodes=4, caller="test")
+    # Multiplex path validates supplied counts.
+    assert op._require_num_nodes_dict({"node": 3}, num_nodes=3, caller="test") == {
+        "node": 3
+    }
+
+    z = torch.randn(3, 2)
+    edges_bank = [torch.tensor([[0, 1], [1, 2]], dtype=torch.long)]
+    with pytest.raises(ValueError, match="edge_indices is required"):
+        op.inverse_advance(z)
+    with pytest.raises(ValueError, match="expects z with shape"):
+        op.inverse_advance(torch.randn(3), edge_indices=edges_bank)
+    recovered = op.inverse_advance(z, edge_indices=edges_bank)
+    assert recovered.shape == z.shape
+
+    ctrl_op = HeteroGraphKoopmanOperator(2, 1, control_dim=1, control_mode="bilinear")
+    with pytest.raises(ValueError, match="control input is required"):
+        ctrl_op._bilinear_self_factors(None, num_nodes=3)
+    with pytest.raises(ValueError, match="Per-node control"):
+        ctrl_op._bilinear_self_factors(torch.randn(2, 1), num_nodes=3)
+    with pytest.raises(ValueError, match="control input must have shape"):
+        ctrl_op._bilinear_self_factors(torch.randn(3, 2, 1), num_nodes=3)
+
+    # Typed block-diagonal inverse path.
+    bd = HeteroGraphKoopmanOperator(
+        2,
+        1,
+        node_types=("a", "b"),
+        edge_types=(("a", "r0", "b"),),
+        sparsity="block_diagonal",
+    )
+    typed_z = torch.randn(5, 2)
+    typed_edges = [torch.tensor([[0, 1], [2, 3]], dtype=torch.long)]
+    out = bd.inverse_advance(
+        typed_z,
+        edge_indices=typed_edges,
+        num_nodes_dict={"a": 2, "b": 3},
+    )
+    assert out.shape == typed_z.shape
+
+
+def test_estimator_propagation_rollout_and_objectives_gaps() -> None:
+    """Cover estimator hetero guards, pack/rollout helpers, and eig-reg gaps."""
+    model = _multiplex_model()
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        model._rollout_hetero(_multiplex_snapshot(), steps=0)
+    with pytest.raises(ValueError, match="step_deltas"):
+        model._rollout_hetero(
+            _multiplex_snapshot(),
+            steps=1,
+            step_deltas=[1.0, 2.0],
+        )
+    with pytest.raises(TypeError, match="_rollout is homogeneous-only"):
+        model._rollout(_multiplex_snapshot(), steps=1)
+    with pytest.raises(ValueError, match="history / delay embedding"):
+        model.predict(_multiplex_snapshot(), steps=1, history=torch.randn(1, 4, 3))
+    with pytest.raises(TypeError, match="requires a HeteroData origin"):
+        model.predict(torch.randn(4, 3), steps=1)
+
+    # Swap RelGraph peers for GNN modules after construction.
+    broken = _multiplex_model(num_relations=1)
+    broken.encoder = GNNEncoder(3, 8, 4)
+    broken.decoder = GNNDecoder(4, 8, 3)
+    with pytest.raises(TypeError, match="HeteroData forward requires"):
+        broken(_multiplex_snapshot())
+    with pytest.raises(TypeError, match="Hetero rollout requires RelGraphEncoder"):
+        broken._rollout_hetero(_multiplex_snapshot(), steps=1)
+
+    op = HeteroGraphKoopmanOperator(2, 1)
+    edges = [torch.tensor([[0, 1], [1, 0]], dtype=torch.long)]
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        autoregressive_hetero_latent_rollout(
+            op,
+            lambda z, *_a, **_k: z,
+            torch.randn(2, 2),
+            steps=0,
+            topology_at=lambda _s: (edges, [None]),
+        )
+    with pytest.raises(ValueError, match="at least one node type"):
+        pack_hetero_rollout_snapshots(
+            [(torch.randn(2, 2), edges, [None])],
+            template=_multiplex_snapshot(),
+            node_types=(),
+        )
+    multi_edges = [
+        torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+        torch.tensor([[0], [3]], dtype=torch.long),
+    ]
+    with pytest.raises(ValueError, match="Expected 2 relation banks"):
+        pack_hetero_rollout_snapshots(
+            [(torch.randn(4, 3), multi_edges[:1], [None])],
+            template=_multiplex_snapshot(),
+        )
+    packed = pack_hetero_rollout_snapshots(
+        [
+            (
+                torch.randn(4, 3),
+                multi_edges,
+                [torch.ones(2), None],
+            )
+        ],
+        template=_multiplex_snapshot(),
+    )
+    assert packed[0]["node", "r1", "node"].edge_weight is not None
+    with pytest.raises(ValueError, match="missing node types"):
+        pack_hetero_rollout_snapshots(
+            [({"gen": torch.randn(2, 3)}, edges, [None])],
+            template=_typed_snapshot(),
+        )
+
+    short = HeteroGraphSnapshotSequence([_multiplex_snapshot()])
+    with pytest.raises(ValueError, match="at least 2 snapshots"):
+        _hetero_eigenvalue_regularization_over_sequence(model, short)
+
+    # Hypergraph / continuous-graph eig-reg reject hetero sequences.
+    from koopman_graph.operators import (
+        ContinuousGraphKoopmanOperator,
+        HypergraphKoopmanOperator,
+    )
+
+    class _Fake:
+        dynamics_mode = "discrete"
+
+        def __init__(self, koopman: object) -> None:
+            self.koopman = koopman
+
+    hetero_seq = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(2)])
+    with pytest.raises(ValueError, match="homogeneous GraphSnapshotSequence"):
+        compute_eigenvalue_regularization_loss(
+            _Fake(ContinuousGraphKoopmanOperator(2)),  # type: ignore[arg-type]
+            hetero_seq,
+        )
+    with pytest.raises(ValueError, match="homogeneous GraphSnapshotSequence"):
+        compute_eigenvalue_regularization_loss(
+            _Fake(HypergraphKoopmanOperator(2)),  # type: ignore[arg-type]
+            hetero_seq,
+        )
+
+    # Rollout loss hetero guards.
+    controlled = HeteroGraphSnapshotSequence(
+        [_multiplex_snapshot() for _ in range(3)],
+        control_inputs=torch.randn(3, 1),
+    )
+    with pytest.raises(ValueError, match="uncontrolled"):
+        rollout_sequence_loss(model, controlled, start=0, horizon=1)
+
+    # Decoder-only num_relations / non-typed bind.
+    peer = SimpleNamespace(
+        koopman=SimpleNamespace(),
+        decoder=RelGraphDecoder(2, 4, 3, num_relations=2, num_layers=1),
+    )
+    assert _hetero_num_relations(peer) == 2  # type: ignore[arg-type]
+    bound = _bind_hetero_decoder(peer.decoder, None)
+    assert callable(bound)
+
+    # Masked multiplex prediction loss branch.
+    from koopman_graph.training.pair_objectives import _hetero_prediction_loss
+
+    pred = torch.randn(4, 3)
+    loss = _hetero_prediction_loss(
+        pred,
+        _multiplex_snapshot(),
+        node_types=None,
+        target_masks={"node": torch.ones(4, dtype=torch.bool)},
+    )
+    assert loss.ndim == 0
+
+    # container control_dim tensor / None branches on hetero sequence.
+    plain = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(2)])
+    assert plain.control_dim == 0
+    tensor_ctrl = HeteroGraphSnapshotSequence(
+        [_multiplex_snapshot() for _ in range(2)],
+        control_inputs=torch.randn(2, 1),
+    )
+    assert tensor_ctrl.control_dim == 1
+    node_ctrl = HeteroGraphSnapshotSequence(
+        [_multiplex_snapshot() for _ in range(2)],
+        control_inputs=torch.randn(2, 4, 1),
+    )
+    assert node_ctrl.control_dim == 1
+
+    # RelGraph stack TypeError for non-RelGraphConv layers.
+    enc = RelGraphEncoder(3, 4, 2, num_relations=1, num_layers=1)
+    enc.convs[0] = torch.nn.Linear(3, 4)  # type: ignore[assignment]
+    with pytest.raises(TypeError, match="expected RelGraphConv"):
+        _relgraph_message_passing(
+            enc,
+            torch.randn(3, 3),
+            [torch.tensor([[0, 1], [1, 0]], dtype=torch.long)],
+            [None],
+        )
