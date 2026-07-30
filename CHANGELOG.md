@@ -45,6 +45,8 @@ unchanged.
 - Deferred: per-type \(d_\tau\), auto reverse relations, continuous hetero
   operators, env / conformal / hierarchical hetero parity, joint structural
   certificates.
+- Zenodo version DOI:
+  [10.5281/zenodo.21711185](https://doi.org/10.5281/zenodo.21711185).
 
 ## [0.8.2] - 2026-07-28
 
