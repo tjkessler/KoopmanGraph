@@ -131,6 +131,31 @@ def test_assemble_grams_rejects_mismatched_or_empty() -> None:
         assemble_galerkin_grams(
             torch.zeros(2, 2), torch.zeros(2, 2), regularization=-1.0
         )
+    with pytest.raises(ValueError, match="2-D"):
+        assemble_galerkin_grams(torch.zeros(3), torch.zeros(3))
+    with pytest.raises(ValueError, match="dictionary dimension"):
+        assemble_galerkin_grams(torch.zeros(2, 0), torch.zeros(2, 0))
+
+
+def test_assemble_galerkin_grams_applies_regularization() -> None:
+    """Positive regularization adds Tikhonov mass to G00."""
+    psi0 = torch.eye(2, dtype=torch.float64)
+    psi1 = torch.diag(torch.tensor([0.5, 0.2], dtype=torch.float64))
+    grams = assemble_galerkin_grams(psi0, psi1, regularization=1e-2)
+    expected = psi0.mH @ psi0 + 1e-2 * torch.eye(2, dtype=torch.float64)
+    assert torch.allclose(grams.g00, expected, atol=_ATOL)
+
+
+def test_assemble_edmd_matrix_handles_singular_g00_and_extra_reg() -> None:
+    """Rank-deficient G00 uses pinv; extra regularization is applied."""
+    psi0 = torch.ones(5, 2, dtype=torch.float64)
+    psi1 = 0.5 * psi0
+    grams = assemble_galerkin_grams(psi0, psi1)
+    edmd = assemble_edmd_matrix(grams)
+    assert edmd.shape == (2, 2)
+    edmd_reg = assemble_edmd_matrix(grams, regularization=1e-2)
+    assert edmd_reg.shape == (2, 2)
+    assert not torch.allclose(edmd, edmd_reg, atol=1e-8)
 
 
 def test_galerkin_module_has_no_residuals_coupling() -> None:

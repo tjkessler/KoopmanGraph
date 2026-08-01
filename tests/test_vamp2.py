@@ -37,6 +37,21 @@ def _seeded_lag_features(
     return x, y
 
 
+def test_vamp2_score_rejects_invalid_inputs() -> None:
+    """Validation guards reject bad epsilon, shape, and sample counts."""
+    x, y = _seeded_lag_features()
+    with pytest.raises(ValueError, match="epsilon must be positive"):
+        vamp2_score(x, y, epsilon=0.0)
+    with pytest.raises(ValueError, match="2D"):
+        vamp2_score(x[:, 0], y[:, 0])
+    with pytest.raises(ValueError, match="share shape"):
+        vamp2_score(x, y[:, :3])
+    with pytest.raises(ValueError, match="at least 2 lag samples"):
+        vamp2_score(x[:1], y[:1])
+    with pytest.raises(ValueError, match="n_features must be positive"):
+        vamp2_score(torch.zeros(4, 0), torch.zeros(4, 0))
+
+
 def test_vamp2_score_finite_and_loss_negation() -> None:
     """Seeded lag pairs yield a finite positive score; loss is its negation."""
     x, y = _seeded_lag_features()

@@ -597,6 +597,154 @@ def test_edmd_baseline_rejects_invalid_dictionary_knobs() -> None:
             kernel="linear",
             kernel_approximation="random_features",
         )
+    with pytest.raises(ValueError, match="kernel_degree must be"):
+        EDMDBaseline(dictionary="kernel", kernel="polynomial", kernel_degree=0)
+    with pytest.raises(ValueError, match="kernel_gamma must be positive"):
+        EDMDBaseline(
+            dictionary="kernel",
+            kernel="polynomial",
+            kernel_gamma=0.0,
+        )
+    with pytest.raises(ValueError, match="num_features must be"):
+        EDMDBaseline(
+            dictionary="kernel",
+            kernel="gaussian",
+            kernel_approximation="random_features",
+            num_features=0,
+        )
+
+
+def test_edmd_require_reconstruction_matrix_when_cleared(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Clearing reconstruction_matrix after fit still fails the guard."""
+    baseline = EDMDBaseline().fit(_linear_fit_sequence(synthetic_edge_index))
+    baseline.reconstruction_matrix = None
+    with pytest.raises(RuntimeError, match="must be fit"):
+        baseline._require_reconstruction_matrix()
+
+
+def test_edmd_observables_before_fit_raise(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Observable lifts require fit state for RFF / centers / Nyström."""
+    states = flatten_snapshots(_linear_fit_sequence(synthetic_edge_index))
+    rff = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="random_features",
+    )
+    with pytest.raises(RuntimeError, match="random features are not available"):
+        rff._observables(states)
+
+    rbf = EDMDBaseline(dictionary="rbf")
+    with pytest.raises(RuntimeError, match="dictionary centers are not available"):
+        rbf._observables(states)
+
+    nystrom = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="nystrom",
+    )
+    nystrom.centers = states[:3].detach().clone()
+    with pytest.raises(RuntimeError, match="Nyström whitener is not available"):
+        nystrom._observables(states)
+
+
+def test_edmd_random_features_rejects_non_gaussian_kernel() -> None:
+    """RFF initialization supports Gaussian kernels only."""
+    baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="polynomial",
+        kernel_approximation="random_features",
+    )
+    with pytest.raises(ValueError, match="random_features currently supports"):
+        baseline._init_random_features(torch.randn(5, 2, dtype=torch.float64))
+
+
+def test_edmd_init_nystrom_whitener_requires_centers() -> None:
+    """Nyström whitener build requires landmark centers."""
+    baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="nystrom",
+    )
+    with pytest.raises(RuntimeError, match="landmark centers"):
+        baseline._init_nystrom_whitener()
+
+
+def test_edmd_select_centers_paths(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Center selection covers Nyström defaults and RFF early return."""
+    states = flatten_snapshots(_linear_fit_sequence(synthetic_edge_index))
+    rff_baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="random_features",
+    )
+    assert rff_baseline._select_centers(states) is None
+
+    nystrom_centers = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="nystrom",
+        num_centers=3,
+    )._select_centers(states)
+    assert nystrom_centers is not None
+    assert nystrom_centers.shape[0] == 3
+
+    nystrom_features = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="nystrom",
+        num_features=4,
+    )._select_centers(states)
+    assert nystrom_features is not None
+    assert nystrom_features.shape[0] == 4
+
+
+def test_edmd_feature_width_resolution() -> None:
+    """RFF width honors num_features or defaults to min(32, T)."""
+    explicit = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="random_features",
+        num_features=6,
+    )
+    assert explicit._feature_width(8) == 6
+    default = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="random_features",
+    )
+    assert default._feature_width(8) == 8
+    assert default._feature_width(100) == 32
+
+
+def test_edmd_polynomial_kernel_smoke(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """Polynomial kernel sections fit and roll out on a short sequence."""
+    states = [
+        torch.tensor([0.5 + 0.1 * t, 1.0 - 0.05 * t], dtype=torch.float64)
+        for t in range(6)
+    ]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+    baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="polynomial",
+        kernel_degree=2,
+        kernel_gamma=1.0,
+    ).fit(sequence)
+    assert baseline.K is not None
+    preds = baseline.predict(sequence[0], steps=1)
+    assert preds[0].x.shape == (2, 1)
 
 
 def test_edmd_nystrom_smoke(synthetic_edge_index: torch.Tensor) -> None:

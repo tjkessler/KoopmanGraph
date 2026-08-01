@@ -321,3 +321,86 @@ def test_homogeneous_orbit_path_unchanged_on_ring() -> None:
     edge_index = _cycle_edge_index(num_nodes)
     _ = op.advance(torch.randn(num_nodes, 2), edge_index=edge_index)
     assert op.orbit_partition == ((0, 1, 2, 3, 4, 5),)
+
+
+def test_typed_orbit_binding_validation_boundaries() -> None:
+    """Typed orbit binding validates operator mode and no-op configuration."""
+    multiplex = HeteroGraphKoopmanOperator(2, num_relations=1)
+    with pytest.raises(ValueError, match="requires a typed"):
+        multiplex.ensure_typed_orbit_binding(
+            [torch.empty((2, 0), dtype=torch.long)],
+            {"node": 2},
+        )
+
+    rectangular = HeteroGraphKoopmanOperator(
+        4,
+        num_relations=1,
+        node_types=_TYPED_NODE_TYPES,
+        edge_types=(("a", "to", "b"),),
+        latent_dims={"a": 2, "b": 3},
+        parameterization="dense",
+        sparsity="dense",
+    )
+    with pytest.raises(ValueError, match="unsupported for rectangular"):
+        rectangular.ensure_typed_orbit_binding(
+            [torch.tensor([[0], [2]], dtype=torch.long)],
+            {"a": 2, "b": 2},
+        )
+
+    typed = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=_TYPED_NODE_TYPES,
+        edge_types=(("a", "to", "b"),),
+    )
+    typed.ensure_typed_orbit_binding(
+        [torch.tensor([[0], [2]], dtype=torch.long)],
+        {"a": 2, "b": 2},
+    )
+    with pytest.raises(RuntimeError, match="requires auto_orbits=True"):
+        typed._bind_typed_auto_orbits(
+            [torch.tensor([[0], [2]], dtype=torch.long)],
+            {"a": 2, "b": 2},
+        )
+
+
+def test_typed_explicit_orbits_validate_ranges_and_bind() -> None:
+    """Explicit typed orbits reject outside nodes and bind valid partitions."""
+    outside = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=_TYPED_NODE_TYPES,
+        edge_types=(("a", "to", "b"),),
+        orbit_partition=((0, 1), (2, 3, 4)),
+    )
+    banks = [torch.tensor([[0], [2]], dtype=torch.long)]
+    with pytest.raises(ValueError, match="lies outside typed stacked ranges"):
+        outside.ensure_typed_orbit_binding(banks, {"a": 2, "b": 2})
+
+    valid = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=_TYPED_NODE_TYPES,
+        edge_types=(("a", "to", "b"),),
+        orbit_partition=((0, 1), (2, 3)),
+    )
+    valid.ensure_typed_orbit_binding(banks, {"a": 2, "b": 2})
+    valid.reset_parameters()
+    assert valid.uses_orbit_selves
+
+
+def test_typed_auto_orbits_handle_empty_intra_type_banks_and_reentry() -> None:
+    """Auto-orbits handle cross-type-only banks and ignore repeated binding."""
+    op = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=_TYPED_NODE_TYPES,
+        edge_types=(("a", "to", "b"),),
+        auto_orbits=True,
+    )
+    banks = [torch.tensor([[0], [2]], dtype=torch.long)]
+    counts = {"a": 2, "b": 2}
+    op.ensure_typed_orbit_binding(banks, counts)
+    partition = op.orbit_partition
+    op._bind_typed_auto_orbits(banks, counts)
+    assert op.orbit_partition == partition

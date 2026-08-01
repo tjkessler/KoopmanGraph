@@ -101,6 +101,17 @@ def test_graph_gradient_and_curvature_presets_preserve_shape_and_isolates() -> N
     assert curvature[2].item() == pytest.approx(0.0)
 
 
+def test_graph_lifts_reject_missing_or_malformed_features() -> None:
+    """Graph derivative lifts validate required two-dimensional node features."""
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    with pytest.raises(ValueError, match="data.x is required"):
+        graph_laplacian_features(Data(edge_index=edge_index))
+    with pytest.raises(ValueError, match="data.x is required"):
+        graph_gradient_features(Data(edge_index=edge_index))
+    with pytest.raises(ValueError, match="data.x must be 2D"):
+        graph_gradient_features(Data(x=torch.zeros(2), edge_index=edge_index))
+
+
 def test_graph_curvature_features_biharmonic_isolate_smoke() -> None:
     """Biharmonic curvature features ≈ L_sym² x; isolated nodes stay zero."""
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)

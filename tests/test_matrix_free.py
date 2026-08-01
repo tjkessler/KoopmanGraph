@@ -23,6 +23,11 @@ from koopman_graph.operators import (
     spectrum_k_eff_hetero,
     unflatten_node_latents,
 )
+from koopman_graph.operators.matrix_free import (
+    _arnoldi_eigs,
+    _invert_square_factor,
+    _richardson_invert,
+)
 
 _ATOL = 1e-5
 _SPECTRUM_ATOL = 1e-4
@@ -528,4 +533,113 @@ def test_spectrum_k_eff_graph_raises_when_tol_too_tight() -> None:
             num_modes=4,
             ncv=4,
             tol=1e-30,
+        )
+
+
+def test_apply_k_eff_graph_rejects_mismatched_factor_shapes() -> None:
+    """Square K factors must match latent_dim."""
+    with pytest.raises(ValueError, match="k_self must have shape"):
+        apply_k_eff_graph(
+            torch.zeros(4),
+            k_self=torch.ones(2, 3),
+            k_nbr=torch.eye(2),
+            edge_index=_cycle_edge_index(2),
+            num_nodes=2,
+        )
+    with pytest.raises(ValueError, match="k_nbr must have shape"):
+        apply_k_eff_graph(
+            torch.zeros(4),
+            k_self=torch.eye(2),
+            k_nbr=torch.eye(3),
+            edge_index=_cycle_edge_index(2),
+            num_nodes=2,
+        )
+
+
+def test_apply_k_eff_hetero_rejects_edge_weights_length_mismatch() -> None:
+    """Per-relation edge_weights must align with k_relations."""
+    with pytest.raises(ValueError, match="edge_weights length"):
+        apply_k_eff_hetero(
+            torch.zeros(4),
+            k_self=torch.eye(2),
+            k_relations=[torch.eye(2), torch.eye(2)],
+            edge_indices=[_cycle_edge_index(2), _cycle_edge_index(2)],
+            num_nodes=2,
+            edge_weights=[None],
+        )
+
+
+def test_invert_square_factor_validation() -> None:
+    """Preconditioner inversion rejects non-square and singular factors."""
+    with pytest.raises(ValueError, match="square 2-D matrix"):
+        _invert_square_factor(torch.zeros(2, 3))
+    with pytest.raises(ValueError, match="singular"):
+        _invert_square_factor(torch.zeros(2, 2))
+
+
+def test_richardson_invert_immediate_convergence() -> None:
+    """Zero initial residual returns without Richardson updates."""
+    rhs = torch.tensor([1.0, 2.0, 3.0])
+    result = _richardson_invert(
+        lambda x: x,
+        lambda residual: residual,
+        rhs,
+        max_iters=8,
+        tol=1e-6,
+        x0=rhs.clone(),
+    )
+    assert isinstance(result, MatrixFreeInverseResult)
+    assert result.converged
+    assert result.iterations == 0
+
+
+def test_arnoldi_eigs_rejects_invalid_parameters() -> None:
+    """Arnoldi helper validates dim, tol, num_modes, and ncv."""
+
+    def apply_k(flat: torch.Tensor) -> torch.Tensor:
+        return flat
+
+    with pytest.raises(ValueError, match="dim must be positive"):
+        _arnoldi_eigs(
+            apply_k,
+            0,
+            num_modes=1,
+            tol=1e-6,
+            ncv=1,
+            seed=0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+    with pytest.raises(ValueError, match="tol must be positive"):
+        _arnoldi_eigs(
+            apply_k,
+            4,
+            num_modes=1,
+            tol=0.0,
+            ncv=2,
+            seed=0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+    with pytest.raises(ValueError, match="ncv must be in"):
+        _arnoldi_eigs(
+            apply_k,
+            4,
+            num_modes=2,
+            tol=1e-6,
+            ncv=1,
+            seed=0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
+        )
+    with pytest.raises(ValueError, match="num_modes must be in"):
+        _arnoldi_eigs(
+            apply_k,
+            4,
+            num_modes=5,
+            tol=1e-6,
+            ncv=4,
+            seed=0,
+            device=torch.device("cpu"),
+            dtype=torch.float64,
         )

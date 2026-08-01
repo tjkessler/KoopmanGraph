@@ -613,3 +613,126 @@ def test_rectangular_mode_energy_type_fractions_sum_to_one() -> None:
     assert type_sum == pytest.approx(1.0, abs=1e-5)
     assert float(report.relation_fractions["to_b"][0]) >= 0.0
     assert float(report.relation_fractions["to_a"][0]) >= 0.0
+
+
+def test_rectangular_constructor_and_factor_validation_errors() -> None:
+    """Rectangular construction rejects incompatible modes and factor shapes."""
+    with pytest.raises(ValueError, match="sparsity='dense'"):
+        HeteroGraphKoopmanOperator(
+            SHARED_D,
+            num_relations=len(EDGE_TYPES),
+            node_types=NODE_TYPES,
+            edge_types=EDGE_TYPES,
+            latent_dims=LATENT_DIMS,
+            parameterization="dense",
+            sparsity="block_diagonal",
+        )
+    with pytest.raises(ValueError, match="multiplex latent_dims"):
+        HeteroGraphKoopmanOperator(
+            2,
+            num_relations=1,
+            latent_dims={"node": 3},
+        )
+
+    op = _rectangular_operator()
+    with pytest.raises(ValueError, match="typed_k_self_blocks is undefined"):
+        op.typed_k_self_blocks(NUM_NODES)
+    with pytest.raises(KeyError, match="unknown node type"):
+        op.d_for("missing")
+    with pytest.raises(ValueError, match="_relation_modules is undefined"):
+        op._relation_modules()
+    k_self, k_relations = _oracle_factors()
+    k_relations[0] = torch.zeros(3, 2)
+    with pytest.raises(ValueError, match=r"d_src×d_dst"):
+        op.set_dense_matrices(k_self, k_relations)
+
+
+def test_rectangular_latent_pack_unpack_validation_errors() -> None:
+    """Rectangular latent packing validates keys, block shapes, and flat length."""
+    op = _rectangular_operator()
+    latents = _oracle_typed_latents()
+    with pytest.raises(ValueError, match="keys must match"):
+        op.pack_typed_latents({"a": latents["a"]}, NUM_NODES)
+    with pytest.raises(ValueError, match="must have shape"):
+        op.pack_typed_latents(
+            {"a": torch.zeros(1, 2), "b": latents["b"]},
+            NUM_NODES,
+        )
+    with pytest.raises(ValueError, match="z_flat must have shape"):
+        op.unpack_typed_latents(torch.zeros(2), NUM_NODES)
+
+    shared = HeteroGraphKoopmanOperator(
+        SHARED_D,
+        num_relations=len(EDGE_TYPES),
+        node_types=NODE_TYPES,
+        edge_types=EDGE_TYPES,
+    )
+    flat = torch.arange(sum(NUM_NODES.values()) * SHARED_D, dtype=torch.float32)
+    unpacked = shared.unpack_typed_latents(flat, NUM_NODES)
+    assert unpacked["a"].shape == (NUM_NODES["a"], SHARED_D)
+    assert shared.d_for("a") == SHARED_D
+
+
+def test_rectangular_matrix_and_forward_validation_errors() -> None:
+    """Rectangular assembly and forward paths reject incompatible arguments."""
+    op = _rectangular_operator()
+    banks = _global_edges()
+    num_nodes = sum(NUM_NODES.values())
+    flat = op.pack_typed_latents(_oracle_typed_latents(), NUM_NODES)
+
+    with pytest.raises(ValueError, match="shared-d only"):
+        op._relation_coupling_matrix(
+            banks,
+            num_nodes,
+            [None, None],
+            dtype=torch.float32,
+            device=torch.device("cpu"),
+        )
+    with pytest.raises(ValueError, match="overrides are unsupported"):
+        op.effective_matrix(
+            banks,
+            num_nodes,
+            k_self=torch.eye(SHARED_D),
+            num_nodes_dict=NUM_NODES,
+        )
+    with pytest.raises(ValueError, match="requires num_nodes_dict"):
+        op.effective_matrix(banks, num_nodes)
+    with pytest.raises(ValueError, match="control is unsupported"):
+        op.forward(flat, banks, control=torch.zeros(1), num_nodes_dict=NUM_NODES)
+    with pytest.raises(ValueError, match="requires num_nodes_dict"):
+        op.forward(flat, banks)
+    with pytest.raises(ValueError, match="expects flat z"):
+        op.forward(torch.zeros(num_nodes, SHARED_D), banks, num_nodes_dict=NUM_NODES)
+
+
+def test_rectangular_inverse_validation_errors() -> None:
+    """Rectangular inverse requires flat uncontrolled latents and type counts."""
+    op = _rectangular_operator()
+    banks = _global_edges()
+    flat = op.pack_typed_latents(_oracle_typed_latents(), NUM_NODES)
+    with pytest.raises(ValueError, match="control is unsupported"):
+        op.inverse_advance(
+            flat,
+            edge_indices=banks,
+            control=torch.zeros(1),
+            num_nodes_dict=NUM_NODES,
+        )
+    with pytest.raises(ValueError, match="requires num_nodes_dict"):
+        op.inverse_advance(flat, edge_indices=banks)
+    with pytest.raises(ValueError, match="expects flat z"):
+        op.inverse_advance(
+            torch.zeros(sum(NUM_NODES.values()), SHARED_D),
+            edge_indices=banks,
+            num_nodes_dict=NUM_NODES,
+        )
+
+
+def test_rectangular_bound_metric_includes_relation_norms() -> None:
+    """Rectangular factor monitoring includes self and rectangular relation norms."""
+    op = _rectangular_operator()
+    k_self, k_relations = _oracle_factors()
+    k_relations[0] = 3.0 * torch.ones_like(k_relations[0])
+    op.set_dense_matrices(k_self, k_relations)
+    assert float(op.bound_metric().detach()) >= float(
+        torch.linalg.matrix_norm(k_relations[0], ord=2)
+    )

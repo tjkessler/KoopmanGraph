@@ -22,6 +22,19 @@ def _sequence_from_scalar_states(values: list[float]) -> GraphSnapshotSequence:
     return GraphSnapshotSequence(snaps)
 
 
+def test_ulam_rejects_invalid_bins_per_dim() -> None:
+    """Constructor rejects non-positive bin counts."""
+    with pytest.raises(ValueError, match="bins_per_dim must be >= 1"):
+        UlamTransferOperatorBaseline(bins_per_dim=0)
+
+
+def test_ulam_rejects_single_snapshot_sequence() -> None:
+    """Fit requires at least two snapshots."""
+    sequence = _sequence_from_scalar_states([0.5])
+    with pytest.raises(ValueError, match="at least two snapshots"):
+        UlamTransferOperatorBaseline().fit(sequence)
+
+
 def test_ulam_recovers_deterministic_bin_cycle() -> None:
     """Deterministic cell-to-cell jumps recover a cyclic transfer matrix."""
     # Four well-separated scalars → four bins; always advance to the next cell.
@@ -97,6 +110,65 @@ def test_ulam_export_and_not_on_root_all() -> None:
     assert "UlamTransferOperatorBaseline" in baselines_pkg.__all__
     assert baselines_pkg.UlamTransferOperatorBaseline is UlamTransferOperatorBaseline
     assert "UlamTransferOperatorBaseline" not in set(koopman_graph.__all__)
+
+
+def test_ulam_uniform_fallback_for_unvisited_source_cells() -> None:
+    """Rows with no outgoing mass receive uniform transition probabilities."""
+    sequence = _sequence_from_scalar_states([0.0, 0.0, 0.0, 1.0])
+    baseline = UlamTransferOperatorBaseline(bins_per_dim=2).fit(sequence)
+    assert baseline.P is not None
+    # Cell 1 never appears as a transition source; row should be uniform.
+    assert float(baseline.P[1].sum()) == pytest.approx(1.0, abs=1e-12)
+    assert torch.allclose(
+        baseline.P[1],
+        torch.full((2,), 0.5, dtype=torch.float64),
+        atol=1e-12,
+    )
+
+
+def test_ulam_propagate_density_validation() -> None:
+    """propagate_density rejects invalid steps and rho width."""
+    sequence = _sequence_from_scalar_states([0.0, 1.0, 0.0, 1.0])
+    baseline = UlamTransferOperatorBaseline(bins_per_dim=2).fit(sequence)
+    rho0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        baseline.propagate_density(rho0, steps=0)
+    with pytest.raises(ValueError, match="rho trailing dimension"):
+        baseline.propagate_density(torch.ones(3), steps=1)
+
+
+def test_ulam_predict_rejects_invalid_steps() -> None:
+    """predict rejects non-positive rollout horizons."""
+    sequence = _sequence_from_scalar_states([0.0, 1.0, 0.0, 1.0])
+    baseline = UlamTransferOperatorBaseline(bins_per_dim=2).fit(sequence)
+    with pytest.raises(ValueError, match="steps must be >= 1"):
+        baseline.predict(sequence[0], steps=0)
+
+
+def test_ulam_require_transfer_when_p_cleared() -> None:
+    """_require_transfer raises when the transfer matrix was cleared."""
+    sequence = _sequence_from_scalar_states([0.0, 1.0, 0.0, 1.0])
+    baseline = UlamTransferOperatorBaseline(bins_per_dim=2).fit(sequence)
+    baseline.P = None
+    with pytest.raises(RuntimeError, match="must be fit"):
+        baseline._require_transfer()
+
+
+def test_ulam_multidimensional_state_bin_assignment() -> None:
+    """Two-dimensional flattened states use the product grid cell index."""
+    edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+    snaps = [
+        Data(x=torch.tensor([[0.0, 0.0]], dtype=torch.float64), edge_index=edge_index),
+        Data(x=torch.tensor([[1.0, 0.0]], dtype=torch.float64), edge_index=edge_index),
+        Data(x=torch.tensor([[0.0, 1.0]], dtype=torch.float64), edge_index=edge_index),
+        Data(x=torch.tensor([[1.0, 1.0]], dtype=torch.float64), edge_index=edge_index),
+    ]
+    baseline = UlamTransferOperatorBaseline(bins_per_dim=2).fit(
+        GraphSnapshotSequence(snaps)
+    )
+    assert baseline.n_cells == 4
+    assert baseline.P is not None
+    assert torch.isfinite(baseline.P).all()
 
 
 def test_ulam_predict_requires_fit() -> None:

@@ -16,9 +16,14 @@ from koopman_graph.analysis import (
     MAX_JOINT_LYAPUNOV_SIZE,
     MAX_JOINT_SCHUR_SIZE,
     JointStabilityCertificate,
+    build_joint_stability_certificate,
     gershgorin_radius_bound,
     lyapunov_joint_bound,
     schur_radius_bound,
+)
+from koopman_graph.analysis.joint_stability import (
+    joint_certificate_from_assembled,
+    require_joint_assembled_size,
 )
 from koopman_graph.operators import GraphKoopmanOperator, HeteroGraphKoopmanOperator
 
@@ -310,3 +315,31 @@ def test_stability_certificate_rejects_unknown_kind() -> None:
     op = GraphKoopmanOperator(2, init_mode="identity")
     with pytest.raises(ValueError, match="kind must be one of"):
         op.stability_certificate(edge_index, num_nodes=2, kind="bogus")
+
+
+def test_joint_certificate_helpers_reject_invalid_kinds_and_sizes() -> None:
+    """Public helper boundaries reject unknown kinds and non-positive sizes."""
+    with pytest.raises(ValueError, match="kind must be one of"):
+        build_joint_stability_certificate(torch.tensor(0.5), kind="bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must be positive"):
+        require_joint_assembled_size(0, kind="gershgorin")
+    with pytest.raises(ValueError, match="kind must be one of"):
+        require_joint_assembled_size(2, kind="bogus")  # type: ignore[arg-type]
+
+
+def test_joint_matrix_helpers_reject_empty_and_complex_lyapunov_inputs() -> None:
+    """Joint matrix helpers reject empty matrices and complex Lyapunov systems."""
+    with pytest.raises(ValueError, match="requires n ≥ 1"):
+        gershgorin_radius_bound(torch.empty((0, 0)))
+    with pytest.raises(ValueError, match="requires a real"):
+        lyapunov_joint_bound(torch.eye(2, dtype=torch.complex64))
+
+
+def test_joint_certificate_dispatches_gershgorin_and_rejects_unknown_kind() -> None:
+    """Assembled certificate dispatch covers the default and invalid branches."""
+    matrix = torch.tensor([[0.5, 0.2], [0.0, 0.4]])
+    cert = joint_certificate_from_assembled(matrix, kind="gershgorin")
+    assert cert.kind == "gershgorin"
+    assert float(cert.bound) == pytest.approx(0.7, abs=_ATOL)
+    with pytest.raises(ValueError, match="kind must be one of"):
+        joint_certificate_from_assembled(matrix, kind="bogus")  # type: ignore[arg-type]

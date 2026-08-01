@@ -122,3 +122,91 @@ def test_hodge_honesty_docs() -> None:
     assert "sheaf" in source
     assert "not" in source
     assert "l_1" in source or "b_1" in source
+
+
+def test_face_index_validation_edge_cases() -> None:
+    """Face validation handles invalid node counts, empty faces, and float ids."""
+    with pytest.raises(ValueError, match="num_nodes must be"):
+        coerce_face_index(torch.empty((3, 0), dtype=torch.long), num_nodes=0)
+    empty = torch.empty((3, 0), dtype=torch.int32)
+    coerced = coerce_face_index(empty, num_nodes=2)
+    assert coerced.dtype == torch.long
+    assert coerced.shape == (3, 0)
+    with pytest.raises(ValueError, match="integer tensor"):
+        coerce_face_index(torch.zeros((3, 1)), num_nodes=2)
+
+
+def test_boundary_incidence_validation_and_degenerate_edges() -> None:
+    """Incidence validates its domain and handles empty edges and self-loops."""
+    with pytest.raises(ValueError, match="num_nodes must be"):
+        boundary_incidence_b1(torch.empty((2, 0), dtype=torch.long), num_nodes=0)
+    with pytest.raises(ValueError, match="shape \\(2, num_edges\\)"):
+        boundary_incidence_b1(torch.empty((3, 0), dtype=torch.long), num_nodes=2)
+    with pytest.raises(ValueError, match="lie in"):
+        boundary_incidence_b1(torch.tensor([[0], [2]]), num_nodes=2)
+
+    empty = boundary_incidence_b1(
+        torch.empty((2, 0), dtype=torch.long),
+        num_nodes=2,
+    )
+    self_loop = boundary_incidence_b1(torch.tensor([[1], [1]]), num_nodes=2)
+    assert empty.shape == (2, 0)
+    assert torch.count_nonzero(self_loop) == 0
+
+
+def test_simplicial_matvec_rejects_invalid_shapes() -> None:
+    """The simplicial matvec requires a matching two-dimensional node signal."""
+    edge_index = torch.empty((2, 0), dtype=torch.long)
+    with pytest.raises(ValueError, match="x must be 2D"):
+        simplicial_one_laplacian_matvec(edge_index, torch.zeros(2))
+    with pytest.raises(ValueError, match="does not match"):
+        simplicial_one_laplacian_matvec(
+            edge_index,
+            torch.zeros(2, 1),
+            num_nodes=3,
+        )
+
+
+@pytest.mark.parametrize(
+    ("lift", "data", "message"),
+    [
+        (
+            simplicial_one_laplacian_features,
+            Data(edge_index=torch.empty((2, 0), dtype=torch.long)),
+            "data.x is required",
+        ),
+        (
+            simplicial_one_laplacian_features,
+            Data(x=torch.zeros(2), edge_index=torch.empty((2, 0), dtype=torch.long)),
+            "data.x must be 2D",
+        ),
+        (
+            simplicial_one_laplacian_features,
+            Data(x=torch.zeros(2, 1)),
+            "data.edge_index is required",
+        ),
+        (
+            hodge_gradient_features,
+            Data(edge_index=torch.empty((2, 0), dtype=torch.long)),
+            "data.x is required",
+        ),
+        (
+            hodge_gradient_features,
+            Data(x=torch.zeros(2), edge_index=torch.empty((2, 0), dtype=torch.long)),
+            "data.x must be 2D",
+        ),
+        (
+            hodge_gradient_features,
+            Data(x=torch.zeros(2, 1)),
+            "data.edge_index is required",
+        ),
+    ],
+)
+def test_hodge_lifts_reject_missing_or_malformed_inputs(
+    lift: object,
+    data: Data,
+    message: str,
+) -> None:
+    """Hodge lifts report missing features, rank errors, and missing topology."""
+    with pytest.raises(ValueError, match=message):
+        lift(data)  # type: ignore[operator]
