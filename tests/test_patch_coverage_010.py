@@ -455,8 +455,8 @@ def test_factory_stochastic_attachment_and_continuous_hetero_guards() -> None:
 
 def test_baseline_validation_and_dead_eigenvalue_branch() -> None:
     """Optimized and streaming DMD validate iterations and vector ranks."""
-    left = torch.zeros(3, 2)
-    right = torch.zeros(3, 2)
+    left = torch.randn(6, 2)
+    right = torch.randn(6, 2)
     with pytest.raises(ValueError, match="max_iter must be >= 1"):
         fit_opt_row_operator(left, right, None, max_iter=0)
     operator = fit_opt_row_operator(left, right, None, max_iter=1)

@@ -19,6 +19,8 @@ DDP / Fabric for multi-GPU *model* training.
 from __future__ import annotations
 
 import importlib
+import os
+import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -31,6 +33,19 @@ _RAY_INSTALL_HINT = 'pip install "koopman-graph[ray]"'
 # Avoid importing ``koopman_graph.model`` here — ``GraphKoopmanModel.fit``
 # lazy-imports this package and a top-level model import would cycle.
 MemberFactory = Callable[[], Any]
+
+
+def _prefer_driver_interpreter_for_uv_run() -> None:
+    """Disable Ray's ``uv run`` worker rewrite when unset.
+
+    Under ``uv run --no-sync`` after ``uv sync``, Ray's default UV runtime-env
+    hook rewrites workers as ``uv run ... python`` and can miss the synced
+    project environment (``ModuleNotFoundError: ray``). Prefer the driver
+    interpreter via :func:`_ray_init_kwargs` instead.
+
+    Must run before ``import ray`` so Ray reads the flag at import time.
+    """
+    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
 
 def _import_ray() -> Any:
@@ -46,6 +61,7 @@ def _import_ray() -> Any:
     ImportError
         If Ray is not installed.
     """
+    _prefer_driver_interpreter_for_uv_run()
     try:
         return importlib.import_module("ray")
     except ImportError as exc:
@@ -54,6 +70,28 @@ def _import_ray() -> Any:
             f"install with: {_RAY_INSTALL_HINT}"
         )
         raise ImportError(msg) from exc
+
+
+def _ray_init_kwargs(
+    *,
+    ray_address: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build ``ray.init`` kwargs that keep workers on the driver interpreter.
+
+    Pinning ``runtime_env['py_executable']`` to :data:`sys.executable` keeps
+    local workers aligned with the driver when Ray's ``uv run`` rewrite is
+    disabled (see :func:`_prefer_driver_interpreter_for_uv_run`).
+    """
+    _prefer_driver_interpreter_for_uv_run()
+    kwargs: dict[str, Any] = {
+        "ignore_reinit_error": True,
+        "runtime_env": {"py_executable": sys.executable},
+    }
+    if ray_address is not None:
+        kwargs["address"] = ray_address
+    kwargs.update(extra)
+    return kwargs
 
 
 def _fit_member_task(
@@ -177,10 +215,7 @@ def fit_ensemble_with_ray(
 
     ray = _import_ray()
     if not ray.is_initialized():
-        init_kwargs: dict[str, Any] = {"ignore_reinit_error": True}
-        if ray_address is not None:
-            init_kwargs["address"] = ray_address
-        ray.init(**init_kwargs)
+        ray.init(**_ray_init_kwargs(ray_address=ray_address))
 
     data_ref = ray.put(data_sequence)
     remote_fit = ray.remote(_fit_member_task)

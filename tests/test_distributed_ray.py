@@ -195,7 +195,7 @@ def test_fit_ensemble_with_ray_default_seeds_and_init(
         ray_address="auto",
         epochs=1,
     )
-    assert captured["init"] == {"ignore_reinit_error": True, "address": "auto"}
+    assert captured["init"] == mod._ray_init_kwargs(ray_address="auto")
     assert len(state_dicts) == 2
     assert len(histories) == 2
     # Default seeds are 0 and 1 when omitted.
@@ -212,7 +212,7 @@ def test_fit_ensemble_with_ray_default_seeds_and_init(
         num_members=1,
         epochs=1,
     )
-    assert captured["init"] == {"ignore_reinit_error": True}
+    assert captured["init"] == mod._ray_init_kwargs()
     assert len(state_dicts) == 1
     assert len(histories) == 1
 
@@ -221,9 +221,10 @@ def test_fit_ensemble_with_ray_two_members_finite_histories() -> None:
     """Ray path fits two members with finite losses under a local runtime."""
     ray = pytest.importorskip("ray")
     from koopman_graph.distributed import fit_ensemble_with_ray
+    from koopman_graph.distributed.ray_jobs import _ray_init_kwargs
 
     if not ray.is_initialized():
-        ray.init(num_cpus=2, ignore_reinit_error=True)
+        ray.init(**_ray_init_kwargs(num_cpus=2))
 
     factory = _make_member_factory()
     sequence = _tiny_sequence()

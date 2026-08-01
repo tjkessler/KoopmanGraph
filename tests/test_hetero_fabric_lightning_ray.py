@@ -200,9 +200,10 @@ def test_fit_ensemble_with_ray_hetero_two_members() -> None:
     """Ray ensemble members accept multiplex inputs once single-process fit does."""
     ray = pytest.importorskip("ray")
     from koopman_graph.distributed import fit_ensemble_with_ray
+    from koopman_graph.distributed.ray_jobs import _ray_init_kwargs
 
     if not ray.is_initialized():
-        ray.init(num_cpus=2, ignore_reinit_error=True)
+        ray.init(**_ray_init_kwargs(num_cpus=2))
 
     factory = _make_hetero_member_factory()
     state_dicts, histories = fit_ensemble_with_ray(
