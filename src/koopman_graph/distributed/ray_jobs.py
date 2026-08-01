@@ -43,6 +43,8 @@ def _prefer_driver_interpreter_for_uv_run() -> None:
     project environment (``ModuleNotFoundError: ray``). Prefer the driver
     interpreter via :func:`_ray_init_kwargs` instead.
 
+    Notes
+    -----
     Must run before ``import ray`` so Ray reads the flag at import time.
     """
     os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
@@ -82,6 +84,18 @@ def _ray_init_kwargs(
     Pinning ``runtime_env['py_executable']`` to :data:`sys.executable` keeps
     local workers aligned with the driver when Ray's ``uv run`` rewrite is
     disabled (see :func:`_prefer_driver_interpreter_for_uv_run`).
+
+    Parameters
+    ----------
+    ray_address : str or None, optional
+        Optional Ray cluster address forwarded as ``address=...``.
+    **extra
+        Additional ``ray.init`` keyword arguments (for example ``num_cpus``).
+
+    Returns
+    -------
+    dict of str to object
+        Keyword arguments suitable for ``ray.init(**kwargs)``.
     """
     _prefer_driver_interpreter_for_uv_run()
     kwargs: dict[str, Any] = {
