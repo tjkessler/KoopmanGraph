@@ -19,12 +19,12 @@ from collections.abc import Iterator, Sequence
 
 import torch
 
-from koopman_graph.data import SnapshotSequence
 from koopman_graph.data.sampling import (
     WindowOrigin,
     as_trajectory_list,
     build_window_index_list,
 )
+from koopman_graph.data.trajectories import SnapshotSequence
 from koopman_graph.distributed.process import get_rank, get_world_size
 
 __all__ = [

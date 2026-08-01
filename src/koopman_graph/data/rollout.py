@@ -7,13 +7,13 @@ from typing import Literal
 
 import torch
 
-from koopman_graph.data.containers import GraphSnapshotSequence
+from koopman_graph.data.trajectories import SnapshotSequence
 
 RolloutStartIndices = Sequence[int] | Literal["all"] | None
 
 
 def resolve_rollout_start_indices(
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence,
     *,
     horizon: int,
     rollout_start_indices: RolloutStartIndices = None,
@@ -25,7 +25,7 @@ def resolve_rollout_start_indices(
 
     Parameters
     ----------
-    sequence : GraphSnapshotSequence
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Snapshot sequence used for rollout.
     horizon : int
         Rollout horizon in steps.

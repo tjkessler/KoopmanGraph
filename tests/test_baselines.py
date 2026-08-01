@@ -581,6 +581,80 @@ def test_edmd_baseline_rejects_invalid_dictionary_knobs() -> None:
         EDMDBaseline(dictionary="kernel", kernel="laplacian")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="num_centers must be >= 1"):
         EDMDBaseline(dictionary="rbf", num_centers=0)
+    with pytest.raises(ValueError, match="kernel_approximation must be"):
+        EDMDBaseline(
+            dictionary="kernel",
+            kernel_approximation="foo",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="dictionary='kernel'"):
+        EDMDBaseline(
+            dictionary="polynomial",
+            kernel_approximation="nystrom",
+        )
+    with pytest.raises(ValueError, match="non-linear kernel"):
+        EDMDBaseline(
+            dictionary="kernel",
+            kernel="linear",
+            kernel_approximation="random_features",
+        )
+
+
+def test_edmd_nystrom_smoke(synthetic_edge_index: torch.Tensor) -> None:
+    """Nyström kernel EDMD fits and rolls out on a short sequence."""
+    states = [
+        torch.tensor([0.5 + 0.1 * t, 1.0 - 0.05 * t], dtype=torch.float64)
+        for t in range(8)
+    ]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+    baseline = EDMDBaseline(
+        dictionary="kernel",
+        kernel="gaussian",
+        kernel_approximation="nystrom",
+        num_features=4,
+        length_scale=2.0,
+    ).fit(sequence)
+    assert baseline.centers is not None
+    assert baseline.centers.shape[0] == 4
+    assert baseline.observable_dim == 4
+    assert baseline.K is not None
+    preds = baseline.predict(sequence[0], steps=1)
+    assert preds[0].x.shape == (2, 1)
+
+
+def test_edmd_random_features_seeded_reproducible(
+    synthetic_edge_index: torch.Tensor,
+) -> None:
+    """RFF kernel EDMD is deterministic for a fixed ``feature_seed``."""
+    states = [
+        torch.tensor([0.5 + 0.1 * t, 1.0 - 0.05 * t], dtype=torch.float64)
+        for t in range(8)
+    ]
+    sequence = _sequence_from_states(
+        states,
+        synthetic_edge_index,
+        num_nodes=2,
+        in_channels=1,
+    )
+    kwargs = {
+        "dictionary": "kernel",
+        "kernel": "gaussian",
+        "kernel_approximation": "random_features",
+        "num_features": 8,
+        "feature_seed": 42,
+        "length_scale": 1.5,
+    }
+    left = EDMDBaseline(**kwargs).fit(sequence)  # type: ignore[arg-type]
+    right = EDMDBaseline(**kwargs).fit(sequence)  # type: ignore[arg-type]
+    assert left.K is not None and right.K is not None
+    assert torch.allclose(left.K, right.K, atol=1e-12)
+    assert left.observable_dim == 8
+    preds = left.predict(sequence[0], steps=1)
+    assert preds[0].x.shape == (2, 1)
 
 
 def test_edmd_rbf_dictionary_smoke(

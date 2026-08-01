@@ -141,10 +141,41 @@ def test_block_diagonal_shares_dense_forward() -> None:
     assert torch.allclose(dense(z, edge_indices), block(z, edge_indices), atol=_ATOL)
 
 
-def test_rejects_distributed_sparsity() -> None:
-    """Reserved sparsity='distributed' raises at construction."""
-    with pytest.raises(ValueError, match="distributed"):
-        HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+def test_distributed_sparsity_constructs() -> None:
+    """sparsity='distributed' constructs for multiplex hetero."""
+    op = HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+    assert op.sparsity == "distributed"
+
+
+def test_distributed_spectrum_and_inverse_smoke() -> None:
+    """Distributed hetero spectrum / inverse agree with dense on modest N·d."""
+    num_nodes = 4
+    latent_dim = 2
+    edge_indices = _two_relation_banks(num_nodes)
+    dense = HeteroGraphKoopmanOperator(
+        latent_dim, num_relations=2, init_mode="identity", sparsity="dense"
+    )
+    distributed = HeteroGraphKoopmanOperator(
+        latent_dim, num_relations=2, init_mode="identity", sparsity="distributed"
+    )
+    k_self = torch.tensor([[0.7, 0.1], [0.0, 0.6]])
+    k_relations = [
+        torch.tensor([[0.2, 0.0], [0.05, 0.15]]),
+        torch.tensor([[0.0, 0.1], [0.1, 0.0]]),
+    ]
+    dense.set_dense_matrices(k_self, k_relations)
+    distributed.set_dense_matrices(k_self, k_relations)
+
+    num_modes = 3
+    dense_abs = dense.spectrum(edge_indices, num_nodes).eigenvalues.abs()[:num_modes]
+    dist_spec = distributed.spectrum(edge_indices, num_nodes, num_modes=num_modes)
+    assert dist_spec.eigenvalues.shape == (num_modes,)
+    assert torch.allclose(dist_spec.eigenvalues.abs(), dense_abs, atol=1e-4)
+
+    z = torch.randn(num_nodes, latent_dim)
+    y = dense.advance(z, edge_indices=edge_indices)
+    recovered = distributed.inverse_advance(y, edge_indices=edge_indices)
+    assert torch.allclose(recovered, z, atol=_INV_ATOL)
 
 
 def test_advance_requires_edge_indices() -> None:

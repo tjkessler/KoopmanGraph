@@ -1,11 +1,14 @@
 """Shared scaffolding for classical DMD-family baselines.
 
 Module-level helpers (``require_static_topology``, ``flatten_snapshots``,
-``fit_row_operator``, ``fit_controlled_row_operator``,
-``require_global_controls``, ``transition_controls``, ``copy_topology``,
-``check_initial_graph``, ``optimal_hard_threshold_rank``) are documented
-non-private power-user symbols for classical and GNN baseline peers. They
-are not re-exported from package or root ``__all__``.
+``fit_row_operator``, ``fit_fb_row_operator``, ``fit_tls_row_operator``,
+``fit_opt_row_operator``, ``streaming_gram_init``, ``streaming_gram_update``,
+``streaming_gram_solve``,
+``fit_controlled_row_operator``, ``require_global_controls``,
+``transition_controls``, ``copy_topology``, ``check_initial_graph``,
+``optimal_hard_threshold_rank``) are documented non-private power-user
+symbols for classical and GNN baseline peers. They are not re-exported
+from package or root ``__all__``.
 """
 
 from __future__ import annotations
@@ -287,6 +290,298 @@ def fit_row_operator(left: Tensor, right: Tensor, rank: RankSpec) -> Tensor:
     vh_r = vh[:resolved, :]
     solution = vh_r.T @ ((u_r.T @ right) / s_r.unsqueeze(1))
     return solution.T
+
+
+def _principal_matrix_sqrt_aligned(matrix: Tensor, reference: Tensor) -> Tensor:
+    """Principal matrix square root with eigenvalue signs aligned to ``reference``.
+
+    Parameters
+    ----------
+    matrix : Tensor
+        Square matrix whose square root is required (typically
+        ``K_forward @ inv(K_backward)``).
+    reference : Tensor
+        Forward operator used to resolve ``±√λ`` branch choices.
+
+    Returns
+    -------
+    Tensor
+        Real square-root matrix with the same dtype as ``matrix``.
+    """
+    working = matrix.to(dtype=torch.complex128)
+    eigenvalues, eigenvectors = torch.linalg.eig(working)
+    sqrt_eig = torch.sqrt(eigenvalues)
+    ref_eigs = torch.linalg.eigvals(reference.to(dtype=torch.complex128))
+    aligned = []
+    for value in sqrt_eig:
+        distance_pos = torch.min(torch.abs(value - ref_eigs))
+        distance_neg = torch.min(torch.abs(-value - ref_eigs))
+        aligned.append(value if distance_pos <= distance_neg else -value)
+    sqrt_matrix = (
+        eigenvectors @ torch.diag(torch.stack(aligned)) @ torch.linalg.inv(eigenvectors)
+    )
+    return sqrt_matrix.real.to(dtype=matrix.dtype)
+
+
+def fit_fb_row_operator(left: Tensor, right: Tensor, rank: RankSpec) -> Tensor:
+    """Fit a forward–backward DMD operator in the package row convention.
+
+    Fits forward and backward least-squares maps, forms
+    ``M = K_f @ inv(K_b)``, and returns a principal matrix square root of
+    ``M`` with eigenvalue signs aligned to ``K_f``. The result ``K``
+    satisfies ``x_next = x @ K.T``.
+
+    Parameters
+    ----------
+    left : Tensor
+        Source states with shape ``(num_samples, state_dim)``.
+    right : Tensor
+        Target states with shape ``(num_samples, state_dim)``.
+    rank : int or None or {"auto"}
+        Truncation for each directional fit (same semantics as
+        :func:`fit_row_operator`).
+
+    Returns
+    -------
+    Tensor
+        Forward–backward Koopman matrix ``K`` with shape
+        ``(state_dim, state_dim)``.
+
+    Raises
+    ------
+    ValueError
+        If ``rank`` is invalid or ``K_b`` is singular.
+    """
+    k_forward = fit_row_operator(left, right, rank)
+    k_backward = fit_row_operator(right, left, rank)
+    try:
+        composed = k_forward @ torch.linalg.inv(k_backward)
+    except RuntimeError as exc:
+        msg = "forward-backward DMD requires an invertible backward operator"
+        raise ValueError(msg) from exc
+    return _principal_matrix_sqrt_aligned(composed, k_forward)
+
+
+def fit_tls_row_operator(left: Tensor, right: Tensor, rank: RankSpec) -> Tensor:
+    """Fit a total-least-squares DMD operator in the package row convention.
+
+    Stacks column-oriented snapshot matrices, takes a truncated SVD of the
+    joint matrix, and forms ``K = U_y @ pinv(U_x)`` so that
+    ``x_next = x @ K.T``.
+
+    Parameters
+    ----------
+    left : Tensor
+        Source states with shape ``(num_samples, state_dim)``.
+    right : Tensor
+        Target states with shape ``(num_samples, state_dim)``.
+    rank : int or None or {"auto"}
+        Truncation rank for the joint SVD. ``None`` uses ``state_dim``
+        (signal subspace). ``"auto"`` / integers follow
+        :func:`resolve_fit_rank` on ``left``, clamped to ``state_dim``.
+
+    Returns
+    -------
+    Tensor
+        TLS Koopman matrix ``K`` with shape ``(state_dim, state_dim)``.
+
+    Raises
+    ------
+    ValueError
+        If ``rank`` is invalid, shapes disagree, or the truncated
+        ``U_x`` block is rank-deficient.
+    """
+    if left.shape != right.shape:
+        msg = (
+            f"left and right must share shape, got {tuple(left.shape)} and "
+            f"{tuple(right.shape)}"
+        )
+        raise ValueError(msg)
+    if left.ndim != 2:
+        msg = f"left/right must be 2-D, got shape {tuple(left.shape)}"
+        raise ValueError(msg)
+
+    resolved = resolve_fit_rank(left, rank)
+    state_dim = left.shape[1]
+    x_columns = left.T
+    y_columns = right.T
+    stacked = torch.cat([x_columns, y_columns], dim=0)
+    # Exact linear dynamics live in an at-most-``state_dim`` joint subspace;
+    # truncating to ``min(stacked.shape)`` pulls in a null space and collapses K.
+    max_rank = min(state_dim, min(stacked.shape))
+    truncated_rank = max_rank if resolved is None else min(resolved, max_rank)
+    if truncated_rank < 1:
+        msg = f"TLS DMD truncation rank must be >= 1, got {truncated_rank}"
+        raise ValueError(msg)
+
+    u, _, _ = torch.linalg.svd(stacked, full_matrices=False)
+    u_r = u[:, :truncated_rank]
+    u_x = u_r[:state_dim, :]
+    u_y = u_r[state_dim:, :]
+    try:
+        return u_y @ torch.linalg.pinv(u_x)
+    except RuntimeError as exc:
+        msg = "TLS DMD failed: truncated U_x block is rank-deficient"
+        raise ValueError(msg) from exc
+
+
+def fit_opt_row_operator(
+    left: Tensor,
+    right: Tensor,
+    rank: RankSpec,
+    *,
+    max_iter: int = 20,
+) -> Tensor:
+    """Fit an optimized-DMD operator via light variable projection.
+
+    Initializes from :func:`fit_row_operator`, refines eigenvalues with a
+    damped amplitude-ratio update against a Vandermonde-in-time model, and
+    rebuilds ``K = Φ Λ pinv(Φ)`` in the package row convention. This is an
+    MVP solver for tiny sequences — not a full research-grade optDMD
+    implementation.
+
+    Parameters
+    ----------
+    left : Tensor
+        Source states with shape ``(num_samples, state_dim)``.
+    right : Tensor
+        Target states with shape ``(num_samples, state_dim)``.
+    rank : int or None or {"auto"}
+        Truncation for the exact-DMD initialization.
+    max_iter : int, optional
+        Maximum variable-projection refinement iterations. Default is ``20``.
+
+    Returns
+    -------
+    Tensor
+        Optimized Koopman matrix ``K`` with shape ``(state_dim, state_dim)``.
+
+    Raises
+    ------
+    ValueError
+        If ``rank`` / ``max_iter`` is invalid.
+    """
+    if max_iter < 1:
+        msg = f"max_iter must be >= 1, got {max_iter}"
+        raise ValueError(msg)
+    k0 = fit_row_operator(left, right, rank)
+    resolved = resolve_fit_rank(left, rank)
+    states = torch.cat([left[:1], right], dim=0)
+    snapshot_matrix = states.T.contiguous()
+    state_dim, num_timesteps = snapshot_matrix.shape
+    truncation = state_dim if resolved is None else min(resolved, state_dim)
+    eigenvalues = torch.linalg.eigvals(k0.to(dtype=torch.complex128))
+    order = torch.argsort(eigenvalues.abs(), descending=True)
+    lam = eigenvalues[order[:truncation]].clone()
+    times = torch.arange(
+        num_timesteps,
+        dtype=torch.float64,
+        device=snapshot_matrix.device,
+    )
+    data = snapshot_matrix.to(dtype=torch.complex128)
+    for _ in range(max_iter):
+        vandermonde = lam.unsqueeze(1) ** times.to(dtype=lam.dtype).unsqueeze(0)
+        modes = data @ torch.linalg.pinv(vandermonde)
+        coefficients = torch.linalg.pinv(modes) @ data
+        updated = []
+        for index in range(lam.shape[0]):
+            previous = coefficients[index, :-1]
+            nxt = coefficients[index, 1:]
+            mask = previous.abs() > 1e-12
+            if bool(mask.any()):
+                updated.append((nxt[mask] / previous[mask]).mean())
+            else:
+                updated.append(lam[index])
+        lam = 0.5 * lam + 0.5 * torch.stack(updated)
+
+    vandermonde = lam.unsqueeze(1) ** times.to(dtype=lam.dtype).unsqueeze(0)
+    modes = data @ torch.linalg.pinv(vandermonde)
+    operator = modes @ torch.diag(lam) @ torch.linalg.pinv(modes)
+    return operator.real.to(dtype=left.dtype)
+
+
+def streaming_gram_init(
+    state_dim: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[Tensor, Tensor]:
+    """Allocate zero Gram accumulators for online least-squares DMD.
+
+    Parameters
+    ----------
+    state_dim : int
+        Flattened state dimension.
+    dtype : torch.dtype
+        Accumulator dtype.
+    device : torch.device
+        Accumulator device.
+
+    Returns
+    -------
+    tuple of Tensor
+        ``(M, N)`` zero matrices with shape ``(state_dim, state_dim)``.
+    """
+    gram = torch.zeros(state_dim, state_dim, dtype=dtype, device=device)
+    cross = torch.zeros(state_dim, state_dim, dtype=dtype, device=device)
+    return gram, cross
+
+
+def streaming_gram_update(
+    gram: Tensor,
+    cross: Tensor,
+    source: Tensor,
+    target: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Accumulate one transition into online least-squares Gram matrices.
+
+    Maintains ``M = Σ x xᵀ`` and ``N = Σ x yᵀ`` for later
+    :func:`streaming_gram_solve`.
+
+    Parameters
+    ----------
+    gram : Tensor
+        Accumulator ``M`` with shape ``(state_dim, state_dim)``.
+    cross : Tensor
+        Accumulator ``N`` with shape ``(state_dim, state_dim)``.
+    source : Tensor
+        Source state vector ``(state_dim,)``.
+    target : Tensor
+        Target state vector ``(state_dim,)``.
+
+    Returns
+    -------
+    tuple of Tensor
+        Updated ``(gram, cross)``.
+    """
+    if source.ndim != 1 or target.ndim != 1:
+        msg = "source/target must be 1-D state vectors"
+        raise ValueError(msg)
+    gram = gram + torch.outer(source, source)
+    cross = cross + torch.outer(source, target)
+    return gram, cross
+
+
+def streaming_gram_solve(gram: Tensor, cross: Tensor) -> Tensor:
+    """Solve for row-convention ``K`` from Gram accumulators.
+
+    Uses least squares so early rank-deficient accumulators remain well
+    defined; with enough independent pairs the result matches batch DMD.
+
+    Parameters
+    ----------
+    gram : Tensor
+        Accumulator ``M`` with shape ``(state_dim, state_dim)``.
+    cross : Tensor
+        Accumulator ``N`` with shape ``(state_dim, state_dim)``.
+
+    Returns
+    -------
+    Tensor
+        Operator ``K`` with shape ``(state_dim, state_dim)``.
+    """
+    operator_t = torch.linalg.lstsq(gram, cross).solution
+    return operator_t.T
 
 
 def fit_controlled_row_operator(

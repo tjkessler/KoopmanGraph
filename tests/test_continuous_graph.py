@@ -169,10 +169,12 @@ def test_factory_aliases_and_validation() -> None:
             dynamics_mode="discrete",
             koopman="continuous_graph",
         )
-    with pytest.raises(ValueError, match="distributed"):
-        ContinuousGraphKoopmanOperator(3, sparsity="distributed")
+    dist = ContinuousGraphKoopmanOperator(3, sparsity="distributed")
+    assert dist.sparsity == "distributed"
     with pytest.raises(ValueError, match="auxiliary_spectral"):
         ContinuousGraphKoopmanOperator(3, parameterization="auxiliary_spectral")
+    with pytest.raises(ValueError, match="must be 'dense'"):
+        ContinuousGraphKoopmanOperator(3, sparsity="bogus")  # type: ignore[arg-type]
 
 
 def test_spectrum_requires_topology() -> None:

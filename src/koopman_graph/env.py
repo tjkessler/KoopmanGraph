@@ -13,24 +13,40 @@ For optional dependencies that are not base classes (e.g. ``h5py`` in METR-LA
 loaders), prefer a call-site ``import`` that raises ``ImportError`` with the
 same install-guidance style. Never fail the core package import for an optional
 extra.
+
+Heterogeneous observation layout
+--------------------------------
+For ``koopman="hetero_graph"`` models the observation is the row-major
+flatten of the latent state. Shared-d path: stacked block ``Z`` with shape
+``(N, d)`` where ``N = Σ_τ N_τ``;
+:meth:`GraphKoopmanEnv.reshape_observation` restores ``(N, d)``. Opt-in
+unequal ``d_τ`` (``latent_dims``): flat vector of length ``Σ_τ N_τ·d_τ``
+(same C-order type blocks as :mod:`koopman_graph.data.hetero_layout`);
+reshape restores that 1-D layout.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 import torch
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.data import GraphSnapshotSequence, HeteroGraphSnapshotSequence
+from koopman_graph.data.hetero_layout import stack_typed_features, stacked_latent_numel
 from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.graph_utils import (
     advance_and_decode,
+    propagate_latent,
     snapshot_edge_weight,
     snapshot_to_device,
+)
+from koopman_graph.nn.heterogeneous import (
+    resolve_multiplex_relation_inputs,
+    resolve_typed_relation_inputs,
 )
 from koopman_graph.protocols import ModeShapeModel
 
@@ -41,7 +57,9 @@ except ImportError:  # pragma: no cover - exercised in test_env_requires_gymnasi
     gym = None  # type: ignore[assignment,misc]
     spaces = None  # type: ignore[assignment,misc]
 
-RewardFn = Callable[[Data, int], float]
+SnapshotLike = Data | HeteroData
+RewardFn = Callable[[SnapshotLike, int], float]
+ReferenceSequence = GraphSnapshotSequence | HeteroGraphSnapshotSequence
 
 _GYMNASIUM_IMPORT_ERROR = (
     "Gymnasium is required for GraphKoopmanEnv. "
@@ -73,13 +91,13 @@ def flatten_latent(z: Tensor) -> np.ndarray:
     Parameters
     ----------
     z : Tensor
-        Latent node features with shape ``(num_nodes, latent_dim)``.
+        Shared-d latents ``(num_nodes, latent_dim)``, or rectangular flat
+        latents ``(Σ N_τ·d_τ,)``.
 
     Returns
     -------
     ndarray
-        Observation vector with shape ``(num_nodes * latent_dim,)`` and
-        dtype ``float32``.
+        Observation vector (``float32``) with length ``z.numel()``.
     """
     return z.detach().cpu().numpy().astype(np.float32, copy=False).reshape(-1)
 
@@ -89,28 +107,59 @@ def unflatten_latent(
     *,
     num_nodes: int,
     latent_dim: int,
+    obs_numel: int | None = None,
 ) -> Tensor:
-    """Reshape a flattened observation back to node latent features.
+    """Reshape a flattened observation back to latent features.
 
     Parameters
     ----------
     observation : ndarray
         Flattened latent vector.
     num_nodes : int
-        Number of graph nodes.
+        Number of graph nodes (stacked ``Σ_τ N_τ`` when hetero).
     latent_dim : int
-        Latent feature dimension per node.
+        Shared latent width ``d`` (ignored when ``obs_numel`` is set for
+        rectangular layouts).
+    obs_numel : int or None, optional
+        When set (rectangular ``Σ N_τ·d_τ``), validate against this length
+        and return a 1-D tensor of that size instead of ``(N, d)``.
 
     Returns
     -------
     Tensor
-        Latent tensor with shape ``(num_nodes, latent_dim)``.
+        Latent tensor with shape ``(num_nodes, latent_dim)`` or ``(obs_numel,)``.
     """
+    if obs_numel is not None:
+        if observation.size != obs_numel:
+            msg = (
+                f"expected flattened observation size {obs_numel}, "
+                f"got {observation.size}"
+            )
+            raise ValueError(msg)
+        return torch.from_numpy(np.asarray(observation, dtype=np.float32).reshape(-1))
     expected = num_nodes * latent_dim
     if observation.size != expected:
         msg = f"expected flattened observation size {expected}, got {observation.size}"
         raise ValueError(msg)
     return torch.from_numpy(observation.reshape(num_nodes, latent_dim))
+
+
+def _reference_num_nodes(sequence: ReferenceSequence) -> int:
+    """Return stacked node count for observation sizing.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Reference trajectory.
+
+    Returns
+    -------
+    int
+        ``N`` (homo / multiplex) or ``Σ_τ N_τ`` (typed hetero).
+    """
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        return int(sequence.num_nodes_total)
+    return int(sequence.num_nodes)
 
 
 class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[misc]
@@ -132,6 +181,20 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     linear control interface while rewards are defined on interpretable physical
     states.
 
+    Heterogeneous models (``koopman="hetero_graph"``) use
+    :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` references.
+    Shared-d observations flatten ``(Σ_τ N_τ) · d`` in the operator
+    ``node_types`` order; :meth:`reshape_observation` restores ``(N, d)``.
+    With opt-in ``latent_dims`` (unequal ``d_τ``), the observation length is
+    ``Σ_τ N_τ·d_τ`` and reshape restores the flat 1-D layout (see module
+    ``Heterogeneous observation layout``). This documents the Gymnasium
+    vector layout only; it does not imply type-balanced rewards or certified
+    control performance. Rewards receive decoded ``HeteroData`` snapshots;
+    there is no silent cast to homogeneous ``Data``. Typed operators
+    currently reject ``control_dim > 0``, so controlled typed envs are
+    unavailable until that operator support lands; multiplex controlled
+    hetero envs work today.
+
     **Limitations.** Rewards see decoded states that depend on a frozen
     encoder/decoder trained offline. Global controls with shape
     ``(control_dim,)`` are supported; per-node action spaces are not. Topology
@@ -145,13 +208,15 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     ----------
     model : GraphKoopmanModel
         Trained controlled model with ``control_dim > 0``.
-    reference_sequence : GraphSnapshotSequence
+    reference_sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
         Sequence supplying reset snapshots and fixed episode topology.
-        Must have ``is_dynamic_topology=False``.
+        Must have ``is_dynamic_topology=False``. Container type must match
+        the model (homo vs hetero).
     reward_fn : callable
         ``reward_fn(decoded_snapshot, step_index) -> float`` where
-        ``decoded_snapshot`` is a PyG ``Data`` object with physical node
-        features and ``step_index`` counts environment steps since ``reset``.
+        ``decoded_snapshot`` is a PyG ``Data`` (homogeneous) or
+        ``HeteroData`` (hetero) object with physical node features and
+        ``step_index`` counts environment steps since ``reset``.
     control_low : float or sequence of float, optional
         Lower bounds for the action space. Default is ``-1.0``.
     control_high : float or sequence of float, optional
@@ -182,7 +247,7 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     def __init__(
         self,
         model: ModeShapeModel,
-        reference_sequence: GraphSnapshotSequence,
+        reference_sequence: ReferenceSequence,
         reward_fn: RewardFn,
         *,
         control_low: float | Sequence[float] = -1.0,
@@ -195,42 +260,29 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     ) -> None:
         """Initialize the latent-space Gymnasium environment.
 
-        See the class docstring for parameter descriptions.
-
         Parameters
         ----------
-
-        model : GraphKoopmanModel
-            See the function signature / summary for ``model``.
-        reference_sequence : GraphSnapshotSequence
-            See the function signature / summary for ``reference_sequence``.
-        reward_fn : RewardFn
-            See the function signature / summary for ``reward_fn``.
-        control_low : float | Sequence[float]
-            See the function signature / summary for ``control_low``.
-        control_high : float | Sequence[float]
-            See the function signature / summary for ``control_high``.
-        max_episode_steps : int
-            See the function signature / summary for ``max_episode_steps``.
-        start_index : int | None
-            See the function signature / summary for ``start_index``.
-        random_start : bool
-            See the function signature / summary for ``random_start``.
-        delta_t : float | None
-            See the function signature / summary for ``delta_t``.
-        device : torch.device | str | None
-            See the function signature / summary for ``device``.
-
-        Raises
-        ------
-
-        TypeError
-            If ``model`` is not a :class:`~koopman_graph.model.GraphKoopmanModel`.
-        ValueError
-            If ``control_dim`` is zero, ``reference_sequence`` has dynamic
-            topology, or arguments are invalid.
-        ImportError
-            If Gymnasium is not installed."""
+        model
+            Value for ``model``.
+        reference_sequence
+            Value for ``reference_sequence``.
+        reward_fn
+            Value for ``reward_fn``.
+        control_low
+            Value for ``control_low``.
+        control_high
+            Value for ``control_high``.
+        max_episode_steps
+            Value for ``max_episode_steps``.
+        start_index
+            Value for ``start_index``.
+        random_start
+            Value for ``random_start``.
+        delta_t
+            Value for ``delta_t``.
+        device
+            Value for ``device``.
+        """
         _require_gymnasium()
         # Duck-type against the ModeShapeModel / trainable façade surface so
         # ``env`` does not import ``koopman_graph.model`` (import cycle).
@@ -246,21 +298,37 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         if not all(hasattr(model, name) for name in required):
             msg = "model must provide GraphKoopmanModel encode/decode/koopman surface"
             raise TypeError(msg)
-        if model.control_dim <= 0:
-            msg = "GraphKoopmanEnv requires model.control_dim > 0"
+        uses_hetero = bool(getattr(model, "uses_hetero_koopman", False))
+        rectangular_zero_control = (
+            uses_hetero
+            and bool(getattr(model.koopman, "is_rectangular", False))
+            and int(model.control_dim) == 0
+        )
+        if model.control_dim < 0:
+            msg = f"model.control_dim must be non-negative, got {model.control_dim}"
             raise ValueError(msg)
-        if getattr(model, "uses_hetero_koopman", False):
+        if model.control_dim == 0 and not rectangular_zero_control:
             msg = (
-                "GraphKoopmanEnv is homogeneous-only; multiplex / "
-                "koopman='hetero_graph' models are not supported yet"
+                "GraphKoopmanEnv requires model.control_dim > 0 "
+                "(control_dim=0 is allowed only for rectangular hetero "
+                "observation smokes)"
+            )
+            raise ValueError(msg)
+
+        seq_is_hetero = isinstance(reference_sequence, HeteroGraphSnapshotSequence)
+        if uses_hetero and not seq_is_hetero:
+            msg = (
+                "hetero GraphKoopmanEnv requires HeteroGraphSnapshotSequence "
+                "reference_sequence"
             )
             raise TypeError(msg)
-        if isinstance(reference_sequence, HeteroGraphSnapshotSequence):
+        if not uses_hetero and seq_is_hetero:
             msg = (
-                "GraphKoopmanEnv is homogeneous-only; "
-                "HeteroGraphSnapshotSequence is not supported yet"
+                "homogeneous GraphKoopmanEnv cannot use "
+                "HeteroGraphSnapshotSequence reference_sequence"
             )
             raise TypeError(msg)
+
         if reference_sequence.num_timesteps < 1:
             msg = "reference_sequence must contain at least one snapshot"
             raise ValueError(msg)
@@ -311,10 +379,41 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
             if device is not None
             else next(model.parameters()).device
         )
+        self._uses_hetero = uses_hetero
 
-        self.num_nodes = reference_sequence.num_nodes
+        self.num_nodes = _reference_num_nodes(reference_sequence)
         self.latent_dim = model.latent_dim
         self.control_dim = model.control_dim
+        self._latent_dims: dict[str, int] | None = None
+        self._is_rectangular = False
+        if uses_hetero:
+            koopman = model.koopman
+            self.node_type_names: tuple[str, ...] = tuple(koopman.node_types)
+            self._edge_types: tuple[tuple[str, str, str], ...] = tuple(
+                tuple(edge_type) for edge_type in koopman.edge_types
+            )
+            if isinstance(reference_sequence, HeteroGraphSnapshotSequence):
+                self._num_nodes_dict: dict[str, int] | None = dict(
+                    reference_sequence.num_nodes_dict
+                )
+            else:  # pragma: no cover - guarded above
+                self._num_nodes_dict = None
+            latent_dims = getattr(koopman, "latent_dims", None)
+            is_rectangular = bool(getattr(koopman, "is_rectangular", False))
+            if is_rectangular:
+                if self._num_nodes_dict is None or latent_dims is None:
+                    msg = (
+                        "rectangular hetero GraphKoopmanEnv requires "
+                        "HeteroGraphSnapshotSequence.num_nodes_dict and "
+                        "operator.latent_dims"
+                    )
+                    raise ValueError(msg)
+                self._latent_dims = dict(latent_dims)
+                self._is_rectangular = True
+        else:
+            self.node_type_names = ()
+            self._edge_types = ()
+            self._num_nodes_dict = None
 
         control_low_arr = np.full(self.control_dim, control_low, dtype=np.float32)
         control_high_arr = np.full(self.control_dim, control_high, dtype=np.float32)
@@ -338,7 +437,17 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         self._control_low = control_low_arr
         self._control_high = control_high_arr
 
-        obs_size = self.num_nodes * self.latent_dim
+        if self._is_rectangular:
+            assert self._num_nodes_dict is not None
+            assert self._latent_dims is not None
+            obs_size = stacked_latent_numel(
+                self.node_type_names,
+                self._num_nodes_dict,
+                self._latent_dims,
+            )
+        else:
+            obs_size = self.num_nodes * self.latent_dim
+        self._obs_numel = int(obs_size)
         self.observation_space = spaces.Box(  # type: ignore[union-attr]
             low=-np.inf,
             high=np.inf,
@@ -353,6 +462,9 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
 
         self._edge_index: Tensor | None = None
         self._edge_weight: Tensor | None = None
+        self._edge_indices: list[Tensor] | None = None
+        self._edge_weights: list[Tensor | None] | None = None
+        self._topology_template: HeteroData | None = None
         self._latent: Tensor | None = None
         self._step_count = 0
         self._start_index = 0
@@ -362,9 +474,9 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
     def _freeze_model(self) -> None:
         """Freeze encoder/decoder and run the model in eval mode.
 
-        Returns
-        -------
-        None
+        Notes
+        -----
+        Internal helper with no parameters.
         """
         self.model.eval()
         for parameter in self.model.encoder.parameters():
@@ -373,7 +485,11 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
             parameter.requires_grad_(False)
 
     def reshape_observation(self, observation: np.ndarray) -> Tensor:
-        """Reshape a flattened observation to ``(num_nodes, latent_dim)``.
+        """Reshape a flattened observation to model latent layout.
+
+        Shared-d: ``(num_nodes, latent_dim)``. Rectangular hetero: flat
+        ``(Σ N_τ·d_τ,)``. See the module ``Heterogeneous observation layout``
+        section.
 
         Parameters
         ----------
@@ -383,12 +499,13 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         Returns
         -------
         Tensor
-            Node latent features.
+            Latent features matching model ``encode`` layout.
         """
         return unflatten_latent(
             observation,
             num_nodes=self.num_nodes,
             latent_dim=self.latent_dim,
+            obs_numel=self._obs_numel if self._is_rectangular else None,
         )
 
     def reset(
@@ -412,7 +529,7 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         tuple
             ``(observation, info)`` where ``observation`` is a flattened latent
             vector and ``info`` contains ``step_index``, ``start_index``, and
-            ``decoded_x`` (physical node features as a NumPy array).
+            decoded physical features (see :meth:`_build_info`).
         """
         super().reset(seed=seed)
         options = options or {}
@@ -435,14 +552,22 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
             start_index = 0
 
         snapshot = self.reference_sequence[start_index]
-        self._edge_index = snapshot.edge_index.to(self._device)
-        self._edge_weight = snapshot_edge_weight(snapshot)
-        if self._edge_weight is not None:
-            self._edge_weight = self._edge_weight.to(self._device)
-
         with torch.no_grad():
             snapshot_device = snapshot_to_device(snapshot, self._device)
-            self._latent = self.model.encode(snapshot_device)
+            if self._uses_hetero:
+                assert isinstance(snapshot_device, HeteroData)
+                self._cache_hetero_topology(snapshot_device)
+                self._latent = self.model.encode(snapshot_device)
+            else:
+                assert isinstance(snapshot_device, Data)
+                self._edge_index = snapshot_device.edge_index
+                self._edge_weight = snapshot_edge_weight(snapshot_device)
+                if self._edge_weight is not None:
+                    self._edge_weight = self._edge_weight.to(self._device)
+                self._edge_indices = None
+                self._edge_weights = None
+                self._topology_template = None
+                self._latent = self.model.encode(snapshot_device)
 
         self._step_count = 0
         self._start_index = start_index
@@ -475,30 +600,57 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         Latent advance uses the environment's ``delta_t`` (or
         ``model.time_step`` when unset). Continuous models integrate the
         generator over that interval; discrete models always take one
-        ``K``-step.
+        ``K``-step. Hetero models advance with cached relation banks.
         """
-        if self._latent is None or self._edge_index is None:
+        if self._latent is None:
+            msg = "reset() must be called before step()"
+            raise RuntimeError(msg)
+        if self._uses_hetero:
+            if self._edge_indices is None:
+                msg = "reset() must be called before step()"
+                raise RuntimeError(msg)
+        elif self._edge_index is None:
             msg = "reset() must be called before step()"
             raise RuntimeError(msg)
 
         clipped = np.clip(action, self._control_low, self._control_high)
-        control = torch.as_tensor(
-            clipped,
-            dtype=self._latent.dtype,
-            device=self._device,
-        )
+        control: Tensor | None
+        if self.control_dim == 0:
+            control = None
+        else:
+            control = torch.as_tensor(
+                clipped,
+                dtype=self._latent.dtype,
+                device=self._device,
+            )
 
         with torch.no_grad():
-            self._latent, prediction = advance_and_decode(
-                self.model.koopman,
-                self.model.decoder,
-                self._latent,
-                self._edge_index,
-                self._edge_weight,
-                control=control,
-                delta_t=self.model.resolve_delta_t(self._delta_t),
-                default_delta_t=self.model.time_step,
-            )
+            if self._uses_hetero:
+                assert self._edge_indices is not None
+                assert self._edge_weights is not None
+                self._latent = propagate_latent(
+                    self.model.koopman,
+                    self._latent,
+                    control=control,
+                    delta_t=self.model.resolve_delta_t(self._delta_t),
+                    default_delta_t=self.model.time_step,
+                    edge_indices=self._edge_indices,
+                    edge_weights=self._edge_weights,
+                    num_nodes_dict=self._num_nodes_dict,
+                )
+                prediction = self._decode_hetero_latent(self._latent)
+            else:
+                assert self._edge_index is not None
+                self._latent, prediction = advance_and_decode(
+                    self.model.koopman,
+                    self.model.decoder,
+                    self._latent,
+                    self._edge_index,
+                    self._edge_weight,
+                    control=control,
+                    delta_t=self.model.resolve_delta_t(self._delta_t),
+                    default_delta_t=self.model.time_step,
+                )
 
         decoded = self._package_decoded(prediction)
         reward = float(self.reward_fn(decoded, self._step_count))
@@ -510,38 +662,129 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
         info = self._build_info(decoded)
         return observation, reward, terminated, truncated, info
 
-    def _decode_current(self) -> Data:
+    def _cache_hetero_topology(self, snapshot: HeteroData) -> None:
+        """Resolve and cache relation banks from a hetero reset snapshot.
+
+        Parameters
+        ----------
+        snapshot : HeteroData
+            Device-placed reset snapshot.
+        """
+        encoder = self.model.encoder
+        if bool(getattr(encoder, "is_typed", False)):
+            _, edge_indices, edge_weights, num_nodes_dict = (
+                resolve_typed_relation_inputs(
+                    snapshot,
+                    None,
+                    None,
+                    node_types=encoder.node_types,
+                    edge_types=encoder.edge_types,
+                    num_relations=encoder.num_relations,
+                )
+            )
+            self._num_nodes_dict = dict(num_nodes_dict)
+        else:
+            _, edge_indices, edge_weights = resolve_multiplex_relation_inputs(
+                snapshot,
+                None,
+                None,
+                num_relations=encoder.num_relations,
+            )
+            self._num_nodes_dict = None
+        self._edge_indices = [bank.to(self._device) for bank in edge_indices]
+        self._edge_weights = [
+            None if weight is None else weight.to(self._device)
+            for weight in edge_weights
+        ]
+        self._edge_index = None
+        self._edge_weight = None
+        # Keep type-local topology for packing rewards (not global banks).
+        self._topology_template = snapshot.clone().cpu()
+
+    def _decode_hetero_latent(
+        self,
+        latent: Tensor,
+    ) -> Tensor | dict[str, Tensor]:
+        """Decode a stacked hetero latent with the RelGraph decoder.
+
+        Parameters
+        ----------
+        latent : Tensor
+            Shared-d stacked block ``(N, d)`` or rectangular flat
+            ``(Σ N_τ·d_τ,)``.
+
+        Returns
+        -------
+        Tensor or dict of str to Tensor
+            Multiplex tensor or per-type feature mapping.
+        """
+        assert self._edge_indices is not None
+        assert self._edge_weights is not None
+        decoder = self.model.decoder
+        if bool(getattr(decoder, "is_typed", False)):
+            return decoder(
+                latent,
+                self._edge_indices,
+                self._edge_weights,
+                num_nodes_dict=self._num_nodes_dict,
+            )
+        return decoder(latent, self._edge_indices, self._edge_weights)
+
+    def _decode_current(self) -> SnapshotLike:
         """Decode the current latent state to a physical graph snapshot.
 
         Returns
         -------
-        Data
+        Data or HeteroData
             Decoded graph snapshot on CPU.
         """
         assert self._latent is not None
-        assert self._edge_index is not None
         with torch.no_grad():
-            prediction = self.model.decoder(
-                self._latent,
-                self._edge_index,
-                self._edge_weight,
-            )
+            if self._uses_hetero:
+                prediction = self._decode_hetero_latent(self._latent)
+            else:
+                assert self._edge_index is not None
+                prediction = self.model.decoder(
+                    self._latent,
+                    self._edge_index,
+                    self._edge_weight,
+                )
         return self._package_decoded(prediction)
 
-    def _package_decoded(self, prediction: Tensor) -> Data:
-        """Package decoded node features into a CPU graph snapshot.
+    def _package_decoded(
+        self,
+        prediction: Tensor | Mapping[str, Tensor],
+    ) -> SnapshotLike:
+        """Package decoded features into a CPU graph snapshot.
 
         Parameters
         ----------
-        prediction : Tensor
-            Decoded physical node features.
+        prediction : Tensor or mapping of str to Tensor
+            Decoded physical node features (per-type when typed hetero).
 
         Returns
         -------
-        Data
+        Data or HeteroData
             Snapshot with CPU tensors and the environment topology.
         """
+        if self._uses_hetero:
+            assert self._topology_template is not None
+            out = self._topology_template.clone()
+            if isinstance(prediction, Mapping):
+                for name in self.node_type_names:
+                    out[name].x = prediction[name].detach().cpu()
+            else:
+                if len(self.node_type_names) != 1:
+                    msg = (
+                        "typed hetero decode must return a per-type feature "
+                        "mapping; got a tensor"
+                    )
+                    raise TypeError(msg)
+                out[self.node_type_names[0]].x = prediction.detach().cpu()
+            return out
+
         assert self._edge_index is not None
+        assert isinstance(prediction, Tensor)
         fields: dict[str, Tensor] = {
             "x": prediction.detach().cpu(),
             "edge_index": self._edge_index.detach().cpu(),
@@ -550,23 +793,39 @@ class GraphKoopmanEnv(gym.Env if gym is not None else object):  # type: ignore[m
             fields["edge_weight"] = self._edge_weight.detach().cpu()
         return Data(**fields)
 
-    def _build_info(self, decoded: Data) -> dict[str, Any]:
+    def _build_info(self, decoded: SnapshotLike) -> dict[str, Any]:
         """Build the info dictionary returned by reset/step.
 
         Parameters
         ----------
-        decoded : Data
+        decoded : Data or HeteroData
             Latest decoded physical snapshot.
 
         Returns
         -------
         dict
             Info payload with step index and decoded node features.
+            Homogeneous paths expose ``decoded_x``. Hetero paths expose
+            stacked ``decoded_x`` plus ``decoded_x_by_type``.
         """
-        return {
+        info: dict[str, Any] = {
             "step_index": self._step_count,
             "start_index": self._start_index,
-            "decoded_x": decoded.x.numpy(),
             "num_nodes": self.num_nodes,
             "latent_dim": self.latent_dim,
         }
+        if isinstance(decoded, HeteroData):
+            by_type = {
+                name: decoded[name].x.detach().cpu().numpy()
+                for name in self.node_type_names
+            }
+            stacked = stack_typed_features(
+                {name: torch.as_tensor(by_type[name]) for name in self.node_type_names},
+                self.node_type_names,
+            )
+            info["decoded_x"] = stacked.numpy()
+            info["decoded_x_by_type"] = by_type
+            info["node_type_names"] = self.node_type_names
+        else:
+            info["decoded_x"] = decoded.x.numpy()
+        return info

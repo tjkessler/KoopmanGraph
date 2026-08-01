@@ -64,6 +64,12 @@ def _validate_mpc_model(model: GraphKoopmanModel) -> KoopmanOperator:
     ValueError
         Raised when inputs are invalid."""
     koopman = model.koopman
+    if getattr(model, "dynamics_mode", "discrete") != "discrete":
+        msg = (
+            "KoopmanMPC requires dynamics_mode='discrete' "
+            f"(got {getattr(model, 'dynamics_mode', None)!r})"
+        )
+        raise ValueError(msg)
     if isinstance(koopman, ContinuousKoopmanOperator | ContinuousGraphKoopmanOperator):
         msg = (
             "KoopmanMPC requires dynamics_mode='discrete' "

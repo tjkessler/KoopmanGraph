@@ -10,9 +10,9 @@ from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
+from koopman_graph.data import SnapshotSequence
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
     hold_last_topology_at,
@@ -23,6 +23,7 @@ from koopman_graph.graph_utils import (
 from koopman_graph.metrics import EvaluationResult, evaluate_forecast
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
+    ContinuousHeteroGraphKoopmanOperator,
     GraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
@@ -57,6 +58,7 @@ def compute_model_spectrum(
     uses_hypergraph_koopman: bool = False,
     uses_continuous_graph_koopman: bool = False,
     uses_hetero_koopman: bool = False,
+    uses_continuous_hetero_koopman: bool = False,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
     edge_indices: Sequence[Tensor] | None = None,
@@ -84,7 +86,12 @@ def compute_model_spectrum(
     uses_continuous_graph_koopman : bool, optional
         Whether ``koopman`` is a :class:`ContinuousGraphKoopmanOperator`.
     uses_hetero_koopman : bool, optional
-        Whether ``koopman`` is a :class:`HeteroGraphKoopmanOperator`.
+        Whether ``koopman`` is a :class:`HeteroGraphKoopmanOperator` or a
+        :class:`ContinuousHeteroGraphKoopmanOperator`.
+    uses_continuous_hetero_koopman : bool, optional
+        Whether ``koopman`` is specifically a
+        :class:`ContinuousHeteroGraphKoopmanOperator` (checked before the
+        generic ``uses_hetero_koopman`` branch).
     hyperedge_index, hyperedge_weight
         Topology arguments required for hypergraph operators.
     edge_indices, edge_weights, num_nodes_dict
@@ -101,6 +108,23 @@ def compute_model_spectrum(
         If networked-operator topology is missing or continuous
         ``auxiliary_spectral`` spectrum is requested.
     """
+    if uses_continuous_hetero_koopman:
+        if edge_indices is None or num_nodes is None:
+            msg = (
+                "edge_indices and num_nodes are required for "
+                "GraphKoopmanModel.spectrum when koopman='hetero_graph' with "
+                "dynamics_mode='continuous' (topology-coupled effective "
+                "generator); the per-node contract matrix L_self is not a "
+                "substitute"
+            )
+            raise ValueError(msg)
+        assert isinstance(koopman, ContinuousHeteroGraphKoopmanOperator)
+        return koopman.spectrum(
+            edge_indices,
+            num_nodes,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
+        )
     if uses_hetero_koopman:
         if edge_indices is None or num_nodes is None:
             msg = (
@@ -411,7 +435,7 @@ def predict_at_snapshots(
 
 def evaluate_sequence(
     model: object,
-    sequence: GraphSnapshotSequence | Sequence[Data],
+    sequence: SnapshotSequence | Sequence[Data] | Sequence[HeteroData],
     *,
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
@@ -422,8 +446,9 @@ def evaluate_sequence(
     ----------
     model
         Forecast model accepted by :func:`~koopman_graph.metrics.evaluate_forecast`.
-    sequence : GraphSnapshotSequence or sequence of Data
-        Evaluation snapshots with shared topology.
+    sequence : GraphSnapshotSequence, HeteroGraphSnapshotSequence, or sequence
+        Homogeneous or hetero evaluation snapshots. Container normalization is
+        handled inside :func:`~koopman_graph.metrics.evaluate_forecast`.
     horizons : sequence of int, optional
         Forecast horizons to report. Default is ``(3, 6, 12)``.
     start_indices : sequence of int or None, optional
@@ -435,8 +460,8 @@ def evaluate_sequence(
         Per-horizon and aggregate MAE, RMSE, and MAPE.
     """
     return evaluate_forecast(
-        model,
-        resolve_sequence(sequence),
+        model,  # type: ignore[arg-type]
+        sequence,
         horizons=horizons,
         start_indices=start_indices,
     )

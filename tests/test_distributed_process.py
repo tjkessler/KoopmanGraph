@@ -44,6 +44,8 @@ def test_package_import_and_all() -> None:
         "get_world_size",
         "init_process_group_from_env",
         "is_main_process",
+        "materialize_sequences",
+        "materialize_window_index_list",
         "prepare_ddp_model",
         "run_ddp_fit_loop",
         "seed_everything",
@@ -52,7 +54,12 @@ def test_package_import_and_all() -> None:
     }
     assert set(distributed_pkg.__all__) == expected
     optional_extra_exports = frozenset(
-        {"KoopmanLightningModule", "fit_ensemble_with_ray"}
+        {
+            "KoopmanLightningModule",
+            "fit_ensemble_with_ray",
+            "materialize_sequences",
+            "materialize_window_index_list",
+        }
     )
     for name in expected - optional_extra_exports:
         assert hasattr(distributed_pkg, name)
@@ -92,6 +99,97 @@ def test_init_process_group_from_env_noop_without_env(
     assert init_process_group_from_env() is None
     assert get_rank() == 0
     assert get_world_size() == 1
+
+
+def test_active_process_group_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Initialized helpers forward to ``torch.distributed`` rank/world/barrier."""
+    import torch.distributed as dist
+
+    import koopman_graph.distributed.process as process_mod
+
+    monkeypatch.setattr(process_mod, "_is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda: 3)
+    monkeypatch.setattr(dist, "get_world_size", lambda: 4)
+    called: list[str] = []
+    monkeypatch.setattr(dist, "barrier", lambda: called.append("barrier"))
+
+    assert get_rank() == 3
+    assert get_world_size() == 4
+    assert is_main_process() is False
+    barrier()
+    assert called == ["barrier"]
+
+
+def test_env_world_size_and_default_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``WORLD_SIZE`` parsing and nccl/gloo backend selection."""
+    import koopman_graph.distributed.process as process_mod
+
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    assert process_mod._env_world_size() is None
+    monkeypatch.setenv("WORLD_SIZE", "")
+    assert process_mod._env_world_size() is None
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    assert process_mod._env_world_size() == 2
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert process_mod._default_backend(world_size=2) == "nccl"
+    assert process_mod._default_backend(world_size=1) == "gloo"
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert process_mod._default_backend(world_size=8) == "gloo"
+
+
+def test_init_process_group_from_env_already_initialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Already-initialized groups return ``dist.group.WORLD`` without re-init."""
+    import types
+
+    import torch.distributed as dist
+
+    import koopman_graph.distributed.process as process_mod
+
+    sentinel = object()
+    monkeypatch.setattr(process_mod, "_is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "group", types.SimpleNamespace(WORLD=sentinel))
+    assert init_process_group_from_env() is sentinel
+
+
+def test_init_process_group_from_env_initializes_and_sets_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env-driven init resolves backend and sets CUDA device for nccl."""
+    import types
+
+    import torch.distributed as dist
+
+    import koopman_graph.distributed.process as process_mod
+
+    monkeypatch.setattr(process_mod, "_is_initialized", lambda: False)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    captured: dict[str, object] = {}
+
+    def fake_init_process_group(*, backend: str) -> None:
+        captured["backend"] = backend
+
+    def fake_set_device(index: int) -> None:
+        captured["device"] = index
+
+    sentinel = object()
+    monkeypatch.setattr(dist, "init_process_group", fake_init_process_group)
+    monkeypatch.setattr(torch.cuda, "set_device", fake_set_device)
+    monkeypatch.setattr(dist, "group", types.SimpleNamespace(WORLD=sentinel))
+
+    assert init_process_group_from_env() is sentinel
+    assert captured["backend"] == "nccl"
+    assert captured["device"] == 1
+
+    captured.clear()
+    assert init_process_group_from_env(backend="gloo") is sentinel
+    assert captured["backend"] == "gloo"
+    assert "device" not in captured
 
 
 def test_seed_everything_reproducible_and_rank_offset() -> None:

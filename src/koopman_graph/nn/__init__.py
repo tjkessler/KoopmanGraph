@@ -21,6 +21,16 @@ Capability layout
 ``hypergraph``
     :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
     :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`.
+``simplicial``
+    :class:`~koopman_graph.nn.simplicial.SimplicialEncoder` /
+    :class:`~koopman_graph.nn.simplicial.SimplicialDecoder`
+    (combinatorial ``L_1`` mixing; not sheaf/cell).
+``equivariant``
+    :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
+    (Tier A invariant distance/angle features from ``Data.pos``) and optional
+    :class:`~koopman_graph.nn.equivariant.E3EquivariantEncoder` (Tier B
+    ``e3nn`` / ``[equivariance]``; steerable encode to invariant latents; not
+    equivariant ``K``).
 ``heterogeneous``
     :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
     :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
@@ -61,6 +71,12 @@ from koopman_graph.nn.encoder import (
     GraphTransformerEncoder,
     SAGEEncoder,
 )
+from koopman_graph.nn.equivariant import (
+    GEOM_CHANNELS,
+    E3EquivariantEncoder,
+    InvariantGeometryEncoder,
+    invariant_geometry_features,
+)
 from koopman_graph.nn.gnn import (
     ActivationName,
     BaseGNNModule,
@@ -90,6 +106,11 @@ from koopman_graph.nn.hypergraph import (
     HypergraphEncoder,
     bind_hypergraph_decoder,
 )
+from koopman_graph.nn.simplicial import (
+    SimplicialDecoder,
+    SimplicialEncoder,
+    bind_simplicial_decoder,
+)
 
 __all__ = [
     "ActivationName",
@@ -100,8 +121,10 @@ __all__ = [
     "DiffConvDecoder",
     "DiffConvEncoder",
     "DiffusionConv",
+    "E3EquivariantEncoder",
     "GATDecoder",
     "GATEncoder",
+    "GEOM_CHANNELS",
     "GNNDecoder",
     "GNNEncoder",
     "GraphTransformerDecoder",
@@ -110,12 +133,17 @@ __all__ = [
     "HGTEncoder",
     "HypergraphDecoder",
     "HypergraphEncoder",
+    "InvariantGeometryEncoder",
     "RelGraphConv",
     "RelGraphDecoder",
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "SimplicialDecoder",
+    "SimplicialEncoder",
     "bind_hypergraph_decoder",
+    "bind_simplicial_decoder",
+    "invariant_geometry_features",
     "build_diff_convs",
     "build_gat_convs",
     "build_gcn_convs",

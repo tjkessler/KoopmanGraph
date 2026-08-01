@@ -5,12 +5,17 @@
 large static graphs can train on subgraph windows. Sampled-subgraph training
 is an approximation (loss over induced subgraphs, not the full graph);
 ``predict`` / ``evaluate`` remain full-graph.
+
+:func:`resolve_window_sampler` is the shared construction entry point for
+single-process ``run_fit_loop`` and distributed fit adapters so sampler
+policy cannot drift between paths.
 """
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterator, Sequence
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 from torch import Tensor
@@ -633,3 +638,140 @@ class NeighborWindowSampler:
 
 
 WindowLikeSampler = WindowSampler | NeighborWindowSampler
+
+
+def resolve_window_sampler(
+    train_sequences: Sequence[SnapshotSequence],
+    *,
+    window_length: int | None,
+    batch_size: int = 8,
+    windows_per_epoch: int | None = None,
+    window_seed: int | None = None,
+    sampler: WindowLikeSampler | Any | None = None,
+    distributed: bool = False,
+    rank: int | None = None,
+    world_size: int | None = None,
+    api_name: str = "fit",
+    shuffle: bool = True,
+) -> WindowLikeSampler | Any | None:
+    """Resolve a local or distributed temporal window sampler.
+
+    Shared by single-process :func:`~koopman_graph.training.loop.run_fit_loop`
+    and distributed fit adapters so mutual-exclusion and construction policy
+    stay aligned.
+
+    Parameters
+    ----------
+    train_sequences : sequence of SnapshotSequence
+        Training trajectories used when constructing a sampler from
+        ``window_length``.
+    window_length : int or None
+        Window length when building a sampler. Mutually exclusive with
+        ``sampler``.
+    batch_size : int, optional
+        Windows per batch. Default is ``8``.
+    windows_per_epoch : int or None, optional
+        Cap on windows per epoch (global cap before sharding when
+        ``distributed=True``).
+    window_seed : int or None, optional
+        Base shuffle seed passed to the constructed sampler.
+    sampler : WindowSampler, NeighborWindowSampler, \
+DistributedWindowSampler, or None, optional
+        Pre-built sampler. When ``distributed=False``, accepted as-is.
+        When ``distributed=True``, only
+        :class:`~koopman_graph.distributed.DistributedWindowSampler` is
+        accepted.
+    distributed : bool, optional
+        If ``True``, construct or accept a rank-aware
+        :class:`~koopman_graph.distributed.DistributedWindowSampler`.
+        Default is ``False`` (local :class:`WindowSampler` path).
+    rank : int or None, optional
+        Rank override for distributed construction.
+    world_size : int or None, optional
+        World-size override for distributed construction.
+    api_name : str, optional
+        Public API name used in distributed error messages. Default is
+        ``"fit"``.
+    shuffle : bool, optional
+        Whether constructed samplers shuffle window order. Default is
+        ``True``.
+
+    Returns
+    -------
+    WindowSampler, NeighborWindowSampler, DistributedWindowSampler, or None
+        Resolved sampler, or ``None`` when neither ``sampler`` nor
+        ``window_length`` is set (full-sequence training).
+
+    Raises
+    ------
+    ValueError
+        If both ``sampler`` and ``window_length`` are set, or if
+        ``distributed=True`` and ``sampler`` is a non-distributed window
+        sampler.
+    TypeError
+        If ``distributed=True`` and ``sampler`` has an unsupported type.
+
+    Notes
+    -----
+    **Hetero vs homogeneous legality** (documented for callers; this helper
+    does not raise on hetero sequences by itself):
+
+    - :class:`WindowSampler` and
+      :class:`~koopman_graph.distributed.DistributedWindowSampler` are the
+      intended temporal-window samplers for both homogeneous and hetero
+      trajectories (single-process hetero windowed fit is gated separately
+      in :func:`~koopman_graph.training.loop.run_fit_loop` until that guard
+      is narrowed).
+    - :class:`NeighborWindowSampler` remains **homogeneous-only** (static
+      pairwise topology); it rejects
+      :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` at
+      construction.
+    """
+    if sampler is not None and window_length is not None:
+        msg = "pass sampler or window_length, not both"
+        raise ValueError(msg)
+
+    if not distributed:
+        if sampler is not None:
+            return sampler
+        if window_length is None:
+            return None
+        return WindowSampler(
+            train_sequences,
+            window_length=window_length,
+            batch_size=batch_size,
+            windows_per_epoch=windows_per_epoch,
+            shuffle=shuffle,
+            seed=window_seed,
+        )
+
+    # importlib avoids a static ``data.sampling`` → ``distributed.sampling``
+    # import edge (architecture DEP cycle with the reverse import).
+    _DistributedWindowSampler = importlib.import_module(
+        "koopman_graph.distributed.sampling"
+    ).DistributedWindowSampler
+
+    if sampler is None:
+        if window_length is None:
+            return None
+        return _DistributedWindowSampler(
+            train_sequences,
+            window_length=window_length,
+            batch_size=batch_size,
+            windows_per_epoch=windows_per_epoch,
+            shuffle=shuffle,
+            seed=window_seed,
+            rank=rank,
+            world_size=world_size,
+        )
+    if isinstance(sampler, _DistributedWindowSampler):
+        return sampler
+    if isinstance(sampler, (WindowSampler, NeighborWindowSampler)):
+        msg = (
+            f"{api_name} requires DistributedWindowSampler or "
+            "window_length=...; plain WindowSampler / NeighborWindowSampler "
+            "are not rank-aware"
+        )
+        raise ValueError(msg)
+    msg = f"unsupported sampler type: {type(sampler)!r}"
+    raise TypeError(msg)

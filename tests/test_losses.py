@@ -653,6 +653,26 @@ def test_eigenvalue_loss_graph_edge_weight_affects_penalty() -> None:
     assert equal.item() != pytest.approx(unequal.item(), abs=1e-4)
 
 
+def test_eigenvalue_loss_distributed_graph_is_finite_without_assembly() -> None:
+    """Distributed graph eig-reg uses Arnoldi surrogate (finite penalty)."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator, HypergraphKoopmanOperator
+
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    op.set_dense_matrices(1.2 * torch.eye(2), 0.3 * torch.eye(2))
+    loss_fn = EigenvalueRegularizationLoss()
+    penalty = loss_fn(op, edge_index=edge_index, num_nodes=3)
+    assert torch.isfinite(penalty)
+    assert penalty.item() > 0.0
+
+    # Hypergraph distributed disables assembled hinge (no matrix-free helper).
+    hyper = HypergraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    assert loss_fn(
+        hyper, hyperedge_index=edge_index, num_nodes=3
+    ).item() == pytest.approx(0.0, abs=1e-8)
+
+
 def test_eigenvalue_loss_graph_structural_uses_factor_bound() -> None:
     """Graph structural modes keep factor bound_metric without topology."""
     from koopman_graph.losses import EigenvalueRegularizationLoss

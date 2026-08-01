@@ -355,8 +355,8 @@ def test_typed_decoder_requires_num_nodes_dict() -> None:
         decoder(latents, banks)
 
 
-def test_typed_modules_reject_per_type_latent_dims() -> None:
-    """Latent width stays scalar: mapping ``latent_dim`` is not accepted."""
+def test_typed_modules_reject_mapping_as_scalar_latent_dim() -> None:
+    """Scalar ``latent_dim`` rejects a mapping; use opt-in ``latent_dims``."""
     with pytest.raises((TypeError, ValueError)):
         RelGraphEncoder(
             FEATURE_DIMS,
@@ -625,9 +625,9 @@ def test_typed_reset_parameters_reinitializes_every_self_block() -> None:
 
 
 def test_typed_operator_reports_a_self_stability_certificate() -> None:
-    """Stability reporting reads the first typed self factor."""
+    """Factor stability reporting reads the first typed self factor."""
     operator = _typed_operator()
-    assert operator.stability_certificate() is None
+    assert operator.factor_stability_certificate() is None
 
 
 # --------------------------------------------------------------------------
@@ -658,6 +658,24 @@ def test_typed_model_predict_packs_hetero_snapshots() -> None:
         assert set(map(tuple, snapshot.edge_types)) == set(EDGE_TYPES)
         for name in NODE_TYPES:
             assert snapshot[name].x.shape == (NUM_NODES[name], FEATURE_DIMS[name])
+
+
+def test_typed_predict_at_and_evaluate_forecast() -> None:
+    """Typed ``predict_at`` / ``evaluate_forecast`` use flattened stacked features."""
+    from koopman_graph.metrics import evaluate_forecast
+
+    model = _typed_model()
+    origin = _typed_snapshot()
+    preds = model.predict_at(origin, step_deltas=[1.0, 1.0])
+    assert len(preds) == 2
+    assert isinstance(preds[0], HeteroData)
+    assert tuple(preds[0].node_types) == NODE_TYPES
+
+    sequence = HeteroGraphSnapshotSequence([_typed_snapshot() for _ in range(4)])
+    result = evaluate_forecast(model, sequence, horizons=(1, 2), start_indices=[0])
+    assert result.num_origins == 1
+    assert len(result.horizons) == 2
+    assert torch.isfinite(torch.tensor(result.aggregate_mae))
 
 
 def test_factory_rejects_typed_operator_with_shared_peer_channels() -> None:

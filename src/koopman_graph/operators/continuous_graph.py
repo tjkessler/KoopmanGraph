@@ -80,7 +80,9 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` uses the full ``N·d`` exponential;
         ``"block_diagonal"`` advances with ``L_self`` only; ``"distributed"``
-        is rejected.
+        is accepted for construction / checkpoints (not trainer DDP or
+        multi-GPU training; matrix-free inverse / spectrum are wired for
+        discrete graph and hetero in 0.10).
     max_real_eigenvalue : float
         Stability bound forwarded to the continuous factor modules.
     """
@@ -124,6 +126,9 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
             Realization mode. Default ``"dense"``. ``"block_diagonal"`` is a
             self-term-only shortcut and ignores neighbor / adjacency coupling.
+            ``"distributed"`` is accepted for construction / checkpoints
+            (matrix-free inverse / spectrum are wired for discrete graph and
+            hetero in 0.10; continuous paths may still assemble).
         adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
             Neighbor-coupling normalization. Default ``"symmetric"`` preserves
             historical undirected behavior bit-for-bit.
@@ -135,17 +140,10 @@ class ContinuousGraphKoopmanOperator(nn.Module):
             or args invalid.
         """
         super().__init__()
-        if sparsity == "distributed":
+        if sparsity not in {"dense", "block_diagonal", "distributed"}:
             msg = (
-                "ContinuousGraphKoopmanOperator sparsity='distributed' is "
-                "planned; not in 0.6.0. Use sparsity='dense' or "
-                "'block_diagonal'"
-            )
-            raise ValueError(msg)
-        if sparsity not in {"dense", "block_diagonal"}:
-            msg = (
-                "ContinuousGraphKoopmanOperator sparsity must be 'dense' or "
-                f"'block_diagonal', got {sparsity!r}"
+                "ContinuousGraphKoopmanOperator sparsity must be 'dense', "
+                f"'block_diagonal', or 'distributed', got {sparsity!r}"
             )
             raise ValueError(msg)
         if adjacency not in GRAPH_ADJACENCY_MODES:

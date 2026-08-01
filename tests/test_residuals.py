@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 import math
+from dataclasses import fields
+from pathlib import Path
 
 import pytest
 import torch
 from torch_geometric.data import Data
 
+import koopman_graph.analysis as analysis
 from koopman_graph import (
     GNNDecoder,
     GNNEncoder,
@@ -15,8 +19,22 @@ from koopman_graph import (
     GraphSnapshotSequence,
     compute_spectrum,
 )
-from koopman_graph.analysis import SpectralResidualReport, spectral_residuals
+from koopman_graph.analysis import (
+    ResDMDReport,
+    SpectralResidualReport,
+    resdmd,
+    spectral_residuals,
+)
+from koopman_graph.analysis import residuals as residuals_module
 from koopman_graph.spectrum_types import KoopmanSpectrum
+
+_RESIDUALS_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "koopman_graph"
+    / "analysis"
+    / "residuals.py"
+)
 
 
 def _path_edges(num_nodes: int) -> torch.Tensor:
@@ -321,3 +339,53 @@ def test_not_exported_from_root_all() -> None:
 
     assert "spectral_residuals" not in koopman_graph.__all__
     assert "SpectralResidualReport" not in koopman_graph.__all__
+
+
+def test_spectral_residuals_api_signature_stable() -> None:
+    """Public signature and report fields remain stable (TASK-1837)."""
+    params = inspect.signature(spectral_residuals).parameters
+    for name in (
+        "model",
+        "sequence",
+        "spectrum",
+        "tolerance",
+        "edge_index",
+        "edge_weight",
+        "delta_t",
+    ):
+        assert name in params
+    field_names = {f.name for f in fields(SpectralResidualReport)}
+    assert field_names == {
+        "eigenvalues",
+        "residuals",
+        "num_pairs",
+        "tolerance",
+    }
+    assert callable(SpectralResidualReport.trustworthy_mask)
+
+
+def test_spectral_residuals_not_aliased_to_resdmd() -> None:
+    """ResDMD and spectral_residuals stay distinct symbols (R2)."""
+    assert spectral_residuals is not resdmd
+    assert SpectralResidualReport is not ResDMDReport
+    assert analysis.spectral_residuals is residuals_module.spectral_residuals
+    assert analysis.spectral_residuals is not resdmd
+    assert analysis.SpectralResidualReport is not ResDMDReport
+    required = {
+        "spectral_residuals",
+        "SpectralResidualReport",
+        "resdmd",
+        "ResDMDReport",
+    }
+    assert required.issubset(set(analysis.__all__))
+
+
+def test_spectral_residuals_honesty_docs_separate_resdmd() -> None:
+    """Docs forbid renaming/aliasing spectral_residuals as ResDMD."""
+    source = _RESIDUALS_PATH.read_text(encoding="utf-8")
+    doc = (spectral_residuals.__doc__ or "") + source
+    assert "ResDMD" in doc
+    assert "not" in doc.lower()
+    assert "rename" in doc.lower() or "alias" in doc.lower()
+    assert "from koopman_graph.analysis.resdmd" not in source
+    assert "import koopman_graph.analysis.resdmd" not in source

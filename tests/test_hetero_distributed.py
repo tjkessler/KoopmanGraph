@@ -1,8 +1,7 @@
-"""World-size-1 and opt-in multi-proc DDP for multiplex hetero models.
+"""World-size-1 and opt-in multi-proc DDP for multiplex / typed hetero models.
 
-Default CI covers seeded world-size-1 parity (full-sequence and
-``MultiTrajectory``). Windowed multiplex DDP is smoke-only: single-process
-``run_fit_loop`` still rejects windowed hetero.
+Default CI covers seeded world-size-1 parity for full-sequence,
+``MultiTrajectory``, and windowed multiplex / typed paths (TASK-1802).
 
 Multi-process gloo smokes are marked ``@pytest.mark.distributed`` and are
 **opt-in**:
@@ -28,8 +27,13 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch_geometric.data import HeteroData
 
-from koopman_graph.data import HeteroGraphSnapshotSequence, MultiTrajectory
+from koopman_graph.data import (
+    HeteroGraphSnapshotSequence,
+    MultiTrajectory,
+    WindowSampler,
+)
 from koopman_graph.distributed import (
+    DistributedWindowSampler,
     prepare_ddp_model,
     run_ddp_fit_loop,
     seed_everything,
@@ -40,6 +44,11 @@ from koopman_graph.nn import RelGraphDecoder, RelGraphEncoder
 from koopman_graph.operators import HeteroGraphKoopmanOperator
 from koopman_graph.training import run_fit_loop
 from koopman_graph.training.loop import bind_pending_orbit_ties
+
+# Match existing hetero full-sequence WS1 parity in this module (not relative
+# float tolerance). Homogeneous windowed DDP uses abs=1e-6; hetero paths keep
+# abs=1e-5 for the slightly larger relational compute graph.
+_WS1_LOSS_ABS = 1e-5
 
 _DISTRIBUTED_ENV = "KOOPMAN_GRAPH_DISTRIBUTED_TESTS"
 
@@ -87,6 +96,75 @@ def _hetero_model(*, seed: int = 0) -> GraphKoopmanModel:
         latent_dim=4,
         time_step=1.0,
         koopman="hetero_graph",
+    )
+
+
+# Typed multi-node fixtures (shared-d path) for windowed WS1 parity.
+_TYPED_NODE_TYPES = ("a", "b")
+_TYPED_EDGE_TYPES = (("a", "r0", "b"), ("b", "r1", "a"), ("a", "r2", "a"))
+_TYPED_FEATURE_DIMS = {"a": 2, "b": 3}
+_TYPED_NUM_NODES = {"a": 4, "b": 3}
+_TYPED_LATENT_DIM = 4
+_TYPED_EDGES_AB = torch.tensor([[0, 1, 2], [0, 1, 2]], dtype=torch.long)
+_TYPED_EDGES_BA = torch.tensor([[0, 1], [1, 3]], dtype=torch.long)
+_TYPED_EDGES_AA = torch.tensor([[0, 1, 2], [1, 2, 3]], dtype=torch.long)
+
+
+def _typed_snapshot(*, seed: int = 0) -> HeteroData:
+    generator = torch.Generator().manual_seed(seed)
+    snapshot = HeteroData()
+    snapshot["a"].x = torch.randn(
+        _TYPED_NUM_NODES["a"],
+        _TYPED_FEATURE_DIMS["a"],
+        generator=generator,
+    )
+    snapshot["b"].x = torch.randn(
+        _TYPED_NUM_NODES["b"],
+        _TYPED_FEATURE_DIMS["b"],
+        generator=generator,
+    )
+    snapshot["a", "r0", "b"].edge_index = _TYPED_EDGES_AB
+    snapshot["b", "r1", "a"].edge_index = _TYPED_EDGES_BA
+    snapshot["a", "r2", "a"].edge_index = _TYPED_EDGES_AA
+    return snapshot
+
+
+def _typed_sequence(
+    *,
+    num_timesteps: int = 5,
+    seed: int = 0,
+) -> HeteroGraphSnapshotSequence:
+    return HeteroGraphSnapshotSequence(
+        [_typed_snapshot(seed=seed + t) for t in range(num_timesteps)]
+    )
+
+
+def _typed_model(*, seed: int = 0) -> GraphKoopmanModel:
+    torch.manual_seed(seed)
+    return GraphKoopmanModel(
+        encoder=RelGraphEncoder(
+            _TYPED_FEATURE_DIMS,
+            hidden_channels=8,
+            latent_dim=_TYPED_LATENT_DIM,
+            num_relations=len(_TYPED_EDGE_TYPES),
+            num_layers=1,
+            node_types=_TYPED_NODE_TYPES,
+            edge_types=_TYPED_EDGE_TYPES,
+        ),
+        decoder=RelGraphDecoder(
+            latent_dim=_TYPED_LATENT_DIM,
+            hidden_channels=8,
+            out_channels=_TYPED_FEATURE_DIMS,
+            num_relations=len(_TYPED_EDGE_TYPES),
+            num_layers=1,
+            node_types=_TYPED_NODE_TYPES,
+            edge_types=_TYPED_EDGE_TYPES,
+        ),
+        latent_dim=_TYPED_LATENT_DIM,
+        time_step=1.0,
+        koopman="hetero_graph",
+        koopman_node_types=_TYPED_NODE_TYPES,
+        koopman_edge_types=_TYPED_EDGE_TYPES,
     )
 
 
@@ -187,7 +265,7 @@ def test_hetero_ddp_full_sequence_matches_run_fit_loop() -> None:
     history_b = run_ddp_fit_loop(model_b, [sequence], **kwargs)
     assert history_a.epochs == history_b.epochs
     for left, right in zip(history_a.loss, history_b.loss, strict=True):
-        assert left == pytest.approx(right, rel=0, abs=1e-5)
+        assert left == pytest.approx(right, rel=0, abs=_WS1_LOSS_ABS)
 
 
 def test_hetero_ddp_multi_trajectory_matches_run_fit_loop() -> None:
@@ -207,7 +285,7 @@ def test_hetero_ddp_multi_trajectory_matches_run_fit_loop() -> None:
     history_b = run_ddp_fit_loop(model_b, sequences, **kwargs)
     assert history_a.epochs == history_b.epochs
     for left, right in zip(history_a.loss, history_b.loss, strict=True):
-        assert left == pytest.approx(right, rel=0, abs=1e-5)
+        assert left == pytest.approx(right, rel=0, abs=_WS1_LOSS_ABS)
 
 
 def test_hetero_fit_strategy_ddp_matches_run_ddp_fit_loop() -> None:
@@ -219,7 +297,7 @@ def test_hetero_fit_strategy_ddp_matches_run_ddp_fit_loop() -> None:
     history_a = run_ddp_fit_loop(model_a, [sequence], **kwargs)
     history_b = model_b.fit(sequence, strategy="ddp", **kwargs)
     for left, right in zip(history_a.loss, history_b.loss, strict=True):
-        assert left == pytest.approx(right, rel=0, abs=1e-5)
+        assert left == pytest.approx(right, rel=0, abs=_WS1_LOSS_ABS)
 
 
 def test_hetero_fit_passes_find_unused_parameters(
@@ -294,13 +372,14 @@ def test_hetero_ddp_checkpoint_round_trip(tmp_path: Path) -> None:
     assert loaded.koopman_kind == "hetero_graph"
 
 
-def test_bind_pending_orbit_ties_raises_on_hetero_auto_orbits() -> None:
-    """Orbit bind raises clearly when auto_orbits is set on a hetero model."""
+def test_bind_pending_orbit_ties_binds_multiplex_hetero_auto_orbits() -> None:
+    """Multiplex hetero auto_orbits bind from the union of relation banks."""
+    pytest.importorskip("networkx")
     model = _hetero_model()
     sequence = _hetero_sequence(num_timesteps=2)
     object.__setattr__(model.koopman, "auto_orbits", True)
-    with pytest.raises(ValueError, match="auto_orbits / orbit binding"):
-        bind_pending_orbit_ties(model, [sequence])
+    bind_pending_orbit_ties(model, [sequence])
+    assert model.koopman.orbit_partition is not None
 
 
 def test_bind_pending_orbit_ties_noop_for_hetero_without_auto_orbits() -> None:
@@ -308,28 +387,75 @@ def test_bind_pending_orbit_ties_noop_for_hetero_without_auto_orbits() -> None:
     model = _hetero_model()
     sequence = _hetero_sequence(num_timesteps=2)
     bind_pending_orbit_ties(model, [sequence])
+    assert model.koopman.orbit_partition is None
 
 
-def test_hetero_ddp_windowed_world_size_one() -> None:
-    """DDP windowed multiplex training runs via DistributedWindowSampler.
+def test_windowed_hetero_samplers_preserve_hetero_container() -> None:
+    """Local and WS1 distributed window slices stay HeteroGraphSnapshotSequence."""
+    sequence = _hetero_sequence(num_timesteps=5, seed=4)
+    local = WindowSampler(
+        sequence,
+        window_length=3,
+        batch_size=1,
+        shuffle=False,
+    )
+    distributed = DistributedWindowSampler(
+        sequence,
+        window_length=3,
+        batch_size=1,
+        shuffle=False,
+        rank=0,
+        world_size=1,
+    )
+    local_window = next(iter(local.iter_epoch(0)))[0]
+    ddp_window = next(iter(distributed.iter_epoch(0)))[0]
+    assert isinstance(local_window, HeteroGraphSnapshotSequence)
+    assert isinstance(ddp_window, HeteroGraphSnapshotSequence)
+    assert type(local_window) is type(ddp_window)
 
-    Smoke only — single-process ``run_fit_loop`` rejects windowed hetero, so
-    loss parity against that path is unavailable.
+
+def test_hetero_ddp_windowed_matches_run_fit_loop() -> None:
+    """World-size-1 windowed multiplex DDP loss matches single-process fit.
+
+    Tolerance ``abs=1e-5`` matches other hetero WS1 parity tests in this
+    module (see ``_WS1_LOSS_ABS``).
     """
     sequence = _hetero_sequence(num_timesteps=5, seed=4)
-    model = _hetero_model(seed=4)
-    history = run_ddp_fit_loop(
-        model,
-        [sequence],
-        epochs=2,
-        lr=1e-2,
-        device="cpu",
-        window_length=3,
-        batch_size=2,
-        window_seed=0,
-    )
-    assert history.epochs == 2
-    assert all(torch.isfinite(torch.tensor(loss)) for loss in history.loss)
+    model_a = _hetero_model(seed=4)
+    model_b = _hetero_model(seed=4)
+    kwargs = {
+        "epochs": 2,
+        "lr": 1e-2,
+        "device": "cpu",
+        "window_length": 3,
+        "batch_size": 2,
+        "window_seed": 0,
+    }
+    history_a = run_fit_loop(model_a, [sequence], **kwargs)
+    history_b = run_ddp_fit_loop(model_b, [sequence], **kwargs)
+    assert history_a.epochs == history_b.epochs
+    for left, right in zip(history_a.loss, history_b.loss, strict=True):
+        assert left == pytest.approx(right, rel=0, abs=_WS1_LOSS_ABS)
+
+
+def test_hetero_ddp_windowed_typed_matches_run_fit_loop() -> None:
+    """World-size-1 windowed typed DDP loss matches single-process fit."""
+    sequence = _typed_sequence(num_timesteps=5, seed=6)
+    model_a = _typed_model(seed=6)
+    model_b = _typed_model(seed=6)
+    kwargs = {
+        "epochs": 2,
+        "lr": 1e-2,
+        "device": "cpu",
+        "window_length": 3,
+        "batch_size": 2,
+        "window_seed": 0,
+    }
+    history_a = run_fit_loop(model_a, [sequence], **kwargs)
+    history_b = run_ddp_fit_loop(model_b, [sequence], **kwargs)
+    assert history_a.epochs == history_b.epochs
+    for left, right in zip(history_a.loss, history_b.loss, strict=True):
+        assert left == pytest.approx(right, rel=0, abs=_WS1_LOSS_ABS)
 
 
 @pytest.mark.distributed

@@ -12,7 +12,9 @@ Capability layout
     Coercion and validation helpers for snapshot construction.
 ``hetero_layout``
     Stacked typed-node layout contract: ``node_type_slices``,
-    ``node_type_offsets``, ``latent_type_slices``, ``stack_typed_features`` /
+    ``node_type_offsets``, ``latent_type_slices``,
+    ``validate_latent_dims``, ``latent_type_slices_from_dims``,
+    ``stacked_latent_numel``, ``stack_typed_features`` /
     ``unstack_typed_features``, ``offset_edge_index``,
     ``global_relation_edge_indices``, ``snapshot_num_nodes_dict``, and
     ``mask_hetero_snapshot_features``.
@@ -28,6 +30,8 @@ Capability layout
     ``WindowSampler`` for fixed-length temporal windows;
     ``NeighborWindowSampler`` for k-hop subgraph windows on large static
     graphs (training approximation; not on root ``__all__``);
+    :func:`~koopman_graph.data.resolve_window_sampler` shared local /
+    distributed construction entry point;
     :class:`~koopman_graph.data.WindowOrigin` /
     :func:`~koopman_graph.data.build_window_index_list` for pure origin
     planning (also used by distributed samplers).
@@ -44,13 +48,16 @@ from koopman_graph.data.containers import (
 from koopman_graph.data.hetero_layout import (
     global_relation_edge_indices,
     latent_type_slices,
+    latent_type_slices_from_dims,
     mask_hetero_snapshot_features,
     node_type_offsets,
     node_type_slices,
     offset_edge_index,
     snapshot_num_nodes_dict,
     stack_typed_features,
+    stacked_latent_numel,
     unstack_typed_features,
+    validate_latent_dims,
 )
 from koopman_graph.data.rollout import (
     RolloutStartIndices,
@@ -62,6 +69,7 @@ from koopman_graph.data.sampling import (
     WindowOrigin,
     WindowSampler,
     build_window_index_list,
+    resolve_window_sampler,
 )
 from koopman_graph.data.splits import TemporalSplit, temporal_split
 from koopman_graph.data.trajectories import (
@@ -88,6 +96,7 @@ __all__ = [
     "build_window_index_list",
     "global_relation_edge_indices",
     "latent_type_slices",
+    "latent_type_slices_from_dims",
     "mask_hetero_snapshot_features",
     "node_type_offsets",
     "node_type_slices",
@@ -96,8 +105,11 @@ __all__ = [
     "resolve_pair_delta_t",
     "resolve_rollout_start_indices",
     "resolve_sequence",
+    "resolve_window_sampler",
     "snapshot_num_nodes_dict",
     "stack_typed_features",
+    "stacked_latent_numel",
     "temporal_split",
     "unstack_typed_features",
+    "validate_latent_dims",
 ]

@@ -34,7 +34,7 @@ def test_dynamics_mode_is_single_source_of_truth() -> None:
     assert OperatorDynamicsMode is DynamicsMode
     assert model.DynamicsMode is DynamicsMode
     assert adaptation.AdaptationMode is DynamicsMode
-    assert get_args(DynamicsMode) == ("discrete", "continuous")
+    assert get_args(DynamicsMode) == ("discrete", "continuous", "stochastic")
 
 
 def _small_graph_koopman_model() -> GraphKoopmanModel:

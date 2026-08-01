@@ -9,10 +9,22 @@ which requires Galerkin matrices for :math:`\\mathcal{K}^*\\mathcal{K}` in a
 fixed dictionary and yields error control on the infinite-dimensional
 spectrum.
 
+Do **not** rename or alias this API as ResDMD. Fixed-dictionary Colbrook–
+Townsend residuals live in :func:`~koopman_graph.analysis.resdmd` /
+:class:`~koopman_graph.analysis.ResDMDReport` (separate module and names).
+
 Do **not** replace this diagnostic with the matrix residual
 :math:`\\|Kv - \\lambda v\\| / \\|v\\|` on the assembled operator: that quantity
 is vacuous after ``torch.linalg.eig`` and returns machine epsilon for every
 mode.
+
+See Also
+--------
+:func:`~koopman_graph.analysis.resdmd`
+    Certified ResDMD residuals on a fixed dictionary.
+:class:`~koopman_graph.analysis.ResDMDReport`
+    Report type for that API — not interchangeable with
+    :class:`SpectralResidualReport`.
 
 References
 ----------
@@ -101,7 +113,8 @@ def spectral_residuals(
     claimed on held-out data. It is **not** the certified ResDMD residual
     bound, which requires Galerkin matrices for
     :math:`\\mathcal{K}^*\\mathcal{K}` in a fixed dictionary and yields error
-    control on the infinite-dimensional spectrum.
+    control on the infinite-dimensional spectrum. Do **not** rename or alias
+    ``spectral_residuals`` as ResDMD.
 
     For each eigenpair :math:`(\\lambda_i, v_i)`, mode amplitudes
     :math:`a(t) = \\mathrm{mode\\_amplitudes}(z_t)` are the approximate
@@ -151,6 +164,13 @@ def spectral_residuals(
         If ``tolerance`` is not positive, the sequence has fewer than two
         snapshots, spectrum / latent dimensions are incompatible, or
         networked topology cannot be resolved.
+
+    See Also
+    --------
+    :func:`~koopman_graph.analysis.resdmd`
+        Fixed-dictionary Colbrook–Townsend ResDMD (separate API).
+    :class:`~koopman_graph.analysis.ResDMDReport`
+        ResDMD report type — not an alias of this report.
     """
     if tolerance <= 0:
         msg = f"tolerance must be positive, got {tolerance}"

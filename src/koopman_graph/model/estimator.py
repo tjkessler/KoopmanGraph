@@ -56,6 +56,7 @@ from koopman_graph.observables import (
 )
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
+    ContinuousHeteroGraphKoopmanOperator,
     GraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
@@ -116,10 +117,12 @@ from .online_adaptation import (
     freeze_modules,
     run_adapt_step,
 )
+from .timing import resolve_time_increments, validate_uniform_discrete_increments
 from .validation import (
     prepare_fit_inputs,
     uses_hypergraph_modules,
     uses_relgraph_modules,
+    uses_simplicial_modules,
 )
 
 if TYPE_CHECKING:
@@ -205,6 +208,8 @@ class GraphKoopmanModel(nn.Module):
         koopman_edge_types: Sequence[Sequence[str]] | None = None,
         koopman_relation_tying: str = "independent",
         koopman_basis_size: int | None = None,
+        koopman_synthesize_reverse_relations: bool = False,
+        koopman_latent_dims: Mapping[str, int] | None = None,
     ) -> None:
         """Initialize encoder, decoder, and Koopman operator.
 
@@ -266,10 +271,12 @@ class GraphKoopmanModel(nn.Module):
             ``koopman=...``.
         koopman_sparsity : {"dense", "block_diagonal", "distributed"}, optional
             Realization mode for networked operators (``koopman="graph"`` /
-            ``"hypergraph"``). Only ``"dense"`` is implemented today; other
-            values are rejected by the operator constructors. Ignored for
-            per-node operators (must remain ``"dense"``). Default is
-            ``"dense"``.
+            ``"hypergraph"`` / ``"hetero_graph"`` / continuous peers).
+            ``"distributed"`` uses matrix-free inverse / spectrum helpers on
+            discrete graph and multiplex hetero; it is **not** trainer DDP /
+            ``[distributed]`` extras and does **not** enable multi-GPU
+            training. Ignored for per-node operators (must remain
+            ``"dense"``). Default is ``"dense"``.
         koopman_adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
             Neighbor-coupling normalization for ``koopman="graph"`` and
             continuous-graph peers. Default ``"symmetric"``. Rejected for
@@ -353,6 +360,15 @@ class GraphKoopmanModel(nn.Module):
             ``"independent"``.
         koopman_basis_size : int or None, optional
             Basis size ``B`` when ``koopman_relation_tying="basis"``.
+        koopman_synthesize_reverse_relations : bool, optional
+            When ``True`` with ``koopman="hetero_graph"``, expand
+            ``koopman_edge_types`` with reverse relations and rebuild
+            RelGraph / operator banks to match. Default ``False``. Snapshots
+            still need reverse ``edge_index`` banks (see
+            :func:`~koopman_graph.graph_utils.materialize_reverse_relation_edges`).
+        koopman_latent_dims : mapping of str to int or None, optional
+            Opt-in per-type latent widths. When set, RelGraph peers are
+            aligned and the discrete hetero operator receives the same map.
 
         Raises
         ------
@@ -399,6 +415,8 @@ class GraphKoopmanModel(nn.Module):
             koopman_edge_types=koopman_edge_types,
             koopman_relation_tying=koopman_relation_tying,
             koopman_basis_size=koopman_basis_size,
+            koopman_synthesize_reverse_relations=(koopman_synthesize_reverse_relations),
+            koopman_latent_dims=koopman_latent_dims,
         )
         apply_resolved_components(self, components)
         if learn_topology is not None and learn_topology != "self_adaptive":
@@ -454,15 +472,32 @@ class GraphKoopmanModel(nn.Module):
 
     @property
     def uses_hetero_koopman(self) -> bool:
-        """Return whether latent advance uses the multiplex relational operator.
+        """Return whether latent advance uses a multiplex relational operator.
 
         Returns
         -------
         bool
             ``True`` when :attr:`koopman` is a
-            :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`.
+            :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator` or a
+            :class:`~koopman_graph.operators.ContinuousHeteroGraphKoopmanOperator`.
+            Use :attr:`uses_continuous_hetero_koopman` to distinguish the two.
         """
-        return isinstance(self.koopman, HeteroGraphKoopmanOperator)
+        return isinstance(
+            self.koopman,
+            (HeteroGraphKoopmanOperator, ContinuousHeteroGraphKoopmanOperator),
+        )
+
+    @property
+    def uses_continuous_hetero_koopman(self) -> bool:
+        """Return whether latent advance uses the continuous hetero generator.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`koopman` is a
+            :class:`~koopman_graph.operators.ContinuousHeteroGraphKoopmanOperator`.
+        """
+        return isinstance(self.koopman, ContinuousHeteroGraphKoopmanOperator)
 
     @property
     def uses_typed_hetero(self) -> bool:
@@ -904,6 +939,7 @@ class GraphKoopmanModel(nn.Module):
             uses_hypergraph_koopman=self.uses_hypergraph_koopman,
             uses_continuous_graph_koopman=self.uses_continuous_graph_koopman,
             uses_hetero_koopman=self.uses_hetero_koopman,
+            uses_continuous_hetero_koopman=self.uses_continuous_hetero_koopman,
             is_continuous=self.is_continuous,
             time_step=self.time_step,
             delta_t=delta_t,
@@ -1769,15 +1805,15 @@ class GraphKoopmanModel(nn.Module):
 
     def predict_at(
         self,
-        initial_graph: Tensor | Data,
+        initial_graph: Tensor | Data | HeteroData,
         *,
         query_times: Sequence[float] | Sequence[Tensor] | None = None,
         step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
-        future_topologies: Sequence[Data] | None = None,
-    ) -> list[Data]:
+        future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
+    ) -> list[Data] | list[HeteroData]:
         """Forecast graph snapshots at arbitrary query times.
 
         Exactly one of ``query_times`` or ``step_deltas`` must be provided.
@@ -1789,9 +1825,13 @@ class GraphKoopmanModel(nn.Module):
         :class:`ValueError` because the learned operator is tied to a fixed
         :attr:`time_step`.
 
+        Multiplex / typed ``HeteroData`` origins (``koopman="hetero_graph"``)
+        return ``list[HeteroData]`` preserving the origin schema. Continuous
+        hetero operators are TASK-1812; discrete uniform increments apply today.
+
         Parameters
         ----------
-        initial_graph : Tensor or Data
+        initial_graph : Tensor, Data, or HeteroData
             Initial graph snapshot at ``t = 0``.
         query_times : sequence of float or Tensor or None, optional
             Strictly increasing absolute query times, each positive.
@@ -1802,9 +1842,59 @@ class GraphKoopmanModel(nn.Module):
 
         Returns
         -------
-        list of Data
+        list of Data or list of HeteroData
             Predicted snapshots, one per query interval.
         """
+        if self.uses_hetero_koopman or isinstance(initial_graph, HeteroData):
+            if not isinstance(initial_graph, HeteroData):
+                msg = (
+                    "koopman='hetero_graph' predict_at requires a HeteroData "
+                    "origin (tensor relation-bank packing is not implemented "
+                    "for predict_at; use forward for tensor banks)"
+                )
+                raise TypeError(msg)
+            increments = resolve_time_increments(
+                query_times=query_times,
+                step_deltas=step_deltas,
+            )
+            if not self.is_continuous:
+                validate_uniform_discrete_increments(
+                    time_step=self.time_step,
+                    increments=increments,
+                )
+            was_training = self.training
+            self.eval()
+            try:
+                with torch.no_grad():
+                    rollout = self._rollout_hetero(
+                        initial_graph,
+                        len(increments),
+                        edge_index=edge_index,
+                        edge_weight=edge_weight,
+                        controls=controls,
+                        future_topologies=future_topologies,  # type: ignore[arg-type]
+                        step_deltas=increments,
+                    )
+            finally:
+                self.train(was_training)
+            encoder = self.encoder
+            typed_node_types = (
+                encoder.node_types
+                if isinstance(encoder, RelGraphEncoder) and encoder.is_typed
+                else None
+            )
+            typed_edge_types = (
+                encoder.edge_types
+                if isinstance(encoder, RelGraphEncoder) and encoder.is_typed
+                else None
+            )
+            return pack_hetero_rollout_snapshots(
+                rollout,
+                template=initial_graph,
+                node_types=typed_node_types,
+                edge_types=typed_edge_types,
+            )
+
         return predict_at_snapshots(
             self,
             self._rollout,
@@ -1816,22 +1906,28 @@ class GraphKoopmanModel(nn.Module):
             edge_index=edge_index,
             edge_weight=edge_weight,
             controls=controls,
-            future_topologies=future_topologies,
+            future_topologies=future_topologies,  # type: ignore[arg-type]
         )
 
     def evaluate(
         self,
-        sequence: GraphSnapshotSequence | Sequence[Data],
+        sequence: SnapshotSequence | Sequence[Data] | Sequence[HeteroData],
         *,
         horizons: Sequence[int] = (3, 6, 12),
         start_indices: Sequence[int] | None = None,
     ) -> EvaluationResult:
         """Evaluate multi-horizon forecast accuracy on a snapshot sequence.
 
+        Homogeneous sequences use per-node ``Data.x`` metrics. Hetero sequences
+        use concatenated flattened per-type features in
+        :attr:`~koopman_graph.data.HeteroGraphSnapshotSequence.node_type_names`
+        order (stacked aggregate; not a certified per-type report).
+
         Parameters
         ----------
-        sequence : GraphSnapshotSequence or sequence of Data
-            Evaluation snapshots with shared topology.
+        sequence : GraphSnapshotSequence, HeteroGraphSnapshotSequence, or sequence
+            Evaluation snapshots. Hetero paths require static relation banks
+            without controls or observation masks.
         horizons : sequence of int, optional
             Forecast horizons to report. Default is ``(3, 6, 12)``.
         start_indices : sequence of int or None, optional
@@ -2046,6 +2142,7 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             than two snapshots are provided for training or validation, or
             ``strategy`` is not ``None`` / ``"ddp"``.
         """
+        uses_simplicial_modules(self.encoder, self.decoder)
         prepared = prepare_fit_inputs(
             control_dim=self.control_dim,
             data_sequence=data_sequence,

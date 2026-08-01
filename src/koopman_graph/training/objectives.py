@@ -29,6 +29,7 @@ from koopman_graph.losses import (
 )
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
+    ContinuousHeteroGraphKoopmanOperator,
     GraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
     HypergraphKoopmanOperator,
@@ -38,6 +39,7 @@ from koopman_graph.training.extra_objectives import (
     compute_lie_consistency_loss,
     compute_pde_residual_loss,
     compute_sparsity_loss,
+    compute_vamp2_loss,
     compute_worst_case_reconstruction_loss,
 )
 from koopman_graph.training.history import (
@@ -219,7 +221,8 @@ def _hetero_eigenvalue_regularization_over_sequence(
     Parameters
     ----------
     model : TrainableKoopmanModel
-        Model whose ``koopman`` is a :class:`HeteroGraphKoopmanOperator`.
+        Model whose ``koopman`` is a :class:`HeteroGraphKoopmanOperator` or a
+        :class:`ContinuousHeteroGraphKoopmanOperator`.
     sequence : HeteroGraphSnapshotSequence
         Training window or trajectory supplying relation topology.
 
@@ -241,11 +244,13 @@ def _hetero_eigenvalue_regularization_over_sequence(
         )
         raise ValueError(msg)
     koopman = model.koopman
-    assert isinstance(koopman, HeteroGraphKoopmanOperator)
+    assert isinstance(
+        koopman, (HeteroGraphKoopmanOperator, ContinuousHeteroGraphKoopmanOperator)
+    )
     edge_indices, edge_weights = _hetero_relation_banks(sequence)
     if len(edge_indices) != koopman.num_relations:
         msg = (
-            f"HeteroGraphKoopmanOperator has num_relations="
+            f"{type(koopman).__name__} has num_relations="
             f"{koopman.num_relations}, but sequence provides "
             f"{len(edge_indices)} edge types"
         )
@@ -254,8 +259,9 @@ def _hetero_eigenvalue_regularization_over_sequence(
         koopman,
         dynamics_mode=model.dynamics_mode,
         edge_indices=edge_indices,
-        num_nodes=sequence.num_nodes,
+        num_nodes=sequence.num_nodes_total,
         edge_weights=edge_weights,
+        num_nodes_dict=sequence.num_nodes_dict,
     )
 
 
@@ -391,6 +397,25 @@ def compute_eigenvalue_regularization_loss(
             raise ValueError(msg)
         return _hetero_eigenvalue_regularization_over_sequence(model, sequence)
 
+    if isinstance(
+        koopman, ContinuousHeteroGraphKoopmanOperator
+    ) and koopman.parameterization in {"dense", "odo"}:
+        if sequence is None:
+            msg = (
+                "sequence is required for eigenvalue regularization of "
+                "ContinuousHeteroGraphKoopmanOperator dense/odo modes "
+                "(topology-coupled effective generator); pass a "
+                "HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
+        if not isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = (
+                "ContinuousHeteroGraphKoopmanOperator eigenvalue "
+                "regularization requires a HeteroGraphSnapshotSequence"
+            )
+            raise ValueError(msg)
+        return _hetero_eigenvalue_regularization_over_sequence(model, sequence)
+
     return _EIGENVALUE_REGULARIZATION_LOSS(
         koopman,
         dynamics_mode=model.dynamics_mode,
@@ -447,9 +472,10 @@ def _validate_hetero_fit_surface(
         loss_weights.lie != 0.0
         or loss_weights.pde != 0.0
         or loss_weights.worst_case != 0.0
+        or loss_weights.vamp2 != 0.0
     ):
         msg = (
-            "lie / pde / worst_case losses are unsupported for "
+            "lie / pde / worst_case / vamp2 losses are unsupported for "
             "HeteroGraphSnapshotSequence fit"
         )
         raise ValueError(msg)
@@ -550,7 +576,9 @@ def compute_training_loss(
     """
     # Evaluation-scoped continuous L_eff / Φ caches must not span optimizer steps.
     koopman = model.koopman
-    if isinstance(koopman, ContinuousGraphKoopmanOperator):
+    if isinstance(
+        koopman, (ContinuousGraphKoopmanOperator, ContinuousHeteroGraphKoopmanOperator)
+    ):
         koopman.clear_transition_cache()
 
     if isinstance(sequence, HeteroGraphSnapshotSequence):
@@ -571,6 +599,7 @@ def compute_training_loss(
         or loss_weights.forward != 0.0
         or loss_weights.backward != 0.0
         or loss_weights.rollout != 0.0
+        or loss_weights.vamp2 != 0.0
     )
     cache = encode_sequence_latents(model, sequence) if needs_latent_cache else None
     predictions = (
@@ -628,6 +657,15 @@ def compute_training_loss(
         weight=loss_weights.worst_case,
         predictions=predictions,
     )
+    if isinstance(sequence, GraphSnapshotSequence):
+        vamp2 = compute_vamp2_loss(
+            model,
+            sequence,
+            weight=loss_weights.vamp2,
+            cache=cache,
+        )
+    else:
+        vamp2 = torch.zeros((), device=device)
 
     if loss_weights.rollout != 0.0:
         horizon = (
@@ -654,6 +692,7 @@ def compute_training_loss(
         + loss_weights.pde * pde
         + loss_weights.sparsity * sparsity
         + loss_weights.worst_case * worst_case
+        + loss_weights.vamp2 * vamp2
     )
     return TrainingLossBreakdown(
         reconstruction=reconstruction,
@@ -665,6 +704,7 @@ def compute_training_loss(
         pde=pde,
         sparsity=sparsity,
         worst_case=worst_case,
+        vamp2=vamp2,
         total=total,
     )
 

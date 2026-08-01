@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import torch
 from torch import Tensor, nn
 
+from koopman_graph.data.hetero_layout import stacked_latent_numel
 from koopman_graph.graph_utils import KoopmanPropagator
+from koopman_graph.operators.continuous_hetero import (
+    ContinuousHeteroGraphKoopmanOperator,
+)
 from koopman_graph.operators.graph import GraphKoopmanOperator
 from koopman_graph.operators.heterogeneous import HeteroGraphKoopmanOperator
 from koopman_graph.operators.hypergraph import HypergraphKoopmanOperator
@@ -47,8 +51,17 @@ class EigenvalueRegularizationLoss(nn.Module):
       :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator` —
       ``eigvals`` on the topology-coupled ``effective_matrix`` (requires
       topology / ``num_nodes``). Never falls back to ``K_self`` alone.
-      When ``N·d >`` :data:`MAX_ASSEMBLED_EIGREG_SIZE`, the assembled hinge
+      When assembled size (``N·d`` shared-d, or ``Σ N_τ·d_τ`` rectangular)
+      exceeds :data:`MAX_ASSEMBLED_EIGREG_SIZE`, the assembled hinge
       **no-ops** (returns zero) rather than allocating a huge eigendecomposition.
+      Factor ``bound_metric`` paths remain factor-level surrogates and do
+      **not** certify joint ``ρ(K_eff)``.
+    - Networked ``sparsity="distributed"`` — **never** assembles
+      ``effective_matrix``. Discrete graph / multiplex hetero use an Arnoldi
+      leading-modulus surrogate
+      (:data:`~koopman_graph.operators.matrix_free.DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES`);
+      hypergraph / continuous / typed hetero distributed operators return
+      zero (assembled hinge disabled).
     - ``"schur"`` / ``"lyapunov"`` — cheap
       :meth:`~koopman_graph.operators.KoopmanOperatorContract.bound_metric`
       (closed-form certified bound for ordinary operators; for networked
@@ -93,6 +106,7 @@ class EigenvalueRegularizationLoss(nn.Module):
         hyperedge_weight: Tensor | None = None,
         edge_indices: Sequence[Tensor] | None = None,
         edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
     ) -> Tensor:
         """Compute the stability eigenvalue hinge penalty.
 
@@ -100,8 +114,9 @@ class EigenvalueRegularizationLoss(nn.Module):
         ----------
         koopman : KoopmanOperatorContract
             Operator whose eigenvalues (or bound metric) are penalized.
-        dynamics_mode : {"discrete", "continuous"}, optional
+        dynamics_mode : {"discrete", "continuous", "stochastic"}, optional
             Selects the discrete unit-circle hinge vs continuous Hurwitz hinge.
+            ``"stochastic"`` uses the discrete hinge.
             Default is ``"discrete"``.
         edge_index : Tensor or None, optional
             Topology for networked
@@ -125,11 +140,13 @@ class EigenvalueRegularizationLoss(nn.Module):
             dense/ODO modes.
         edge_weights : sequence of Tensor or None, optional
             Optional per-relation edge weights for hetero dense/ODO.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type node counts for typed / rectangular hetero operators.
 
         Returns
         -------
         Tensor
-            Scalar hinge penalty (zero when assembled ``N·d`` exceeds
+            Scalar hinge penalty (zero when assembled size exceeds
             :data:`MAX_ASSEMBLED_EIGREG_SIZE`).
 
         Raises
@@ -138,10 +155,10 @@ class EigenvalueRegularizationLoss(nn.Module):
             If ``dynamics_mode`` is invalid, or a networked dense/ODO operator
             is regularized without required topology arguments.
         """
-        if dynamics_mode not in {"discrete", "continuous"}:
+        if dynamics_mode not in {"discrete", "continuous", "stochastic"}:
             msg = (
-                "dynamics_mode must be 'discrete' or 'continuous', "
-                f"got {dynamics_mode!r}"
+                "dynamics_mode must be 'discrete', 'continuous', or "
+                f"'stochastic', got {dynamics_mode!r}"
             )
             raise ValueError(msg)
 
@@ -157,7 +174,28 @@ class EigenvalueRegularizationLoss(nn.Module):
                 violation = torch.relu(bound - 1.0)
             return violation**2
 
-        if _assembled_eigreg_exceeds_ceiling(koopman, num_nodes=num_nodes):
+        if getattr(koopman, "sparsity", None) == "distributed":
+            eigenvalues = _distributed_eigreg_eigenvalues(
+                koopman,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                edge_weight=edge_weight,
+                edge_indices=edge_indices,
+                edge_weights=edge_weights,
+            )
+            if eigenvalues is None:
+                return torch.zeros((), device=device)
+            if dynamics_mode == "continuous":
+                violation = torch.relu(eigenvalues.real)
+            else:
+                violation = torch.relu(eigenvalues.abs() - 1.0)
+            return (violation**2).mean()
+
+        if _assembled_eigreg_exceeds_ceiling(
+            koopman,
+            num_nodes=num_nodes,
+            num_nodes_dict=num_nodes_dict,
+        ):
             return torch.zeros((), device=device)
 
         matrix = self._spectrum_matrix(
@@ -169,6 +207,7 @@ class EigenvalueRegularizationLoss(nn.Module):
             hyperedge_weight=hyperedge_weight,
             edge_indices=edge_indices,
             edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
         )
         eigenvalues = torch.linalg.eigvals(matrix)
         if dynamics_mode == "continuous":
@@ -188,6 +227,7 @@ class EigenvalueRegularizationLoss(nn.Module):
         hyperedge_weight: Tensor | None = None,
         edge_indices: Sequence[Tensor] | None = None,
         edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
     ) -> Tensor:
         """Return the matrix whose spectrum is regularized for dense/ODO.
 
@@ -209,6 +249,8 @@ class EigenvalueRegularizationLoss(nn.Module):
             Relation banks for hetero operators.
         edge_weights : sequence of Tensor or None, optional
             Optional per-relation weights for hetero operators.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type counts for typed / rectangular hetero operators.
 
         Returns
         -------
@@ -235,6 +277,7 @@ class EigenvalueRegularizationLoss(nn.Module):
                 edge_indices,
                 num_nodes,
                 edge_weights=edge_weights,
+                num_nodes_dict=num_nodes_dict,
             )
         if isinstance(koopman, HypergraphKoopmanOperator):
             if hyperedge_index is None or num_nodes is None:
@@ -265,6 +308,22 @@ class EigenvalueRegularizationLoss(nn.Module):
                 num_nodes,
                 edge_weight=edge_weight,
             )
+        if isinstance(koopman, ContinuousHeteroGraphKoopmanOperator):
+            if edge_indices is None or num_nodes is None:
+                msg = (
+                    "edge_indices and num_nodes are required for "
+                    "EigenvalueRegularizationLoss on "
+                    "ContinuousHeteroGraphKoopmanOperator dense/odo modes "
+                    "(topology-coupled effective generator); the per-node "
+                    "contract matrix L_self is not a substitute"
+                )
+                raise ValueError(msg)
+            return koopman.effective_generator(
+                edge_indices,
+                num_nodes,
+                edge_weights=edge_weights,
+                num_nodes_dict=num_nodes_dict,
+            )
         if not isinstance(koopman, GraphKoopmanOperator):
             return koopman.matrix
         if edge_index is None or num_nodes is None:
@@ -282,10 +341,141 @@ class EigenvalueRegularizationLoss(nn.Module):
         )
 
 
+def _distributed_eigreg_eigenvalues(
+    koopman: KoopmanPropagator,
+    *,
+    edge_index: Tensor | None,
+    num_nodes: int | None,
+    edge_weight: Tensor | None,
+    edge_indices: Sequence[Tensor] | None,
+    edge_weights: Sequence[Tensor | None] | None,
+) -> Tensor | None:
+    """Return Arnoldi eigenvalues for distributed eig-reg, or ``None`` to no-op.
+
+    Parameters
+    ----------
+    koopman : KoopmanPropagator
+        Networked operator with ``sparsity="distributed"``.
+    edge_index, num_nodes, edge_weight
+        Topology for :class:`GraphKoopmanOperator`.
+    edge_indices, edge_weights
+        Relation banks for multiplex :class:`HeteroGraphKoopmanOperator`.
+
+    Returns
+    -------
+    Tensor or None
+        Leading-modulus Arnoldi eigenvalues, or ``None`` when the surrogate
+        is unavailable (hypergraph / continuous / typed hetero).
+
+    Raises
+    ------
+    ValueError
+        If a supported distributed operator is missing topology arguments.
+    """
+    from koopman_graph.operators.matrix_free import (
+        DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES,
+        spectrum_k_eff_graph,
+        spectrum_k_eff_hetero,
+    )
+
+    if isinstance(koopman, GraphKoopmanOperator):
+        if edge_index is None or num_nodes is None:
+            msg = (
+                "edge_index and num_nodes are required for "
+                "EigenvalueRegularizationLoss on GraphKoopmanOperator "
+                "with sparsity='distributed'"
+            )
+            raise ValueError(msg)
+        dim = int(num_nodes) * int(koopman.latent_dim)
+        # Cap modes below full dim so early Arnoldi breakdowns stay usable.
+        num_modes = min(DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES, max(1, dim // 2))
+        try:
+            result = spectrum_k_eff_graph(
+                k_self=koopman.K_self,
+                k_nbr=koopman.K_nbr,
+                edge_index=edge_index,
+                num_nodes=int(num_nodes),
+                num_modes=num_modes,
+                adjacency=koopman.adjacency,
+                edge_weight=edge_weight,
+                k_bwd=None if koopman._bwd is None else koopman.K_bwd,
+                tol=1e-4,
+            )
+        except ValueError:
+            return None
+        return result.eigenvalues
+
+    if isinstance(koopman, HeteroGraphKoopmanOperator):
+        if koopman.is_typed or koopman.is_rectangular:
+            return None
+        if edge_indices is None or num_nodes is None:
+            msg = (
+                "edge_indices and num_nodes are required for "
+                "EigenvalueRegularizationLoss on HeteroGraphKoopmanOperator "
+                "with sparsity='distributed'"
+            )
+            raise ValueError(msg)
+        dim = int(num_nodes) * int(koopman.latent_dim)
+        num_modes = min(DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES, max(1, dim // 2))
+        try:
+            result = spectrum_k_eff_hetero(
+                k_self=koopman.K_self,
+                k_relations=list(koopman.K_relations),
+                edge_indices=edge_indices,
+                num_nodes=int(num_nodes),
+                num_modes=num_modes,
+                normalization=koopman.normalization,
+                edge_weights=edge_weights,
+                tol=1e-4,
+            )
+        except ValueError:
+            return None
+        return result.eigenvalues
+
+    # Hypergraph / continuous / other networked kinds: disable assembled hinge.
+    return None
+
+
+def _assembled_eigreg_size(
+    koopman: KoopmanPropagator,
+    *,
+    num_nodes: int | None,
+    num_nodes_dict: Mapping[str, int] | None = None,
+) -> int | None:
+    """Return assembled latent size for networked eig-reg, or ``None``.
+
+    Parameters
+    ----------
+    koopman : KoopmanOperatorContract
+        Operator under regularization.
+    num_nodes : int or None
+        Stacked node count ``N``.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type counts for rectangular hetero.
+
+    Returns
+    -------
+    int or None
+        ``N·d`` (shared-d) or ``Σ N_τ·d_τ`` (rectangular), else ``None``.
+    """
+    if num_nodes is None:
+        return None
+    if isinstance(koopman, HeteroGraphKoopmanOperator) and koopman.is_rectangular:
+        if num_nodes_dict is None or koopman.latent_dims is None:
+            return None
+        return stacked_latent_numel(
+            koopman.node_types,
+            num_nodes_dict,
+            koopman.latent_dims,
+        )
+    return int(num_nodes) * int(koopman.latent_dim)
+
+
 def _assembled_eigreg_exceeds_ceiling(
     koopman: KoopmanPropagator,
     *,
     num_nodes: int | None,
+    num_nodes_dict: Mapping[str, int] | None = None,
 ) -> bool:
     """Return whether assembled networked eig-reg should no-op.
 
@@ -294,18 +484,18 @@ def _assembled_eigreg_exceeds_ceiling(
     koopman : KoopmanOperatorContract
         Operator under regularization.
     num_nodes : int or None
-        Node count for the assembled ``N·d`` map.
+        Node count for the assembled map.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type counts for rectangular hetero size ``Σ N_τ·d_τ``.
 
     Returns
     -------
     bool
         ``True`` when ``koopman`` is a networked dense/ODO operator and
-        ``N·d`` exceeds :data:`MAX_ASSEMBLED_EIGREG_SIZE`.
+        assembled size exceeds :data:`MAX_ASSEMBLED_EIGREG_SIZE`.
     """
     from koopman_graph.operators import ContinuousGraphKoopmanOperator
 
-    if num_nodes is None:
-        return False
     if koopman.parameterization not in {"dense", "odo"}:
         return False
     if not isinstance(
@@ -315,10 +505,18 @@ def _assembled_eigreg_exceeds_ceiling(
             HypergraphKoopmanOperator,
             HeteroGraphKoopmanOperator,
             ContinuousGraphKoopmanOperator,
+            ContinuousHeteroGraphKoopmanOperator,
         ),
     ):
         return False
-    return num_nodes * koopman.latent_dim > MAX_ASSEMBLED_EIGREG_SIZE
+    size = _assembled_eigreg_size(
+        koopman,
+        num_nodes=num_nodes,
+        num_nodes_dict=num_nodes_dict,
+    )
+    if size is None:
+        return False
+    return size > MAX_ASSEMBLED_EIGREG_SIZE
 
 
 class KoopmanSparsityLoss(nn.Module):

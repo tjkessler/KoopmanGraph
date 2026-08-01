@@ -12,6 +12,7 @@ in-degree normalization for multiplex / heterogeneous graphs.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 import torch
@@ -815,6 +816,179 @@ def random_walk_normalized_adjacency_matvec(
     return out
 
 
+def synthesize_reverse_edge_types(
+    edge_types: Sequence[Sequence[str]],
+    *,
+    reverse_prefix: str = "rev_",
+) -> tuple[tuple[str, str, str], ...]:
+    """Expand a hetero edge-type schema with reverse relations.
+
+    For each forward triple ``(src, rel, dst)`` whose relation name does
+    **not** already start with ``reverse_prefix``, append
+    ``(dst, reverse_prefix + rel, src)`` when that reverse is not already
+    present. Original triples keep their input order; newly synthesized
+    reverses follow in the same relative order as their forwards.
+
+    Parameters
+    ----------
+    edge_types : sequence of sequence of str
+        Ordered ``(src, rel, dst)`` triples (multiplex or typed).
+    reverse_prefix : str, optional
+        Prefix applied to the relation string of synthesized reverses.
+        Default is ``"rev_"``. Relations that already start with this
+        prefix are not reverse-synthesized (no reverse-of-reverse).
+
+    Returns
+    -------
+    tuple of tuple of str
+        Expanded schema: originals then any newly synthesized reverses.
+
+    Raises
+    ------
+    ValueError
+        If an entry is not a length-3 string triple, if ``reverse_prefix``
+        is empty, if input triples are not unique, or if
+        ``reverse_prefix + rel`` is already used by a triple that is not
+        the geometric reverse of ``(src, rel, dst)``.
+
+    Notes
+    -----
+    Collision policy: skip when the reverse triple already exists
+    (idempotent); raise when the reverse *relation name* is occupied by a
+    different ``(src, rel, dst)``. This helper does not mutate snapshots or
+    build operator banks — factory wiring is separate.
+    """
+    if not reverse_prefix:
+        msg = "reverse_prefix must be a non-empty string"
+        raise ValueError(msg)
+
+    originals: list[tuple[str, str, str]] = []
+    for entry in edge_types:
+        if len(entry) != 3:
+            msg = (
+                "edge_types entries must be (src, rel, dst) triples; "
+                f"got {tuple(entry)!r}"
+            )
+            raise ValueError(msg)
+        src, rel, dst = (str(entry[0]), str(entry[1]), str(entry[2]))
+        if not src or not rel or not dst:
+            msg = "edge_types entries must use non-empty strings"
+            raise ValueError(msg)
+        originals.append((src, rel, dst))
+
+    if len(set(originals)) != len(originals):
+        msg = f"edge_types must be unique; got {tuple(originals)!r}"
+        raise ValueError(msg)
+
+    present = set(originals)
+    # Map relation name -> triples that use it (for collision checks).
+    by_rel: dict[str, list[tuple[str, str, str]]] = {}
+    for triple in originals:
+        by_rel.setdefault(triple[1], []).append(triple)
+
+    synthesized: list[tuple[str, str, str]] = []
+    for src, rel, dst in originals:
+        if rel.startswith(reverse_prefix):
+            continue
+        rev_rel = f"{reverse_prefix}{rel}"
+        reverse = (dst, rev_rel, src)
+        if reverse in present:
+            continue
+        conflicts = [triple for triple in by_rel.get(rev_rel, []) if triple != reverse]
+        if conflicts:
+            msg = (
+                f"cannot synthesize reverse for {(src, rel, dst)!r}: "
+                f"relation name {rev_rel!r} is already used by "
+                f"{conflicts[0]!r} (not the geometric reverse)"
+            )
+            raise ValueError(msg)
+        synthesized.append(reverse)
+        present.add(reverse)
+        by_rel.setdefault(rev_rel, []).append(reverse)
+
+    return tuple(originals) + tuple(synthesized)
+
+
+def materialize_reverse_relation_edges(
+    snapshot: HeteroData,
+    edge_types: Sequence[Sequence[str]],
+    *,
+    reverse_prefix: str = "rev_",
+) -> HeteroData:
+    """Fill reverse relation ``edge_index`` banks from forward edges.
+
+    For each forward triple ``(src, rel, dst)`` in ``edge_types`` whose
+    geometric reverse ``(dst, reverse_prefix + rel, src)`` is also listed,
+    copy ``edge_index.flip(0)`` onto the reverse store when that store is
+    missing or empty. Existing non-empty reverse banks are left unchanged.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Multiplex or typed snapshot with forward relation banks populated.
+    edge_types : sequence of sequence of str
+        Full schema (typically the expanded output of
+        :func:`synthesize_reverse_edge_types`).
+    reverse_prefix : str, optional
+        Prefix identifying synthesized reverse relation names. Default
+        ``"rev_"``.
+
+    Returns
+    -------
+    HeteroData
+        Cloned snapshot with reverse banks materialized.
+
+    Raises
+    ------
+    ValueError
+        If ``reverse_prefix`` is empty, an entry is not a length-3 string
+        triple, or a forward bank required to materialize a reverse is
+        missing from ``snapshot``.
+    """
+    if not reverse_prefix:
+        msg = "reverse_prefix must be a non-empty string"
+        raise ValueError(msg)
+
+    schema: list[tuple[str, str, str]] = []
+    for entry in edge_types:
+        if len(entry) != 3:
+            msg = (
+                "edge_types entries must be (src, rel, dst) triples; "
+                f"got {tuple(entry)!r}"
+            )
+            raise ValueError(msg)
+        src, rel, dst = (str(entry[0]), str(entry[1]), str(entry[2]))
+        if not src or not rel or not dst:
+            msg = "edge_types entries must use non-empty strings"
+            raise ValueError(msg)
+        schema.append((src, rel, dst))
+
+    schema_set = set(schema)
+    out = snapshot.clone()
+    for src, rel, dst in schema:
+        if rel.startswith(reverse_prefix):
+            continue
+        reverse = (dst, f"{reverse_prefix}{rel}", src)
+        if reverse not in schema_set:
+            continue
+        forward_key = (src, rel, dst)
+        if forward_key not in out.edge_types:
+            msg = (
+                f"snapshot is missing forward edge type {forward_key!r} "
+                f"required to materialize reverse {reverse!r}"
+            )
+            raise ValueError(msg)
+        if (
+            reverse in out.edge_types
+            and out[reverse].edge_index is not None
+            and out[reverse].edge_index.numel() > 0
+        ):
+            continue
+        forward_index = out[forward_key].edge_index
+        out[reverse].edge_index = forward_index.flip(0).contiguous()
+    return out
+
+
 def _relation_normalization_to_rw_direction(
     normalization: RelationNormalization,
 ) -> RandomWalkDirection:
@@ -868,7 +1042,8 @@ def relation_degree_normalize(
     ``normalization="random_walk"`` uses forward out-degree scaling
     ``D_{out}^{-1} A`` (same convention as homogeneous
     ``adjacency="random_walk"``). Reverse relations are **not** synthesized
-    here; callers add explicit reverse edge types when needed.
+    here; use :func:`synthesize_reverse_edge_types` (or explicit reverse
+    edge types) when a dual bank is required.
 
     Isolated destinations produce zero contribution (zero row), not an
     identity fill. Empty relation banks (``num_edges == 0``) return an empty
@@ -1181,8 +1356,9 @@ def snapshot_to_device(
     """Move a graph snapshot to a target device, preserving topology fields.
 
     Homogeneous ``Data`` copies ``x``, ``edge_index``, optional ``edge_weight``,
-    and optional hyperedge incidence when present. Multiplex ``HeteroData``
-    uses PyG ``HeteroData.to(device)`` so node/edge stores stay intact.
+    optional ``pos`` (invariant-geometry coordinates), and optional hyperedge
+    incidence when present. Multiplex ``HeteroData`` uses PyG
+    ``HeteroData.to(device)`` so node/edge stores stay intact.
 
     Parameters
     ----------
@@ -1206,6 +1382,9 @@ def snapshot_to_device(
     edge_weight = snapshot_edge_weight(snapshot)
     if edge_weight is not None:
         fields["edge_weight"] = edge_weight.to(device)
+    pos = getattr(snapshot, "pos", None)
+    if pos is not None:
+        fields["pos"] = pos.to(device)
     hyperedge_index = snapshot_hyperedge_index(snapshot)
     if hyperedge_index is not None:
         fields["hyperedge_index"] = hyperedge_index.to(device)

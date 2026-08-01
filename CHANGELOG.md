@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - Unreleased
+
+Heterogeneous-operator completion, matrix-free sparsity, ResDMD MVP,
+classical DMD peers, and topology-blind VAMP-2 precursor. Homogeneous
+defaults and the 0.9 RelGraph hetero path remain the baseline; shared-\(d\)
+bit-compat is preserved where rectangular maps are not requested.
+
+### Added
+
+- Windowed hetero `fit`, opt-in reverse-relation synthesis
+  (`synthesize_reverse_relations` / `synthesize_reverse_edge_types`), and
+  continuous hetero dynamics (`dynamics_mode="continuous"`).
+- Per-type latent widths \(d_\tau\) with rectangular relation maps \(K_r\);
+  joint structural certificate on \(\rho(K_{\mathrm{eff}})\) (Gershgorin-style
+  bound via `stability_certificate`, distinct from factor-wise proxies).
+- Hetero parity for conformal UQ, `GraphKoopmanEnv`, hierarchical models
+  (multiplex union-bank and typed per-type pooling; hetero ``fit`` uses
+  ``hold_perm``), and evaluate paths; hetero orbit ties
+  (`koopman_auto_orbits`).
+- Operator flag `sparsity="distributed"`: matrix-free matvec path (Lanczos /
+  Arnoldi spectrum with `num_modes`; multi-step Neumann / fixed-point
+  inverse). Distinct from multi-GPU *trainer* extras.
+- Finite-dictionary ResDMD MVP (`koopman_graph.analysis.resdmd`) and
+  resolvent-norm grid (`pseudospectra`); tutorial
+  `examples/40_resdmd_pseudospectra.ipynb`. Remains separate from
+  diagnostic `spectral_residuals`.
+- Bayesian Laplace UQ over operator factors (`koopman_graph.uq.bayesian`)
+  and opt-in stochastic latent dynamics; Ulam-style transfer-operator
+  baseline.
+- Dask materialization helpers (`koopman_graph.distributed.dask_prep`,
+  `[dask]` extra) — prep only; no Dask training loop.
+- Classical DMD family peers: fbDMD, tlsDMD, optDMD, streaming DMD,
+  depth-2 mrDMD; EDMD Nyström / random-feature approximations.
+- Simplicial-1 / Hodge encode path (`encoder="simplicial"`); Tier A
+  `InvariantGeometryEncoder` (rotation-invariant features; not equivariant
+  \(K\)).
+- Optional Tier B `E3EquivariantEncoder` via `e3nn` (`[equivariance]`
+  extra): steerable encode to invariant scalar latents for linear \(K\)
+  (still **not** an equivariant operator). Citations: `Thomas2018TFN`,
+  `Geiger2022e3nn`.
+- Topology-blind VAMP-2 precursor (`vamp2_score` / `LossWeights.vamp2`,
+  optional `[msm]` deeptime oracles) — not GraphVAMPnets / MD toolchain.
+- Sphinx: limitations **0.11 roadmap**, capabilities / architecture / FAQ /
+  API / tutorials updates for the 0.10 surface.
+
+### Notes
+
+- Dense \(N\cdot d\) (or \(\sum_\tau N_\tau d_\tau\)) assembly ceilings still
+  apply when spectrum / inverse require a dense effective matrix; the
+  matrix-free path avoids assembly only under `sparsity="distributed"`.
+- ResDMD MVP is finite-dictionary only (Colbrook & Townsend / related
+  residual DMD literature; keys `ColbrookTownsend2023ResDMD`,
+  `Colbrook2023ResidualDMD`). Do not treat `spectral_residuals` as ResDMD.
+- VAMP-2 precursor cites Wu & Noé (`Wu2020VAMP`) and Mardt et al.
+  (`Mardt2018VAMPnets`); it is not a GraphVAMPnets or MSM production stack.
+- **0.11 targets (high level):** variable node cardinality / churn, directed
+  hypergraph incidence modes, public cross-topology transfer API, sheaf /
+  cell TDL, GraphVAMPnets + MD/MSM toolchains, Ray Train as model DDP,
+  isotypic symmetry / equivariant \(K\).
+
 ## [0.9.0] - 2026-07-30
 
 Opt-in heterogeneous / multiplex graph Koopman operators and RelGraph

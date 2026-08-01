@@ -20,11 +20,21 @@ This is **not** joint / simultaneous coverage across nodes. Small calibration
 sets make per-node quantiles noisy; ``node_wise`` calibration requires at
 least ``ceil(1 / alpha)`` sequences.
 
+Heterogeneous models (``koopman="hetero_graph"``) score **stacked** decoded
+features with shape ``(N, F)`` where ``N = Σ_τ N_τ`` in the operator's
+``node_types`` order (shared trailing feature width ``F``; unequal per-type
+feature widths are unsupported here). Opt-in unequal latent widths ``d_τ``
+are fine when decoded features still share ``F`` — scoring does not use the
+latent layout. Interval bands are packed as ``HeteroData``. The same
+marginal / exchangeability honesty applies to stacked node rows; this is not
+joint coverage across types or relations.
+
 Optional ``neighbor_smoothing`` applies DAPS-style diffusion to node-wise
 regression residual scores. Zargarbashi et al. (ICML 2023) prove
 exchangeability preservation for *classification* conformity scores; applying
 the same diffusion to regression residuals is an empirical adaptation, not a
-transferred theorem.
+transferred theorem. On hetero graphs, diffusion uses the **union** of
+relation banks in stacked global numbering.
 
 This peer belongs to the package ``uncertainty_quantification`` profile
 (power-user ``koopman_graph.uq`` path).
@@ -52,12 +62,31 @@ from torch_geometric.data import Data, HeteroData
 from koopman_graph.data import (
     GraphSnapshotSequence,
     HeteroGraphSnapshotSequence,
+    resolve_hetero_sequence,
     resolve_sequence,
+)
+from koopman_graph.data.hetero_layout import (
+    global_relation_edge_indices,
+    stack_typed_features,
 )
 from koopman_graph.graph_utils import random_walk_normalized_adjacency_matvec
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
-from koopman_graph.uq.common import PredictionInterval, snapshot_with_features
+from koopman_graph.operators import HeteroGraphKoopmanOperator
+from koopman_graph.uq.common import (
+    PredictionInterval,
+    SnapshotLike,
+    hetero_snapshot_with_features,
+    snapshot_with_features,
+)
+
+CalibrationSequence = (
+    GraphSnapshotSequence
+    | HeteroGraphSnapshotSequence
+    | Sequence[Data]
+    | Sequence[HeteroData]
+)
+ResolvedSequence = GraphSnapshotSequence | HeteroGraphSnapshotSequence
 
 ConformalMethod = Literal["split", "adaptive"]
 ConformalScore = Literal["aggregate", "per_node", "node_wise"]
@@ -226,6 +255,102 @@ def _minimum_calibration_count(alpha: float) -> int:
     return int(ceil(1.0 / alpha))
 
 
+def _is_hetero_sequence(sequence: object) -> bool:
+    """Return whether ``sequence`` is a hetero trajectory container or list.
+
+    Parameters
+    ----------
+    sequence
+        Value for ``sequence``.
+
+    Returns
+    -------
+    object
+        Function result.
+    """
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        return True
+    if isinstance(sequence, Sequence) and not isinstance(sequence, (str, bytes)):
+        return bool(sequence) and isinstance(sequence[0], HeteroData)
+    return False
+
+
+def _stack_hetero_features(
+    snapshot: HeteroData,
+    node_types: Sequence[str],
+) -> Tensor:
+    """Stack per-type ``x`` blocks into ``(N, F)`` with shared trailing width.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Multiplex or typed snapshot.
+    node_types : sequence of str
+        Operator node-type order.
+
+    Returns
+    -------
+    Tensor
+        Stacked features ``(Σ_τ N_τ, F)``.
+
+    Raises
+    ------
+    ValueError
+        If a type is missing ``x`` or trailing widths disagree.
+    """
+    feature_dict: dict[str, Tensor] = {}
+    for name in node_types:
+        if name not in snapshot.node_types:
+            msg = (
+                f"HeteroData snapshot is missing node type {name!r}; "
+                f"present types are {sorted(snapshot.node_types)!r}"
+            )
+            raise ValueError(msg)
+        features = snapshot[name].x
+        if features is None:
+            msg = f"HeteroData node type {name!r} is missing feature matrix x"
+            raise ValueError(msg)
+        feature_dict[name] = features
+    return stack_typed_features(feature_dict, node_types)
+
+
+def _union_relation_edge_index(
+    snapshot: HeteroData,
+    edge_types: Sequence[Sequence[str]],
+    node_types: Sequence[str],
+) -> Tensor:
+    """Concatenate relation banks into one stacked-global ``edge_index``.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Origin snapshot carrying per-relation banks.
+    edge_types : sequence of sequence of str
+        Operator edge-type schema.
+    node_types : sequence of str
+        Operator node-type order.
+
+    Returns
+    -------
+    Tensor
+        Union ``edge_index`` with shape ``(2, E_union)``.
+
+    Raises
+    ------
+    ValueError
+        If every relation bank is empty.
+    """
+    banks = global_relation_edge_indices(snapshot, edge_types, node_types)
+    nonempty = [bank for bank in banks if bank.numel() > 0]
+    if not nonempty:
+        msg = (
+            "neighbor_smoothing requires at least one non-empty relation "
+            "bank on the calibration / predict origin"
+        )
+        raise ValueError(msg)
+    return torch.cat(nonempty, dim=1)
+
+
 class ConformalKoopmanUQ:
     """Distribution-free forecast intervals via conformal prediction.
 
@@ -260,13 +385,19 @@ class ConformalKoopmanUQ:
     -----
     Call :meth:`calibrate` before :meth:`predict_interval`. Intervals are
     symmetric half-widths ``ŷ ± q`` in feature space. For ``node_wise``,
-    ``q`` is per-node and broadcasts over features. Coverage is **marginal
-    per node**, not joint across nodes. ``node_wise`` calibration requires
-    at least ``ceil(1 / alpha)`` sequences.
+    ``q`` is per-node (stacked global rows when hetero) and broadcasts over
+    features. Reported coverage is **marginal** (and **marginal per node**
+    under ``score="node_wise"``), not joint across nodes, types, or
+    horizons. Exact frequentist coverage assumes exchangeable calibration
+    and test scores; graph time series typically violate that assumption, so
+    treat split coverage as approximate under temporal dependence (see the
+    module ``Coverage semantics`` section). ``node_wise`` calibration
+    requires at least ``ceil(1 / alpha)`` sequences.
 
     Score diffusion follows Zargarbashi et al. (ICML 2023) for classification
     conformity scores; using it on regression residuals is an adaptation with
-    empirical rather than theoretical warrant.
+    empirical rather than theoretical warrant. Hetero diffusion uses the
+    union of relation banks.
 
     References
     ----------
@@ -310,12 +441,6 @@ class ConformalKoopmanUQ:
             if not 0.0 <= float(neighbor_smoothing) <= 1.0:
                 msg = f"neighbor_smoothing must lie in [0, 1], got {neighbor_smoothing}"
                 raise ValueError(msg)
-        if getattr(model, "uses_hetero_koopman", False):
-            msg = (
-                "ConformalKoopmanUQ is homogeneous-only; multiplex / "
-                "koopman='hetero_graph' models are not supported yet"
-            )
-            raise TypeError(msg)
         self.model = model
         self.method: ConformalMethod = method
         self.score: ConformalScore = score
@@ -327,6 +452,87 @@ class ConformalKoopmanUQ:
         self._alpha: float | None = None
         self._n_calibration: int = 0
         self._calibrated_steps: int = 0
+
+    @property
+    def _uses_hetero(self) -> bool:
+        """Return whether the wrapped model uses hetero Koopman advance.
+
+        Returns
+        -------
+        object
+            Function result.
+        """
+        return bool(getattr(self.model, "uses_hetero_koopman", False))
+
+    def _hetero_operator(self) -> HeteroGraphKoopmanOperator:
+        """Return the wrapped hetero operator.
+
+        Returns
+        -------
+        HeteroGraphKoopmanOperator
+            Relational Koopman module.
+
+        Raises
+        ------
+        TypeError
+            If the model is not hetero.
+        """
+        koopman = self.model.koopman
+        if not isinstance(koopman, HeteroGraphKoopmanOperator):
+            msg = "hetero conformal helpers require HeteroGraphKoopmanOperator"
+            raise TypeError(msg)
+        return koopman
+
+    def _stacked_features(self, snapshot: SnapshotLike) -> Tensor:
+        """Return homogeneous ``x`` or stacked hetero features ``(N, F)``.
+
+        Parameters
+        ----------
+        snapshot : Data or HeteroData
+            Forecast or target snapshot.
+
+        Returns
+        -------
+        Tensor
+            Feature matrix with shape ``(num_nodes, num_features)``.
+        """
+        if isinstance(snapshot, HeteroData):
+            return _stack_hetero_features(
+                snapshot,
+                self._hetero_operator().node_types,
+            )
+        if snapshot.x is None:
+            msg = "snapshots must define node features x"
+            raise ValueError(msg)
+        return snapshot.x
+
+    def _pack_band(
+        self,
+        template: SnapshotLike,
+        features: Tensor,
+    ) -> SnapshotLike:
+        """Pack a feature matrix onto a homogeneous or hetero template.
+
+        Parameters
+        ----------
+        template : Data or HeteroData
+            Topology template from the point forecast.
+        features : Tensor
+            Replacement features (stacked when hetero).
+
+        Returns
+        -------
+        Data or HeteroData
+            Band snapshot matching the template container type.
+        """
+        if isinstance(template, HeteroData):
+            return hetero_snapshot_with_features(
+                template,
+                features,
+                self._hetero_operator().node_types,
+            )
+        assert isinstance(template, Data)
+        return snapshot_with_features(template, features)
 
     @property
     def is_calibrated(self) -> bool:
@@ -379,12 +585,12 @@ class ConformalKoopmanUQ:
 
     def calibrate(
         self,
-        calibration_sequences: Sequence[GraphSnapshotSequence | Sequence[Data]],
+        calibration_sequences: Sequence[CalibrationSequence],
         *,
         steps: int,
         alpha: float = 0.1,
         controls: Sequence[Sequence[Tensor] | None] | None = None,
-        future_topologies: Sequence[Sequence[Data] | None] | None = None,
+        future_topologies: Sequence[Sequence[SnapshotLike] | None] | None = None,
     ) -> ConformalKoopmanUQ:
         """Estimate per-horizon conformal half-widths from held-out sequences.
 
@@ -393,14 +599,18 @@ class ConformalKoopmanUQ:
         calibration_sequences : sequence of trajectories
             Each trajectory must have length ``≥ steps + 1``. The first
             snapshot is the rollout origin; the next ``steps`` snapshots are
-            targets. For ``score="node_wise"``, length must be at least
-            ``ceil(1 / alpha)``.
+            targets. Homogeneous models require ``Data`` /
+            :class:`~koopman_graph.data.GraphSnapshotSequence`; hetero models
+            require ``HeteroData`` /
+            :class:`~koopman_graph.data.HeteroGraphSnapshotSequence`. For
+            ``score="node_wise"``, length must be at least ``ceil(1 / alpha)``.
         steps : int
             Forecast horizon used for calibration (and the maximum horizon
             for later :meth:`predict_interval` calls).
         alpha : float, optional
-            Target miscoverage rate in ``(0, 1)``. Default ``0.1`` (90%
-            nominal marginal coverage under exchangeability).
+            Target miscoverage rate in ``(0, 1)``. Default ``0.1`` (nominal
+            90% **marginal** coverage when calibration and test scores are
+            exchangeable; not a joint coverage claim across nodes or types).
         controls : sequence of control sequences or None, optional
             Optional per-trajectory future controls aligned with ``steps``.
         future_topologies : sequence of topology schedules or None, optional
@@ -413,10 +623,18 @@ class ConformalKoopmanUQ:
 
         Raises
         ------
+        TypeError
+            If sequence container types disagree with the wrapped model
+            (homo vs hetero).
         ValueError
             If inputs are invalid, sequences are too short, or (for
             ``node_wise``) the calibration set is smaller than
             ``ceil(1 / alpha)``.
+
+        Notes
+        -----
+        See the module ``Coverage semantics`` section for exchangeability
+        limits on graph time series and hetero stacked-score honesty.
         """
         if steps < 1:
             msg = f"steps must be >= 1, got {steps}"
@@ -427,18 +645,34 @@ class ConformalKoopmanUQ:
         if not calibration_sequences:
             msg = "calibration_sequences must be non-empty"
             raise ValueError(msg)
+
+        uses_hetero = self._uses_hetero
         for seq in calibration_sequences:
-            if isinstance(seq, HeteroGraphSnapshotSequence) or (
-                isinstance(seq, Sequence) and seq and isinstance(seq[0], HeteroData)
-            ):
+            seq_is_hetero = _is_hetero_sequence(seq)
+            if uses_hetero and not seq_is_hetero:
                 msg = (
-                    "ConformalKoopmanUQ is homogeneous-only; "
-                    "HeteroData / HeteroGraphSnapshotSequence calibration "
-                    "is not supported yet"
+                    "hetero ConformalKoopmanUQ calibration requires "
+                    "HeteroData / HeteroGraphSnapshotSequence trajectories"
+                )
+                raise TypeError(msg)
+            if not uses_hetero and seq_is_hetero:
+                msg = (
+                    "homogeneous ConformalKoopmanUQ cannot calibrate on "
+                    "HeteroData / HeteroGraphSnapshotSequence trajectories"
                 )
                 raise TypeError(msg)
 
-        resolved = [resolve_sequence(seq) for seq in calibration_sequences]
+        resolved: list[ResolvedSequence]
+        if uses_hetero:
+            resolved = [
+                resolve_hetero_sequence(seq)  # type: ignore[arg-type]
+                for seq in calibration_sequences
+            ]
+        else:
+            resolved = [
+                resolve_sequence(seq)  # type: ignore[arg-type]
+                for seq in calibration_sequences
+            ]
         if self.score == "node_wise":
             min_count = _minimum_calibration_count(alpha)
             if len(resolved) < min_count:
@@ -490,19 +724,19 @@ class ConformalKoopmanUQ:
 
     def _calibrate_scalar(
         self,
-        resolved: list[GraphSnapshotSequence],
+        resolved: list[ResolvedSequence],
         *,
         steps: int,
         alpha: float,
         controls: Sequence[Sequence[Tensor] | None] | None,
-        future_topologies: Sequence[Sequence[Data] | None] | None,
+        future_topologies: Sequence[Sequence[SnapshotLike] | None] | None,
     ) -> None:
         """Calibrate pooled scalar quantiles (``aggregate`` / ``per_node``).
 
         Parameters
         ----------
-        resolved : list of GraphSnapshotSequence
-            Resolved calibration trajectories.
+        resolved : list of snapshot sequences
+            Resolved calibration trajectories (homo or hetero).
         steps : int
             Forecast horizon.
         alpha : float
@@ -535,11 +769,8 @@ class ConformalKoopmanUQ:
                 future_topologies=traj_future,
             )
             for horizon in range(steps):
-                pred_x = forecast[horizon].x
-                target_x = sequence[horizon + 1].x
-                if pred_x is None or target_x is None:
-                    msg = "calibration snapshots must define node features x"
-                    raise ValueError(msg)
+                pred_x = self._stacked_features(forecast[horizon])
+                target_x = self._stacked_features(sequence[horizon + 1])
                 score = _nonconformity_score(pred_x, target_x, score_mode)
                 if self.method == "split":
                     score_rows[horizon].append(score)
@@ -560,19 +791,19 @@ class ConformalKoopmanUQ:
 
     def _calibrate_node_wise(
         self,
-        resolved: list[GraphSnapshotSequence],
+        resolved: list[ResolvedSequence],
         *,
         steps: int,
         alpha: float,
         controls: Sequence[Sequence[Tensor] | None] | None,
-        future_topologies: Sequence[Sequence[Data] | None] | None,
+        future_topologies: Sequence[Sequence[SnapshotLike] | None] | None,
     ) -> None:
         """Calibrate per-node quantiles with optional score diffusion.
 
         Parameters
         ----------
-        resolved : list of GraphSnapshotSequence
-            Resolved calibration trajectories (fixed node count).
+        resolved : list of snapshot sequences
+            Resolved calibration trajectories (fixed stacked node count).
         steps : int
             Forecast horizon.
         alpha : float
@@ -583,13 +814,12 @@ class ConformalKoopmanUQ:
             Optional per-trajectory topology schedules.
         """
         origin0 = resolved[0][0]
-        if origin0.x is None:
-            msg = "calibration snapshots must define node features x"
-            raise ValueError(msg)
-        num_nodes = int(origin0.x.shape[0])
+        features0 = self._stacked_features(origin0)
+        num_nodes = int(features0.shape[0])
         lam = 0.0 if self.neighbor_smoothing is None else self.neighbor_smoothing
         score_rows: list[list[Tensor]] = [[] for _ in range(steps)]
         quantiles = torch.zeros(steps, num_nodes, dtype=torch.float64)
+        hetero_op = self._hetero_operator() if self._uses_hetero else None
 
         for seq_id, sequence in enumerate(resolved):
             traj_controls = None if controls is None else controls[seq_id]
@@ -603,16 +833,37 @@ class ConformalKoopmanUQ:
                     steps=steps,
                 )
             origin = sequence[0]
-            if origin.x is None or int(origin.x.shape[0]) != num_nodes:
+            origin_features = self._stacked_features(origin)
+            if int(origin_features.shape[0]) != num_nodes:
                 msg = (
                     "node_wise calibration requires a fixed node count; "
                     f"expected {num_nodes} nodes"
                 )
                 raise ValueError(msg)
-            if lam > 0.0 and origin.edge_index is None:
-                msg = "neighbor_smoothing requires edge_index on calibration origins"
-                raise ValueError(msg)
-            edge_weight = getattr(origin, "edge_weight", None)
+            edge_index: Tensor | None
+            edge_weight: Tensor | None
+            if lam > 0.0:
+                if hetero_op is not None:
+                    assert isinstance(origin, HeteroData)
+                    edge_index = _union_relation_edge_index(
+                        origin,
+                        hetero_op.edge_types,
+                        hetero_op.node_types,
+                    )
+                    edge_weight = None
+                else:
+                    assert isinstance(origin, Data)
+                    if origin.edge_index is None:
+                        msg = (
+                            "neighbor_smoothing requires edge_index on "
+                            "calibration origins"
+                        )
+                        raise ValueError(msg)
+                    edge_index = origin.edge_index
+                    edge_weight = getattr(origin, "edge_weight", None)
+            else:
+                edge_index = None
+                edge_weight = None
             forecast = self.model.predict(
                 origin,
                 steps,
@@ -620,16 +871,14 @@ class ConformalKoopmanUQ:
                 future_topologies=traj_future,
             )
             for horizon in range(steps):
-                pred_x = forecast[horizon].x
-                target_x = sequence[horizon + 1].x
-                if pred_x is None or target_x is None:
-                    msg = "calibration snapshots must define node features x"
-                    raise ValueError(msg)
+                pred_x = self._stacked_features(forecast[horizon])
+                target_x = self._stacked_features(sequence[horizon + 1])
                 scores = _node_wise_scores(pred_x, target_x).to(dtype=torch.float64)
                 if lam != 0.0:
+                    assert edge_index is not None
                     scores = _diffuse_node_scores(
                         scores,
-                        origin.edge_index,
+                        edge_index,
                         edge_weight=edge_weight,
                         lam=lam,
                     )
@@ -655,13 +904,13 @@ class ConformalKoopmanUQ:
 
     def predict_interval(
         self,
-        initial_graph: Tensor | Data,
+        initial_graph: Tensor | SnapshotLike,
         steps: int,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
-        future_topologies: Sequence[Data] | None = None,
-        history: Sequence[Data] | None = None,
+        future_topologies: Sequence[SnapshotLike] | None = None,
+        history: Sequence[SnapshotLike] | None = None,
         *,
         level: float = 0.9,
     ) -> PredictionInterval:
@@ -669,9 +918,10 @@ class ConformalKoopmanUQ:
 
         Parameters
         ----------
-        initial_graph : Tensor or Data
+        initial_graph : Tensor, Data, or HeteroData
             Rollout origin (same semantics as
-            :meth:`~koopman_graph.model.GraphKoopmanModel.predict`).
+            :meth:`~koopman_graph.model.GraphKoopmanModel.predict`). Hetero
+            models require ``HeteroData`` origins.
         steps : int
             Number of forecast steps (``1 ≤ steps ≤ calibrated_steps``).
         edge_index, edge_weight, controls, future_topologies, history
@@ -686,25 +936,40 @@ class ConformalKoopmanUQ:
         PredictionInterval
             Mean point forecast plus symmetric conformal bands
             ``mean ± q``. For ``node_wise``, ``q`` has shape ``(num_nodes,)``
-            and broadcasts over features. ``n_members`` is the calibration
-            set size.
+            over stacked global rows when hetero and broadcasts over
+            features. ``n_members`` is the calibration set size. Mean /
+            lower / upper snapshots are ``HeteroData`` for hetero models.
 
         Raises
         ------
         TypeError
-            If ``initial_graph`` is multiplex ``HeteroData``.
+            If ``initial_graph`` disagrees with the wrapped model
+            (homo vs hetero).
         RuntimeError
             If not calibrated.
         ValueError
             If ``steps`` / ``level`` disagree with calibration.
+
+        Notes
+        -----
+        Bands inherit the marginal / exchangeability assumptions documented
+        on the class and in the module ``Coverage semantics`` section; they
+        are not joint intervals across nodes, types, or horizons.
         """
         if self._quantiles is None or self._alpha is None:
             msg = "ConformalKoopmanUQ is not calibrated; call calibrate() first"
             raise RuntimeError(msg)
-        if isinstance(initial_graph, HeteroData):
+        uses_hetero = self._uses_hetero
+        if uses_hetero and not isinstance(initial_graph, HeteroData):
             msg = (
-                "ConformalKoopmanUQ is homogeneous-only; HeteroData origins "
-                "are not supported yet"
+                "hetero ConformalKoopmanUQ.predict_interval requires a "
+                "HeteroData origin"
+            )
+            raise TypeError(msg)
+        if not uses_hetero and isinstance(initial_graph, HeteroData):
+            msg = (
+                "homogeneous ConformalKoopmanUQ.predict_interval cannot "
+                "accept HeteroData origins"
             )
             raise TypeError(msg)
         if steps < 1:
@@ -732,28 +997,29 @@ class ConformalKoopmanUQ:
             future_topologies=future_topologies,
             history=history,
         )
-        lower_snaps: list[Data] = []
-        upper_snaps: list[Data] = []
+        lower_snaps: list[SnapshotLike] = []
+        upper_snaps: list[SnapshotLike] = []
         node_wise = self.score == "node_wise"
         for horizon, mean_snap in enumerate(mean_snaps):
-            if mean_snap.x is None:
+            if isinstance(mean_snap, Data) and mean_snap.x is None:
                 msg = "predicted snapshots must define node features x"
                 raise ValueError(msg)
+            mean_x = self._stacked_features(mean_snap)
             half = self._quantiles[horizon].to(
-                device=mean_snap.x.device,
-                dtype=mean_snap.x.dtype,
+                device=mean_x.device,
+                dtype=mean_x.dtype,
             )
             if node_wise:
-                if half.ndim != 1 or half.shape[0] != mean_snap.x.shape[0]:
+                if half.ndim != 1 or half.shape[0] != mean_x.shape[0]:
                     msg = (
                         "node_wise quantiles must match the forecast node "
                         f"count; got {tuple(half.shape)} vs "
-                        f"{mean_snap.x.shape[0]} nodes"
+                        f"{mean_x.shape[0]} nodes"
                     )
                     raise ValueError(msg)
                 half = half.unsqueeze(-1)
-            lower_snaps.append(snapshot_with_features(mean_snap, mean_snap.x - half))
-            upper_snaps.append(snapshot_with_features(mean_snap, mean_snap.x + half))
+            lower_snaps.append(self._pack_band(mean_snap, mean_x - half))
+            upper_snaps.append(self._pack_band(mean_snap, mean_x + half))
 
         return PredictionInterval(
             mean=mean_snaps,

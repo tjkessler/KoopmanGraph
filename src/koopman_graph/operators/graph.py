@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
@@ -13,6 +14,9 @@ from koopman_graph.operators.contract import (
     Parameterization,
     StabilityCertificate,
 )
+
+if TYPE_CHECKING:
+    from koopman_graph.operators.joint_stability import JointStabilityCertificate
 from koopman_graph.operators.control import (
     ControlMode,
     bilinear_state_control_term,
@@ -27,6 +31,13 @@ from koopman_graph.operators.graph_types import (
     GraphAdjacency,
     GraphSparsity,
 )
+from koopman_graph.operators.matrix_free import (
+    DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
+    flatten_node_latents,
+    invert_k_eff_graph,
+    spectrum_k_eff_graph,
+    unflatten_node_latents,
+)
 from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
@@ -35,6 +46,46 @@ __all__ = [
     "GraphKoopmanOperator",
     "GraphSparsity",
 ]
+
+
+def _koopman_spectrum_from_eigenvalues(
+    eigenvalues: Tensor,
+    time_step: float,
+) -> KoopmanSpectrum:
+    """Build an eigenvalue-focused :class:`KoopmanSpectrum`.
+
+    Parameters
+    ----------
+    eigenvalues
+        Value for ``eigenvalues``.
+    time_step
+        Value for ``time_step``.
+
+    Returns
+    -------
+    object
+        Function result.
+    """
+    if time_step <= 0:
+        msg = f"time_step must be positive, got {time_step}"
+        raise ValueError(msg)
+    magnitudes = eigenvalues.abs()
+    growth_rates = torch.log(magnitudes.clamp_min(1e-30)) / time_step
+    frequencies = torch.angle(eigenvalues) / (2 * torch.pi * time_step)
+    num_modes = int(eigenvalues.numel())
+    eigenvectors = torch.eye(
+        num_modes,
+        dtype=eigenvalues.dtype,
+        device=eigenvalues.device,
+    )
+    return KoopmanSpectrum(
+        eigenvalues=eigenvalues,
+        eigenvectors=eigenvectors,
+        magnitudes=magnitudes,
+        growth_rates=growth_rates,
+        frequencies=frequencies,
+        time_step=float(time_step),
+    )
 
 
 class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
@@ -87,8 +138,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` and ``"block_diagonal"`` share the same
         sparse forward matvec; they differ in ``inverse_advance`` (exact
-        ``N·d`` inverse vs approximate per-node Jacobi). ``"distributed"`` is
-        planned and not in 0.6.0.
+        ``N·d`` inverse vs approximate per-node Jacobi). ``"distributed"``
+        keeps the sparse forward path and uses matrix-free
+        Richardson / Arnoldi inverse and spectrum helpers (not trainer DDP
+        or multi-GPU training).
     max_spectral_radius : float
         Stability bound forwarded to the factorized self/neighbor matrices.
     """
@@ -135,8 +188,9 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
             ``"dense"`` (default) uses an exact dense ``inverse_advance``.
             ``"block_diagonal"`` keeps the same forward advance and uses an
-            approximate per-node inverse. ``"distributed"`` is planned; not
-            in 0.6.0.
+            approximate per-node inverse. ``"distributed"`` uses matrix-free
+            Richardson inverse and Arnoldi spectrum (not trainer DDP or
+            multi-GPU training).
         adjacency : {"symmetric", "random_walk", "dual_random_walk"}, optional
             Neighbor-coupling normalization. Default ``"symmetric"`` preserves
             historical undirected behavior bit-for-bit.
@@ -157,13 +211,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             args are invalid.
         """
         super().__init__()
-        if sparsity == "distributed":
-            msg = "GraphKoopmanOperator sparsity='distributed' is planned; not in 0.6.0"
-            raise ValueError(msg)
-        if sparsity not in {"dense", "block_diagonal"}:
+        if sparsity not in {"dense", "block_diagonal", "distributed"}:
             msg = (
-                "GraphKoopmanOperator sparsity must be 'dense' or "
-                f"'block_diagonal', got {sparsity!r}"
+                "GraphKoopmanOperator sparsity must be 'dense', "
+                f"'block_diagonal', or 'distributed', got {sparsity!r}"
             )
             raise ValueError(msg)
         if adjacency not in GRAPH_ADJACENCY_MODES:
@@ -446,8 +497,49 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         """
         return self._self.spectral_radius()
 
-    def stability_certificate(self) -> StabilityCertificate | None:
-        """Return the self-term certificate when a structural mode is active.
+    def joint_bound_metric(
+        self,
+        edge_index: Tensor,
+        num_nodes: int,
+        edge_weight: Tensor | None = None,
+    ) -> Tensor:
+        """Return a Gershgorin upper bound on assembled ``ρ(K_eff)``.
+
+        Assembles :meth:`effective_matrix` and applies
+        :func:`~koopman_graph.operators.joint_stability.gershgorin_radius_bound`.
+        The bound is **sufficient, not tight** (DESIGN R4): ``ρ(K_eff) ≤``
+        the returned value. Distinct from :meth:`bound_metric` (factor-level)
+        and from :meth:`spectral_radius` (self-factor only on this class).
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        edge_weight : Tensor or None, optional
+            Optional edge weights ``(E,)``.
+
+        Returns
+        -------
+        Tensor
+            Scalar Gershgorin upper bound on ``ρ(K_eff)``.
+        """
+        from koopman_graph.operators.joint_stability import gershgorin_radius_bound
+
+        effective = self.effective_matrix(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+        )
+        return gershgorin_radius_bound(effective)
+
+    def factor_stability_certificate(self) -> StabilityCertificate | None:
+        """Return a **factor-level** self-term certificate, if any.
+
+        Structural modes on ``K_self`` never certify joint ``ρ(K_eff)`` —
+        use :meth:`stability_certificate` with topology for the Gershgorin
+        joint bound object.
 
         Returns
         -------
@@ -455,6 +547,74 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             Certificate from the self-coupling factor, if any.
         """
         return self._self.stability_certificate()
+
+    def stability_certificate(
+        self,
+        edge_index: Tensor,
+        num_nodes: int,
+        edge_weight: Tensor | None = None,
+        *,
+        kind: str = "gershgorin",
+    ) -> JointStabilityCertificate:
+        """Return a joint bound / certificate object for assembled ``K_eff``.
+
+        Topology is required. Default ``kind="gershgorin"`` is a
+        **sufficient** upper bound on ``ρ(K_eff)``, not a tight certificate
+        and not soft assembled eigenvalue regularization. Opt-in
+        ``kind="schur"`` / ``"lyapunov"`` (TASK-1824) use the assembled
+        spectrum (and a discrete Lyapunov ``P`` when ``ρ < 1``) under size
+        ceilings. For factor-level margins use
+        :meth:`factor_stability_certificate`. Distinct from
+        :meth:`spectral_radius`, which reports ``ρ(K_self)`` only on this
+        class.
+
+        Parameters
+        ----------
+        edge_index : Tensor
+            Edge index ``(2, E)``.
+        num_nodes : int
+            Number of nodes ``N``.
+        edge_weight : Tensor or None, optional
+            Optional edge weights ``(E,)``.
+        kind : {"gershgorin", "schur", "lyapunov"}, optional
+            Joint certificate construction. Default ``"gershgorin"``.
+
+        Returns
+        -------
+        JointStabilityCertificate
+            Joint bound / unit-disk margin for ``K_eff``.
+
+        Raises
+        ------
+        ValueError
+            If ``kind`` is unsupported or an assembled Schur / Lyapunov
+            size ceiling is exceeded.
+        """
+        from koopman_graph.operators.joint_stability import (
+            JOINT_BOUND_KINDS,
+            joint_certificate_from_assembled,
+        )
+
+        if kind not in JOINT_BOUND_KINDS:
+            msg = f"kind must be one of {sorted(JOINT_BOUND_KINDS)}, got {kind!r}"
+            raise ValueError(msg)
+        if kind == "gershgorin":
+            from koopman_graph.operators.joint_stability import (
+                build_joint_stability_certificate,
+            )
+
+            bound = self.joint_bound_metric(
+                edge_index,
+                num_nodes,
+                edge_weight=edge_weight,
+            )
+            return build_joint_stability_certificate(bound)
+        effective = self.effective_matrix(
+            edge_index,
+            num_nodes,
+            edge_weight=edge_weight,
+        )
+        return joint_certificate_from_assembled(effective, kind=kind)  # type: ignore[arg-type]
 
     def _dense_neighbor_coupling(
         self,
@@ -699,12 +859,19 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         *,
         edge_weight: Tensor | None = None,
         time_step: float = 1.0,
+        num_modes: int = DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
     ) -> KoopmanSpectrum:
         """Eigendecomposition of the effective ``N·d`` networked operator.
 
         Directed / dual modes may yield complex spectra; magnitudes and
         frequencies are taken from the complex eigendecomposition (no
         real-dtype assumption on the eigenvalues).
+
+        When ``sparsity="distributed"``, returns the ``num_modes``
+        largest-modulus Ritz values from matrix-free Arnoldi (eigenvectors
+        are a placeholder identity of size ``num_modes``, not ambient Ritz
+        vectors). Dense / ``block_diagonal`` still assemble
+        :meth:`effective_matrix` (``num_modes`` ignored).
 
         Parameters
         ----------
@@ -716,12 +883,27 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             Optional edge weights.
         time_step : float, optional
             Discrete sampling interval for growth rates / frequencies.
+        num_modes : int, optional
+            Leading-modulus count for ``sparsity="distributed"``. Default
+            :data:`~koopman_graph.operators.matrix_free.DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES`.
 
         Returns
         -------
         KoopmanSpectrum
-            Spectrum of :meth:`effective_matrix`.
+            Full dense spectrum, or distributed leading-modulus surrogate.
         """
+        if self.sparsity == "distributed":
+            result = spectrum_k_eff_graph(
+                k_self=self.K_self,
+                k_nbr=self.K_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                num_modes=num_modes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+                k_bwd=None if self._bwd is None else self.K_bwd,
+            )
+            return _koopman_spectrum_from_eigenvalues(result.eigenvalues, time_step)
         return compute_spectrum(
             self.effective_matrix(edge_index, num_nodes, edge_weight=edge_weight),
             time_step,
@@ -819,13 +1001,19 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Returns
         -------
         Tensor
-            Advanced latent states.
+            Advanced latent states. When ``dynamics_mode='stochastic'``,
+            diagonal process noise is added after the linear map.
         """
+        from koopman_graph.operators.stochastic import maybe_apply_process_noise
+
         _ = delta_t
         if edge_index is None:
             msg = "edge_index is required for GraphKoopmanOperator.advance"
             raise ValueError(msg)
-        return self.forward(z, edge_index, edge_weight, control=control)
+        return maybe_apply_process_noise(
+            self.forward(z, edge_index, edge_weight, control=control),
+            self,
+        )
 
     def inverse_advance(
         self,
@@ -843,8 +1031,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         suitable for modest ``N``). ``sparsity="block_diagonal"`` uses a
         one-step Jacobi / per-node ``d×d`` approximate inverse (exact when
         neighbor factors are zero or the graph has no edges; approximate for
-        all three ``adjacency`` modes otherwise). ``inverse_matrix`` is
-        supported only for ``sparsity="dense"``.
+        all three ``adjacency`` modes otherwise). ``sparsity="distributed"``
+        uses matrix-free Richardson / Neumann iteration on a shared
+        ``K_self`` (orbit / per-node bilinear self blocks are unsupported).
+        ``inverse_matrix`` is supported only for ``sparsity="dense"``.
 
         For ``control_mode="bilinear"``, global controls fold into a shared
         ``K_self`` override; per-node controls use node-specific bilinear self
@@ -876,7 +1066,8 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         ------
         ValueError
             If topology / shapes are invalid, or ``inverse_matrix`` is passed
-            with ``sparsity="block_diagonal"``.
+            with ``sparsity`` other than ``"dense"``, or distributed inverse
+            is requested with per-node self blocks.
         """
         from koopman_graph.operators.graph_inverse import (
             block_diagonal_graph_inverse_advance,
@@ -969,6 +1160,40 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 k_self_blocks=k_self_blocks,
                 adjacency=self.adjacency,
                 k_bwd=None if self._bwd is None else self.K_bwd,
+            )
+
+        if self.sparsity == "distributed":
+            if inverse_matrix is not None:
+                msg = (
+                    "inverse_matrix is only supported for "
+                    "GraphKoopmanOperator sparsity='dense'"
+                )
+                raise ValueError(msg)
+            k_self_override, k_self_blocks = _bilinear_self_factors()
+            if k_self_blocks is None and k_self_override is None:
+                k_self_blocks = self.tied_self_blocks(num_nodes)
+            if k_self_blocks is not None:
+                msg = (
+                    "GraphKoopmanOperator sparsity='distributed' inverse "
+                    "requires a shared K_self (orbit ties / per-node bilinear "
+                    "self blocks are unsupported); use sparsity='dense' or "
+                    "'block_diagonal'"
+                )
+                raise ValueError(msg)
+            result = invert_k_eff_graph(
+                flatten_node_latents(adjusted),
+                k_self=k_self_override if k_self_override is not None else self.K_self,
+                k_nbr=self.K_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+                k_bwd=None if self._bwd is None else self.K_bwd,
+            )
+            return unflatten_node_latents(
+                result.solution,
+                num_nodes=num_nodes,
+                latent_dim=self.latent_dim,
             )
 
         if inverse_matrix is None:

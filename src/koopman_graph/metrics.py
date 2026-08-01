@@ -7,9 +7,16 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence, resolve_rollout_start_indices
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
+    resolve_hetero_sequence,
+    resolve_rollout_start_indices,
+    resolve_sequence,
+)
 from koopman_graph.losses import masked_mse_loss
 from koopman_graph.protocols import TrainableKoopmanModel
 
@@ -222,9 +229,172 @@ class EvaluationResult:
     num_origins: int
 
 
+def _hetero_eval_feature_vector(
+    snapshot: HeteroData,
+    node_types: Sequence[str],
+) -> Tensor:
+    """Flatten and concatenate per-type ``x`` in ``node_types`` order.
+
+    Unequal trailing widths ``F_τ`` are allowed: each type is reshaped to a
+    1-D vector before concatenation. This is a stacked aggregate over all
+    physical channels, not a certified per-type metric report.
+
+    Parameters
+    ----------
+    snapshot : HeteroData
+        Multiplex or typed snapshot.
+    node_types : sequence of str
+        Ordered node-type names (typically ``sequence.node_type_names``).
+
+    Returns
+    -------
+    Tensor
+        Concatenated feature vector with shape ``(Σ_τ N_τ · F_τ,)``.
+
+    Raises
+    ------
+    ValueError
+        If a node type is missing or lacks ``x``.
+    """
+    blocks: list[Tensor] = []
+    present = set(snapshot.node_types)
+    for name in node_types:
+        if name not in present:
+            msg = (
+                f"HeteroData snapshot is missing node type {name!r}; "
+                f"present types are {sorted(present)!r}"
+            )
+            raise ValueError(msg)
+        features = snapshot[name].x
+        if features is None:
+            msg = f"HeteroData node type {name!r} is missing feature matrix x"
+            raise ValueError(msg)
+        blocks.append(features.reshape(-1))
+    return torch.cat(blocks, dim=0)
+
+
+def _validate_hetero_evaluate_surface(sequence: HeteroGraphSnapshotSequence) -> None:
+    """Reject hetero evaluate options that would silently use wrong topology.
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Evaluation trajectory.
+
+    Raises
+    ------
+    ValueError
+        If unsupported hetero evaluate options are requested.
+    """
+    if sequence.is_dynamic_topology:
+        msg = (
+            "dynamic-topology HeteroGraphSnapshotSequence evaluate is "
+            "unsupported; use static relation banks"
+        )
+        raise ValueError(msg)
+    if sequence.has_controls:
+        msg = (
+            "controlled HeteroGraphSnapshotSequence evaluate is unsupported; "
+            "omit control_inputs"
+        )
+        raise ValueError(msg)
+    if sequence.has_observation_masks:
+        msg = (
+            "observation-masked HeteroGraphSnapshotSequence evaluate is "
+            "unsupported; omit observation_masks"
+        )
+        raise ValueError(msg)
+
+
+def _resolve_evaluate_sequence(
+    sequence: SnapshotSequence | Sequence[Data] | Sequence[HeteroData],
+) -> SnapshotSequence:
+    """Normalize evaluate input into a homogeneous or hetero sequence.
+
+    Parameters
+    ----------
+    sequence : SnapshotSequence or sequence of Data or HeteroData
+        Raw evaluation input.
+
+    Returns
+    -------
+    GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Validated sequence container.
+
+    Raises
+    ------
+    TypeError
+        If the input kind cannot be resolved.
+    ValueError
+        If a plain sequence is empty.
+    """
+    if isinstance(sequence, (GraphSnapshotSequence, HeteroGraphSnapshotSequence)):
+        return sequence
+    if isinstance(sequence, Sequence) and not isinstance(sequence, (str, bytes)):
+        if not sequence:
+            msg = "evaluate sequence must contain at least one snapshot"
+            raise ValueError(msg)
+        first = sequence[0]
+        if isinstance(first, HeteroData):
+            return resolve_hetero_sequence(sequence)  # type: ignore[arg-type]
+        if isinstance(first, Data):
+            return resolve_sequence(sequence)  # type: ignore[arg-type]
+    msg = (
+        "evaluate_forecast expects GraphSnapshotSequence, "
+        "HeteroGraphSnapshotSequence, or a non-empty sequence of Data / "
+        f"HeteroData; got {type(sequence).__name__}"
+    )
+    raise TypeError(msg)
+
+
+def _pack_evaluation_result(
+    horizons: Sequence[int],
+    mae_sums: dict[int, float],
+    rmse_sums: dict[int, float],
+    mape_sums: dict[int, float],
+    origins: Sequence[int],
+) -> EvaluationResult:
+    """Assemble per-horizon averages into :class:`EvaluationResult`.
+
+    Parameters
+    ----------
+    horizons : sequence of int
+        Sorted unique horizons.
+    mae_sums, rmse_sums, mape_sums : dict of int to float
+        Accumulated metric sums keyed by horizon.
+    origins : sequence of int
+        Forecast origins used for averaging.
+
+    Returns
+    -------
+    EvaluationResult
+        Packed evaluation summary.
+    """
+    num_origins = len(origins)
+    horizon_metrics = tuple(
+        HorizonMetrics(
+            horizon=horizon,
+            mae=mae_sums[horizon] / num_origins,
+            rmse=rmse_sums[horizon] / num_origins,
+            mape=mape_sums[horizon] / num_origins,
+        )
+        for horizon in horizons
+    )
+    return EvaluationResult(
+        horizons=horizon_metrics,
+        aggregate_mae=sum(metric.mae for metric in horizon_metrics)
+        / len(horizon_metrics),
+        aggregate_rmse=sum(metric.rmse for metric in horizon_metrics)
+        / len(horizon_metrics),
+        aggregate_mape=sum(metric.mape for metric in horizon_metrics)
+        / len(horizon_metrics),
+        num_origins=num_origins,
+    )
+
+
 def evaluate_forecast(
     model: TrainableKoopmanModel,
-    sequence: GraphSnapshotSequence,
+    sequence: SnapshotSequence | Sequence[Data] | Sequence[HeteroData],
     *,
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
@@ -234,14 +404,22 @@ def evaluate_forecast(
     For each forecast origin, the model predicts up to ``max(horizons)`` steps
     ahead and metrics are averaged across origins at each requested horizon.
 
+    Homogeneous sequences compare ``Data.x``. Heterogeneous sequences compare
+    concatenated flattened per-type features in
+    :attr:`~koopman_graph.data.HeteroGraphSnapshotSequence.node_type_names`
+    order (stacked aggregate over all physical channels; not a certified
+    per-type coverage or metric report). Hetero evaluate requires static
+    relation banks and rejects controls / observation masks.
+
     Parameters
     ----------
     model : TrainableKoopmanModel
         Trainable model implementing
         :meth:`~koopman_graph.protocols.TrainableKoopmanModel.predict` and the
         Module train/eval façade.
-    sequence : GraphSnapshotSequence
-        Evaluation snapshots with shared topology.
+    sequence : GraphSnapshotSequence, HeteroGraphSnapshotSequence, or sequence
+        Evaluation snapshots. Plain ``Data`` / ``HeteroData`` sequences are
+        wrapped in the matching container.
     horizons : sequence of int, optional
         Forecast horizons to report. Default is ``(3, 6, 12)``.
     start_indices : sequence of int or None, optional
@@ -256,8 +434,10 @@ def evaluate_forecast(
     Raises
     ------
     ValueError
-        If ``horizons`` is empty, any horizon is invalid, or the sequence is
-        too short.
+        If ``horizons`` is empty, any horizon is invalid, the sequence is too
+        short, or unsupported hetero evaluate options are requested.
+    TypeError
+        If ``sequence`` is neither homogeneous nor hetero.
     """
     if not horizons:
         msg = "horizons must contain at least one step"
@@ -268,16 +448,57 @@ def evaluate_forecast(
         msg = f"all horizons must be >= 1, got {sorted_horizons}"
         raise ValueError(msg)
 
-    max_horizon = sorted_horizons[-1]
+    resolved = _resolve_evaluate_sequence(sequence)
+    if isinstance(resolved, HeteroGraphSnapshotSequence):
+        return _evaluate_hetero_forecast(
+            model,
+            resolved,
+            horizons=sorted_horizons,
+            start_indices=start_indices,
+        )
+    return _evaluate_homogeneous_forecast(
+        model,
+        resolved,
+        horizons=sorted_horizons,
+        start_indices=start_indices,
+    )
+
+
+def _evaluate_homogeneous_forecast(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    *,
+    horizons: Sequence[int],
+    start_indices: Sequence[int] | None,
+) -> EvaluationResult:
+    """Homogeneous multi-horizon evaluate path.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Forecast model.
+    sequence : GraphSnapshotSequence
+        Homogeneous evaluation trajectory.
+    horizons : sequence of int
+        Sorted unique horizons.
+    start_indices : sequence of int or None
+        Explicit origins, or ``None`` for all valid origins.
+
+    Returns
+    -------
+    EvaluationResult
+        Per-horizon and aggregate metrics.
+    """
+    max_horizon = horizons[-1]
     origins = resolve_rollout_start_indices(
         sequence,
         horizon=max_horizon,
         rollout_start_indices="all" if start_indices is None else start_indices,
     )
 
-    mae_sums = {horizon: 0.0 for horizon in sorted_horizons}
-    rmse_sums = {horizon: 0.0 for horizon in sorted_horizons}
-    mape_sums = {horizon: 0.0 for horizon in sorted_horizons}
+    mae_sums = {horizon: 0.0 for horizon in horizons}
+    rmse_sums = {horizon: 0.0 for horizon in horizons}
+    mape_sums = {horizon: 0.0 for horizon in horizons}
 
     was_training = model.training
     model.eval()
@@ -313,7 +534,7 @@ def evaluate_forecast(
                         controls=controls,
                         future_topologies=future_topologies,
                     )
-                for horizon in sorted_horizons:
+                for horizon in horizons:
                     pred = predictions[horizon - 1].x
                     target = sequence[start + horizon].x
                     if sequence.has_observation_masks:
@@ -334,23 +555,82 @@ def evaluate_forecast(
     finally:
         model.train(was_training)
 
-    num_origins = len(origins)
-    horizon_metrics = tuple(
-        HorizonMetrics(
-            horizon=horizon,
-            mae=mae_sums[horizon] / num_origins,
-            rmse=rmse_sums[horizon] / num_origins,
-            mape=mape_sums[horizon] / num_origins,
+    return _pack_evaluation_result(horizons, mae_sums, rmse_sums, mape_sums, origins)
+
+
+def _evaluate_hetero_forecast(
+    model: TrainableKoopmanModel,
+    sequence: HeteroGraphSnapshotSequence,
+    *,
+    horizons: Sequence[int],
+    start_indices: Sequence[int] | None,
+) -> EvaluationResult:
+    """Hetero multi-horizon evaluate path (stacked flattened features).
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Hetero forecast model (``koopman='hetero_graph'``).
+    sequence : HeteroGraphSnapshotSequence
+        Multiplex or typed evaluation trajectory.
+    horizons : sequence of int
+        Sorted unique horizons.
+    start_indices : sequence of int or None
+        Explicit origins, or ``None`` for all valid origins.
+
+    Returns
+    -------
+    EvaluationResult
+        Per-horizon and aggregate metrics on concatenated features.
+    """
+    _validate_hetero_evaluate_surface(sequence)
+    n_delays = int(getattr(model, "n_delays", 1))
+    if n_delays > 1:
+        msg = (
+            "delay embedding (n_delays > 1) is unsupported for hetero evaluate_forecast"
         )
-        for horizon in sorted_horizons
+        raise ValueError(msg)
+    if not bool(getattr(model, "uses_hetero_koopman", False)):
+        msg = (
+            "HeteroGraphSnapshotSequence evaluate requires "
+            "koopman='hetero_graph' (uses_hetero_koopman)"
+        )
+        raise TypeError(msg)
+
+    max_horizon = horizons[-1]
+    origins = resolve_rollout_start_indices(
+        sequence,
+        horizon=max_horizon,
+        rollout_start_indices="all" if start_indices is None else start_indices,
     )
-    return EvaluationResult(
-        horizons=horizon_metrics,
-        aggregate_mae=sum(metric.mae for metric in horizon_metrics)
-        / len(horizon_metrics),
-        aggregate_rmse=sum(metric.rmse for metric in horizon_metrics)
-        / len(horizon_metrics),
-        aggregate_mape=sum(metric.mape for metric in horizon_metrics)
-        / len(horizon_metrics),
-        num_origins=num_origins,
-    )
+    node_types = sequence.node_type_names
+
+    mae_sums = {horizon: 0.0 for horizon in horizons}
+    rmse_sums = {horizon: 0.0 for horizon in horizons}
+    mape_sums = {horizon: 0.0 for horizon in horizons}
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for start in origins:
+                initial_graph = sequence[start]
+                predictions = model.predict(initial_graph, steps=max_horizon)
+                for horizon in horizons:
+                    pred_snap = predictions[horizon - 1]
+                    target_snap = sequence[start + horizon]
+                    if not isinstance(pred_snap, HeteroData):
+                        msg = (
+                            "hetero evaluate_forecast expects predict() to "
+                            f"return HeteroData; got {type(pred_snap).__name__}"
+                        )
+                        raise TypeError(msg)
+                    pred = _hetero_eval_feature_vector(pred_snap, node_types)
+                    target = _hetero_eval_feature_vector(target_snap, node_types)
+                    mae_sums[horizon] += float(mae(pred, target).cpu())
+                    rmse_sums[horizon] += float(rmse(pred, target).cpu())
+                    mape_sums[horizon] += float(mape(pred, target).cpu())
+    finally:
+        model.train(was_training)
+
+    return _pack_evaluation_result(horizons, mae_sums, rmse_sums, mape_sums, origins)

@@ -20,8 +20,8 @@ from koopman_graph.data import (
     SnapshotSequence,
     WindowLikeSampler,
     resolve_rollout_start_indices,
+    resolve_window_sampler,
 )
-from koopman_graph.data.sampling import NeighborWindowSampler, WindowSampler
 from koopman_graph.distributed.sampling import DistributedWindowSampler
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.epochs import (
@@ -92,32 +92,22 @@ def resolve_distributed_window_sampler(
     TypeError
         If ``sampler`` has an unsupported type.
     """
-    if sampler is not None and window_length is not None:
-        msg = "pass sampler or window_length, not both"
-        raise ValueError(msg)
-    if sampler is None:
-        if window_length is None:
-            return None
-        return DistributedWindowSampler(
-            train_sequences,
-            window_length=window_length,
-            batch_size=batch_size,
-            windows_per_epoch=windows_per_epoch,
-            seed=window_seed,
-            rank=rank,
-            world_size=world_size,
-        )
-    if isinstance(sampler, DistributedWindowSampler):
-        return sampler
-    if isinstance(sampler, (WindowSampler, NeighborWindowSampler)):
-        msg = (
-            f"{api_name} requires DistributedWindowSampler or "
-            "window_length=...; plain WindowSampler / NeighborWindowSampler "
-            "are not rank-aware"
-        )
-        raise ValueError(msg)
-    msg = f"unsupported sampler type: {type(sampler)!r}"
-    raise TypeError(msg)
+    resolved = resolve_window_sampler(
+        train_sequences,
+        window_length=window_length,
+        batch_size=batch_size,
+        windows_per_epoch=windows_per_epoch,
+        window_seed=window_seed,
+        sampler=sampler,
+        distributed=True,
+        rank=rank,
+        world_size=world_size,
+        api_name=api_name,
+    )
+    if resolved is None:
+        return None
+    # Shared resolver returns DistributedWindowSampler in distributed mode.
+    return cast(DistributedWindowSampler, resolved)
 
 
 def fit_epochs_distributed(
@@ -210,6 +200,7 @@ def fit_epochs_distributed(
     pde_losses: list[float] = []
     sparsity_losses: list[float] = []
     worst_case_losses: list[float] = []
+    vamp2_losses: list[float] = []
     val_losses: list[float] | None = [] if val_sequences is not None else None
     val_reconstruction_losses: list[float] | None = (
         [] if val_sequences is not None else None
@@ -226,6 +217,7 @@ def fit_epochs_distributed(
     val_worst_case_losses: list[float] | None = (
         [] if val_sequences is not None else None
     )
+    val_vamp2_losses: list[float] | None = [] if val_sequences is not None else None
     best_loss_for_stop = float("inf")
     best_loss: float | None = None
     best_epoch: int | None = None
@@ -297,6 +289,7 @@ def fit_epochs_distributed(
         pde_losses.append(term_values["pde"])
         sparsity_losses.append(term_values["sparsity"])
         worst_case_losses.append(term_values["worst_case"])
+        vamp2_losses.append(term_values["vamp2"])
 
         monitored_loss = term_values["total"]
         if val_sequences is not None:
@@ -322,6 +315,7 @@ def fit_epochs_distributed(
             assert val_pde_losses is not None
             assert val_sparsity_losses is not None
             assert val_worst_case_losses is not None
+            assert val_vamp2_losses is not None
             val_losses.append(val_terms["total"])
             val_reconstruction_losses.append(val_terms["reconstruction"])
             val_forward_losses.append(val_terms["forward"])
@@ -332,6 +326,7 @@ def fit_epochs_distributed(
             val_pde_losses.append(val_terms["pde"])
             val_sparsity_losses.append(val_terms["sparsity"])
             val_worst_case_losses.append(val_terms["worst_case"])
+            val_vamp2_losses.append(val_terms["vamp2"])
             if early_stopping_monitor == "val":
                 monitored_loss = val_terms["total"]
 
@@ -377,6 +372,7 @@ def fit_epochs_distributed(
         pde_loss=tuple(pde_losses),
         sparsity_loss=tuple(sparsity_losses),
         worst_case_loss=tuple(worst_case_losses),
+        vamp2_loss=tuple(vamp2_losses),
         val_loss=None if val_losses is None else tuple(val_losses),
         val_reconstruction_loss=(
             None
@@ -403,6 +399,7 @@ def fit_epochs_distributed(
         val_worst_case_loss=(
             None if val_worst_case_losses is None else tuple(val_worst_case_losses)
         ),
+        val_vamp2_loss=(None if val_vamp2_losses is None else tuple(val_vamp2_losses)),
         stopped_early=stopped_early,
         best_epoch=best_epoch,
         best_loss=best_loss,

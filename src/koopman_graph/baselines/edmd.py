@@ -1,7 +1,13 @@
-"""Extended DMD baseline with polynomial, RBF, and kernel dictionaries."""
+"""Extended DMD baseline with polynomial, RBF, and kernel dictionaries.
+
+Kernel dictionaries support exact center sections plus Nyström and random
+Fourier feature (RFF) approximations for medium-``T`` paths. Primary-source
+citations are deferred to Sphinx Phase 61 verification.
+"""
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Literal
 
@@ -28,6 +34,7 @@ from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 DictionaryKind = Literal["polynomial", "rbf", "kernel"]
 PolynomialDegree = Literal[1, 2]
 KernelKind = Literal["gaussian", "polynomial", "linear"]
+KernelApproximation = Literal["centers", "nystrom", "random_features"]
 
 
 class EDMDBaseline(ClassicalBaseline):
@@ -45,9 +52,9 @@ class EDMDBaseline(ClassicalBaseline):
       of training states (``num_centers``, ``length_scale``).
     * ``kernel`` — dictionary of kernel sections ``k(x, c_i)`` against training
       centers (Gaussian / polynomial), or the linear-kernel identity lift that
-      reduces to DMD. Observable dimension scales with the number of centers
-      (``O(T)`` features and ``O(T^2)`` Gram-sized operator work for full-data
-      centers); intended for small/medium ``T`` only.
+      reduces to DMD. Full-data centers are ``O(T^2)``; use
+      ``kernel_approximation="nystrom"`` or ``"random_features"`` for fixed-width
+      lifts on medium ``T``.
 
     All modes remain **topology-blind**: snapshots are flattened and graph
     edges are ignored during fit/predict (topology is only copied onto
@@ -74,7 +81,7 @@ class EDMDBaseline(ClassicalBaseline):
     num_centers : int or None, optional
         Number of RBF / kernel centers drawn uniformly from training snapshots.
         ``None`` selects ``min(32, T)`` for ``rbf`` and all ``T`` snapshots for
-        ``kernel`` (full kernel path). Ignored for ``polynomial``.
+        ``kernel`` center sections. Ignored for ``polynomial``.
     length_scale : float, optional
         Gaussian bandwidth ``σ`` for ``rbf`` and ``kernel="gaussian"``.
         Default is ``1.0``.
@@ -89,6 +96,15 @@ class EDMDBaseline(ClassicalBaseline):
     kernel_gamma : float or None, optional
         Scale ``γ`` for the polynomial kernel. ``None`` uses ``1.0``.
         Default is ``None``.
+    kernel_approximation : {"centers", "nystrom", "random_features"}, optional
+        Kernel lift when ``dictionary="kernel"`` and ``kernel != "linear"``.
+        Default ``"centers"`` preserves the exact section path. Nyström and
+        RFF require a non-linear kernel dictionary.
+    num_features : int or None, optional
+        Feature width for Nyström / RFF (default ``min(32, T)``). Nyström also
+        uses this as the landmark count when ``num_centers`` is ``None``.
+    feature_seed : int or None, optional
+        RNG seed for RFF weights. Default ``0`` when RFF is used.
     """
 
     def __init__(
@@ -104,6 +120,9 @@ class EDMDBaseline(ClassicalBaseline):
         kernel_degree: int = 2,
         kernel_coef0: float = 1.0,
         kernel_gamma: float | None = None,
+        kernel_approximation: KernelApproximation = "centers",
+        num_features: int | None = None,
+        feature_seed: int | None = None,
     ) -> None:
         """Initialize the EDMD baseline.
 
@@ -133,6 +152,12 @@ class EDMDBaseline(ClassicalBaseline):
             Polynomial kernel offset. Default is ``1.0``.
         kernel_gamma : float or None, optional
             Polynomial kernel scale. ``None`` uses ``1.0``.
+        kernel_approximation : {"centers", "nystrom", "random_features"}, optional
+            Kernel lift approximation. Default is ``"centers"``.
+        num_features : int or None, optional
+            Nyström / RFF width. Default ``min(32, T)`` at fit time.
+        feature_seed : int or None, optional
+            RFF RNG seed. Default ``0`` when RFF is used.
 
         Raises
         ------
@@ -166,6 +191,28 @@ class EDMDBaseline(ClassicalBaseline):
         if kernel_gamma is not None and kernel_gamma <= 0.0:
             msg = f"kernel_gamma must be positive when provided, got {kernel_gamma}"
             raise ValueError(msg)
+        if kernel_approximation not in ("centers", "nystrom", "random_features"):
+            msg = (
+                "kernel_approximation must be 'centers', 'nystrom', or "
+                f"'random_features', got {kernel_approximation!r}"
+            )
+            raise ValueError(msg)
+        if num_features is not None and num_features < 1:
+            msg = f"num_features must be >= 1 when provided, got {num_features}"
+            raise ValueError(msg)
+        if kernel_approximation != "centers":
+            if dictionary != "kernel":
+                msg = (
+                    "kernel_approximation requires dictionary='kernel', "
+                    f"got {dictionary!r}"
+                )
+                raise ValueError(msg)
+            if kernel == "linear":
+                msg = (
+                    "kernel_approximation requires a non-linear kernel "
+                    "(not kernel='linear')"
+                )
+                raise ValueError(msg)
 
         self.dictionary = dictionary
         self.polynomial_degree = polynomial_degree
@@ -175,9 +222,15 @@ class EDMDBaseline(ClassicalBaseline):
         self.kernel_degree = int(kernel_degree)
         self.kernel_coef0 = float(kernel_coef0)
         self.kernel_gamma = None if kernel_gamma is None else float(kernel_gamma)
+        self.kernel_approximation = kernel_approximation
+        self.num_features = num_features
+        self.feature_seed = feature_seed
         self.reconstruction_matrix: Tensor | None = None
         self.observable_dim: int | None = None
         self.centers: Tensor | None = None
+        self._nystrom_whitener: Tensor | None = None
+        self._rff_weight: Tensor | None = None
+        self._rff_bias: Tensor | None = None
 
     def _is_fitted(self) -> bool:
         """Return whether the EDMD operator and reconstruction matrix are fit.
@@ -240,7 +293,16 @@ class EDMDBaseline(ClassicalBaseline):
             raise ValueError(msg)
 
         states = flatten_snapshots(resolved)
-        self.centers = self._select_centers(states)
+        self._nystrom_whitener = None
+        self._rff_weight = None
+        self._rff_bias = None
+        if self.kernel_approximation == "random_features":
+            self.centers = None
+            self._init_random_features(states)
+        else:
+            self.centers = self._select_centers(states)
+            if self.kernel_approximation == "nystrom":
+                self._init_nystrom_whitener()
         observables = self._observables(states)
         left = observables[:-1]
         self.selected_rank = resolve_fit_rank(left, self.rank)
@@ -339,10 +401,19 @@ class EDMDBaseline(ClassicalBaseline):
             return None
         if self.dictionary == "kernel" and self.kernel == "linear":
             return None
+        if self.kernel_approximation == "random_features":
+            return None
 
         num_timesteps = int(states.shape[0])
         if self.dictionary == "rbf":
             requested = 32 if self.num_centers is None else self.num_centers
+        elif self.kernel_approximation == "nystrom":
+            if self.num_centers is not None:
+                requested = self.num_centers
+            elif self.num_features is not None:
+                requested = self.num_features
+            else:
+                requested = min(32, num_timesteps)
         else:
             requested = num_timesteps if self.num_centers is None else self.num_centers
         if requested > num_timesteps:
@@ -361,6 +432,80 @@ class EDMDBaseline(ClassicalBaseline):
             .long()
         )
         return states[indices].detach().clone()
+
+    def _feature_width(self, num_timesteps: int) -> int:
+        """Resolve Nyström / RFF feature width for training length ``T``.
+
+        Parameters
+        ----------
+        num_timesteps
+            Value for ``num_timesteps``.
+
+        Returns
+        -------
+        object
+            Function result.
+        """
+        if self.num_features is not None:
+            return int(self.num_features)
+        return min(32, num_timesteps)
+
+    def _init_random_features(self, states: Tensor) -> None:
+        """Sample seeded RFF weights for Gaussian kernel approximation.
+
+        Parameters
+        ----------
+        states
+            Value for ``states``.
+        """
+        if self.kernel != "gaussian":
+            msg = "random_features currently supports kernel='gaussian' only"
+            raise ValueError(msg)
+        num_timesteps = int(states.shape[0])
+        width = self._feature_width(num_timesteps)
+        state_dim = int(states.shape[1])
+        seed = 0 if self.feature_seed is None else int(self.feature_seed)
+        generator = torch.Generator(device=states.device)
+        generator.manual_seed(seed)
+        self._rff_weight = (
+            torch.randn(
+                state_dim,
+                width,
+                dtype=states.dtype,
+                device=states.device,
+                generator=generator,
+            )
+            / self.length_scale
+        )
+        self._rff_bias = (
+            2.0
+            * math.pi
+            * torch.rand(
+                width,
+                dtype=states.dtype,
+                device=states.device,
+                generator=generator,
+            )
+        )
+
+    def _init_nystrom_whitener(self) -> None:
+        """Build the Nyström whitener ``pinv(sqrtm(K_mm))`` from landmarks.
+
+        Notes
+        -----
+        Internal helper with no parameters.
+        """
+        if self.centers is None:
+            msg = "Nyström approximation requires landmark centers"
+            raise RuntimeError(msg)
+        gram = self._kernel_features(self.centers, self.centers)
+        # Symmetric eigendecomposition for a principal square-root inverse.
+        eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+        positive = torch.clamp(eigenvalues, min=0.0)
+        inv_sqrt = torch.zeros_like(positive)
+        mask = positive > 1e-12
+        inv_sqrt[mask] = positive[mask].rsqrt()
+        self._nystrom_whitener = eigenvectors @ torch.diag(inv_sqrt) @ eigenvectors.T
 
     def _observables(self, states: Tensor) -> Tensor:
         """Lift flattened states into the configured observable dictionary.
@@ -385,12 +530,27 @@ class EDMDBaseline(ClassicalBaseline):
             # so Kernel EDMD reduces to standard DMD on flattened states.
             return states
 
+        if self.kernel_approximation == "random_features":
+            if self._rff_weight is None or self._rff_bias is None:
+                msg = "random features are not available; call fit() first"
+                raise RuntimeError(msg)
+            projection = states @ self._rff_weight + self._rff_bias
+            scale = math.sqrt(2.0 / float(self._rff_weight.shape[1]))
+            return scale * torch.cos(projection)
+
         if self.centers is None:
             msg = "dictionary centers are not available; call fit() first"
             raise RuntimeError(msg)
 
         if self.dictionary == "rbf":
             return self._rbf_features(states, self.centers)
+
+        if self.kernel_approximation == "nystrom":
+            if self._nystrom_whitener is None:
+                msg = "Nyström whitener is not available; call fit() first"
+                raise RuntimeError(msg)
+            kernel_block = self._kernel_features(states, self.centers)
+            return kernel_block @ self._nystrom_whitener
 
         return self._kernel_features(states, self.centers)
 

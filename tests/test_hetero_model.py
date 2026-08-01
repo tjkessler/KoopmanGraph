@@ -6,7 +6,7 @@ import pytest
 import torch
 from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence, HeteroGraphSnapshotSequence
+from koopman_graph.data import HeteroGraphSnapshotSequence
 from koopman_graph.hierarchical import HierarchicalGraphKoopmanModel
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.nn import GNNDecoder, GNNEncoder, RelGraphDecoder, RelGraphEncoder
@@ -110,6 +110,36 @@ def test_encode_forward_predict_heterodata() -> None:
     assert set(preds[0].edge_types) == set(origin.edge_types)
 
 
+def test_predict_at_accepts_multiplex_heterodata() -> None:
+    """Discrete ``predict_at`` returns HeteroData for multiplex origins."""
+    model = _hetero_model()
+    origin = _multiplex_snapshot()
+    model.eval()
+    with torch.no_grad():
+        preds = model.predict_at(origin, step_deltas=[1.0, 1.0])
+    assert len(preds) == 2
+    assert isinstance(preds[0], HeteroData)
+    assert preds[0]["node"].x.shape == (4, 3)
+    assert set(preds[0].edge_types) == set(origin.edge_types)
+
+
+def test_evaluate_forecast_multiplex_stacked_metrics() -> None:
+    """``evaluate_forecast`` / ``evaluate`` score multiplex stacked features."""
+    from koopman_graph.metrics import evaluate_forecast
+
+    torch.manual_seed(0)
+    sequence = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(5)])
+    model = _hetero_model()
+    result = evaluate_forecast(model, sequence, horizons=(1, 2))
+    assert result.num_origins == 3
+    assert len(result.horizons) == 2
+    assert all(h.mae >= 0.0 for h in result.horizons)
+    assert torch.isfinite(torch.tensor(result.aggregate_rmse))
+    via_model = model.evaluate(sequence, horizons=(1, 2))
+    assert via_model.num_origins == result.num_origins
+    assert via_model.aggregate_mae == pytest.approx(result.aggregate_mae)
+
+
 def test_predict_hold_last_future_hetero_topology() -> None:
     """Future ``HeteroData`` topologies update relation banks under hold-last."""
     model = _hetero_model()
@@ -151,22 +181,35 @@ def test_homogeneous_factory_path_unchanged() -> None:
     assert out.shape == (3, 3)
 
 
-def test_hierarchical_rejects_hetero_model() -> None:
-    """Hierarchical façade rejects multiplex operators."""
+def test_hierarchical_accepts_multiplex_hetero_model() -> None:
+    """Hierarchical façade accepts multiplex hetero operators."""
     model = _hetero_model()
-    with pytest.raises(TypeError, match="homogeneous-only"):
-        HierarchicalGraphKoopmanModel(model)
+    hier = HierarchicalGraphKoopmanModel(model, pool_ratios=(1.0,))
+    assert hier._uses_hetero is True
+    # Default multiplex operator edge types are (node, r{i}, node).
+    data = HeteroData()
+    data["node"].x = torch.randn(4, 3)
+    data["node", "r0", "node"].edge_index = torch.tensor(
+        [[0, 1, 2], [1, 2, 0]],
+        dtype=torch.long,
+    )
+    data["node", "r1", "node"].edge_index = torch.tensor(
+        [[0, 2], [2, 3]],
+        dtype=torch.long,
+    )
+    coarse, _steps = hier.pool_down(data)
+    assert isinstance(coarse, HeteroData)
 
 
-def test_conformal_rejects_hetero_model() -> None:
-    """Conformal UQ rejects multiplex operators at construction."""
+def test_conformal_accepts_hetero_model() -> None:
+    """Conformal UQ constructs for multiplex hetero operators."""
     model = _hetero_model()
-    with pytest.raises(TypeError, match="homogeneous-only"):
-        ConformalKoopmanUQ(model)
+    uq = ConformalKoopmanUQ(model)
+    assert uq.model is model
 
 
-def test_conformal_rejects_hetero_calibration_sequences() -> None:
-    """Conformal calibrate rejects hetero sequences even for homo models."""
+def test_conformal_rejects_hetero_calibration_sequences_for_homo_model() -> None:
+    """Homogeneous conformal calibrate rejects hetero sequences."""
     model = GraphKoopmanModel(
         encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
         decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
@@ -175,7 +218,7 @@ def test_conformal_rejects_hetero_calibration_sequences() -> None:
     )
     uq = ConformalKoopmanUQ(model)
     seq = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(3)])
-    with pytest.raises(TypeError, match="homogeneous-only"):
+    with pytest.raises(TypeError, match="homogeneous ConformalKoopmanUQ"):
         uq.calibrate([seq], steps=1)
 
 
@@ -207,12 +250,21 @@ def test_hetero_fit_rejects_backward_consistency() -> None:
         )
 
 
-def test_hetero_fit_rejects_windowed_sampler() -> None:
-    """Windowed fit is unsupported for multiplex sequences."""
+def test_hetero_fit_accepts_window_length() -> None:
+    """Multiplex windowed fit is supported via ``window_length`` (TASK-1801)."""
+    torch.manual_seed(0)
     sequence = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(5)])
     model = _hetero_model()
-    with pytest.raises(ValueError, match="windowed / sampler fit"):
-        model.fit(sequence, epochs=1, window_length=3)
+    history = model.fit(
+        sequence,
+        epochs=1,
+        window_length=3,
+        batch_size=2,
+        window_seed=0,
+        lr=1e-2,
+    )
+    assert len(history.loss) == 1
+    assert torch.isfinite(torch.tensor(history.loss[0]))
 
 
 def test_sequence_to_device_preserves_hetero_container() -> None:
@@ -262,23 +314,23 @@ def test_encode_sequence_latents_hetero() -> None:
     assert cache.z[0].shape == (4, 4)
 
 
-def test_env_rejects_hetero_model() -> None:
-    """GraphKoopmanEnv rejects multiplex models."""
+def test_env_accepts_hetero_model() -> None:
+    """GraphKoopmanEnv constructs for multiplex hetero models + sequences."""
     gymnasium = pytest.importorskip("gymnasium")
     del gymnasium
     from koopman_graph.env import GraphKoopmanEnv
 
     controlled = _hetero_model(control_dim=1)
-    edge_index = torch.tensor([[0, 1], [1, 2]], dtype=torch.long)
-    ref = GraphSnapshotSequence(
-        [Data(x=torch.randn(3, 3), edge_index=edge_index) for _ in range(2)]
+    ref = HeteroGraphSnapshotSequence([_multiplex_snapshot() for _ in range(2)])
+    env = GraphKoopmanEnv(
+        controlled,
+        ref,
+        reward_fn=lambda data, _t: float(data["node"].x.sum().item()),
+        control_low=-1.0,
+        control_high=1.0,
+        max_episode_steps=2,
+        start_index=0,
+        random_start=False,
     )
-    with pytest.raises(TypeError, match="homogeneous-only"):
-        GraphKoopmanEnv(
-            controlled,
-            ref,
-            reward_fn=lambda _data, _t: 0.0,
-            control_low=-1.0,
-            control_high=1.0,
-            max_episode_steps=2,
-        )
+    obs, _info = env.reset(seed=0)
+    assert obs.shape == (controlled.latent_dim * 4,)

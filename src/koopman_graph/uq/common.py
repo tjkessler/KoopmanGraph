@@ -7,10 +7,18 @@ other's leading-``_`` symbols or each other's public result types.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from torch import Tensor
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
+
+from koopman_graph.data.hetero_layout import (
+    snapshot_num_nodes_dict,
+    unstack_typed_features,
+)
+
+SnapshotLike = Data | HeteroData
 
 
 @dataclass(frozen=True)
@@ -20,17 +28,19 @@ class PredictionInterval:
     Public result types in this package are frozen dataclasses with attribute
     access (not mapping/dict styles). Collection fields are immutable
     sequences (``tuple``) after construction: callers cannot ``.append`` or
-    replace slots in place. Individual ``Data`` objects are **borrowed**, not
-    cloned — in-place mutation of node features or topology remains possible.
-    Clone explicitly when isolation is required.
+    replace slots in place. Individual ``Data`` / ``HeteroData`` objects are
+    **borrowed**, not cloned — in-place mutation of node features or
+    topology remains possible. Clone explicitly when isolation is required.
 
     Attributes
     ----------
-    mean : tuple of Data
+    mean : tuple of Data or HeteroData
         Ensemble-mean (or predictive-mean) node features per forecast step.
-    lower : tuple of Data
+        Homogeneous paths use ``Data``; hetero conformal paths use
+        ``HeteroData``.
+    lower : tuple of Data or HeteroData
         Lower empirical quantile per step (same topology as ``mean``).
-    upper : tuple of Data
+    upper : tuple of Data or HeteroData
         Upper empirical quantile per step (same topology as ``mean``).
     level : float
         Nominal central coverage requested at construction (e.g. ``0.9``).
@@ -39,9 +49,9 @@ class PredictionInterval:
         form the interval (context-dependent).
     """
 
-    mean: tuple[Data, ...]
-    lower: tuple[Data, ...]
-    upper: tuple[Data, ...]
+    mean: tuple[SnapshotLike, ...]
+    lower: tuple[SnapshotLike, ...]
+    upper: tuple[SnapshotLike, ...]
     level: float
     n_members: int
 
@@ -108,3 +118,40 @@ def snapshot_with_features(template: Data, features: Tensor) -> Data:
     if edge_weight is not None:
         fields["edge_weight"] = edge_weight
     return Data(**fields)
+
+
+def hetero_snapshot_with_features(
+    template: HeteroData,
+    features: Tensor,
+    node_type_names: Sequence[str],
+) -> HeteroData:
+    """Clone a hetero snapshot and replace stacked node features.
+
+    Parameters
+    ----------
+    template : HeteroData
+        Snapshot supplying per-type / per-relation topology.
+    features : Tensor
+        Stacked replacement features with shape ``(Σ_τ N_τ, F)`` in
+        ``node_type_names`` order (shared trailing width ``F``).
+    node_type_names : sequence of str
+        Ordered node-type names defining the stacking order.
+
+    Returns
+    -------
+    HeteroData
+        Cloned snapshot with unstacked ``x`` per node type and the template
+        relation banks.
+
+    Raises
+    ------
+    ValueError
+        If ``features`` row count disagrees with the template schema or
+        widths cannot be unstacked.
+    """
+    counts = snapshot_num_nodes_dict(template, node_type_names)
+    unstacked = unstack_typed_features(features, node_type_names, counts)
+    out = template.clone()
+    for name, block in unstacked.items():
+        out[name].x = block
+    return out

@@ -10,6 +10,14 @@ Public API
     Graph Transformer encoder (PyG ``TransformerConv``; edges×heads cost).
 ``HypergraphEncoder``
     Hypergraph encoder (PyG ``HypergraphConv``; static hyperedge incidence).
+``SimplicialEncoder``
+    Simplicial-1 encoder (combinatorial ``L_1`` mixing; not sheaf/cell).
+``InvariantGeometryEncoder``
+    Tier A invariant distance/angle features from ``Data.pos`` (not
+    equivariant ``K``).
+``E3EquivariantEncoder``
+    Optional Tier B steerable encode via ``e3nn`` (``[equivariance]``);
+    projects to invariant latents for linear ``K`` (not equivariant ``K``).
 ``RelGraphEncoder``
     Multiplex relational encoder (R-GCN-lite; per-relation message banks).
 ``DelayEmbeddingEncoder``
@@ -20,6 +28,8 @@ Public API
     Graph Transformer decoder peer.
 ``HypergraphDecoder``
     Hypergraph decoder peer.
+``SimplicialDecoder``
+    Simplicial-1 decoder peer.
 ``RelGraphDecoder``
     Multiplex relational decoder peer.
 ``KoopmanOperator``
@@ -78,6 +88,7 @@ from koopman_graph.nn import (
     DelayEmbeddingEncoder,
     DiffConvDecoder,
     DiffConvEncoder,
+    E3EquivariantEncoder,
     GATDecoder,
     GATEncoder,
     GNNDecoder,
@@ -86,10 +97,13 @@ from koopman_graph.nn import (
     GraphTransformerEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    InvariantGeometryEncoder,
     RelGraphDecoder,
     RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
+    SimplicialDecoder,
+    SimplicialEncoder,
 )
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
@@ -106,6 +120,7 @@ __all__ = [
     "DelayEmbeddingEncoder",
     "DiffConvDecoder",
     "DiffConvEncoder",
+    "E3EquivariantEncoder",
     "GATDecoder",
     "GATEncoder",
     "GNNDecoder",
@@ -119,6 +134,7 @@ __all__ = [
     "HypergraphDecoder",
     "HypergraphEncoder",
     "HypergraphKoopmanOperator",
+    "InvariantGeometryEncoder",
     "KoopmanOperator",
     "KoopmanSpectrum",
     "MultiTrajectory",
@@ -126,7 +142,9 @@ __all__ = [
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "SimplicialDecoder",
+    "SimplicialEncoder",
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.9.0"
+__version__ = "0.10.0"

@@ -1,6 +1,7 @@
 """Extra-loss objective composition over ``ExtraLosses`` / ``LossWeights``.
 
-Owns Lie / PDE / sparsity / worst-case training-side composition helpers used by
+Owns Lie / PDE / sparsity / worst-case / VAMP-2 training-side composition
+helpers used by
 :func:`~koopman_graph.training.objectives.compute_training_loss`. Shared pair
 utilities come from :mod:`~koopman_graph.training.pair_objectives` as documented
 non-private names.
@@ -9,11 +10,13 @@ non-private names.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
+from koopman_graph.baselines.vamp2 import vamp2_loss
 from koopman_graph.data import (
     GraphSnapshotSequence,
     resolve_pair_delta_t,
@@ -26,11 +29,15 @@ from koopman_graph.losses import (
 )
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.history import ExtraLosses
+from koopman_graph.training.latent_cache import encode_sequence_latents
 from koopman_graph.training.pair_objectives import (
     mean_pair_sequence_loss,
     model_default_delta_t,
     pair_control,
 )
+
+if TYPE_CHECKING:
+    from koopman_graph.training.latent_cache import SequenceLatentCache
 
 _LIE_CONSISTENCY_LOSS = LieConsistencyLoss()
 _PDE_RESIDUAL_LOSS = PDEResidualLoss()
@@ -105,9 +112,37 @@ def compute_lie_consistency_loss(
             raise ValueError(msg)
 
         def observable_fn(x: Tensor, context: Data = snapshot) -> Tensor:
+            """Observable fn.
+
+            Parameters
+            ----------
+            x
+                Value for ``x``.
+            context
+                Value for ``context``.
+
+            Returns
+            -------
+            object
+                Function result.
+            """
             return model.encode(_snapshot_with_x(context, x))
 
         def dynamics_fn(x: Tensor, context: Data = snapshot) -> Tensor:
+            """Dynamics fn.
+
+            Parameters
+            ----------
+            x
+                Value for ``x``.
+            context
+                Value for ``context``.
+
+            Returns
+            -------
+            object
+                Function result.
+            """
             return dynamics_from_snapshot(_snapshot_with_x(context, x))
 
         losses.append(
@@ -323,3 +358,43 @@ def compute_worst_case_reconstruction_loss(
             prediction=predictions[timestep],
         )
     return total_loss / num_pairs
+
+
+def compute_vamp2_loss(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+    *,
+    weight: float,
+    cache: SequenceLatentCache | None = None,
+) -> Tensor:
+    """Topology-blind VAMP-2 precursor on flattened encoder latents.
+
+    Builds lag-1 feature matrices by flattening each teacher-forced latent
+    ``z_t`` to ``N · d``, then returns
+    :func:`~koopman_graph.baselines.vamp2.vamp2_loss`.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model providing encoder latents.
+    sequence : GraphSnapshotSequence
+        Homogeneous trajectory with at least two snapshots.
+    weight : float
+        Active VAMP-2 weight; zero skips evaluation.
+    cache : SequenceLatentCache or None, optional
+        Shared teacher-forced latents. When ``None``, encodes ``sequence``.
+
+    Returns
+    -------
+    Tensor
+        Scalar ``-vamp2_score`` (unweighted).
+    """
+    device = next(model.parameters()).device
+    if weight == 0.0:
+        return torch.zeros((), device=device)
+    if sequence.num_timesteps < 2:
+        msg = "GraphSnapshotSequence must contain at least 2 snapshots for VAMP-2"
+        raise ValueError(msg)
+    resolved = cache if cache is not None else encode_sequence_latents(model, sequence)
+    features = torch.stack([z.reshape(-1) for z in resolved.z], dim=0)
+    return vamp2_loss(features[:-1], features[1:])

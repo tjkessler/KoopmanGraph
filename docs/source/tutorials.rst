@@ -82,6 +82,8 @@ Analysis and stability
      - GAT encoder on grid graphs
    * - `07_koopman_spectrum.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb>`_
      - Koopman eigenvalue analysis + held-out ``spectral_residuals`` / spurious-mode filter
+   * - `40_resdmd_pseudospectra.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
+     - Finite-dictionary ResDMD MVP + resolvent-norm grid (≠ ``spectral_residuals``; not infinite-dim certificates)
    * - `08_loss_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb>`_
      - Loss weighting and soft stability regularization
    * - `26_sparse_interpretable_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/26_sparse_interpretable_operator.ipynb>`_
@@ -179,6 +181,10 @@ hetero support and are not factory defaults. See
 `39_heterogeneous_relational_koopman.ipynb
 <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb>`_
 for a multiplex RelGraph ablation (parameter counts and hold-out MSE).
+For residual-aware spectral diagnostics on a fixed dictionary, see also
+`40_resdmd_pseudospectra.ipynb
+<https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
+(finite ResDMD MVP; distinct from notebook 07's ``spectral_residuals``).
 
 Related pages
 -------------

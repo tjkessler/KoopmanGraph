@@ -14,13 +14,19 @@ from torch_geometric.data import HeteroData
 
 from koopman_graph.data import (
     HeteroGraphSnapshotSequence,
+    NeighborWindowSampler,
     RolloutStartIndices,
     SnapshotSequence,
     WindowLikeSampler,
-    WindowSampler,
     resolve_rollout_start_indices,
+    resolve_window_sampler,
+)
+from koopman_graph.data.hetero_layout import (
+    global_relation_edge_indices,
+    snapshot_num_nodes_dict,
 )
 from koopman_graph.graph_utils import snapshot_hyperedge_index
+from koopman_graph.nn.heterogeneous import resolve_multiplex_relation_inputs
 from koopman_graph.protocols import TrainableKoopmanModel
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
@@ -104,33 +110,67 @@ def bind_pending_orbit_ties(
     train_sequences : sequence of SnapshotSequence
         Training trajectories already placed on the training device. The first
         snapshot of the first sequence supplies topology. Multiplex hetero
-        sequences raise when ``auto_orbits`` is enabled (orbit ties are
-        homogeneous-only for the multiplex MVP).
+        sequences bind orbits from the **union** of relation banks;
+        typed hetero binds per-type orbits from intra-type banks.
 
     Raises
     ------
     ValueError
-        If training sequences are multiplex and ``koopman.auto_orbits`` is
-        ``True``.
+        If a homogeneous bind path receives ``HeteroData``, or typed /
+        multiplex hetero binding fails validation.
     """
     if not train_sequences:
         return
     koopman = getattr(model, "koopman", None)
-    if isinstance(train_sequences[0], HeteroGraphSnapshotSequence):
-        if koopman is not None and bool(getattr(koopman, "auto_orbits", False)):
-            msg = (
-                "auto_orbits / orbit binding is unsupported for "
-                "HeteroGraphSnapshotSequence; disable koopman_auto_orbits "
-                "(typed-node orbit ties are deferred)"
-            )
-            raise ValueError(msg)
-        return
     ensure = getattr(koopman, "ensure_orbit_binding", None)
     if koopman is None or ensure is None:
         return
     if not bool(getattr(koopman, "auto_orbits", False)):
         return
     if getattr(koopman, "orbit_partition", None) is not None:
+        return
+    if isinstance(train_sequences[0], HeteroGraphSnapshotSequence):
+        snapshot = train_sequences[0][0]
+        if not isinstance(snapshot, HeteroData):
+            msg = (
+                "hetero auto_orbits binding requires HeteroData snapshots; "
+                f"got {type(snapshot).__name__}"
+            )
+            raise ValueError(msg)
+        if bool(getattr(koopman, "is_typed", False)):
+            typed_ensure = getattr(koopman, "ensure_typed_orbit_binding", None)
+            if typed_ensure is None:
+                msg = (
+                    "typed hetero auto_orbits requires "
+                    "ensure_typed_orbit_binding on the Koopman operator"
+                )
+                raise ValueError(msg)
+            node_types = tuple(koopman.node_types)
+            edge_types = tuple(koopman.edge_types)
+            counts = snapshot_num_nodes_dict(snapshot, node_types)
+            banks = global_relation_edge_indices(
+                snapshot,
+                edge_types,
+                node_types,
+                num_nodes_dict=counts,
+            )
+            typed_ensure(banks, counts)
+            return
+        # Match multiplex RelGraph bank order (sorted edge-type keys), not
+        # the operator's default synthetic ``r0``/``r1`` labels.
+        _x, banks, _weights = resolve_multiplex_relation_inputs(
+            snapshot,
+            None,
+            None,
+            num_relations=int(koopman.num_relations),
+        )
+        nonempty = [bank for bank in banks if bank.numel() > 0]
+        if nonempty:
+            union = torch.cat(nonempty, dim=1)
+        else:
+            device = banks[0].device if banks else _x.device
+            union = torch.zeros(2, 0, dtype=torch.long, device=device)
+        ensure(int(_x.shape[0]), edge_index=union)
         return
     snapshot = train_sequences[0][0]
     if isinstance(snapshot, HeteroData):
@@ -278,7 +318,10 @@ def run_fit_loop(
         Scheduler instance or ``optimizer -> scheduler`` factory.
     window_length : int or None, optional
         Fixed window length for mini-batch training; ``None`` uses full
-        sequences. Mutually exclusive with ``sampler``.
+        sequences. Mutually exclusive with ``sampler``. Supported for
+        homogeneous and hetero
+        (:class:`~koopman_graph.data.HeteroGraphSnapshotSequence`)
+        trajectories via :class:`~koopman_graph.data.WindowSampler`.
     batch_size : int, optional
         Windows per optimizer step when windowed. Default is ``8``.
     windows_per_epoch : int or None, optional
@@ -288,8 +331,10 @@ def run_fit_loop(
     sampler : WindowSampler, NeighborWindowSampler, or None, optional
         Pre-built window sampler (temporal or neighbor-subgraph). When set,
         ``window_length`` / ``batch_size`` / ``windows_per_epoch`` /
-        ``window_seed`` are ignored. Neighbor sampling is a training
-        approximation over induced subgraphs.
+        ``window_seed`` are ignored. :class:`~koopman_graph.data.WindowSampler`
+        is allowed for hetero sequences;
+        :class:`~koopman_graph.data.NeighborWindowSampler` remains
+        homogeneous-only (induced-subgraph approximation).
     max_grad_norm : float or None, optional
         Global gradient-norm clip before each optimizer step.
     use_amp : bool, optional
@@ -320,8 +365,10 @@ def run_fit_loop(
     Raises
     ------
     ValueError
-        If ``early_stopping_monitor="val"`` without ``val_sequences``, or if
-        both ``sampler`` and ``window_length`` are provided.
+        If ``early_stopping_monitor="val"`` without ``val_sequences``, if both
+        ``sampler`` and ``window_length`` are provided, or if a
+        :class:`~koopman_graph.data.NeighborWindowSampler` is used with
+        hetero training sequences.
     """
     if early_stopping_monitor == "val" and val_sequences is None:
         msg = 'early_stopping_monitor="val" requires val_sequences'
@@ -333,10 +380,11 @@ def run_fit_loop(
         isinstance(sequence, HeteroGraphSnapshotSequence)
         for sequence in train_sequences
     )
-    if has_hetero_train and (sampler is not None or window_length is not None):
+    if has_hetero_train and isinstance(sampler, NeighborWindowSampler):
         msg = (
-            "windowed / sampler fit is unsupported for "
-            "HeteroGraphSnapshotSequence; omit sampler and window_length"
+            "NeighborWindowSampler is homogeneous-only; "
+            "HeteroGraphSnapshotSequence windowed fit requires WindowSampler "
+            "or window_length=... (not neighbor-subgraph sampling)"
         )
         raise ValueError(msg)
 
@@ -371,22 +419,19 @@ def run_fit_loop(
         "amp_dtype": resolved_amp_dtype,
         "grad_scaler": grad_scaler,
     }
-    window_sampler: WindowLikeSampler | None
     if sampler is not None:
         sampler.sequences = [
             sequence_to_device(sequence, train_device) for sequence in sampler.sequences
         ]
-        window_sampler = sampler
-    elif window_length is None:
-        window_sampler = None
-    else:
-        window_sampler = WindowSampler(
-            train_sequences,
-            window_length=window_length,
-            batch_size=batch_size,
-            windows_per_epoch=windows_per_epoch,
-            seed=window_seed,
-        )
+    window_sampler = resolve_window_sampler(
+        train_sequences,
+        window_length=window_length,
+        batch_size=batch_size,
+        windows_per_epoch=windows_per_epoch,
+        window_seed=window_seed,
+        sampler=sampler,
+        distributed=False,
+    )
     losses: list[float] = []
     reconstruction_losses: list[float] = []
     forward_losses: list[float] = []
@@ -397,6 +442,7 @@ def run_fit_loop(
     pde_losses: list[float] = []
     sparsity_losses: list[float] = []
     worst_case_losses: list[float] = []
+    vamp2_losses: list[float] = []
     val_losses: list[float] | None = [] if val_sequences is not None else None
     val_reconstruction_losses: list[float] | None = (
         [] if val_sequences is not None else None
@@ -413,6 +459,7 @@ def run_fit_loop(
     val_worst_case_losses: list[float] | None = (
         [] if val_sequences is not None else None
     )
+    val_vamp2_losses: list[float] | None = [] if val_sequences is not None else None
     best_loss_for_stop = float("inf")
     best_loss: float | None = None
     best_epoch: int | None = None
@@ -482,6 +529,7 @@ def run_fit_loop(
         pde_losses.append(term_values["pde"])
         sparsity_losses.append(term_values["sparsity"])
         worst_case_losses.append(term_values["worst_case"])
+        vamp2_losses.append(term_values["vamp2"])
 
         monitored_loss = term_values["total"]
         if val_sequences is not None:
@@ -504,6 +552,7 @@ def run_fit_loop(
             assert val_pde_losses is not None
             assert val_sparsity_losses is not None
             assert val_worst_case_losses is not None
+            assert val_vamp2_losses is not None
             val_losses.append(val_terms["total"])
             val_reconstruction_losses.append(val_terms["reconstruction"])
             val_forward_losses.append(val_terms["forward"])
@@ -514,6 +563,7 @@ def run_fit_loop(
             val_pde_losses.append(val_terms["pde"])
             val_sparsity_losses.append(val_terms["sparsity"])
             val_worst_case_losses.append(val_terms["worst_case"])
+            val_vamp2_losses.append(val_terms["vamp2"])
             if early_stopping_monitor == "val":
                 monitored_loss = val_terms["total"]
 
@@ -556,6 +606,7 @@ def run_fit_loop(
         pde_loss=tuple(pde_losses),
         sparsity_loss=tuple(sparsity_losses),
         worst_case_loss=tuple(worst_case_losses),
+        vamp2_loss=tuple(vamp2_losses),
         val_loss=None if val_losses is None else tuple(val_losses),
         val_reconstruction_loss=(
             None
@@ -582,6 +633,7 @@ def run_fit_loop(
         val_worst_case_loss=(
             None if val_worst_case_losses is None else tuple(val_worst_case_losses)
         ),
+        val_vamp2_loss=(None if val_vamp2_losses is None else tuple(val_vamp2_losses)),
         stopped_early=stopped_early,
         best_epoch=best_epoch,
         best_loss=best_loss,

@@ -955,10 +955,14 @@ class KoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Advanced latent states with the same shape as ``z``.
+            Advanced latent states with the same shape as ``z``. When
+            ``dynamics_mode='stochastic'``, diagonal process noise is added
+            after the linear map.
         """
+        from koopman_graph.operators.stochastic import maybe_apply_process_noise
+
         _ = delta_t, edge_index, edge_weight
-        return self.forward(z, control=control)
+        return maybe_apply_process_noise(self.forward(z, control=control), self)
 
     def inverse_advance(
         self,

@@ -92,6 +92,131 @@ def test_ensemble_fit_rejects_unknown_parallel_backend() -> None:
         )
 
 
+def test_fit_ensemble_with_ray_validation_guards() -> None:
+    """``num_members``, ``seeds``, and banned fit kwargs are validated early."""
+    from koopman_graph.distributed.ray_jobs import fit_ensemble_with_ray
+
+    factory = _make_member_factory()
+    sequence = _tiny_sequence()
+    with pytest.raises(ValueError, match="num_members must be >= 1"):
+        fit_ensemble_with_ray(factory, sequence, num_members=0)
+    with pytest.raises(ValueError, match="seeds must have length num_members"):
+        fit_ensemble_with_ray(
+            factory,
+            sequence,
+            num_members=2,
+            seeds=(0,),
+        )
+    with pytest.raises(TypeError, match="parallel_backend"):
+        fit_ensemble_with_ray(
+            factory,
+            sequence,
+            num_members=1,
+            parallel_backend="ray",
+        )
+    with pytest.raises(TypeError, match="member_factory"):
+        fit_ensemble_with_ray(
+            factory,
+            sequence,
+            num_members=1,
+            member_factory=factory,
+        )
+
+
+def test_fit_member_task_in_process_returns_cpu_state() -> None:
+    """Worker helper fits one member and returns CPU ``state_dict`` + history."""
+    from koopman_graph.distributed.ray_jobs import _fit_member_task
+
+    factory = _make_member_factory()
+    state_dict, history = _fit_member_task(
+        factory,
+        _tiny_sequence(),
+        seed=3,
+        fit_kwargs={"epochs": 1, "lr": 1e-2},
+    )
+    assert history.reconstruction_loss
+    assert all(math.isfinite(value) for value in history.reconstruction_loss)
+    assert state_dict
+    assert all(tensor.device.type == "cpu" for tensor in state_dict.values())
+
+
+def test_fit_member_task_without_seed() -> None:
+    """``seed=None`` skips ``torch.manual_seed`` and still returns a history."""
+    from koopman_graph.distributed.ray_jobs import _fit_member_task
+
+    state_dict, history = _fit_member_task(
+        _make_member_factory(),
+        _tiny_sequence(),
+        seed=None,
+        fit_kwargs={"epochs": 1, "lr": 1e-2},
+    )
+    assert state_dict
+    assert history.reconstruction_loss
+
+
+def test_fit_ensemble_with_ray_default_seeds_and_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default seeds are ``0..n-1``; uninitialized Ray calls ``ray.init``."""
+    ray = pytest.importorskip("ray")
+    import koopman_graph.distributed.ray_jobs as mod
+
+    captured: dict[str, object] = {}
+
+    class _Remote:
+        def remote(self, *args: object, **kwargs: object) -> object:
+            return ("future", args, kwargs)
+
+    def fake_remote(fn: object) -> _Remote:
+        captured["remote_fn"] = fn
+        return _Remote()
+
+    def fake_get(futures: object) -> list[tuple[dict[str, torch.Tensor], object]]:
+        captured["futures"] = futures
+        history = type("H", (), {"reconstruction_loss": [1.0]})()
+        count = len(futures) if isinstance(futures, list) else 1
+        return [({"w": torch.zeros(1)}, history) for _ in range(count)]
+
+    def fake_init(**kwargs: object) -> None:
+        captured["init"] = kwargs
+
+    monkeypatch.setattr(ray, "is_initialized", lambda: False)
+    monkeypatch.setattr(ray, "init", fake_init)
+    monkeypatch.setattr(ray, "put", lambda data: ("ref", data))
+    monkeypatch.setattr(ray, "remote", fake_remote)
+    monkeypatch.setattr(ray, "get", fake_get)
+    monkeypatch.setattr(mod, "_import_ray", lambda: ray)
+
+    factory = _make_member_factory()
+    state_dicts, histories = mod.fit_ensemble_with_ray(
+        factory,
+        _tiny_sequence(),
+        num_members=2,
+        ray_address="auto",
+        epochs=1,
+    )
+    assert captured["init"] == {"ignore_reinit_error": True, "address": "auto"}
+    assert len(state_dicts) == 2
+    assert len(histories) == 2
+    # Default seeds are 0 and 1 when omitted.
+    futures = captured["futures"]
+    assert isinstance(futures, list)
+    assert len(futures) == 2
+    assert futures[0][1][2] == 0
+    assert futures[1][1][2] == 1
+
+    captured.clear()
+    state_dicts, histories = mod.fit_ensemble_with_ray(
+        factory,
+        _tiny_sequence(),
+        num_members=1,
+        epochs=1,
+    )
+    assert captured["init"] == {"ignore_reinit_error": True}
+    assert len(state_dicts) == 1
+    assert len(histories) == 1
+
+
 def test_fit_ensemble_with_ray_two_members_finite_histories() -> None:
     """Ray path fits two members with finite losses under a local runtime."""
     ray = pytest.importorskip("ray")

@@ -23,6 +23,8 @@ from koopman_graph.nn import (
     HypergraphEncoder,
     RelGraphDecoder,
     RelGraphEncoder,
+    SimplicialDecoder,
+    SimplicialEncoder,
 )
 from koopman_graph.training import (
     EarlyStoppingMonitor,
@@ -113,6 +115,38 @@ def uses_hypergraph_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
         )
         raise ValueError(msg)
     return enc_hyper and dec_hyper
+
+
+def uses_simplicial_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
+    """Return whether encoder and decoder are a matched simplicial-1 pair.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder module.
+    decoder : nn.Module
+        Model decoder module.
+
+    Returns
+    -------
+    bool
+        ``True`` when both modules are simplicial peers.
+
+    Raises
+    ------
+    ValueError
+        If exactly one of encoder/decoder is a simplicial peer.
+    """
+    enc_sim = isinstance(encoder, SimplicialEncoder)
+    dec_sim = isinstance(decoder, SimplicialDecoder)
+    if enc_sim != dec_sim:
+        msg = (
+            "SimplicialEncoder and SimplicialDecoder must be used together "
+            f"(got encoder={type(encoder).__name__}, "
+            f"decoder={type(decoder).__name__})"
+        )
+        raise ValueError(msg)
+    return enc_sim and dec_sim
 
 
 def validate_sequence_hyperedges(

@@ -141,6 +141,19 @@ def test_hetero_operator_oracle_attribution() -> None:
     assert float(report.relation_fractions["r1"][0]) >= 0.0
 
 
+def test_attribute_mode_energy_rectangular_requires_complete_dims() -> None:
+    """Rectangular path rejects incomplete latent_dims / num_nodes_dict."""
+    k_eff = torch.eye(8)
+    eigenvectors = torch.eye(8)
+    with pytest.raises(ValueError, match="latent_dims and num_nodes_dict"):
+        attribute_mode_energy(
+            k_eff,
+            eigenvectors,
+            latent_dim=4,
+            latent_dims={"a": 2, "b": 3},
+        )
+
+
 def test_attribute_mode_energy_rejects_bad_shapes() -> None:
     """Shape / index validation raises clearly."""
     k_eff = torch.eye(4)

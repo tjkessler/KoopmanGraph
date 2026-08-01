@@ -82,9 +82,10 @@ Optional feature extras
   need ``[lightning]``. Parallel ensemble member fits need ``[ray]``
   (:func:`~koopman_graph.distributed.fit_ensemble_with_ray`). Prefer
   Fabric / DDP for multi-GPU *model* training and full loss schedules.
-  ``[dask]`` is a reserved pin (docs-only in 0.8.0; see “Can I use Dask?”
-  below). See :doc:`installation` and :doc:`capabilities` (Distributed
-  training).
+  ``[dask]`` activates
+  :mod:`koopman_graph.distributed.dask_prep` materialize helpers (not a
+  training loop; see “Can I use Dask?” below). See :doc:`installation`
+  and :doc:`capabilities` (Distributed training).
 * See :doc:`installation` for the full extras table.
 
 Import paths after 0.6
@@ -108,15 +109,22 @@ aliases), for example:
    from koopman_graph.env import GraphKoopmanEnv
    from koopman_graph.data import temporal_split, WindowSampler
    from koopman_graph.metrics import evaluate_forecast, EvaluationResult
-   from koopman_graph.uq import ConformalKoopmanUQ, EnsembleGraphKoopmanModel
+   from koopman_graph.uq import (
+       BayesianKoopmanUQ,
+       ConformalKoopmanUQ,
+       EnsembleGraphKoopmanModel,
+   )
    from koopman_graph.mpc import KoopmanMPC
    from koopman_graph.nn import AdaptiveAdjacency
    from koopman_graph.analysis import (
        identify_sparse_dynamics,
        koopman_spectral_clustering,
+       resdmd,
        spectral_residuals,
    )
+   from koopman_graph.baselines import vamp2_score
    from koopman_graph.statistics import spectral_distance
+   # Root façade also exports SimplicialEncoder / InvariantGeometryEncoder
 
 ``ImportError: cannot import name '…' from 'koopman_graph'`` for one of these
 names usually means the import should use the capability module. See the Keep-in
@@ -245,9 +253,9 @@ models with the same 0.8 trainer adapters:
 
 ``find_unused_parameters`` defaults to ``True`` for hetero RelGraph stacks
 (override on the DDP fit path if you know every parameter is used).
-Single-process windowed ``run_fit_loop`` still rejects windowed hetero;
-use DDP / Fabric window sampling instead. Dense :math:`N\cdot d`
-ceilings are unchanged by multi-GPU training.
+Single-process windowed ``run_fit_loop`` accepts windowed hetero sequences
+(parity with world-size-1 DDP window sampling). Dense :math:`N\cdot d` /
+stacked width ceilings are unchanged by multi-GPU training.
 
 Is trainer “distributed” the same as ``sparsity="distributed"``?
 ----------------------------------------------------------------
@@ -257,30 +265,60 @@ Is trainer “distributed” the same as ``sparsity="distributed"``?
 * **Trainer orchestration** — optional DDP / Fabric /
   :class:`~koopman_graph.distributed.KoopmanLightningModule` paths under
   :mod:`koopman_graph.distributed` (data-parallel gradients / devices).
-* **``sparsity="distributed"``** — a reserved *operator* sparsity mode on
-  graph / hypergraph / continuous-graph constructors. It is **not
-  implemented** and continues to raise ``ValueError``.
+* **``sparsity="distributed"``** — an *operator* sparsity mode for
+  matrix-free inverse and Arnoldi spectrum on discrete graph and multiplex
+  hetero constructors (hypergraph / continuous peers may still assemble).
+  It does **not** enable multi-GPU training.
 
 Can I use Dask with KoopmanGraph?
 ---------------------------------
 
-**Yes, for offline data prep in your own code** — not as a second training
-runtime. Version 0.8.0 ships **no** library Dask helpers (no ``dask_prep``
-API) and does not import Dask from ``training``. The ``[dask]`` extra is a
-reserved dependency pin only.
+**Yes, for offline data prep** — not as a second training runtime.
+``pip install "koopman-graph[dask]"`` activates
+:mod:`koopman_graph.distributed.dask_prep` helpers
+(``materialize_sequences``, ``materialize_window_index_list``). The library
+does **not** import Dask from ``training``; trainers remain native DDP /
+Fabric / Ray ensemble.
 
-Typical pattern: materialize partitions with a threaded or distributed
-scheduler, then hand in-memory sequences to ``fit`` or
-:class:`~koopman_graph.distributed.DistributedWindowSampler`::
+Typical pattern::
 
    import dask
+   from koopman_graph.distributed import materialize_sequences
 
    delayed_seqs = [dask.delayed(load_sequence)(path) for path in paths]
-   sequences = dask.compute(*delayed_seqs, scheduler="threads")
+   sequences = materialize_sequences(delayed_seqs)
    model.fit(list(sequences), epochs=10)  # or windowed / DDP fit
 
 Do **not** replace :func:`~koopman_graph.training.run_fit_loop` /
 DDP / Fabric with a Dask-worker training loop.
+
+What is the difference between ``spectral_residuals`` and ResDMD?
+-----------------------------------------------------------------
+
+They answer different questions:
+
+* **``spectral_residuals``** — held-out data-driven check that claimed
+  eigenpairs propagate as :math:`a(t+1)\approx\lambda\, a(t)` in the
+  *learned* latent / observable space. Diagnostic filter
+  (``trustworthy_mask``), not a residual-DMD certificate.
+* **``resdmd`` / resolvent-norm grid** — finite-dictionary ResDMD MVP and
+  finite-matrix resolvent helpers in :mod:`koopman_graph.analysis`. Useful
+  for residual-aware spectral diagnostics on a fixed dictionary; **not**
+  infinite-dimensional certified pseudospectra / spectral measures.
+  See ``examples/40_resdmd_pseudospectra.ipynb`` and :doc:`limitations`.
+
+Does ``InvariantGeometryEncoder`` make the Koopman operator equivariant?
+------------------------------------------------------------------------
+
+**No.** Tier A
+:class:`~koopman_graph.nn.InvariantGeometryEncoder` builds
+rotation-/translation-invariant features from ``Data.pos`` and lifts them
+with a standard GCN. Optional Tier B
+:class:`~koopman_graph.nn.E3EquivariantEncoder` (``e3nn``,
+``[equivariance]``) uses steerable message passing but still emits
+**invariant scalar latents** for the ordinary linear map :math:`K`.
+Neither path makes :math:`K` itself E(n)/SE(3) equivariant (see
+:doc:`limitations`).
 
 Hierarchical pooling: ``per_snapshot`` vs ``hold_perm``
 -------------------------------------------------------

@@ -72,8 +72,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` and ``"block_diagonal"`` share the same
         forward hyperedge matvec; they differ in ``inverse_advance`` (exact
-        ``N·d`` inverse vs approximate per-node Jacobi). ``"distributed"`` is
-        reserved and rejected.
+        ``N·d`` inverse vs approximate per-node Jacobi). ``"distributed"``
+        is accepted for construction / checkpoints (not trainer DDP or
+        multi-GPU training); matrix-free inverse and spectrum helpers are
+        wired for discrete graph and hetero in 0.10 (hypergraph may still
+        assemble for spectrum / inverse).
     max_spectral_radius : float
         Stability bound forwarded to the factorized self/hyperedge matrices.
     """
@@ -119,8 +122,9 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
             ``"dense"`` (default) uses an exact dense ``inverse_advance``.
             ``"block_diagonal"`` keeps the same forward advance and uses an
-            approximate per-node inverse. ``"distributed"`` is planned; not
-            in 0.6.0.
+            approximate per-node inverse. ``"distributed"`` is accepted for
+            construction / checkpoints (matrix-free inverse / spectrum are
+            wired for discrete graph and hetero in 0.10).
         orbit_partition : sequence of sequence of int or None, optional
             Explicit node-orbit partition tying ``K_self`` across orbit mates.
         auto_orbits : bool, optional
@@ -132,20 +136,13 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Raises
         ------
         ValueError
-            If ``sparsity`` is ``"distributed"`` or otherwise unsupported, or
-            construction args are invalid.
+            If ``sparsity`` is unsupported or construction args are invalid.
         """
         super().__init__()
-        if sparsity == "distributed":
+        if sparsity not in {"dense", "block_diagonal", "distributed"}:
             msg = (
-                "HypergraphKoopmanOperator sparsity='distributed' is "
-                "planned; not in 0.6.0"
-            )
-            raise ValueError(msg)
-        if sparsity not in {"dense", "block_diagonal"}:
-            msg = (
-                "HypergraphKoopmanOperator sparsity must be 'dense' or "
-                f"'block_diagonal', got {sparsity!r}"
+                "HypergraphKoopmanOperator sparsity must be 'dense', "
+                f"'block_diagonal', or 'distributed', got {sparsity!r}"
             )
             raise ValueError(msg)
 
@@ -787,17 +784,37 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 k_self_blocks=k_self_blocks,
             )
 
+        if self.sparsity == "distributed" and inverse_matrix is not None:
+            msg = (
+                "inverse_matrix is only supported for "
+                "HypergraphKoopmanOperator sparsity='dense'"
+            )
+            raise ValueError(msg)
+
         if inverse_matrix is None:
             k_self_override, k_self_blocks = _bilinear_self_factors()
             if k_self_blocks is None and k_self_override is None:
                 k_self_blocks = self.tied_self_blocks(num_nodes)
-            inverse_matrix = self.dense_effective_inverse(
-                hyperedge_index,
-                num_nodes,
-                hyperedge_weight=hyperedge_weight,
-                k_self=k_self_override,
-                k_self_blocks=k_self_blocks,
-            )
+            if self.sparsity == "distributed":
+                # Construction / checkpoint flag; assemble for inverse until
+                # hypergraph matrix-free helpers land (discrete graph/hetero
+                # already use invert_k_eff_*).
+                effective = self.effective_matrix(
+                    hyperedge_index,
+                    num_nodes,
+                    hyperedge_weight=hyperedge_weight,
+                    k_self=k_self_override,
+                    k_self_blocks=k_self_blocks,
+                )
+                inverse_matrix = dense_inverse_or_pinv(effective)
+            else:
+                inverse_matrix = self.dense_effective_inverse(
+                    hyperedge_index,
+                    num_nodes,
+                    hyperedge_weight=hyperedge_weight,
+                    k_self=k_self_override,
+                    k_self_blocks=k_self_blocks,
+                )
 
         flat = adjusted.reshape(-1)
         recovered = (inverse_matrix @ flat).view_as(adjusted)

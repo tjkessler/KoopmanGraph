@@ -363,6 +363,7 @@ def train_windowed_epoch(
                 "pde",
                 "sparsity",
                 "worst_case",
+                "vamp2",
                 "total",
             )
         }
