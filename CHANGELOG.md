@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - Unreleased
+## [0.10.0] - 2026-08-01
 
 Heterogeneous-operator completion, matrix-free sparsity, ResDMD MVP,
 classical DMD peers, and topology-blind VAMP-2 precursor. Homogeneous
@@ -494,6 +494,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.10.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.9.0...0.10.0
 [0.9.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.8.2...0.9.0
 [0.8.2]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.2
 [0.8.1]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.1
