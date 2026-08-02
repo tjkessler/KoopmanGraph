@@ -55,9 +55,9 @@ Tutorials under `examples/` cover synthetic dynamics, IEEE 118-bus, METR-LA, and
 
 # Research impact statement
 
-`KoopmanGraph` is research software with no publications or downstream adoptions to cite at submission. Impact is shown through reproducible tutorials on synthetic, IEEE 118-bus, METR-LA, and epidemic graphs---per-horizon evaluation, topology-versus-vector baselines in the spirit of prior GNN-versus-Koopman power-grid studies [@Nandanoori2022], dynamic topology, spectral/stability analysis, and latent-space control---plus v0.5.0 tooling and notebooks for deep-ensemble / latent-Gaussian uncertainty, hierarchical multi-resolution forecasting, auxiliary-spectral continuous generators, and sparsity / worst-case reconstruction losses (with a GNN encoder zoo). Open artifacts include PyPI releases through v0.9.0, CI with coverage and notebook smoke tests, Sphinx docs, and a security policy.
+`KoopmanGraph` is research software with no publications or downstream adoptions to cite at submission. Impact is shown through reproducible tutorials on synthetic, IEEE 118-bus, METR-LA, and epidemic graphs---per-horizon evaluation, topology-versus-vector baselines in the spirit of prior GNN-versus-Koopman power-grid studies [@Nandanoori2022], dynamic topology, spectral/stability analysis, and latent-space control---plus v0.5.0 tooling and notebooks for deep-ensemble / latent-Gaussian uncertainty, hierarchical multi-resolution forecasting, auxiliary-spectral continuous generators, and sparsity / worst-case reconstruction losses (with a GNN encoder zoo). Open artifacts include PyPI releases through v0.10.0, CI with coverage and notebook smoke tests, Sphinx docs, and a security policy.
 
-The author uses the library to experiment with Koopman forecasting on networked systems and to lower the barrier for topology-aware Koopman models on standard PyG workflows. Zenodo archives are available through v0.9.0 (DOI: \url{https://doi.org/10.5281/zenodo.21711185}; earlier version DOIs are linked from that record).
+The author uses the library to experiment with Koopman forecasting on networked systems and to lower the barrier for topology-aware Koopman models on standard PyG workflows. Zenodo archives are available through v0.10.0 (DOI: \url{https://doi.org/10.5281/zenodo.21752937}; earlier version DOIs are linked from that record).
 
 # Conclusion
 

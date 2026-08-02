@@ -66,6 +66,8 @@ bit-compat is preserved where rectangular maps are not requested.
   hypergraph incidence modes, public cross-topology transfer API, sheaf /
   cell TDL, GraphVAMPnets + MD/MSM toolchains, Ray Train as model DDP,
   isotypic symmetry / equivariant \(K\).
+- Zenodo version DOI:
+  [10.5281/zenodo.21752937](https://doi.org/10.5281/zenodo.21752937).
 
 ## [0.9.0] - 2026-07-30
 
