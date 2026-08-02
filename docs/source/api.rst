@@ -113,10 +113,42 @@ Combinatorial simplicial-1 / Hodge peers
 (:class:`~koopman_graph.nn.SimplicialEncoder`,
 :class:`~koopman_graph.nn.SimplicialDecoder`) are root-stable ``__all__``
 members. Prefer ``from koopman_graph import SimplicialEncoder,
-SimplicialDecoder``. Oriented ``edge_index`` and optional ``face_index``;
-**not** sheaf Laplacians or full cell-complex TDL.
+SimplicialDecoder``. Oriented ``edge_index`` and optional ``face_index``.
+For sheaf / cell-complex MVPs see the sections below (not full
+TopologicX parity — :doc:`limitations`).
 
 .. automodule:: koopman_graph.nn.simplicial
+   :members:
+   :show-inheritance:
+
+Sheaf Encoders / Decoders
+---------------------------
+
+Diagonal-restriction sheaf peers
+(:class:`~koopman_graph.nn.SheafGNNEncoder`,
+:class:`~koopman_graph.nn.SheafGNNDecoder`) are root-stable ``__all__``
+members. Prefer ``from koopman_graph import SheafGNNEncoder,
+SheafGNNDecoder`` or factory ``encoder="sheaf"``. In-repo MVP with the
+same linear Koopman head — **not** full sheaf / TopologicX feature
+parity.
+
+.. automodule:: koopman_graph.nn.sheaf
+   :members:
+   :show-inheritance:
+
+Cell-complex Encoders / Decoders
+----------------------------------
+
+Cell-complex peers
+(:class:`~koopman_graph.nn.CellComplexGNNEncoder`,
+:class:`~koopman_graph.nn.CellComplexGNNDecoder`) are root-stable
+``__all__`` members; :class:`~koopman_graph.nn.CellComplex` helpers are
+importable from :mod:`koopman_graph.nn`. Prefer
+``from koopman_graph import CellComplexGNNEncoder, CellComplexGNNDecoder``
+or factory ``encoder="cell_complex"`` (``Data.face_index`` required).
+In-repo MVP — **not** a full cellular TDL stack.
+
+.. automodule:: koopman_graph.nn.cell_complex
    :members:
    :show-inheritance:
 
@@ -206,10 +238,12 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``identify_sparse_dynamics``, ``SINDyReport``,
 ``koopman_spectral_clustering``, ``ClusteringResult``,
 ``estimate_coupling_from_snapshots``, ``CouplingEstimate``,
-``attribute_mode_energy``, ``ModeEnergyAttribution``) are imported from
-:mod:`koopman_graph.analysis` only. The helpers live in the ``spectrum`` /
-``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` / ``sindy`` /
-``clustering`` / ``topology_estimation`` submodules.
+``attribute_mode_energy``, ``ModeEnergyAttribution``,
+``evaluate_topology_transfer``, ``TopologyTransferReport``) are imported
+from :mod:`koopman_graph.analysis` only. The helpers live in the
+``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` /
+``sindy`` / ``clustering`` / ``topology_estimation`` / ``transfer``
+submodules.
 ``attribute_mode_energy`` is an interpretive diagnostic on assembled
 :math:`K_{\mathrm{eff}}` (not a causal claim; not a ResDMD residual).
 Finite-dictionary ResDMD
@@ -219,6 +253,9 @@ resolvent-norm grid
 (:func:`~koopman_graph.analysis.resolvent_norm_grid`) are package exports;
 they are distinct from ``spectral_residuals`` and are **not**
 infinite-dimensional certified pseudospectra.
+:func:`~koopman_graph.analysis.evaluate_topology_transfer` **measures**
+cross-topology transfer (mandatory ``pernode`` control; negative
+advantage allowed) — see :doc:`limitations`.
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
 
@@ -228,7 +265,7 @@ infinite-dimensional certified pseudospectra.
 
 .. automodule:: koopman_graph.analysis
    :members:
-   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid
+   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid, TopologyTransferReport, evaluate_topology_transfer
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.residuals
@@ -240,6 +277,10 @@ infinite-dimensional certified pseudospectra.
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.pseudospectra
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.transfer
    :members:
    :show-inheritance:
 
@@ -281,8 +322,10 @@ Additional classical peers include
 :class:`~koopman_graph.baselines.UlamTransferOperatorBaseline`.
 Topology-blind VAMP-2 precursor helpers
 (:func:`~koopman_graph.baselines.vamp2_score`,
-:func:`~koopman_graph.baselines.vamp2_loss`) are package exports — not
-GraphVAMPnets.
+:func:`~koopman_graph.baselines.vamp2_loss`) and the contact-graph
+teaching baseline
+(:class:`~koopman_graph.baselines.GraphVAMPBaseline`) are package
+exports — teaching / diagnostic, not GraphVAMPnets production.
 Truncated-SVD ``rank`` accepts ``None`` (full least squares), a positive
 integer, or ``"auto"`` (Gavish–Donoho median threshold;
 ``koopman_graph.baselines.base.optimal_hard_threshold_rank``); fitted
@@ -295,17 +338,22 @@ only; ``kernel="linear"`` reduces to DMD. Prefer
 Spatiotemporal GNN forecaster baselines
 (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
 :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
-:class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`) live under
-``koopman_graph.baselines.gnn``. They are lightweight ``nn.Module`` reference
-implementations for protocol-matched comparisons with
-:class:`~koopman_graph.model.GraphKoopmanModel` (including
-:func:`~koopman_graph.metrics.evaluate_forecast`). Their ``spectrum`` method
-raises ``RuntimeError`` (no linear Koopman operator). Prefer
+:class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`,
+:class:`~koopman_graph.baselines.gnn.AGCRNBaseline`,
+:class:`~koopman_graph.baselines.gnn.MTGNNBaseline`,
+:class:`~koopman_graph.baselines.gnn.STGODEBaseline`,
+:class:`~koopman_graph.baselines.gnn.GraphCastBaseline`) live under
+``koopman_graph.baselines.gnn``. They are lightweight ``nn.Module``
+**teaching** references with ``ForecasterProtocol`` deviation tables for
+comparisons with :class:`~koopman_graph.model.GraphKoopmanModel`
+(including :func:`~koopman_graph.metrics.evaluate_forecast`) — **not**
+leaderboard-matched reproductions. Their ``spectrum`` method raises
+``RuntimeError`` (no linear Koopman operator). Prefer
 ``from koopman_graph.baselines.gnn import …``.
 
 .. automodule:: koopman_graph.baselines
    :members:
-   :exclude-members: STGCNBaseline, DCRNNBaseline, GraphWaveNetBaseline
+   :exclude-members: STGCNBaseline, DCRNNBaseline, GraphWaveNetBaseline, AGCRNBaseline, MTGNNBaseline, STGODEBaseline, GraphCastBaseline
    :show-inheritance:
 
 .. automodule:: koopman_graph.baselines.vamp2
@@ -368,9 +416,10 @@ Shared Graph Utilities (power-user)
 -----------------------------------
 
 Documented internal helpers for graph-input resolution, Laplacian mathematics,
-latent propagation, and symmetry orbits. :mod:`koopman_graph.graph_utils` is a
-shallow capability package (``topology`` / ``propagation`` / ``symmetry``
-peers) whose ``__init__`` re-exports the documented surface. Importable, but
+latent propagation, symmetry orbits, and exact-automorphism isotypic
+projectors. :mod:`koopman_graph.graph_utils` is a shallow capability package
+(``topology`` / ``propagation`` / ``symmetry`` / ``representation`` peers)
+whose ``__init__`` re-exports the documented surface. Importable, but
 **not** part of the stable public façade (not in ``koopman_graph.__all__``).
 Use :meth:`~koopman_graph.model.GraphKoopmanModel.encode` when lifting
 snapshots. See :doc:`architecture`.
@@ -389,6 +438,10 @@ snapshots. See :doc:`architecture`.
    :show-inheritance:
 
 .. automodule:: koopman_graph.graph_utils.symmetry
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.graph_utils.representation
    :members:
    :show-inheritance:
 
@@ -442,10 +495,14 @@ Dask materialize helpers live under :mod:`koopman_graph.distributed`
 (not on root ``__all__``). This is **not** the operator flag
 ``sparsity="distributed"``. Prefer
 ``from koopman_graph.distributed import …``. Lazy symbols
-(``KoopmanLightningModule``, ``fit_ensemble_with_ray``,
-``materialize_sequences``, ``materialize_window_index_list``) require the
-matching extras (``[lightning]`` / ``[ray]`` / ``[dask]``).
-``dask_prep`` is offline prep only — not a Dask training loop.
+(``KoopmanLightningModule``, ``run_ray_train_fit_loop``,
+``fit_ensemble_with_ray``, ``materialize_sequences``,
+``materialize_window_index_list``) require the matching extras
+(``[lightning]`` / ``[ray]`` / ``[dask]``).
+``run_ray_train_fit_loop`` is model DDP under Ray Train;
+``fit_ensemble_with_ray`` parallelizes ensemble *members* — do not
+conflate them (see :doc:`faq`). ``dask_prep`` is offline prep only —
+not a Dask training loop.
 
 .. automodule:: koopman_graph.distributed
    :members:
@@ -621,5 +678,21 @@ Datasets
    :show-inheritance:
 
 .. automodule:: koopman_graph.datasets.cylinder_wake
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.datasets.molecular
+   :members:
+   :show-inheritance:
+
+External toolchain interop (power-user)
+---------------------------------------
+
+Optional deeptime trajectory-feature bridges under
+:mod:`koopman_graph.interop` (lazy ``[msm]``). Off root ``__all__``.
+Other ``koopman_graph`` modules must **not** import ``interop`` (acyclic
+layer boundary). Teaching / diagnostic — not a PyEMMA replacement.
+
+.. automodule:: koopman_graph.interop
    :members:
    :show-inheritance:

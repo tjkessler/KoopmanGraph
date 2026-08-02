@@ -1,4 +1,4 @@
-"""Optional Ray helpers for parallel ensemble member fits.
+"""Optional Ray helpers for parallel ensemble **member** fits.
 
 Embarrassingly parallel member training for
 :class:`~koopman_graph.uq.EnsembleGraphKoopmanModel`. Each Ray task builds a
@@ -12,8 +12,13 @@ Notes
 -----
 Prefer module-level ``member_factory`` callables (cloudpickle-friendly).
 This path does **not** change UQ coverage guarantees — members remain
-independent fits. Ray Train as a DDP backend is out of scope; use native
-DDP / Fabric for multi-GPU *model* training.
+independent fits. It does **not** shard one model across GPUs.
+
+For multi-GPU *model* training prefer
+:func:`~koopman_graph.distributed.run_ddp_fit_loop` or
+:func:`~koopman_graph.distributed.fit_with_fabric` (recommended defaults).
+Optional Ray Train model-DDP orchestration is
+:func:`~koopman_graph.distributed.run_ray_train_fit_loop` — a separate API.
 """
 
 from __future__ import annotations
@@ -199,9 +204,11 @@ def fit_ensemble_with_ray(
     Notes
     -----
     Does not claim new predictive-coverage guarantees relative to sequential
-    ensemble fits. Ray Train / multi-GPU *model* DDP is out of scope — use
-    :func:`~koopman_graph.distributed.run_ddp_fit_loop` or
-    :func:`~koopman_graph.distributed.fit_with_fabric` for that.
+    ensemble fits. This API parallelizes *members* only. For multi-GPU *model*
+    training prefer
+    :func:`~koopman_graph.distributed.run_ddp_fit_loop` /
+    :func:`~koopman_graph.distributed.fit_with_fabric`, or optional
+    :func:`~koopman_graph.distributed.run_ray_train_fit_loop`.
     """
     if num_members < 1:
         msg = f"num_members must be >= 1; got {num_members}"

@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from torch_geometric.data import HeteroData
 
 from koopman_graph.data import (
+    GraphSnapshotSequence,
     HeteroGraphSnapshotSequence,
     SnapshotSequence,
     resolve_pair_delta_t,
@@ -433,11 +434,19 @@ def rollout_sequence_loss(
     total_loss = torch.zeros((), device=z.device)
     for step, (prediction, _, _) in enumerate(rollout):
         target = targets[step]
-        if sequence.has_observation_masks:
-            node_mask = sequence.observation_mask_at(start + step + 1)
-            step_loss = masked_mse_loss(prediction, target.x, node_mask)
-        else:
+        node_mask = (
+            sequence.loss_mask_at(start + step + 1)
+            if isinstance(sequence, GraphSnapshotSequence)
+            else (
+                sequence.observation_mask_at(start + step + 1)
+                if sequence.has_observation_masks
+                else None
+            )
+        )
+        if node_mask is None:
             step_loss = nn.functional.mse_loss(prediction, target.x)
+        else:
+            step_loss = masked_mse_loss(prediction, target.x, node_mask)
         total_loss = total_loss + step_loss
     return total_loss / horizon
 

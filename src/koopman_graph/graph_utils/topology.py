@@ -6,8 +6,63 @@ need the peer module explicitly.
 
 Includes symmetric normalization (``D^{-1/2} A D^{-1/2}``), directed
 random-walk normalization (``D_{\\mathrm{out}}^{-1} A`` /
-``D_{\\mathrm{in}}^{-1} A^{\\top}``), and per-relation R-GCN-style
-in-degree normalization for multiplex / heterogeneous graphs.
+``D_{\\mathrm{in}}^{-1} A^{\\top}``), Zhou hypergraph incidence
+normalization, directed-hypergraph forward random-walk incidence
+(Ducournau & Bretto 2014; see
+:func:`dense_hyperedge_forward_random_walk_adjacency`), and per-relation
+R-GCN-style in-degree normalization for multiplex / heterogeneous graphs.
+
+Directed hypergraph forward random walk (Ducournau & Bretto)
+------------------------------------------------------------
+A directed hypergraph uses **tail** and **head** bipartite incidences
+``B_{\\mathrm{out}}, B_{\\mathrm{in}} \\in \\{0,1\\}^{N \\times M}`` (PyG
+convention: row 0 = node, row 1 = hyperedge). With hyperedge weights
+``W_e = \\mathrm{diag}(w)``, vertex out-degrees
+``D_{v,\\mathrm{out}} = \\mathrm{diag}(B_{\\mathrm{out}} w)``, and head
+sizes ``D_{e,\\mathrm{in}} = \\mathrm{diag}(B_{\\mathrm{in}}^{\\top} 1)``,
+the one-step transition operator is
+
+.. math::
+
+    P
+    = D_{v,\\mathrm{out}}^{-1}
+      B_{\\mathrm{out}}
+      W_e
+      D_{e,\\mathrm{in}}^{-1}
+      B_{\\mathrm{in}}^{\\top}.
+
+Isolated vertices and sinks (zero out-degree) receive a zero row via the
+same non-finite → ``0`` inverse convention as Zhou ``\\hat{H}``. Empty
+tail or head sets for a hyperedge contribute a zero column / zero head
+size and do not inject mass. Citation key: ``Ducournau2014DirectedHypergraphs``
+(primary source verified via Crossref DOI ``10.1016/j.cviu.2013.10.012``).
+
+Directed hypergraph dual random walk (Q3)
+-----------------------------------------
+The reverse contribution is the same operator with **tail and head swapped**
+(no reverse-hyperedge list is materialized):
+
+.. math::
+
+    P_{\\mathrm{bwd}}
+    = D_{v,\\mathrm{in}}^{-1}
+      B_{\\mathrm{in}}
+      W_e
+      D_{e,\\mathrm{out}}^{-1}
+      B_{\\mathrm{out}}^{\\top}.
+
+The dual incidence matrix used by
+:func:`dense_hyperedge_dual_random_walk_adjacency` is the sum
+
+.. math::
+
+    P_{\\mathrm{dual}} = P_{\\mathrm{fwd}} + P_{\\mathrm{bwd}}.
+
+:func:`dense_hyperedge_dual_random_walk_factors` returns
+``(P_fwd, P_bwd)`` for operator wiring that mirrors graph
+``adjacency="dual_random_walk"`` (separate forward / backward factors).
+On a 2-uniform incidence (ordinary digraph), ``P_fwd`` and ``P_bwd``
+reduce to ``D_{\\mathrm{out}}^{-1} A`` and ``D_{\\mathrm{in}}^{-1} A^{\\top}``.
 """
 
 from __future__ import annotations
@@ -131,6 +186,44 @@ def snapshot_hyperedge_index(snapshot: Data) -> Tensor | None:
     if hyperedge_index is None:
         return None
     return hyperedge_index
+
+
+def snapshot_tail_index(snapshot: Data) -> Tensor | None:
+    """Return optional directed-hypergraph tail incidence on a snapshot.
+
+    Parameters
+    ----------
+    snapshot : Data
+        Graph snapshot that may carry ``tail_index``.
+
+    Returns
+    -------
+    Tensor or None
+        Tail bipartite incidence ``(2, nnz)``, or ``None`` when absent.
+    """
+    tail_index = getattr(snapshot, "tail_index", None)
+    if tail_index is None:
+        return None
+    return tail_index
+
+
+def snapshot_head_index(snapshot: Data) -> Tensor | None:
+    """Return optional directed-hypergraph head incidence on a snapshot.
+
+    Parameters
+    ----------
+    snapshot : Data
+        Graph snapshot that may carry ``head_index``.
+
+    Returns
+    -------
+    Tensor or None
+        Head bipartite incidence ``(2, nnz)``, or ``None`` when absent.
+    """
+    head_index = getattr(snapshot, "head_index", None)
+    if head_index is None:
+        return None
+    return head_index
 
 
 def snapshot_hyperedge_weight(snapshot: Data) -> Tensor | None:
@@ -292,6 +385,437 @@ def dense_hyperedge_normalized_adjacency(
 
 # Design / blueprint alias for the Zhou incidence-normalized operator.
 hyperedge_normalized_incidence_weights = dense_hyperedge_normalized_adjacency
+
+
+def _boolean_bipartite_incidence(
+    bipartite_index: Tensor,
+    *,
+    num_nodes: int,
+    num_hyperedges: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> Tensor:
+    """Build a Boolean node×hyperedge incidence from a bipartite index.
+
+    Parameters
+    ----------
+    bipartite_index : Tensor
+        Incidence ``(2, nnz)`` (row 0 = nodes, row 1 = hyperedges).
+    num_nodes : int
+        Node count ``N``.
+    num_hyperedges : int
+        Hyperedge count ``M``.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    device : torch.device
+        Device for the dense matrix.
+
+    Returns
+    -------
+    Tensor
+        Incidence with shape ``(num_nodes, num_hyperedges)``, entries in
+        ``{0, 1}``.
+    """
+    incidence = torch.zeros(
+        (num_nodes, num_hyperedges),
+        dtype=dtype,
+        device=device,
+    )
+    if bipartite_index.numel() == 0:
+        return incidence
+    node_idx = bipartite_index[0].to(device=device)
+    hedge_idx = bipartite_index[1].to(device=device)
+    ones = torch.ones(node_idx.size(0), dtype=dtype, device=device)
+    incidence.index_put_((node_idx, hedge_idx), ones, accumulate=True)
+    return incidence.clamp(max=1)
+
+
+def _validate_bipartite_incidence(index: Tensor, *, name: str) -> None:
+    """Reject non-``(2, nnz)`` bipartite incidence tensors.
+
+    Parameters
+    ----------
+    index
+        See signature.
+    name
+        See signature."""
+    if index.ndim != 2 or index.shape[0] != 2:
+        msg = f"{name} must have shape (2, nnz), got {tuple(index.shape)}"
+        raise ValueError(msg)
+
+
+def _directed_hyperedge_count(
+    tail_index: Tensor,
+    head_index: Tensor,
+) -> int:
+    """Infer ``M`` from the maximum hyperedge id in tail / head indices.
+
+    Parameters
+    ----------
+    tail_index
+        See signature.
+    head_index
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    max_id = -1
+    if tail_index.numel() > 0:
+        max_id = max(max_id, int(tail_index[1].max().item()))
+    if head_index.numel() > 0:
+        max_id = max(max_id, int(head_index[1].max().item()))
+    return max_id + 1
+
+
+def dense_hyperedge_forward_random_walk_adjacency(
+    tail_index: Tensor,
+    head_index: Tensor,
+    *,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Assemble dense Ducournau–Bretto forward random-walk operator ``P``.
+
+    For tail / head incidences ``B_out``, ``B_in`` and weights ``W_e``,
+
+    .. math::
+
+        P
+        = D_{v,\\mathrm{out}}^{-1}
+          B_{\\mathrm{out}}
+          W_e
+          D_{e,\\mathrm{in}}^{-1}
+          B_{\\mathrm{in}}^{\\top},
+
+    with ``D_{v,\\mathrm{out}} = \\mathrm{diag}(B_{\\mathrm{out}} w)`` and
+    ``D_{e,\\mathrm{in}} = \\mathrm{diag}(B_{\\mathrm{in}}^{\\top} 1)``.
+    See the module docstring for citation and degenerate-case conventions.
+
+    Parameters
+    ----------
+    tail_index : Tensor
+        Tail bipartite incidence ``(2, nnz_tail)``.
+    head_index : Tensor
+        Head bipartite incidence ``(2, nnz_head)``.
+    num_nodes : int
+        Number of graph nodes ``N``.
+    hyperedge_weight : Tensor or None, optional
+        Non-negative hyperedge weights with shape ``(num_hyperedges,)``.
+        Defaults to ones.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    device : torch.device or None, optional
+        Device for the computation. Defaults to ``tail_index.device``.
+
+    Returns
+    -------
+    Tensor
+        Dense transition matrix with shape ``(num_nodes, num_nodes)``.
+
+    Raises
+    ------
+    ValueError
+        If incidence shapes or ``num_nodes`` are invalid.
+    """
+    if num_nodes < 0:
+        msg = f"num_nodes must be >= 0, got {num_nodes}"
+        raise ValueError(msg)
+    _validate_bipartite_incidence(tail_index, name="tail_index")
+    _validate_bipartite_incidence(head_index, name="head_index")
+
+    resolved_device = device if device is not None else tail_index.device
+    if num_nodes == 0:
+        return torch.zeros((0, 0), dtype=dtype, device=resolved_device)
+
+    num_hyperedges = _directed_hyperedge_count(tail_index, head_index)
+    if num_hyperedges == 0:
+        return torch.zeros(
+            (num_nodes, num_nodes),
+            dtype=dtype,
+            device=resolved_device,
+        )
+
+    b_out = _boolean_bipartite_incidence(
+        tail_index,
+        num_nodes=num_nodes,
+        num_hyperedges=num_hyperedges,
+        dtype=dtype,
+        device=resolved_device,
+    )
+    b_in = _boolean_bipartite_incidence(
+        head_index,
+        num_nodes=num_nodes,
+        num_hyperedges=num_hyperedges,
+        dtype=dtype,
+        device=resolved_device,
+    )
+
+    if hyperedge_weight is None:
+        weights = torch.ones(num_hyperedges, dtype=dtype, device=resolved_device)
+    else:
+        weights = hyperedge_weight.to(dtype=dtype, device=resolved_device)
+        if weights.ndim != 1 or weights.shape[0] != num_hyperedges:
+            msg = (
+                "hyperedge_weight must have shape "
+                f"(num_hyperedges={num_hyperedges},), "
+                f"got {tuple(weights.shape)}"
+            )
+            raise ValueError(msg)
+
+    # D_v_out = diag(B_out w); D_e_in = diag(B_in^T 1) (unweighted head size).
+    node_out_degree = b_out @ weights
+    head_size = b_in.sum(dim=0)
+
+    deg_v_inv = node_out_degree.pow(-1.0)
+    deg_v_inv = torch.where(
+        torch.isfinite(deg_v_inv),
+        deg_v_inv,
+        torch.zeros_like(deg_v_inv),
+    )
+    deg_e_inv = head_size.pow(-1.0)
+    deg_e_inv = torch.where(
+        torch.isfinite(deg_e_inv),
+        deg_e_inv,
+        torch.zeros_like(deg_e_inv),
+    )
+
+    # P = D_v_out^{-1} B_out W_e D_e_in^{-1} B_in^T
+    mid = b_out * weights.unsqueeze(0) * deg_e_inv.unsqueeze(0)
+    unnormalized = mid @ b_in.transpose(0, 1)
+    return deg_v_inv.unsqueeze(1) * unnormalized
+
+
+def hyperedge_forward_random_walk_matvec(
+    tail_index: Tensor,
+    head_index: Tensor,
+    x: Tensor,
+    *,
+    hyperedge_weight: Tensor | None = None,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply Ducournau–Bretto forward random-walk ``P`` to node features.
+
+    Parameters
+    ----------
+    tail_index : Tensor
+        Tail bipartite incidence ``(2, nnz_tail)``.
+    head_index : Tensor
+        Head bipartite incidence ``(2, nnz_head)``.
+    x : Tensor
+        Node features with shape ``(num_nodes, feature_dim)``.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights with shape ``(num_hyperedges,)``.
+    num_nodes : int or None, optional
+        Number of nodes. Inferred from ``x`` when omitted.
+
+    Returns
+    -------
+    Tensor
+        Transformed features with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2D.
+    """
+    if x.dim() != 2:
+        msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    node_count = num_nodes if num_nodes is not None else x.size(0)
+    transition = dense_hyperedge_forward_random_walk_adjacency(
+        tail_index,
+        head_index,
+        num_nodes=node_count,
+        hyperedge_weight=hyperedge_weight,
+        dtype=x.dtype,
+        device=x.device,
+    )
+    return transition @ x
+
+
+def dense_hyperedge_backward_random_walk_adjacency(
+    tail_index: Tensor,
+    head_index: Tensor,
+    *,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Assemble reverse Ducournau–Bretto walk by swapping tail and head.
+
+    Equivalent to calling
+    :func:`dense_hyperedge_forward_random_walk_adjacency` with
+    ``(head_index, tail_index)``. Does **not** materialize reverse
+    hyperedges (Q3).
+
+    Parameters
+    ----------
+    tail_index, head_index : Tensor
+        Forward directed incidence (see forward helper).
+    num_nodes : int
+        Number of graph nodes ``N``.
+    hyperedge_weight : Tensor or None, optional
+        Non-negative hyperedge weights with shape ``(num_hyperedges,)``.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    device : torch.device or None, optional
+        Device for the computation.
+
+    Returns
+    -------
+    Tensor
+        Dense ``P_bwd`` with shape ``(num_nodes, num_nodes)``.
+    """
+    return dense_hyperedge_forward_random_walk_adjacency(
+        head_index,
+        tail_index,
+        num_nodes=num_nodes,
+        hyperedge_weight=hyperedge_weight,
+        dtype=dtype,
+        device=device,
+    )
+
+
+def dense_hyperedge_dual_random_walk_factors(
+    tail_index: Tensor,
+    head_index: Tensor,
+    *,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Return ``(P_fwd, P_bwd)`` without materializing reverse hyperedges.
+
+    Intended for operator wiring that mirrors graph
+    ``adjacency="dual_random_walk"`` (separate forward / backward factors).
+    See the module docstring for the dual sum convention.
+
+    Parameters
+    ----------
+    tail_index, head_index : Tensor
+        Forward directed incidence.
+    num_nodes : int
+        Number of graph nodes ``N``.
+    hyperedge_weight : Tensor or None, optional
+        Non-negative hyperedge weights with shape ``(num_hyperedges,)``.
+    dtype : torch.dtype
+        Floating dtype for the dense matrices.
+    device : torch.device or None, optional
+        Device for the computation.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor]
+        ``(P_fwd, P_bwd)``, each with shape ``(num_nodes, num_nodes)``.
+    """
+    forward = dense_hyperedge_forward_random_walk_adjacency(
+        tail_index,
+        head_index,
+        num_nodes=num_nodes,
+        hyperedge_weight=hyperedge_weight,
+        dtype=dtype,
+        device=device,
+    )
+    backward = dense_hyperedge_backward_random_walk_adjacency(
+        tail_index,
+        head_index,
+        num_nodes=num_nodes,
+        hyperedge_weight=hyperedge_weight,
+        dtype=dtype,
+        device=device,
+    )
+    return forward, backward
+
+
+def dense_hyperedge_dual_random_walk_adjacency(
+    tail_index: Tensor,
+    head_index: Tensor,
+    *,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    dtype: torch.dtype,
+    device: torch.device | None = None,
+) -> Tensor:
+    """Assemble ``P_dual = P_fwd + P_bwd`` for dual incidence mode.
+
+    Parameters
+    ----------
+    tail_index, head_index : Tensor
+        Forward directed incidence.
+    num_nodes : int
+        Number of graph nodes ``N``.
+    hyperedge_weight : Tensor or None, optional
+        Non-negative hyperedge weights with shape ``(num_hyperedges,)``.
+    dtype : torch.dtype
+        Floating dtype for the dense matrix.
+    device : torch.device or None, optional
+        Device for the computation.
+
+    Returns
+    -------
+    Tensor
+        Dense ``P_dual`` with shape ``(num_nodes, num_nodes)``.
+    """
+    forward, backward = dense_hyperedge_dual_random_walk_factors(
+        tail_index,
+        head_index,
+        num_nodes=num_nodes,
+        hyperedge_weight=hyperedge_weight,
+        dtype=dtype,
+        device=device,
+    )
+    return forward + backward
+
+
+def hyperedge_dual_random_walk_matvec(
+    tail_index: Tensor,
+    head_index: Tensor,
+    x: Tensor,
+    *,
+    hyperedge_weight: Tensor | None = None,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply ``P_dual = P_fwd + P_bwd`` to node features.
+
+    Parameters
+    ----------
+    tail_index, head_index : Tensor
+        Forward directed incidence.
+    x : Tensor
+        Node features with shape ``(num_nodes, feature_dim)``.
+    hyperedge_weight : Tensor or None, optional
+        Optional hyperedge weights with shape ``(num_hyperedges,)``.
+    num_nodes : int or None, optional
+        Number of nodes. Inferred from ``x`` when omitted.
+
+    Returns
+    -------
+    Tensor
+        Transformed features with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not 2D.
+    """
+    if x.dim() != 2:
+        msg = f"x must be 2D (num_nodes, features), got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    node_count = num_nodes if num_nodes is not None else x.size(0)
+    dual = dense_hyperedge_dual_random_walk_adjacency(
+        tail_index,
+        head_index,
+        num_nodes=node_count,
+        hyperedge_weight=hyperedge_weight,
+        dtype=x.dtype,
+        device=x.device,
+    )
+    return dual @ x
 
 
 def hyperedge_normalized_adjacency_matvec(
@@ -1356,9 +1880,11 @@ def snapshot_to_device(
     """Move a graph snapshot to a target device, preserving topology fields.
 
     Homogeneous ``Data`` copies ``x``, ``edge_index``, optional ``edge_weight``,
-    optional ``pos`` (invariant-geometry coordinates), and optional hyperedge
-    incidence when present. Multiplex ``HeteroData`` uses PyG
-    ``HeteroData.to(device)`` so node/edge stores stay intact.
+    optional ``pos`` (invariant-geometry coordinates), optional triangular
+    ``face_index`` (simplicial / cell-complex 2-cells), optional hyperedge
+    incidence, and optional directed ``tail_index`` / ``head_index`` when
+    present. Multiplex ``HeteroData`` uses PyG ``HeteroData.to(device)`` so
+    node/edge stores stay intact.
 
     Parameters
     ----------
@@ -1385,10 +1911,19 @@ def snapshot_to_device(
     pos = getattr(snapshot, "pos", None)
     if pos is not None:
         fields["pos"] = pos.to(device)
+    face_index = getattr(snapshot, "face_index", None)
+    if face_index is not None:
+        fields["face_index"] = face_index.to(device)
     hyperedge_index = snapshot_hyperedge_index(snapshot)
     if hyperedge_index is not None:
         fields["hyperedge_index"] = hyperedge_index.to(device)
     hyperedge_weight = snapshot_hyperedge_weight(snapshot)
     if hyperedge_weight is not None:
         fields["hyperedge_weight"] = hyperedge_weight.to(device)
+    tail_index = snapshot_tail_index(snapshot)
+    if tail_index is not None:
+        fields["tail_index"] = tail_index.to(device)
+    head_index = snapshot_head_index(snapshot)
+    if head_index is not None:
+        fields["head_index"] = head_index.to(device)
     return Data(**fields)

@@ -50,6 +50,8 @@ class ForwardConsistencyLoss(nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
         latent_window: Tensor | None = None,
         edge_indices: Sequence[Tensor] | None = None,
         edge_weights: Sequence[Tensor | None] | None = None,
@@ -85,6 +87,8 @@ class ForwardConsistencyLoss(nn.Module):
             Incidence for hypergraph operators.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        tail_index, head_index : Tensor or None, optional
+            Directed-hypergraph incidence for random-walk modes.
         latent_window : Tensor or None, optional
             Latent history for global/local operators.
         edge_indices : sequence of Tensor or None, optional
@@ -109,6 +113,8 @@ class ForwardConsistencyLoss(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             latent_window=latent_window,
             edge_indices=edge_indices,
             edge_weights=edge_weights,
@@ -171,6 +177,8 @@ class BackwardConsistencyLoss(nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
         edge_indices: Sequence[Tensor] | None = None,
         edge_weights: Sequence[Tensor | None] | None = None,
     ) -> Tensor:
@@ -208,6 +216,8 @@ class BackwardConsistencyLoss(nn.Module):
             Incidence for hypergraph operators.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        tail_index, head_index : Tensor or None, optional
+            Directed-hypergraph incidence for random-walk modes.
         edge_indices : sequence of Tensor or None, optional
             Per-relation banks for multiplex / hetero operators.
         edge_weights : sequence of Tensor or None, optional
@@ -230,6 +240,8 @@ class BackwardConsistencyLoss(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             edge_indices=edge_indices,
             edge_weights=edge_weights,
         )

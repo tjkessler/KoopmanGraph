@@ -1488,3 +1488,52 @@ def test_hyperedge_hat_cache_excluded_from_state_dict(
     _ = op(torch.randn(4, 2), synthetic_hyperedge_index)
     state = op.state_dict()
     assert all("hat" not in key and "hyperedge_cache" not in key for key in state)
+
+
+# ---------------------------------------------------------------------------
+# Release blocker — Zhou default bit-compatibility with 0.10 (TASK-1908)
+# ---------------------------------------------------------------------------
+#
+# Failures here mean the default ``incidence_mode="zhou_symmetric"`` path
+# changed numerically under a fixed seed. Do not ship such a change without
+# an explicit, documented fix. Directed RW modes are covered separately in
+# ``test_directed_hypergraph.py``.
+
+_ZHOU_LOSS_ABS = 1e-5
+_GOLDEN_ZHOU_ONE_STEP = 0.9496447443962097
+
+
+def test_zhou_default_one_step_loss_bit_compatible_with_0_10(
+    synthetic_hyperedge_index: torch.Tensor,
+    synthetic_hypergraph_edge_index: torch.Tensor,
+) -> None:
+    """Seeded Zhou-symmetric one-step loss locks the 0.10 default path.
+
+    **Release blocker.** Uses default factory wiring (no
+    ``koopman_hypergraph_incidence_mode`` override) so additive directed
+    modes cannot silently alter Zhou.
+    """
+    from koopman_graph.training.pair_objectives import _one_step_pair
+
+    snapshots = []
+    for t in range(2):
+        generator = torch.Generator().manual_seed(10 + t)
+        snapshots.append(
+            Data(
+                x=torch.randn(4, 3, generator=generator),
+                edge_index=synthetic_hypergraph_edge_index,
+                hyperedge_index=synthetic_hyperedge_index,
+            )
+        )
+    sequence = GraphSnapshotSequence(snapshots)
+    torch.manual_seed(0)
+    model = GraphKoopmanModel(
+        encoder=HypergraphEncoder(3, 8, 4, num_layers=1),
+        decoder=HypergraphDecoder(4, 8, 3, num_layers=1),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hypergraph",
+    )
+    assert model.koopman.incidence_mode == "zhou_symmetric"
+    loss = _one_step_pair(model, sequence, 0)
+    assert loss.item() == pytest.approx(_GOLDEN_ZHOU_ONE_STEP, abs=_ZHOU_LOSS_ABS)

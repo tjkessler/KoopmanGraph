@@ -13,6 +13,7 @@ from koopman_graph.baselines.gnn.base import (
     dense_adjacency,
     random_walk_normalize,
 )
+from koopman_graph.baselines.gnn.protocol import ForecasterProtocol
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight
 
@@ -239,6 +240,26 @@ class GraphWaveNetBaseline(GNNForecasterBaseline):
             nn.Conv2d(hidden_channels, out_channels, kernel_size=1),
         )
         self._cached_rw_adj: Tensor | None = None
+
+    def protocol(self) -> ForecasterProtocol:
+        """Return the Graph WaveNet teaching protocol (non-empty deviations).
+
+        Returns
+        -------
+        ForecasterProtocol
+            Lookback, claimed evaluation horizon, split ratios, and deviations
+            versus Wu et al. / LibCity-style Graph WaveNet scripts.
+        """
+        return self._teaching_protocol(
+            name="graph_wavenet",
+            deviations=(
+                "architecture: teaching-scale dilated stack / residual-skip "
+                "layout and optional adaptive adjacency; not Wu et al. "
+                "METR-LA Graph WaveNet capacity",
+                "architecture: no multi-horizon WaveNet training target at the "
+                "claimed evaluation horizon (next-frame fit only)",
+            ),
+        )
 
     def fit(
         self,

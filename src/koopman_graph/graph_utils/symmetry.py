@@ -323,7 +323,12 @@ def _orbits_from_pynauty(edge_index: Tensor, num_nodes: int) -> OrbitPartition:
         directed=False,
         adjacency_dict=adjacency,
     )
-    _generators, _grp1, _grp2, orbit_of_vertex, _numorbits = pynauty.autgroup(graph)
+    # pynauty exposes ``autgrp`` (nauty); older docs sometimes said ``autgroup``.
+    aut_fn = getattr(pynauty, "autgrp", None) or getattr(pynauty, "autgroup", None)
+    if aut_fn is None:  # pragma: no cover - defensive
+        msg = "pynauty.autgrp is unavailable"
+        raise ImportError(msg)
+    _generators, _grp1, _grp2, orbit_of_vertex, _numorbits = aut_fn(graph)
     buckets: dict[int, list[int]] = {}
     for node, orbit_id in enumerate(orbit_of_vertex):
         buckets.setdefault(int(orbit_id), []).append(node)

@@ -136,6 +136,13 @@ def temporal_split(
                 if sequence.observation_masks is None
                 else sequence.observation_masks[:train_end]
             ),
+            presence_masks=(
+                None
+                if sequence.presence_masks is None
+                else sequence.presence_masks[:train_end]
+            ),
+            entity_ids=sequence.entity_ids,
+            allow_node_churn=sequence.allow_node_churn,
         ),
         val=GraphSnapshotSequence(
             val_snapshots,
@@ -155,6 +162,13 @@ def temporal_split(
                 if sequence.observation_masks is None
                 else sequence.observation_masks[train_end:val_end]
             ),
+            presence_masks=(
+                None
+                if sequence.presence_masks is None
+                else sequence.presence_masks[train_end:val_end]
+            ),
+            entity_ids=sequence.entity_ids,
+            allow_node_churn=sequence.allow_node_churn,
         ),
         test=GraphSnapshotSequence(
             test_snapshots,
@@ -172,5 +186,12 @@ def temporal_split(
                 if sequence.observation_masks is None
                 else sequence.observation_masks[val_end:]
             ),
+            presence_masks=(
+                None
+                if sequence.presence_masks is None
+                else sequence.presence_masks[val_end:]
+            ),
+            entity_ids=sequence.entity_ids,
+            allow_node_churn=sequence.allow_node_churn,
         ),
     )

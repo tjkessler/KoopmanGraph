@@ -1,5 +1,21 @@
 """Distributed training adapters for KoopmanGraph.
 
+Trainer taxonomy
+----------------
+Do not conflate these three paths:
+
+* **Recommended default (multi-GPU model training):**
+  :func:`~koopman_graph.distributed.run_ddp_fit_loop` (native ``torchrun``)
+  or :func:`~koopman_graph.distributed.fit_with_fabric`.
+* **Optional Ray Train model DDP:**
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop` — same scientific
+  epoch driver under Ray Train ``TorchTrainer``. CI covers world size 1;
+  single-node multi-GPU smoke is manual (not a CI gate). Not a multi-node
+  production path; does not shrink dense :math:`N\\cdot d` ceilings.
+* **Ray ensemble members:**
+  :func:`~koopman_graph.distributed.fit_ensemble_with_ray` — parallel
+  independent member ``fit`` calls; does not shard one model across GPUs.
+
 Capability layout
 -----------------
 ``process``
@@ -27,6 +43,10 @@ Capability layout
 ``ray_jobs``
     :func:`~koopman_graph.distributed.fit_ensemble_with_ray` (optional
     parallel ensemble member fits; lazy Ray import).
+``ray_train``
+    :func:`~koopman_graph.distributed.run_ray_train_fit_loop` (optional
+    Ray Train model-DDP backend over the shared epoch driver; lazy Ray
+    Train import). Distinct from ensemble-member Ray jobs.
 ``dask_prep``
     :func:`~koopman_graph.distributed.materialize_sequences` and
     :func:`~koopman_graph.distributed.materialize_window_index_list`
@@ -80,6 +100,7 @@ __all__ = [
     "materialize_window_index_list",
     "prepare_ddp_model",
     "run_ddp_fit_loop",
+    "run_ray_train_fit_loop",
     "seed_everything",
     "shard_sequences_for_rank",
     "unwrap_model",
@@ -112,6 +133,10 @@ def __getattr__(name: str) -> Any:
         from koopman_graph.distributed.ray_jobs import fit_ensemble_with_ray
 
         return fit_ensemble_with_ray
+    if name == "run_ray_train_fit_loop":
+        from koopman_graph.distributed.ray_train import run_ray_train_fit_loop
+
+        return run_ray_train_fit_loop
     if name == "materialize_sequences":
         from koopman_graph.distributed.dask_prep import materialize_sequences
 

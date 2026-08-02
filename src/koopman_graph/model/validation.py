@@ -19,10 +19,14 @@ from koopman_graph.data import (
 )
 from koopman_graph.data.validation import require_no_hyperedges
 from koopman_graph.nn import (
+    CellComplexGNNDecoder,
+    CellComplexGNNEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
     RelGraphDecoder,
     RelGraphEncoder,
+    SheafGNNDecoder,
+    SheafGNNEncoder,
     SimplicialDecoder,
     SimplicialEncoder,
 )
@@ -147,6 +151,71 @@ def uses_simplicial_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
         )
         raise ValueError(msg)
     return enc_sim and dec_sim
+
+
+def uses_sheaf_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
+    """Return whether encoder and decoder are a matched sheaf peer pair.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder module.
+    decoder : nn.Module
+        Model decoder module.
+
+    Returns
+    -------
+    bool
+        ``True`` when both modules are sheaf peers.
+
+    Raises
+    ------
+    ValueError
+        If exactly one of encoder/decoder is a sheaf peer.
+    """
+    enc_sheaf = isinstance(encoder, SheafGNNEncoder)
+    dec_sheaf = isinstance(decoder, SheafGNNDecoder)
+    if enc_sheaf != dec_sheaf:
+        msg = (
+            "SheafGNNEncoder and SheafGNNDecoder must be used together "
+            f"(got encoder={type(encoder).__name__}, "
+            f"decoder={type(decoder).__name__})"
+        )
+        raise ValueError(msg)
+    return enc_sheaf and dec_sheaf
+
+
+def uses_cell_complex_modules(encoder: nn.Module, decoder: nn.Module) -> bool:
+    """Return whether encoder and decoder are a matched cell-complex peer pair.
+
+    Parameters
+    ----------
+    encoder : nn.Module
+        Model encoder module.
+    decoder : nn.Module
+        Model decoder module.
+
+    Returns
+    -------
+    bool
+        ``True`` when both modules are cell-complex peers.
+
+    Raises
+    ------
+    ValueError
+        If exactly one of encoder/decoder is a cell-complex peer.
+    """
+    enc_cell = isinstance(encoder, CellComplexGNNEncoder)
+    dec_cell = isinstance(decoder, CellComplexGNNDecoder)
+    if enc_cell != dec_cell:
+        msg = (
+            "CellComplexGNNEncoder and CellComplexGNNDecoder must be used "
+            "together "
+            f"(got encoder={type(encoder).__name__}, "
+            f"decoder={type(decoder).__name__})"
+        )
+        raise ValueError(msg)
+    return enc_cell and dec_cell
 
 
 def validate_sequence_hyperedges(

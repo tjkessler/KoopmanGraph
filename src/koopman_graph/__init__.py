@@ -85,6 +85,8 @@ from koopman_graph.analysis import KoopmanSpectrum, compute_spectrum
 from koopman_graph.data import GraphSnapshotSequence, MultiTrajectory
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.nn import (
+    CellComplexGNNDecoder,
+    CellComplexGNNEncoder,
     DelayEmbeddingEncoder,
     DiffConvDecoder,
     DiffConvEncoder,
@@ -102,6 +104,8 @@ from koopman_graph.nn import (
     RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
+    SheafGNNDecoder,
+    SheafGNNEncoder,
     SimplicialDecoder,
     SimplicialEncoder,
 )
@@ -115,6 +119,8 @@ from koopman_graph.operators import (
 )
 
 __all__ = [
+    "CellComplexGNNDecoder",
+    "CellComplexGNNEncoder",
     "ContinuousGraphKoopmanOperator",
     "ContinuousKoopmanOperator",
     "DelayEmbeddingEncoder",
@@ -142,9 +148,13 @@ __all__ = [
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "CellComplexGNNDecoder",
+    "CellComplexGNNEncoder",
+    "SheafGNNDecoder",
+    "SheafGNNEncoder",
     "SimplicialDecoder",
     "SimplicialEncoder",
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.10.0"
+__version__ = "0.11.0"

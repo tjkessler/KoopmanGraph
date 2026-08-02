@@ -30,8 +30,10 @@ from koopman_graph.graph_utils import (
     resolve_delta_t,
     resolve_edge_index,
     resolve_edge_weight,
+    snapshot_head_index,
     snapshot_hyperedge_index,
     snapshot_hyperedge_weight,
+    snapshot_tail_index,
 )
 from koopman_graph.metrics import EvaluationResult
 from koopman_graph.nn import (
@@ -120,8 +122,10 @@ from .online_adaptation import (
 from .timing import resolve_time_increments, validate_uniform_discrete_increments
 from .validation import (
     prepare_fit_inputs,
+    uses_cell_complex_modules,
     uses_hypergraph_modules,
     uses_relgraph_modules,
+    uses_sheaf_modules,
     uses_simplicial_modules,
 )
 
@@ -188,12 +192,14 @@ class GraphKoopmanModel(nn.Module):
         koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
         koopman_sparsity: str = "dense",
         koopman_adjacency: str = "symmetric",
+        koopman_hypergraph_incidence_mode: str = "zhou_symmetric",
         koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
         koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
         koopman_local_hidden_dims: Sequence[int] | None = None,
         koopman_orbit_partition: Sequence[Sequence[int]] | None = None,
         koopman_auto_orbits: bool = False,
         koopman_orbit_method: OrbitMethod = "auto",
+        koopman_symmetry: str | None = None,
         control_dim: int = 0,
         control_mode: ControlMode = DEFAULT_CONTROL_MODE,
         bilinear_rank: int | None = DEFAULT_BILINEAR_RANK,
@@ -299,6 +305,10 @@ class GraphKoopmanModel(nn.Module):
         koopman_orbit_method : {"auto", "exact"}, optional
             Orbit backend when ``koopman_auto_orbits`` is enabled. Default
             ``"auto"``.
+        koopman_symmetry : {None, "isotypic"}, optional
+            Representation symmetry mode. ``"isotypic"`` ties ``K_self`` via
+            exact automorphism orbits on ``koopman="graph"`` (mutually
+            exclusive with orbit kwargs). Default ``None``.
         control_dim : int, optional
             Dimension of exogenous control inputs. When ``0``, the model is
             uncontrolled. Default is ``0``. Must match ``koopman.control_dim``
@@ -369,7 +379,8 @@ class GraphKoopmanModel(nn.Module):
         koopman_latent_dims : mapping of str to int or None, optional
             Opt-in per-type latent widths. When set, RelGraph peers are
             aligned and the discrete hetero operator receives the same map.
-
+        koopman_hypergraph_incidence_mode
+            See signature.
         Raises
         ------
         ValueError
@@ -380,8 +391,7 @@ class GraphKoopmanModel(nn.Module):
             factory kwargs or dimensions, ``dynamics_mode`` disagrees with a
             built-in injected operator type, or ``learn_topology`` is invalid.
         TypeError
-            If ``koopman`` is provided but is not a string kind or ``nn.Module``.
-        """
+            If ``koopman`` is provided but is not a string kind or ``nn.Module``."""
         super().__init__()
         components = resolve_model_components(
             encoder,
@@ -397,12 +407,14 @@ class GraphKoopmanModel(nn.Module):
             koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
             koopman_sparsity=koopman_sparsity,
             koopman_adjacency=koopman_adjacency,  # type: ignore[arg-type]
+            koopman_hypergraph_incidence_mode=koopman_hypergraph_incidence_mode,
             koopman_local_window=koopman_local_window,
             koopman_local_rank=koopman_local_rank,
             koopman_local_hidden_dims=koopman_local_hidden_dims,
             koopman_orbit_partition=koopman_orbit_partition,
             koopman_auto_orbits=koopman_auto_orbits,
             koopman_orbit_method=koopman_orbit_method,
+            koopman_symmetry=koopman_symmetry,
             control_dim=control_dim,
             control_mode=control_mode,
             bilinear_rank=bilinear_rank,
@@ -445,6 +457,69 @@ class GraphKoopmanModel(nn.Module):
             self.adaptive_topology = AdaptiveAdjacency(topology_embedding_dim)
         else:
             self.adaptive_topology = None
+        # Sequence-contract metadata for format-1 checkpoints (not presence tensors).
+        self._allow_node_churn = False
+        self._has_presence_masks = False
+        self._entity_ids: tuple[str | int, ...] | None = None
+
+    @property
+    def allow_node_churn(self) -> bool:
+        """Return whether the last stamped training sequence allowed node churn.
+
+        Stamped from the primary training sequence during :meth:`fit` and
+        restored from additive checkpoint keys. Presence mask tensors remain
+        sequence data and are never stored on the model.
+
+        Returns
+        -------
+        bool
+            ``True`` when the stamped sequence had ``allow_node_churn=True``.
+        """
+        return self._allow_node_churn
+
+    @property
+    def has_presence_masks(self) -> bool:
+        """Return whether the last stamped training sequence carried presence masks.
+
+        Returns
+        -------
+        bool
+            ``True`` when the stamped sequence had presence masks attached.
+        """
+        return self._has_presence_masks
+
+    @property
+    def entity_ids(self) -> tuple[str | int, ...] | None:
+        """Return stable entity keys stamped from the last homogeneous fit.
+
+        Heterogeneous sequences do not yet carry ``entity_ids``; those fits
+        leave this attribute ``None``.
+
+        Returns
+        -------
+        tuple of str or int, or None
+            Universe keys of length ``N_max``, or ``None``.
+        """
+        return self._entity_ids
+
+    def _stamp_node_churn_contract(self, sequence: SnapshotSequence) -> None:
+        """Copy sequence churn-contract flags onto this model for checkpointing.
+
+        Parameters
+        ----------
+        sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+            Primary training sequence. Homogeneous ``entity_ids`` are copied;
+            hetero fits stamp flags only.
+        """
+        self._allow_node_churn = bool(getattr(sequence, "allow_node_churn", False))
+        self._has_presence_masks = bool(getattr(sequence, "has_presence_masks", False))
+        if (
+            isinstance(sequence, GraphSnapshotSequence)
+            and sequence.entity_ids is not None
+        ):
+            self._entity_ids = tuple(sequence.entity_ids)
+        else:
+            self._entity_ids = None
 
     @property
     def uses_graph_koopman(self) -> bool:
@@ -793,6 +868,8 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
         latent_window: Tensor | None = None,
         edge_indices: Sequence[Tensor] | None = None,
         edge_weights: Sequence[Tensor | None] | None = None,
@@ -817,6 +894,8 @@ class GraphKoopmanModel(nn.Module):
             See the function signature / summary for ``hyperedge_index``.
         hyperedge_weight : Tensor | None
             See the function signature / summary for ``hyperedge_weight``.
+        tail_index, head_index : Tensor | None
+            Directed-hypergraph incidence for random-walk modes.
         latent_window : Tensor | None
             See the function signature / summary for ``latent_window``.
         edge_indices : Sequence[Tensor] | None
@@ -841,6 +920,8 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             latent_window=latent_window,
             edge_indices=edge_indices,
             edge_weights=edge_weights,
@@ -1430,9 +1511,13 @@ class GraphKoopmanModel(nn.Module):
         if isinstance(x_or_data, Data):
             hyperedge_index = snapshot_hyperedge_index(x_or_data)
             hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
+            tail_index = snapshot_tail_index(x_or_data)
+            head_index = snapshot_head_index(x_or_data)
         else:
             hyperedge_index = None
             hyperedge_weight = None
+            tail_index = None
+            head_index = None
         z = self.encode(
             x_or_data,
             edge_index,
@@ -1447,6 +1532,8 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
         )
         if isinstance(self.decoder, HypergraphDecoder):
             if hyperedge_index is None:
@@ -1571,6 +1658,7 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
+        future_presence: Tensor | Sequence[Tensor] | None = None,
         step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
         history: Sequence[Data] | None = None,
     ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
@@ -1601,6 +1689,10 @@ class GraphKoopmanModel(nn.Module):
             Known graph topologies for rollout decode steps. Entry ``step`` is
             used when present; otherwise the last known topology is held
             (starting from the initial graph).
+        future_presence : Tensor, sequence of Tensor, or None, optional
+            Per-step entity presence for the inactive-node **hold last active
+            state** policy. Matvecs still use ``N_max`` capacity. When omitted,
+            all entities are treated as present.
         step_deltas : sequence of float or Tensor or None, optional
             Integration interval for each rollout step. When omitted, each step
             uses :attr:`time_step`.
@@ -1669,6 +1761,7 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             controls=controls,
             future_topologies=rollout_futures,
+            future_presence=future_presence,
             step_deltas=step_deltas,
             history=history,
         )
@@ -1681,6 +1774,7 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
+        future_presence: Tensor | Sequence[Tensor] | None = None,
         history: Sequence[Data] | None = None,
     ) -> list[Data] | list[HeteroData]:
         """Autoregressively predict future graph snapshots.
@@ -1707,6 +1801,12 @@ class GraphKoopmanModel(nn.Module):
         topology. Pass one ``Data`` object per rollout step (topology only; node
         features are ignored) to supply a known future rewiring schedule.
 
+        When ``future_presence`` is provided, inactive entities follow the
+        **hold last active state** policy (latent and decoded features freeze
+        while absent and resume on re-entry). Operator matvecs still run at
+        fixed-union ``N_max`` capacity; this is not a sparse-``N_active``
+        speedup. Omitting ``future_presence`` keeps the 0.10 all-present path.
+
         Multiplex ``HeteroData`` origins (``koopman="hetero_graph"``) return
         ``list[HeteroData]`` preserving the origin node/edge-type schema.
 
@@ -1732,6 +1832,10 @@ class GraphKoopmanModel(nn.Module):
         future_topologies : sequence of Data or HeteroData or None, optional
             Known topologies for rollout decode steps. Shorter sequences hold
             the last provided topology for remaining steps.
+        future_presence : Tensor, sequence of Tensor, or None, optional
+            Per-step presence masks ``(steps, N_max)`` or length-``steps``
+            sequence of ``(N_max,)`` masks. Homogeneous-only; ignored / unused
+            on hetero predict in this release.
         history : sequence of Data or None, optional
             Prior observations (oldest → newest, excluding ``initial_graph``)
             for delay embedding when ``n_delays > 1``. Homogeneous-only.
@@ -1751,6 +1855,9 @@ class GraphKoopmanModel(nn.Module):
         if self.uses_hetero_koopman or isinstance(initial_graph, HeteroData):
             if history is not None:
                 msg = "history / delay embedding is unsupported for HeteroData predict"
+                raise ValueError(msg)
+            if future_presence is not None:
+                msg = "future_presence is unsupported for HeteroData predict"
                 raise ValueError(msg)
             if not isinstance(initial_graph, HeteroData):
                 msg = (
@@ -1800,6 +1907,7 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             controls=controls,
             future_topologies=future_topologies,  # type: ignore[arg-type]
+            future_presence=future_presence,
             history=history,
         )
 
@@ -1813,6 +1921,7 @@ class GraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | Sequence[HeteroData] | None = None,
+        future_presence: Tensor | Sequence[Tensor] | None = None,
     ) -> list[Data] | list[HeteroData]:
         """Forecast graph snapshots at arbitrary query times.
 
@@ -1837,8 +1946,9 @@ class GraphKoopmanModel(nn.Module):
             Strictly increasing absolute query times, each positive.
         step_deltas : sequence of float or Tensor or None, optional
             Strictly positive integration intervals applied in order.
-        edge_index, edge_weight, controls, future_topologies
-            Same semantics as :meth:`predict`.
+        edge_index, edge_weight, controls, future_topologies, future_presence
+            Same semantics as :meth:`predict` (including the inactive-node
+            hold policy and ``N_max`` matvec cost note).
 
         Returns
         -------
@@ -1846,6 +1956,9 @@ class GraphKoopmanModel(nn.Module):
             Predicted snapshots, one per query interval.
         """
         if self.uses_hetero_koopman or isinstance(initial_graph, HeteroData):
+            if future_presence is not None:
+                msg = "future_presence is unsupported for HeteroData predict_at"
+                raise ValueError(msg)
             if not isinstance(initial_graph, HeteroData):
                 msg = (
                     "koopman='hetero_graph' predict_at requires a HeteroData "
@@ -1907,6 +2020,7 @@ class GraphKoopmanModel(nn.Module):
             edge_weight=edge_weight,
             controls=controls,
             future_topologies=future_topologies,  # type: ignore[arg-type]
+            future_presence=future_presence,
         )
 
     def evaluate(
@@ -2143,6 +2257,8 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             ``strategy`` is not ``None`` / ``"ddp"``.
         """
         uses_simplicial_modules(self.encoder, self.decoder)
+        uses_sheaf_modules(self.encoder, self.decoder)
+        uses_cell_complex_modules(self.encoder, self.decoder)
         prepared = prepare_fit_inputs(
             control_dim=self.control_dim,
             data_sequence=data_sequence,
@@ -2155,6 +2271,7 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
                 or self.uses_hypergraph_koopman
             ),
         )
+        self._stamp_node_churn_contract(prepared.train_sequences[0])
         loop_kwargs: dict[str, Any] = {
             "epochs": epochs,
             "lr": lr,

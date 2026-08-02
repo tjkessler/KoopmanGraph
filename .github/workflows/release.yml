@@ -23,6 +23,7 @@ jobs:
           uv sync --frozen
           --extra dev --extra rl --extra mpc --extra symmetry --extra docs
           --extra distributed --extra equivariance
+          --extra baselines-ode --extra msm
 
       - name: Lint with Ruff
         run: |

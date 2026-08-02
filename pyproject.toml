@@ -68,28 +68,41 @@ mpc = [
     "scipy>=1.11.0",
 ]
 # Optional distributed-training adapters (0.8.0). Native DDP uses torch only;
-# these extras gate Lightning Fabric / Trainer, Ray jobs, and optional Dask prep.
+# these extras gate Lightning Fabric / Trainer, Ray jobs / Ray Train, and
+# optional Dask prep. ``[ray]`` pins ``ray[train]`` for the Train backend.
 # Exclude Lightning 2.6.2 / 2.6.3 (compromised releases on PyPI).
 lightning = [
     "lightning>=2.4.0,!=2.6.2,!=2.6.3",
 ]
 ray = [
-    "ray>=2.9.0",
+    "ray[train]>=2.9.0",
 ]
 dask = [
     "dask[distributed]>=2024.1.0",
 ]
-# Optional deeptime for VAMP-2 oracle comparison tests only (not GraphVAMPnets/MD).
+# Optional MD trajectory I/O for the GraphVAMP / molecular toolchain (mdtraj MVP).
+md = [
+    "mdtraj>=1.9.9",
+]
+# Optional MSM / VAMP toolchain (deeptime). Covers VAMP-2 oracle tests and the
+# GraphVAMP / implied-timescale helpers — not a PyEMMA replacement.
 msm = [
     "deeptime>=0.4",
 ]
+# Optional torchdiffeq for the STGODE teaching traffic baseline.
+baselines-ode = [
+    "torchdiffeq>=0.2.3",
+]
+# Reserved for future mesh/weather helper deps. GraphCastBaseline teaching
+# path is pure PyTorch (no JAX / DeepMind graphcast / eccodes); extra is a no-op.
+baselines-graphcast = []
 # Optional e3nn for Tier-B steerable SE(3) encode (not equivariant K).
 equivariance = [
     "e3nn>=0.5.1",
 ]
 distributed = [
     "lightning>=2.4.0,!=2.6.2,!=2.6.3",
-    "ray>=2.9.0",
+    "ray[train]>=2.9.0",
     "dask[distributed]>=2024.1.0",
 ]
 
@@ -101,6 +114,9 @@ Issues = "https://github.com/tjkessler/KoopmanGraph/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"koopman_graph.datasets.molecular" = ["data/*.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "koopman_graph.__version__" }

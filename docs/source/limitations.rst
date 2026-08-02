@@ -10,8 +10,8 @@ the full inventory.
 
 Every quantitative statement below is tied to in-repo measurements or to
 behavior enforced by the current API. Absences listed under
-:ref:`limitations-when-else` and :ref:`limitations-011-roadmap` are **scoped
-non-goals**, not overlooked gaps.
+:ref:`limitations-remaining` and :ref:`limitations-when-else` are **scoped
+non-goals or honesty boundaries**, not overlooked gaps.
 
 Graph structure
 ---------------
@@ -21,15 +21,22 @@ Graph structure
   undirected adjacency). Directed coupling is available via
   ``adjacency="random_walk"`` (row-normalized
   :math:`D_{\mathrm{out}}^{-1}A`) or ``adjacency="dual_random_walk"``
-  (forward plus reverse walks). Hypergraph operators keep Zhou-style
-  symmetric incidence normalization; **directed** hypergraph coupling is
-  out of scope (see :ref:`limitations-011-roadmap`).
-* **Fixed node cardinality per sequence.** Homogeneous
-  ``GraphSnapshotSequence`` locks :math:`N` to the first snapshot.
-  Heterogeneous ``HeteroGraphSnapshotSequence`` locks per-type counts
-  :math:`N_\tau` and the edge-type set. Unobserved nodes are handled with
-  observation masks; **variable node cardinality / unbounded node churn** is
-  not supported (see :ref:`limitations-011-roadmap`).
+  (forward plus reverse walks). Hypergraph operators support
+  ``incidence_mode``
+  ``"zhou_symmetric"`` (default), ``"forward_random_walk"``, and
+  ``"dual_random_walk"`` (factory ``koopman_hypergraph_incidence_mode``).
+  Encode and advance orientations may differ under directed incidence;
+  that asymmetry is intentional and is **not** a simplicial / Hodge claim.
+* **Fixed node cardinality is the default; opt-in presence-mask churn.**
+  Homogeneous ``GraphSnapshotSequence`` locks :math:`N` to the first
+  snapshot unless ``allow_node_churn=True`` with fixed-union capacity
+  :math:`N_{\max}` and boolean ``presence_masks`` of shape
+  ``(T, N_{\max})``. Heterogeneous sequences lock per-type counts
+  :math:`N_\tau` (or per-type masks under the same contract). Losses ignore
+  inactive nodes; operator matvecs still run at the full
+  :math:`N_{\max}` (or typed) capacity. **Unbounded open-world growth**
+  and index remapping across unrelated universes remain unsupported
+  (see :ref:`limitations-remaining`).
 * **Heterogeneous / multiplex graphs are supported (opt-in).** Use
   ``koopman="hetero_graph"`` with
   :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
@@ -45,26 +52,33 @@ Graph structure
   under :mod:`koopman_graph.nn` are **not** required. See
   :doc:`capabilities`, :doc:`architecture`, and
   ``examples/39_heterogeneous_relational_koopman.ipynb``.
-* **Hypergraphs and simplicial-1 lifts.** Incidence-based hypergraph
-  encode / decode / operators are supported. Combinatorial simplicial-1 /
-  Hodge helpers
+* **Hypergraphs, simplicial-1, and TDL MVP peers.** Incidence-based
+  hypergraph encode / decode / operators are supported. Combinatorial
+  simplicial-1 / Hodge helpers
   (:mod:`koopman_graph.observables`,
   :class:`~koopman_graph.nn.simplicial.SimplicialEncoder` /
   :class:`~koopman_graph.nn.simplicial.SimplicialDecoder`) use oriented
-  ``edge_index`` and optional ``face_index``. **Sheaf Laplacians and full
-  cell-complex TDL stacks** remain out of scope (see
-  :ref:`limitations-011-roadmap`).
-* **Cross-topology transfer is not automatic.** On a seeded path-diffusion
+  ``edge_index`` and optional ``face_index``. Sheaf peers
+  (:class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
+  :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`; factory
+  ``encoder="sheaf"``) and cell-complex peers
+  (:class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
+  :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`;
+  ``encoder="cell_complex"``) are in-repo MVPs with the same linear
+  Koopman head. They are **not** full TopologicX / cellular TDL feature
+  parity (see :ref:`limitations-remaining`).
+* **Cross-topology transfer is measured, not assumed.** 
+  :func:`~koopman_graph.analysis.evaluate_topology_transfer` returns a
+  structured report with a mandatory ``pernode`` control; negative
+  transfer advantage is an expected outcome. On a seeded path-diffusion
   transfer from :math:`N_1=4` to :math:`N_2=6` nodes, the factorized graph
   operator achieved hold-out mean squared error (MSE) approximately
   :math:`0.26` both in-distribution and after the node-count change; a
   per-node dense control reached approximately :math:`0.21`. That run did
   **not** show a transfer advantage for the graph factorization.
-  Self-adaptive topology and orbit-tied ``K_{\mathrm{self}}`` configurations
-  raise on node-count changes and are excluded from any transfer claim.
-  See ``examples/37_cross_topology_transfer.ipynb``. A public measured
-  cross-topology transfer API is reserved for later
-  (:ref:`limitations-011-roadmap`).
+  Self-adaptive topology, orbit-tied ``K_{\mathrm{self}}``, and isotypic
+  configurations bind node cardinality and are excluded from transfer
+  claims. See ``examples/37_cross_topology_transfer.ipynb``.
 
 Operator and theory
 -------------------
@@ -103,28 +117,37 @@ Operator and theory
   **not** factor-wise training parameterizations. Prefer assembled
   spectrum / ``spectral_radius`` or ``kind="schur"`` when the true joint
   radius matters.
-* **Orbit ties are an inductive bias**, not isotypic / irreducible-
-  representation block diagonalization. Shared-:math:`d` typed hetero orbits
-  are partitioned independently within each type block; rectangular typed
-  orbits are unsupported. A representation-theoretic (isotypic / irrep)
-  reduction is reserved for 0.11
-  (:ref:`limitations-011-roadmap`).
+* **Orbit ties and isotypic MVP are inductive biases.** Orbit-label ties
+  share ``K_{\mathrm{self}}`` blocks; they are not automatic isotypic
+  reduction. Opt-in ``koopman_symmetry="isotypic"`` (exact automorphism
+  groups on modest :math:`N`; see ``examples/45_isotypic_symmetry.ipynb``)
+  ties isotypic projectors for the self block. Neighbor-factor
+  (:math:`K_{\mathrm{nbr}}`) isotypic tying is **not** shipped. Shared-
+  :math:`d` typed hetero orbits are partitioned independently within each
+  type block; rectangular typed orbits are unsupported. Neither path
+  guarantees sample-efficiency wins
+  (see :ref:`limitations-remaining`).
 * **Stochastic mode is process noise, not an SDE.** Opt-in
   ``dynamics_mode="stochastic"`` adds learned diagonal process noise after a
   discrete linear map (:math:`z \mapsto Kz+\varepsilon`); it is not a
   continuous-time stochastic generator.
-* **Topology-blind VAMP-2 precursor.** Optional
+* **VAMP-2 precursor and GraphVAMP teaching path.** Optional
   :func:`~koopman_graph.baselines.vamp2.vamp2_score` /
   :func:`~koopman_graph.baselines.vamp2.vamp2_loss` and
-  ``LossWeights.vamp2`` act on flattened encoder latents. This is **not**
-  GraphVAMPnets or an MD / MSM production toolchain
-  (:ref:`limitations-011-roadmap`).
+  ``LossWeights.vamp2`` act on flattened encoder latents (topology-blind).
+  :class:`~koopman_graph.baselines.GraphVAMPBaseline` plus
+  :mod:`koopman_graph.datasets.molecular` (synthetic contact-graph oracle;
+  optional ``[md]`` / ``[msm]``) form a **teaching / diagnostic** MD-adjacent
+  toolchain, not GraphVAMPnets production software, not a PyEMMA
+  replacement, and not Folding@home-scale MD. A public alanine-dipeptide
+  loader is not shipped; CI uses the synthetic oracle
+  (see :ref:`limitations-remaining`).
 * **Bayesian Laplace UQ over operator factors.** 
   :class:`~koopman_graph.uq.BayesianKoopmanUQ` provides a diagonal Laplace
   posterior over linear Koopman factors with seeded sample forecasts. It is
   **not** a Bayesian neural net over nonlinear encoder weights and not a full
   deep probabilistic Koopman / :math:`K^{2}`\ VAE
-  (:ref:`limitations-011-roadmap`). Ensemble, latent-Gaussian, and conformal
+  (:ref:`limitations-remaining`). Ensemble, latent-Gaussian, and conformal
   surfaces remain available (see below).
 * **Invariant geometry encode (Tier A).** 
   :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder` builds
@@ -179,11 +202,12 @@ modest latent width, and optional CUDA automatic mixed precision
   ``sparsity="block_diagonal"`` (approximate Jacobi / self-dominated path)
   when that cost dominates. Static topology may reuse a precomputed dense
   inverse within a training-loss evaluation; the assembly size is unchanged.
-  Multi-GPU *trainer* orchestration (DDP / Fabric / Lightning / Ray) shards
-  data and synchronizes gradients; it does **not** shrink this dense ceiling.
+  Multi-GPU *trainer* orchestration (DDP / Fabric / Lightning / Ray Train)
+  shards data and synchronizes gradients; it does **not** shrink this dense
+  ceiling. Presence-mask churn still matvecs at :math:`N_{\max}` capacity.
 * **Hetero × trainers.** Multiplex / typed models compose with native DDP
   (``strategy="ddp"``), Lightning Fabric, optional Lightning ``Trainer``,
-  and Ray ensemble helpers under :mod:`koopman_graph.distributed`.
+  and Ray helpers under :mod:`koopman_graph.distributed`.
   ``find_unused_parameters`` defaults to ``True`` for hetero RelGraph stacks.
   Single-process windowed ``run_fit_loop`` accepts windowed hetero sequences
   (parity with world-size-1 DDP window sampling). Do not confuse trainer
@@ -200,9 +224,19 @@ modest latent width, and optional CUDA automatic mixed precision
   (Richardson / Neumann inverse and Arnoldi spectrum for discrete graph and
   multiplex hetero; hypergraph / continuous kinds may still assemble). It is
   **not** multi-GPU training. Optional *trainer* orchestration under
-  :mod:`koopman_graph.distributed` (native DDP / Lightning Fabric) shards
-  data and synchronizes gradients; it does **not** shrink the dense
-  :math:`N\cdot d` representation ceilings above.
+  :mod:`koopman_graph.distributed` shards data and synchronizes gradients;
+  it does **not** shrink the dense :math:`N\cdot d` representation ceilings
+  above.
+* **Trainer taxonomy (DDP / Fabric / Ray).** Native DDP and Lightning Fabric
+  remain the **recommended** multi-GPU *model* paths.
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop` (optional
+  ``[ray]`` / ``[distributed]``) wraps Ray Train ``TorchTrainer`` around the
+  same scientific fit loop (model DDP under Ray). Separately,
+  :func:`~koopman_graph.distributed.fit_ensemble_with_ray` parallelizes
+  *ensemble members*. Prefer DDP / Fabric unless you already standardize on
+  Ray Train. Multi-node / cluster Ray Train production and measured
+  multi-node speedups are outside the documented CI contract
+  (see :ref:`limitations-remaining`).
 * **Multi-process / multi-GPU CI is not guaranteed.** Default test jobs
   stay single-process. Optional gloo smokes are opt-in
   (``KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1`` / ``@pytest.mark.distributed``).
@@ -225,11 +259,11 @@ modest latent width, and optional CUDA automatic mixed precision
   shortcut) for large :math:`N`. Within one training-loss evaluation the
   dense path may reuse :math:`\Phi` (and assembled :math:`L_{\mathrm{eff}}`)
   for repeated topology / :math:`\Delta t` keys; see :doc:`faq`.
-* **Hypergraph Zhou** :math:`\hat{H}` is a dense :math:`N \times N`
-  matrix on the advance / eigen path. Static incidence may reuse a cached
-  :math:`\hat{H}` (see ``clear_hyperedge_cache``); caching does not remove
-  the :math:`O(N^2)` representation or the dense networked
-  :math:`(N \cdot d)` ceiling above.
+* **Hypergraph Zhou** :math:`\hat{H}` (and directed incidence assemblies)
+  are dense :math:`N \times N` tensors on the advance / eigen path. Static
+  incidence may reuse a cached factor (see ``clear_hyperedge_cache``);
+  caching does not remove the :math:`O(N^2)` representation or the dense
+  networked :math:`(N \cdot d)` ceiling above.
 * **Hierarchical pooling** (``HierarchicalGraphKoopmanModel``) recomputes
   feature-dependent TopK / SAG scores every snapshot under the default
   ``pool_schedule="per_snapshot"``. ``pool_schedule="hold_perm"`` holds the
@@ -261,14 +295,17 @@ Benchmarks and baselines
 * **Simulated or surrogate dynamics:** synthetic Laplacian / advection
   graphs, networked SIR, Lorenz-96, Kuramoto–Sivashinsky, IEEE 118 voltage /
   load diffusion (homogeneous and typed generator / load / slack helpers),
-  and the Hopf / Stuart–Landau cylinder-wake teaching surrogate. IEEE 118
-  uses a real bus topology with *simulated* dynamics, not SCADA telemetry.
-* **In-repo GNN forecasters** (STGCN, DCRNN, Graph WaveNet in
-  ``koopman_graph.baselines.gnn``) are **teaching baselines**, not
-  reproductions of dedicated-library state-of-the-art (SOTA) implementations.
-  Adding further SOTA spatiotemporal GNN baselines (for example AGCRN,
-  MTGNN, STGODE, GraphCast) is out of scope
-  (:ref:`limitations-011-roadmap`).
+  the Hopf / Stuart–Landau cylinder-wake teaching surrogate, and synthetic
+  molecular contact-graph oracles under
+  :mod:`koopman_graph.datasets.molecular`. IEEE 118 uses a real bus
+  topology with *simulated* dynamics, not SCADA telemetry.
+* **In-repo GNN forecasters** in ``koopman_graph.baselines.gnn`` include
+  STGCN, DCRNN, Graph WaveNet, and teaching ports of AGCRN, MTGNN, STGODE,
+  and GraphCast (``ForecasterProtocol`` deviation tables). They are
+  **teaching baselines**, not protocol-matched leaderboard reproductions
+  or dedicated-library SOTA. GraphCast is a small-mesh weather teaching
+  adapter, not a PEMS sensor-graph forecaster and not ERA5-scale
+  production training (see :ref:`limitations-remaining`).
 * **Classical DMD family.** Shipped baselines include DMD, EDMD (including
   Nyström / random-feature kernel approximations), DMDc, forward–backward
   DMD, total-least-squares DMD, optDMD (variable-projection MVP), streaming
@@ -280,40 +317,45 @@ Benchmarks and baselines
   alone saturates past the predictability horizon. See
   ``examples/24_nonlinear_chaotic_benchmarks.ipynb``.
 
-.. _limitations-011-roadmap:
+.. _limitations-remaining:
 
-0.11 roadmap
-------------
+Remaining limits
+----------------
 
-The following remain **explicit non-goals** of the current release and are
-tracked for a later 0.11-oriented roadmap (or external toolchains). Public
-docs will not silently drop them.
+The following remain accurate honesty boundaries for the current release.
+They are **not** a deferred roadmap of the same items under a future version
+label.
 
-* Traffic-forecasting teaching SOTA GNN baselines (AGCRN, MTGNN, STGODE,
-  GraphCast) and leaderboard-matched traffic protocols / GraphCast ERA5
-  production.
-* Variable node cardinality / unbounded node churn (union :math:`N_{\max}`
-  + presence masks).
-* Directed hypergraph incidence modes.
-* Public measured cross-topology transfer API (notebook 37 remains a
-  measurement demo until then).
-* Sheaf Laplacian layers and full cell-complex topological deep-learning
-  stacks (0.10 ships simplicial-1 / Hodge lifts only).
-* GraphVAMPnets and molecular-dynamics / Markov-state-model production
-  toolchains (0.10 ships a topology-blind VAMP-2 precursor only; optional
-  ``[msm]`` is for deeptime oracle tests).
-* Ray Train as a multi-GPU *model* DDP backend (native DDP / Fabric / Ray
-  *ensemble* helpers remain).
-* Representation-theoretic isotypic / irrep block diagonalization (0.10
-  enables hetero *orbit* ties only).
-* Infinite-dimensional ResDMD pseudospectra / spectral measures beyond the
-  finite-dictionary MVP.
-* Full deep probabilistic Koopman / :math:`K^{2}`\ VAE; Bayesian sampling over
-  nonlinear encoder weights.
-* Equivariant latent operators :math:`K` / isotypic irrep block
-  diagonalization beyond orbit ties (0.10 ships Tier A invariant geometry
-  and optional Tier B steerable *encode* to invariant latents only).
-* Changing homogeneous scientific defaults (AMP off by default; sparsity
+* **Leaderboard-matched** traffic protocols (exact LibCity / BasicTS
+  schedules, metrics, and preprocessing). Teaching deviations are
+  documented; competition numbers stay upstream.
+* **ERA5-scale / production GraphCast** training. The in-repo adapter is a
+  documented small-mesh teaching slice only.
+* **Unbounded growing graphs / open-world entity discovery** beyond fixed
+  union :math:`N_{\max}` + presence masks. Index remapping across unrelated
+  universes is out of scope.
+* **Multi-node Ray Train / cluster production** support in CI. Documented
+  path is single-node multi-GPU manual smoke; native DDP / Fabric remain the
+  recommended defaults.
+* **Full TopologicX / cellular TDL feature parity.** In-repo sheaf and
+  cell-complex MVPs share the linear Koopman head; they do not replace
+  dedicated TDL frameworks when the domain model is complex-native
+  end-to-end. An optional richer external-complex bridge is not shipped.
+* **Folding@home-scale MD**, a full PyEMMA replacement, or a public
+  alanine-dipeptide fetch loader. GraphVAMP + deeptime interop and the
+  synthetic contact-graph oracle are teaching / diagnostic surfaces.
+* **Guaranteed sample-efficiency wins** from isotypic ties or transfer
+  APIs. Negative transfer advantage and null ablations are allowed
+  outcomes.
+* **Neighbor-factor isotypic tying** (:math:`K_{\mathrm{nbr}}` Aut-consistent
+  blocks). The isotypic MVP ties the self block only.
+* **Infinite-dimensional ResDMD** pseudospectra / spectral measures beyond
+  the finite-dictionary MVP.
+* **Full deep probabilistic Koopman / :math:`K^{2}`\ VAE**; Bayesian
+  sampling over nonlinear encoder weights.
+* **Equivariant latent operators** :math:`K` (Tier A / B encode paths still
+  feed invariant scalar latents into linear :math:`K`).
+* **Changing homogeneous scientific defaults** (AMP off by default; sparsity
   default ``"dense"``; linear time-invariant latent advance).
 
 .. _limitations-when-else:
@@ -326,13 +368,15 @@ When to use something else
   leaderboard numbers on METR-LA / PEMS-style benchmarks. KoopmanGraph’s
   traffic demos and in-repo GNN baselines are teaching comparisons around an
   inspectable linear latent operator, not a forecasting competition entry.
-* **Sheaf / full cell-complex TDL.** Prefer libraries built for sheaf
-  Laplacians and cellular TDL stacks when the domain model requires those
-  operators. KoopmanGraph’s simplicial-1 / Hodge lifts are combinatorial
-  precursors, not a full TSP stack.
-* **Biomolecular / molecular-dynamics Koopman analysis.** Prefer
-  GraphVAMPnets / MSM toolchains aimed at molecular trajectory data. The
-  topology-blind VAMP-2 precursor here is not that toolchain.
+* **Full sheaf / cell-complex TDL stacks.** Prefer libraries built for rich
+  sheaf Laplacians and cellular TDL when the domain model requires
+  complex-native operators end-to-end. KoopmanGraph’s sheaf / cell MVPs and
+  simplicial-1 lifts are precursors with a linear Koopman head, not a full
+  TopologicX replacement.
+* **Production biomolecular Koopman / MSM analysis.** Prefer GraphVAMPnets /
+  PyEMMA-scale MSM toolchains aimed at molecular trajectory data when you
+  need that production surface. The GraphVAMP teaching path and
+  topology-blind VAMP-2 precursor here are not that toolchain.
 * **Certified infinite-dimensional spectral computation.** Prefer full
   ResDMD / spectral-measure packages when you need residual-based
   certificates beyond the finite-dictionary MVP and held-out

@@ -25,6 +25,20 @@ Capability layout
     :class:`~koopman_graph.nn.simplicial.SimplicialEncoder` /
     :class:`~koopman_graph.nn.simplicial.SimplicialDecoder`
     (combinatorial ``L_1`` mixing; not sheaf/cell).
+``sheaf``
+    :class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
+    :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`
+    (diagonal restriction maps by default; opt-in general maps).
+``sheaf``
+    :class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
+    :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`
+    (diagonal restriction maps by default; opt-in general maps).
+``cell_complex``
+    :class:`~koopman_graph.nn.cell_complex.CellComplex` with boundary /
+    Hodge helpers ``B_k`` / ``L_k`` for ``k ∈ {0, 1, 2}``, plus
+    :class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
+    :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`
+    (factory ``encoder="cell_complex"``).
 ``equivariant``
     :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
     (Tier A invariant distance/angle features from ``Data.pos``) and optional
@@ -55,6 +69,17 @@ The package itself is power-user; encoder/decoder classes remain in the root
 from koopman_graph.nn.adaptive_topology import (
     DEFAULT_TOPOLOGY_EMBEDDING_DIM,
     AdaptiveAdjacency,
+)
+from koopman_graph.nn.cell_complex import (
+    MAX_CELL_COMPLEX_DEGREE,
+    CellComplex,
+    CellComplexGNNDecoder,
+    CellComplexGNNEncoder,
+    bind_cell_complex_decoder,
+    boundary_incidence_b2,
+    boundary_operator,
+    hodge_laplacian,
+    hodge_laplacian_matvec,
 )
 from koopman_graph.nn.decoder import (
     DiffConvDecoder,
@@ -106,6 +131,11 @@ from koopman_graph.nn.hypergraph import (
     HypergraphEncoder,
     bind_hypergraph_decoder,
 )
+from koopman_graph.nn.sheaf import (
+    SheafGNNDecoder,
+    SheafGNNEncoder,
+    bind_sheaf_decoder,
+)
 from koopman_graph.nn.simplicial import (
     SimplicialDecoder,
     SimplicialEncoder,
@@ -116,6 +146,9 @@ __all__ = [
     "ActivationName",
     "AdaptiveAdjacency",
     "BaseGNNModule",
+    "CellComplex",
+    "CellComplexGNNDecoder",
+    "CellComplexGNNEncoder",
     "DEFAULT_TOPOLOGY_EMBEDDING_DIM",
     "DelayEmbeddingEncoder",
     "DiffConvDecoder",
@@ -134,15 +167,25 @@ __all__ = [
     "HypergraphDecoder",
     "HypergraphEncoder",
     "InvariantGeometryEncoder",
+    "MAX_CELL_COMPLEX_DEGREE",
     "RelGraphConv",
     "RelGraphDecoder",
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "SheafGNNDecoder",
+    "SheafGNNEncoder",
     "SimplicialDecoder",
     "SimplicialEncoder",
+    "bind_cell_complex_decoder",
+    "bind_cell_complex_decoder",
     "bind_hypergraph_decoder",
+    "bind_sheaf_decoder",
     "bind_simplicial_decoder",
+    "boundary_incidence_b2",
+    "boundary_operator",
+    "hodge_laplacian",
+    "hodge_laplacian_matvec",
     "invariant_geometry_features",
     "build_diff_convs",
     "build_gat_convs",

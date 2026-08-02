@@ -205,6 +205,87 @@ def compute_model_spectrum(
     return compute_spectrum(koopman.matrix, time_step)
 
 
+def resolve_future_presence_at(
+    future_presence: Tensor | Sequence[Tensor] | None,
+    *,
+    steps: int,
+    num_nodes: int,
+) -> Callable[[int], Tensor | None] | None:
+    """Build a ``presence_at(step)`` callable from a forecast presence schedule.
+
+    Parameters
+    ----------
+    future_presence : Tensor, sequence of Tensor, or None
+        Per-step presence for rollout decode steps ``0 .. steps - 1``. A tensor
+        must have shape ``(steps, num_nodes)``; a sequence must have length
+        ``steps`` with each entry shape ``(num_nodes,)``. ``None`` disables the
+        inactive-entity hold policy.
+    steps : int
+        Expected rollout length.
+    num_nodes : int
+        Fixed union size ``N_max``.
+
+    Returns
+    -------
+    callable or None
+        ``presence_at`` schedule, or ``None`` when no schedule is provided.
+
+    Raises
+    ------
+    ValueError
+        If shapes or lengths are inconsistent.
+    """
+    if future_presence is None:
+        return None
+    if isinstance(future_presence, Tensor):
+        if future_presence.ndim != 2 or future_presence.shape != (steps, num_nodes):
+            msg = (
+                "future_presence tensor must have shape "
+                f"(steps={steps}, num_nodes={num_nodes}), "
+                f"got {tuple(future_presence.shape)}"
+            )
+            raise ValueError(msg)
+        schedule = future_presence.bool()
+
+        def _presence_at(step: int) -> Tensor:
+            return schedule[step]
+
+        return _presence_at
+
+    if len(future_presence) != steps:
+        msg = (
+            f"future_presence length {len(future_presence)} does not match "
+            f"steps={steps}"
+        )
+        raise ValueError(msg)
+    masks = []
+    for index, mask in enumerate(future_presence):
+        if mask.ndim != 1 or int(mask.shape[0]) != num_nodes:
+            msg = (
+                f"future_presence[{index}] must have shape ({num_nodes},), "
+                f"got {tuple(mask.shape)}"
+            )
+            raise ValueError(msg)
+        masks.append(mask.bool())
+
+    def _presence_at_seq(step: int) -> Tensor:
+        """Return the presence mask for rollout step ``step``.
+
+        Parameters
+        ----------
+        step : int
+            Zero-based rollout step index.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask of shape ``(num_nodes,)``.
+        """
+        return masks[step]
+
+    return _presence_at_seq
+
+
 def latent_decode_rollout(
     koopman: KoopmanOperatorContract,
     decoder: nn.Module,
@@ -218,6 +299,7 @@ def latent_decode_rollout(
     edge_weight: Tensor | None = None,
     controls: Sequence[Tensor] | None = None,
     future_topologies: Sequence[Data] | None = None,
+    future_presence: Tensor | Sequence[Tensor] | None = None,
     step_deltas: Sequence[float] | Sequence[Tensor] | None = None,
     history: Sequence[Data] | None = None,
     hyperedge_index: Tensor | None = None,
@@ -241,6 +323,11 @@ def latent_decode_rollout(
         Soft-default integration interval when ``step_deltas`` is omitted.
     edge_index, edge_weight, controls, future_topologies, step_deltas, history
         Same semantics as :meth:`GraphKoopmanModel.predict` / ``_rollout``.
+    future_presence : Tensor, sequence of Tensor, or None, optional
+        Per-step entity presence for the inactive-node **hold** policy. See
+        :func:`resolve_future_presence_at`. When omitted, all entities are
+        treated as present (0.10 behavior). Operator matvecs still use
+        ``N_max`` capacity.
     hyperedge_index, hyperedge_weight
         Static hyperedge incidence for hypergraph operators. When omitted and
         ``x_or_data`` is a ``Data`` snapshot, incidence is read from the
@@ -272,10 +359,31 @@ def latent_decode_rollout(
         edge_weight=edge_weight,
         history=history,
     )
-    if hyperedge_index is None and isinstance(x_or_data, Data):
-        hyperedge_index = snapshot_hyperedge_index(x_or_data)
-        if hyperedge_weight is None:
-            hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
+    tail_index = None
+    head_index = None
+    if isinstance(x_or_data, Data):
+        if hyperedge_index is None:
+            hyperedge_index = snapshot_hyperedge_index(x_or_data)
+            if hyperedge_weight is None:
+                hyperedge_weight = snapshot_hyperedge_weight(x_or_data)
+        from koopman_graph.graph_utils import (
+            snapshot_head_index,
+            snapshot_tail_index,
+        )
+
+        tail_index = snapshot_tail_index(x_or_data)
+        head_index = snapshot_head_index(x_or_data)
+
+    initial_features = None
+    if isinstance(x_or_data, Data):
+        initial_features = x_or_data.x
+    elif isinstance(x_or_data, Tensor) and x_or_data.ndim == 2:
+        initial_features = x_or_data
+    presence_at = resolve_future_presence_at(
+        future_presence,
+        steps=steps,
+        num_nodes=int(z.shape[0]),
+    )
 
     control_at = None if controls is None else (lambda step: controls[step])
     delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
@@ -291,9 +399,13 @@ def latent_decode_rollout(
         ),
         control_at=control_at,
         delta_t_at=delta_t_at,
+        presence_at=presence_at,
+        initial_features=initial_features,
         default_delta_t=default_delta_t,
         hyperedge_index=hyperedge_index,
         hyperedge_weight=hyperedge_weight,
+        tail_index=tail_index,
+        head_index=head_index,
     )
 
 
@@ -307,6 +419,7 @@ def predict_snapshots(
     edge_weight: Tensor | None = None,
     controls: Sequence[Tensor] | None = None,
     future_topologies: Sequence[Data] | None = None,
+    future_presence: Tensor | Sequence[Tensor] | None = None,
     history: Sequence[Data] | None = None,
 ) -> list[Data]:
     """Run an eval-mode discrete-step rollout and pack ``Data`` snapshots.
@@ -319,7 +432,7 @@ def predict_snapshots(
     rollout_fn
         Callable matching :meth:`GraphKoopmanModel._rollout`.
     initial_graph, steps, edge_index, edge_weight, controls, future_topologies,
-    history
+    future_presence, history
         Forwarded to ``rollout_fn``.
     initial_graph : Tensor | Data
         See the function signature / summary for ``initial_graph``.
@@ -333,6 +446,8 @@ def predict_snapshots(
         See the function signature / summary for ``controls``.
     future_topologies : Sequence[Data] | None
         See the function signature / summary for ``future_topologies``.
+    future_presence : Tensor | Sequence[Tensor] | None
+        Optional per-step presence schedule for the inactive-node hold policy.
 
     Returns
     -------
@@ -350,6 +465,7 @@ def predict_snapshots(
                 edge_weight,
                 controls=controls,
                 future_topologies=future_topologies,
+                future_presence=future_presence,
                 history=history,
             )
     finally:
@@ -370,6 +486,7 @@ def predict_at_snapshots(
     edge_weight: Tensor | None = None,
     controls: Sequence[Tensor] | None = None,
     future_topologies: Sequence[Data] | None = None,
+    future_presence: Tensor | Sequence[Tensor] | None = None,
 ) -> list[Data]:
     """Forecast snapshots at arbitrary query times / step deltas.
 
@@ -387,7 +504,7 @@ def predict_at_snapshots(
     time_step : float
         Discrete model time step for uniformity checks.
     query_times, step_deltas, edge_index, edge_weight, controls,
-    future_topologies
+    future_topologies, future_presence
         Same semantics as :meth:`GraphKoopmanModel.predict_at`.
     query_times : Sequence[float] | Sequence[Tensor] | None
         See the function signature / summary for ``query_times``.
@@ -399,6 +516,8 @@ def predict_at_snapshots(
         See the function signature / summary for ``edge_weight``.
     controls : Sequence[Tensor] | None
         See the function signature / summary for ``controls``.
+    future_presence : Tensor | Sequence[Tensor] | None
+        Optional per-step presence schedule for the inactive-node hold policy.
 
     Returns
     -------
@@ -426,6 +545,7 @@ def predict_at_snapshots(
                 edge_weight,
                 controls=controls,
                 future_topologies=future_topologies,
+                future_presence=future_presence,
                 step_deltas=increments,
             )
     finally:

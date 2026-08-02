@@ -102,35 +102,51 @@ Optional extras for Koopman model-predictive control (OSQP QP solver):
    pip install -e ".[mpc]"
 
 Optional extras for distributed *trainer orchestration* (Lightning Fabric,
-Ray, and Dask). Native PyTorch DistributedDataParallel (DDP) /
-``torchrun`` paths use core PyTorch only — no extra required:
+Ray Train / Ray ensemble, and Dask), MD / MSM teaching paths, and related
+baselines. Native PyTorch DistributedDataParallel (DDP) / ``torchrun``
+paths use core PyTorch only — no extra required:
 
 .. code-block:: bash
 
-   pip install -e ".[lightning]"      # Fabric + KoopmanLightningModule (Trainer)
-   pip install -e ".[ray]"            # fit_ensemble_with_ray (ensemble members)
-   pip install -e ".[dask]"           # dask_prep materialize helpers (offline)
-   pip install -e ".[msm]"            # deeptime (VAMP-2 oracle tests; optional)
-   pip install -e ".[equivariance]"   # e3nn Tier-B steerable encoder (optional)
-   pip install -e ".[distributed]"    # meta-extra: lightning + ray + dask
+   pip install -e ".[lightning]"           # Fabric + KoopmanLightningModule
+   pip install -e ".[ray]"                 # Ray Train + ensemble Ray (ray[train])
+   pip install -e ".[dask]"                # dask_prep materialize (offline)
+   pip install -e ".[msm]"                 # deeptime (GraphVAMP / interop)
+   pip install -e ".[md]"                  # mdtraj molecular I/O stubs
+   pip install -e ".[equivariance]"        # e3nn Tier-B steerable encoder
+   pip install -e ".[baselines-ode]"       # torchdiffeq for STGODEBaseline
+   pip install -e ".[baselines-graphcast]" # reserved no-op (pure PyTorch)
+   pip install -e ".[distributed]"         # meta: lightning + ray + dask
 
 These trainer extras are **not** related to operator
 ``sparsity="distributed"`` (matrix-free inverse / spectrum on discrete
 graph and multiplex hetero; see :doc:`faq` and :doc:`limitations`). The
 ``[lightning]`` extra covers Fabric and the optional
 :class:`~koopman_graph.distributed.KoopmanLightningModule` Trainer sugar.
-The ``[ray]`` extra covers
+The ``[ray]`` extra pins ``ray[train]`` for both
+:func:`~koopman_graph.distributed.run_ray_train_fit_loop` (model DDP under
+Ray Train) and
 :func:`~koopman_graph.distributed.fit_ensemble_with_ray` (parallel
-independent ensemble member fits; sequential remains default) and is also
-used by the examples-only Tune script
+independent ensemble member fits; sequential remains default). Prefer
+native DDP / Fabric unless you already standardize on Ray Train
+(see :doc:`faq`). The same extra is used by the examples-only Tune script
 ``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
 script; no library Tune / AutoML API). The ``[dask]`` extra activates
 :mod:`koopman_graph.distributed.dask_prep` materialize helpers; it is
 **not** a Dask training loop (see :doc:`faq`). The ``[msm]`` extra pins
-deeptime for VAMP-2 oracle tests; the precursor score/loss helpers
-themselves need no extra. The ``[equivariance]`` extra pins ``e3nn`` for
-:class:`~koopman_graph.nn.E3EquivariantEncoder` (steerable encode to
-invariant latents; latent :math:`K` remains non-equivariant).
+deeptime for VAMP-2 oracle tests, GraphVAMP helpers, and
+:mod:`koopman_graph.interop`; the topology-blind precursor score/loss
+helpers themselves need no extra. The ``[md]`` extra pins mdtraj for
+optional I/O under :mod:`koopman_graph.datasets.molecular`; the synthetic
+contact-graph oracle needs no extra. The ``[equivariance]`` extra pins
+``e3nn`` for :class:`~koopman_graph.nn.E3EquivariantEncoder` (steerable
+encode to invariant latents; latent :math:`K` remains non-equivariant).
+``[baselines-ode]`` is required to construct
+:class:`~koopman_graph.baselines.gnn.STGODEBaseline`.
+``[baselines-graphcast]`` is a reserved no-op — the GraphCast teaching
+path is pure PyTorch. Exact-automorphism isotypic mode
+(``koopman_symmetry="isotypic"``) needs optional ``pynauty`` separately
+from ``[symmetry]`` (``networkx`` approximate orbits).
 
 uv (project sync)
 ~~~~~~~~~~~~~~~~~
@@ -180,12 +196,13 @@ After PyTorch and PyG are installed, install KoopmanGraph from PyPI:
    pip install koopman-graph
    # or: uv pip install koopman-graph
 
-Pin a specific release when reproducing results:
+Pin a specific **published** release when reproducing results (replace the
+version with the tag you intend; see PyPI and ``CHANGELOG.md``):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.6.0
-   # or: uv pip install koopman-graph==0.6.0
+   pip install koopman-graph==0.11.0
+   # or: uv pip install koopman-graph==0.11.0
 
 Releases are published automatically when a maintainer creates a GitHub Release
 (see ``CONTRIBUTING.md`` in the repository). For the latest in-tree development

@@ -3,10 +3,12 @@
 Capability layout
 -----------------
 ``spectrum``
-    Analysis-owned :func:`~koopman_graph.analysis.decode_mode_shapes` and
+    Analysis-owned :func:`~koopman_graph.analysis.decode_mode_shapes`,
     :func:`~koopman_graph.analysis.attribute_mode_energy` (interpretive
-    type / relation energy fractions on assembled ``K_eff``) plus
-    re-exports of neutral-leaf
+    type / relation energy fractions on assembled ``K_eff``), and
+    :func:`~koopman_graph.analysis.implied_timescales` (discrete-time
+    lag-``τ`` timescales with documented units) plus re-exports of
+    neutral-leaf
     :func:`~koopman_graph.spectrum_types.compute_spectrum`,
     :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`, and
     :func:`~koopman_graph.spectrum_types.discrete_spectrum_at_delta_t`.
@@ -65,6 +67,13 @@ Capability layout
     factor ``bound_metric`` /
     :class:`~koopman_graph.operators.StabilityCertificate` and from soft
     assembled eigenvalue regularization.
+``transfer``
+    Measured cross-topology transfer evaluation
+    (:func:`~koopman_graph.analysis.evaluate_topology_transfer`,
+    :class:`~koopman_graph.analysis.TopologyTransferReport`,
+    :data:`~koopman_graph.analysis.TRANSFER_ADVANTAGE_EPSILON`). Measures
+    zero-shot transfer against a mandatory ``pernode`` control; does **not**
+    promise a transfer advantage (negative advantage is reportable).
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` and the spectrum
 assembly helpers stay in the neutral top-level
@@ -114,16 +123,23 @@ from koopman_graph.analysis.similarity import (
 )
 from koopman_graph.analysis.sindy import SINDyReport, identify_sparse_dynamics
 from koopman_graph.analysis.spectrum import (
+    ImpliedTimescales,
     ModeEnergyAttribution,
     attribute_mode_energy,
     compute_generator_spectrum,
     compute_spectrum,
     decode_mode_shapes,
     discrete_spectrum_at_delta_t,
+    implied_timescales,
 )
 from koopman_graph.analysis.topology_estimation import (
     CouplingEstimate,
     estimate_coupling_from_snapshots,
+)
+from koopman_graph.analysis.transfer import (
+    TRANSFER_ADVANTAGE_EPSILON,
+    TopologyTransferReport,
+    evaluate_topology_transfer,
 )
 from koopman_graph.spectrum_types import KoopmanSpectrum
 
@@ -133,6 +149,8 @@ __all__ = [
     "ClusteringResult",
     "CouplingEstimate",
     "EmpiricalSpectralMeasure",
+    "ImpliedTimescales",
+    "ImpliedTimescales",
     "JointStabilityCertificate",
     "KoopmanSpectrum",
     "MAX_JOINT_LYAPUNOV_SIZE",
@@ -145,6 +163,8 @@ __all__ = [
     "SpectrumDistanceMethod",
     "SpectrumLimits",
     "SpectrumSource",
+    "TRANSFER_ADVANTAGE_EPSILON",
+    "TopologyTransferReport",
     "attribute_mode_energy",
     "build_joint_stability_certificate",
     "calibrate_anomaly_threshold",
@@ -156,8 +176,10 @@ __all__ = [
     "dynamical_similarity",
     "empirical_spectral_measure",
     "estimate_coupling_from_snapshots",
+    "evaluate_topology_transfer",
     "gershgorin_radius_bound",
     "identify_sparse_dynamics",
+    "implied_timescales",
     "koopman_spectral_clustering",
     "koopman_std",
     "lyapunov_joint_bound",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -14,9 +15,55 @@ from koopman_graph.baselines.base import (
     copy_topology,
     require_static_topology,
 )
+from koopman_graph.baselines.gnn.protocol import ForecasterProtocol, ForecastMetric
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight, snapshot_to_device
 from koopman_graph.spectrum_types import KoopmanSpectrum
+
+# Default temporal split for teaching comparisons (documented in protocol()).
+_TEACHING_TRAIN_RATIO = 0.7
+_TEACHING_VAL_RATIO = 0.1
+_TEACHING_TEST_RATIO = 0.2
+_TEACHING_HORIZON = 12
+_TEACHING_METRIC: ForecastMetric = "mae"
+
+# Shared honesty lines appended by :meth:`GNNForecasterBaseline._teaching_protocol`.
+# Architecture-specific omissions stay on each baseline's ``protocol()``.
+_COMMON_TEACHING_CONTRACT_DEVIATIONS: tuple[str, ...] = (
+    "preprocessing: no LibCity / BasicTS Z-score or sensor normalization and "
+    "no dataset-specific adjacency construction pipeline; callers supply "
+    "GraphSnapshotSequence features and topology",
+    "splits: protocol reports train/val/test = 0.7/0.1/0.2 for teaching "
+    "comparisons, but fit() does not slice the sequence — callers must apply "
+    "splits themselves",
+    "schedule: Adam with a constant learning rate (default lr=1e-3) for a "
+    "caller-chosen epoch count (default 40); no paper LR schedule, warmup, "
+    "or early stopping",
+    "loss: fit minimizes next-frame MSE on sliding windows; protocol.metric "
+    "'mae' and horizon=12 are evaluation claims, not the training objective "
+    "or multi-horizon decoding target",
+    "predict pads missing lookback by repeating the initial snapshot rather "
+    "than a true historical buffer",
+)
+
+# Shared honesty lines appended by :meth:`GNNForecasterBaseline._teaching_protocol`.
+# Architecture-specific omissions stay on each baseline's ``protocol()``.
+_COMMON_TEACHING_CONTRACT_DEVIATIONS: tuple[str, ...] = (
+    "preprocessing: no LibCity / BasicTS Z-score or sensor normalization and "
+    "no dataset-specific adjacency construction pipeline; callers supply "
+    "GraphSnapshotSequence features and topology",
+    "splits: protocol reports train/val/test = 0.7/0.1/0.2 for teaching "
+    "comparisons, but fit() does not slice the sequence — callers must apply "
+    "splits themselves",
+    "schedule: Adam with a constant learning rate (default lr=1e-3) for a "
+    "caller-chosen epoch count (default 40); no paper LR schedule, warmup, "
+    "or early stopping",
+    "loss: fit minimizes next-frame MSE on sliding windows; protocol.metric "
+    "'mae' and horizon=12 are evaluation claims, not the training objective "
+    "or multi-horizon decoding target",
+    "predict pads missing lookback by repeating the initial snapshot rather "
+    "than a true historical buffer",
+)
 
 
 def stack_node_features(sequence: GraphSnapshotSequence) -> Tensor:
@@ -94,6 +141,11 @@ class GNNForecasterBaseline(nn.Module, ABC):
     Training uses sliding windows of length :attr:`history_len` to predict the
     next frame. Autoregressive :meth:`predict` pads missing history by repeating
     the initial snapshot (a documented simplification vs paper lookbacks).
+
+    Subclasses must implement :meth:`protocol`, returning a
+    :class:`~koopman_graph.baselines.gnn.protocol.ForecasterProtocol` whose
+    ``deviations`` tuple is non-empty (teaching ports cannot claim paper /
+    LibCity parity).
 
     Attributes
     ----------
@@ -188,6 +240,63 @@ class GNNForecasterBaseline(nn.Module, ABC):
             Next-step features with shape ``(num_nodes, out_channels)`` or
             ``(batch, num_nodes, out_channels)`` when ``history`` is batched.
         """
+
+    @abstractmethod
+    def protocol(self) -> ForecasterProtocol:
+        """Return the teaching protocol for this baseline (non-empty deviations).
+
+        Returns
+        -------
+        ForecasterProtocol
+            Frozen metadata describing lookback, claimed evaluation horizon,
+            split ratios, metric, and explicit deviations from the paper /
+            LibCity-style script.
+        """
+
+    def _teaching_protocol(
+        self,
+        *,
+        name: str,
+        deviations: Sequence[str],
+        horizon: int = _TEACHING_HORIZON,
+        train_ratio: float = _TEACHING_TRAIN_RATIO,
+        val_ratio: float = _TEACHING_VAL_RATIO,
+        test_ratio: float = _TEACHING_TEST_RATIO,
+        metric: Literal["mae", "rmse", "mape"] = _TEACHING_METRIC,
+    ) -> ForecasterProtocol:
+        """Build a :class:`ForecasterProtocol` using this model's lookback.
+
+        Parameters
+        ----------
+        name : str
+            Baseline identifier.
+        deviations : sequence of str
+            Architecture-specific teaching deviations. Shared preprocessing,
+            split, schedule, loss, and predict-pad contract lines are appended
+            automatically.
+        horizon : int, optional
+            Claimed evaluation horizon. Default is ``12``.
+        train_ratio, val_ratio, test_ratio : float, optional
+            Teaching split fractions (default ``0.7`` / ``0.1`` / ``0.2``).
+        metric : {"mae", "rmse", "mape"}, optional
+            Primary teaching metric. Default is ``"mae"``.
+
+        Returns
+        -------
+        ForecasterProtocol
+            Validated frozen protocol.
+        """
+        merged = tuple(deviations) + _COMMON_TEACHING_CONTRACT_DEVIATIONS
+        return ForecasterProtocol(
+            name=name,
+            history_len=self.history_len,
+            horizon=horizon,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            metric=metric,
+            deviations=merged,
+        )
 
     def fit(
         self,
@@ -322,6 +431,7 @@ class GNNForecasterBaseline(nn.Module, ABC):
         steps: int,
         controls: Sequence[Tensor] | Tensor | None = None,
         future_topologies: Sequence[Data] | None = None,
+        future_presence: Tensor | None = None,
     ) -> list[Data]:
         """Autoregressively predict future graph snapshots.
 
@@ -335,6 +445,12 @@ class GNNForecasterBaseline(nn.Module, ABC):
             Must be ``None``; these baselines are uncontrolled.
         future_topologies : ignored
             Must be ``None``; topology is frozen from the fitted / initial graph.
+        future_presence : Tensor or None, optional
+            Accepted for call-site parity with
+            :class:`~koopman_graph.model.GraphKoopmanModel` /
+            :func:`~koopman_graph.metrics.evaluate_forecast`. Teaching GNN
+            baselines do not implement presence-mask hold; the argument must
+            be ``None``.
 
         Returns
         -------
@@ -346,8 +462,8 @@ class GNNForecasterBaseline(nn.Module, ABC):
         RuntimeError
             If the baseline has not been fit.
         ValueError
-            If ``steps`` is invalid, controls/topologies are provided, or the
-            initial graph shape does not match fit-time metadata.
+            If ``steps`` is invalid, controls/topologies/presence are provided,
+            or the initial graph shape does not match fit-time metadata.
         """
         self._check_fitted()
         if steps < 1:
@@ -360,6 +476,12 @@ class GNNForecasterBaseline(nn.Module, ABC):
             msg = (
                 f"{type(self).__name__} does not support future_topologies; "
                 "topology is frozen from the initial graph"
+            )
+            raise ValueError(msg)
+        if future_presence is not None:
+            msg = (
+                f"{type(self).__name__} does not support future_presence; "
+                "teaching GNN baselines have no presence-mask hold policy"
             )
             raise ValueError(msg)
         assert self.num_nodes is not None  # guarded by _check_fitted

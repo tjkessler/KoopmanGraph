@@ -150,6 +150,7 @@ jobs:
           uv sync --frozen
           --extra dev --extra rl --extra mpc --extra symmetry
           --extra distributed --extra equivariance
+          --extra baselines-ode --extra msm
 
       - name: Run tests
         if: matrix.coverage != 'true'

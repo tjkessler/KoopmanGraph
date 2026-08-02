@@ -62,30 +62,41 @@ Optional feature extras
 
 .. code-block:: bash
 
-   pip install "koopman-graph[mpc]"          # OSQP for KoopmanMPC
-   pip install "koopman-graph[symmetry]"     # networkx for auto node orbits
-   pip install "koopman-graph[rl]"           # Gymnasium / Stable-Baselines3
-   pip install "koopman-graph[lightning]"    # Fabric + KoopmanLightningModule
-   pip install "koopman-graph[ray]"          # parallel ensemble member fits
-   pip install "koopman-graph[distributed]"  # meta: lightning + ray + dask
+   pip install "koopman-graph[mpc]"               # OSQP for KoopmanMPC
+   pip install "koopman-graph[symmetry]"          # networkx for auto node orbits
+   pip install "koopman-graph[rl]"                # Gymnasium / Stable-Baselines3
+   pip install "koopman-graph[lightning]"         # Fabric + KoopmanLightningModule
+   pip install "koopman-graph[ray]"               # Ray Train + ensemble Ray
+   pip install "koopman-graph[dask]"              # offline dask_prep helpers
+   pip install "koopman-graph[msm]"               # deeptime / GraphVAMP interop
+   pip install "koopman-graph[md]"                # mdtraj molecular I/O stubs
+   pip install "koopman-graph[equivariance]"      # e3nn Tier-B encoder
+   pip install "koopman-graph[baselines-ode]"     # torchdiffeq for STGODE
+   pip install "koopman-graph[baselines-graphcast]"  # reserved; teaching GraphCast is pure PyTorch
+   pip install "koopman-graph[distributed]"       # meta: lightning + ray + dask
 
 * **MPC:** ``from koopman_graph.mpc import KoopmanMPC``. Construction works
   without OSQP; ``solve`` / ``rollout`` raise with install guidance if OSQP
   is missing.
 * **Symmetry:** ``koopman_auto_orbits=True`` uses ``networkx``
   (``method="auto"``). Without ``[symmetry]``, ``node_orbit_partition``
-  warns and returns the identity partition (no tying). Exact orbits need
-  optional ``pynauty`` separately.
+  warns and returns the identity partition (no tying). Exact orbits /
+  ``koopman_symmetry="isotypic"`` need optional ``pynauty`` separately.
 * **Distributed trainers:** native DDP / ``torchrun`` need only core
   PyTorch. Fabric and optional
   :class:`~koopman_graph.distributed.KoopmanLightningModule` Trainer sugar
-  need ``[lightning]``. Parallel ensemble member fits need ``[ray]``
-  (:func:`~koopman_graph.distributed.fit_ensemble_with_ray`). Prefer
-  Fabric / DDP for multi-GPU *model* training and full loss schedules.
-  ``[dask]`` activates
+  need ``[lightning]``. ``[ray]`` covers both
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop` (model DDP)
+  and :func:`~koopman_graph.distributed.fit_ensemble_with_ray` (ensemble
+  members). Prefer Fabric / DDP for multi-GPU *model* training unless you
+  already standardize on Ray Train (see below). ``[dask]`` activates
   :mod:`koopman_graph.distributed.dask_prep` materialize helpers (not a
   training loop; see “Can I use Dask?” below). See :doc:`installation`
   and :doc:`capabilities` (Distributed training).
+* **MD / MSM:** ``[msm]`` pins deeptime for GraphVAMP /
+  :mod:`koopman_graph.interop`. ``[md]`` pins mdtraj for optional
+  trajectory I/O under :mod:`koopman_graph.datasets.molecular`; the
+  synthetic contact-graph oracle needs no extra.
 * See :doc:`installation` for the full extras table.
 
 Import paths after 0.6
@@ -220,14 +231,20 @@ Use the power-user :mod:`koopman_graph.distributed` helpers (not root
   sequences; export with ``export_format1_checkpoint``. Prefer Fabric /
   DDP when you need full loss schedules or
   :class:`~koopman_graph.distributed.DistributedWindowSampler`.
+* **Ray Train model DDP** (optional) —
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop` after
+  ``pip install "koopman-graph[ray]"``. Same scientific epoch driver under
+  Ray Train ``TorchTrainer``. Prefer DDP / Fabric unless you already
+  standardize on Ray (see “Which trainer should I choose?” below).
+  Multi-node Ray Train is outside the CI contract.
 * **Ray ensemble members** (optional) —
   :func:`~koopman_graph.distributed.fit_ensemble_with_ray` after
   ``pip install "koopman-graph[ray]"``, or
   ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
   member_factory=...)``. Sequential ensemble fit remains the default.
   Prefer a picklable (ideally module-level) factory. This does **not**
-  change UQ coverage guarantees. Use DDP / Fabric for multi-GPU model
-  training — Ray Train is out of scope.
+  change UQ coverage guarantees and does **not** shard one model across
+  GPUs — that is Ray Train / DDP / Fabric.
 * **Ray Tune HPO** (examples-only) —
   ``examples/scripts/ray_tune_koopman_example.py``. The search space stays
   in the script; KoopmanGraph does not expose a Tune / AutoML API.
@@ -237,18 +254,36 @@ Default ``fit`` / ``run_fit_loop`` remain single-process when
 :math:`N\cdot d` ceilings (see :doc:`limitations`). Multi-node behavior
 is not covered by default CI.
 
+Which trainer should I choose — DDP, Fabric, Ray Train, or Ray ensemble?
+------------------------------------------------------------------------
+
+They answer different questions:
+
+* **Native DDP / Fabric** — recommended default for multi-GPU *model*
+  training and full loss schedules / window sharding.
+* **Ray Train** (``run_ray_train_fit_loop``) — optional model-DDP backend
+  when your cluster already uses Ray Train. Same scientific fit loop;
+  not a multi-node production path in CI.
+* **Ray ensemble** (``fit_ensemble_with_ray``) — parallel *independent*
+  member fits for
+  :class:`~koopman_graph.uq.EnsembleGraphKoopmanModel`. Not model DDP.
+
+Do not stack Ray Train and Fabric autocast ownership, and do not confuse
+any of these with operator ``sparsity="distributed"``.
+
 Does heterogeneous / multiplex ``koopman="hetero_graph"`` work with DDP /
 Fabric / Lightning / Ray?
 --------------------------------------------------------------------------
 
-**Yes.** Version 0.9 composes RelGraph / ``HeteroGraphKoopmanOperator``
-models with the same 0.8 trainer adapters:
+**Yes.** RelGraph / ``HeteroGraphKoopmanOperator`` models compose with the
+same trainer adapters:
 
 * ``model.fit(..., strategy="ddp")`` /
   :func:`~koopman_graph.distributed.run_ddp_fit_loop`
 * :func:`~koopman_graph.distributed.fit_with_fabric`
 * :class:`~koopman_graph.distributed.KoopmanLightningModule` (hetero
   batches coerce via sequence helpers)
+* :func:`~koopman_graph.distributed.run_ray_train_fit_loop`
 * Ray ensemble member fits when members accept hetero inputs
 
 ``find_unused_parameters`` defaults to ``True`` for hetero RelGraph stacks
@@ -278,7 +313,7 @@ Can I use Dask with KoopmanGraph?
 :mod:`koopman_graph.distributed.dask_prep` helpers
 (``materialize_sequences``, ``materialize_window_index_list``). The library
 does **not** import Dask from ``training``; trainers remain native DDP /
-Fabric / Ray ensemble.
+Fabric / Ray Train / Ray ensemble.
 
 Typical pattern::
 
@@ -318,6 +353,30 @@ with a standard GCN. Optional Tier B
 ``[equivariance]``) uses steerable message passing but still emits
 **invariant scalar latents** for the ordinary linear map :math:`K`.
 Neither path makes :math:`K` itself E(n)/SE(3) equivariant (see
+:doc:`limitations`).
+
+Does ``evaluate_topology_transfer`` mean factorization transfers well?
+----------------------------------------------------------------------
+
+**No.** :func:`~koopman_graph.analysis.evaluate_topology_transfer`
+**measures** zero-shot or fine-tune transfer across a node-count change.
+It always reports a mandatory ``pernode`` control and may return
+**negative** transfer advantage (as on the seeded path-diffusion fixture
+in ``examples/37_cross_topology_transfer.ipynb``). Self-adaptive, orbit,
+and isotypic configurations bind :math:`N` and are excluded. Naming is
+deliberately ``evaluate_*`` / measure-style — not a success path. See
+:doc:`limitations`.
+
+Are AGCRN / MTGNN / STGODE / GraphCast leaderboard reproductions?
+-----------------------------------------------------------------
+
+**No.** The in-repo ports under :mod:`koopman_graph.baselines.gnn` are
+**teaching baselines** with documented ``ForecasterProtocol`` deviation
+tables for side-by-side comparisons on the same PEMS / METR slices. They
+are not protocol-matched LibCity / BasicTS leaderboard entries. GraphCast
+is a small-mesh weather teaching adapter, not a PEMS sensor-graph
+forecaster and not ERA5-scale production training. Prefer dedicated
+traffic libraries when you need competition numbers (see
 :doc:`limitations`).
 
 Hierarchical pooling: ``per_snapshot`` vs ``hold_perm``

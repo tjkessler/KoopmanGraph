@@ -48,6 +48,7 @@ def test_package_import_and_all() -> None:
         "materialize_window_index_list",
         "prepare_ddp_model",
         "run_ddp_fit_loop",
+        "run_ray_train_fit_loop",
         "seed_everything",
         "shard_sequences_for_rank",
         "unwrap_model",
@@ -59,6 +60,7 @@ def test_package_import_and_all() -> None:
             "fit_ensemble_with_ray",
             "materialize_sequences",
             "materialize_window_index_list",
+            "run_ray_train_fit_loop",
         }
     )
     for name in expected - optional_extra_exports:

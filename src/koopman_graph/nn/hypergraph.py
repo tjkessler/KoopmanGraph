@@ -3,6 +3,17 @@
 Encoder and decoder import shared builders from :mod:`koopman_graph.nn.gnn`
 only; they do not import each other. Checkpoint type strings ``hyper_enc`` /
 ``hyper_dec`` are registered in the format-1 schema.
+
+These stacks are **undirected**: message passing uses bipartite
+``hyperedge_index`` (and optional ``hyperedge_weight``) through
+:class:`~torch_geometric.nn.HypergraphConv`. They do not consume directed
+``tail_index`` / ``head_index``. Pairing them with a
+:class:`~koopman_graph.operators.HypergraphKoopmanOperator` that uses a
+directed ``incidence_mode`` is supported and intentional — encode and
+latent advance need not share an orientation. Directed operator modes
+implement one documented random-walk normalization; they are not claimed
+to be the unique literature choice, nor equivalent to simplicial or Hodge
+operators.
 """
 
 from __future__ import annotations
@@ -144,7 +155,11 @@ class HypergraphEncoder(BaseGNNModule):
     Applies stacked :class:`~torch_geometric.nn.HypergraphConv` layers with a
     configurable hidden activation. The final layer maps to ``latent_dim``
     without an activation. Pairwise ``edge_index`` on ``Data`` inputs is
-    ignored; incidence comes from ``hyperedge_index`` / ``hyperedge_weight``.
+    ignored; incidence comes from undirected ``hyperedge_index`` /
+    ``hyperedge_weight`` only (directed ``tail_index`` / ``head_index`` are
+    not used here). When the paired Koopman operator uses a directed
+    ``incidence_mode``, encode and advance orientations may differ; see
+    :class:`~koopman_graph.operators.HypergraphKoopmanOperator`.
 
     Attributes
     ----------
@@ -251,7 +266,10 @@ class HypergraphDecoder(BaseGNNModule):
 
     Applies stacked :class:`~torch_geometric.nn.HypergraphConv` layers with a
     configurable hidden activation. The final layer maps to ``out_channels``
-    without an activation.
+    without an activation. Like the encoder, decoding uses undirected
+    ``hyperedge_index`` / ``hyperedge_weight`` only; it does not consume
+    directed incidence. Orientation asymmetry relative to a directed
+    Koopman ``incidence_mode`` is therefore possible and intentional.
 
     Attributes
     ----------

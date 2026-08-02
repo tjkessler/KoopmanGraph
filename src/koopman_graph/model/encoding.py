@@ -254,11 +254,17 @@ def encode_at_index(
                 x,
                 sequence.observation_mask_at(index),
             )
-            snapshot = Data(
-                x=x,
-                edge_index=snapshot.edge_index,
-                edge_weight=getattr(snapshot, "edge_weight", None),
-            )
+            fields: dict[str, object] = {
+                "x": x,
+                "edge_index": snapshot.edge_index,
+            }
+            edge_weight = getattr(snapshot, "edge_weight", None)
+            if edge_weight is not None:
+                fields["edge_weight"] = edge_weight
+            face_index = getattr(snapshot, "face_index", None)
+            if face_index is not None:
+                fields["face_index"] = face_index
+            snapshot = Data(**fields)
         return encode(snapshot, None, None)
 
     x_window, edge_index, edge_weight, _history_mask = stack_delay_features(

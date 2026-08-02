@@ -40,6 +40,16 @@ callable so intentional decode-topology differences stay explicit:
 Controls and ``delta_t`` are likewise supplied per step via optional
 callables; missing controls mean uncontrolled advance, and missing
 ``delta_t`` falls through to ``default_delta_t`` via :func:`propagate_latent`.
+
+Inactive-entity (presence-mask) rollout policy
+----------------------------------------------
+When a ``presence_at`` schedule is supplied, inactive rows use a **hold last
+active state** policy: the latent row and decoded feature row are frozen at
+their last active values while the entity is absent, then resume advancing on
+re-entry. Operator matvecs still run at the fixed union capacity ``N_max``;
+this policy does **not** shrink the latent width or claim a runtime speedup.
+When ``presence_at`` is omitted, behavior matches the fixed-cardinality 0.10
+path (all entities treated as present).
 """
 
 from __future__ import annotations
@@ -47,6 +57,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 
+import torch
 from torch import Tensor
 from torch_geometric.data import Data, HeteroData
 
@@ -65,6 +76,7 @@ TopologyAtFn = Callable[[int], tuple[Tensor, Tensor | None]]
 RelationTopologyAtFn = Callable[[int], tuple[list[Tensor], list[Tensor | None]]]
 ControlAtFn = Callable[[int], Tensor | None]
 DeltaTAtFn = Callable[[int], float | Tensor | None]
+PresenceAtFn = Callable[[int], Tensor | None]
 
 
 def resolve_delta_t(
@@ -100,6 +112,8 @@ def _topology_kwargs_for(
     edge_weight: Tensor | None,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    tail_index: Tensor | None = None,
+    head_index: Tensor | None = None,
     latent_window: Tensor | None = None,
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
@@ -111,10 +125,11 @@ def _topology_kwargs_for(
     """Return topology / window kwargs accepted by ``method``.
 
     Built-in operators accept optional ``edge_index`` / ``edge_weight`` and/or
-    ``hyperedge_index`` / ``hyperedge_weight``, relational ``edge_indices`` /
-    ``edge_weights``, and global/local operators accept ``latent_window``.
-    Older custom injected operators may omit those parameters; skip them so
-    Protocol injection keeps working without forcing every stub to update.
+    ``hyperedge_index`` / ``hyperedge_weight``, directed ``tail_index`` /
+    ``head_index``, relational ``edge_indices`` / ``edge_weights``, and
+    global/local operators accept ``latent_window``. Older custom injected
+    operators may omit those parameters; skip them so Protocol injection
+    keeps working without forcing every stub to update.
 
     Parameters
     ----------
@@ -128,6 +143,8 @@ def _topology_kwargs_for(
         Hyperedge incidence to forward when supported.
     hyperedge_weight : Tensor or None, optional
         Optional hyperedge weights to forward when supported.
+    tail_index, head_index : Tensor or None, optional
+        Directed-hypergraph incidence to forward when supported.
     latent_window : Tensor or None, optional
         Latent history window for global/local operators.
     edge_indices : sequence of Tensor or None, optional
@@ -158,6 +175,10 @@ def _topology_kwargs_for(
         kwargs["hyperedge_index"] = hyperedge_index
         if accepts_var_kw or "hyperedge_weight" in params:
             kwargs["hyperedge_weight"] = hyperedge_weight
+    if accepts_var_kw or "tail_index" in params:
+        kwargs["tail_index"] = tail_index
+    if accepts_var_kw or "head_index" in params:
+        kwargs["head_index"] = head_index
     if accepts_var_kw or "edge_indices" in params:
         kwargs["edge_indices"] = edge_indices
         if accepts_var_kw or "edge_weights" in params:
@@ -180,6 +201,8 @@ def propagate_latent(
     edge_weight: Tensor | None = None,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    tail_index: Tensor | None = None,
+    head_index: Tensor | None = None,
     latent_window: Tensor | None = None,
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
@@ -217,6 +240,8 @@ def propagate_latent(
         Hyperedge incidence for hypergraph operators.
     hyperedge_weight : Tensor or None, optional
         Optional hyperedge weights for hypergraph operators.
+    tail_index, head_index : Tensor or None, optional
+        Directed-hypergraph incidence for random-walk modes.
     latent_window : Tensor or None, optional
         Latent history for global/local operators (cold-start when omitted).
     edge_indices : sequence of Tensor or None, optional
@@ -243,6 +268,8 @@ def propagate_latent(
             edge_weight=edge_weight,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             latent_window=latent_window,
             edge_indices=edge_indices,
             edge_weights=edge_weights,
@@ -263,6 +290,8 @@ def inverse_propagate_latent(
     edge_weight: Tensor | None = None,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    tail_index: Tensor | None = None,
+    head_index: Tensor | None = None,
     latent_window: Tensor | None = None,
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
@@ -299,6 +328,8 @@ def inverse_propagate_latent(
         See the function signature / summary for ``hyperedge_index``.
     hyperedge_weight : Tensor | None
         See the function signature / summary for ``hyperedge_weight``.
+    tail_index, head_index : Tensor or None, optional
+        Directed-hypergraph incidence for random-walk modes.
     latent_window : Tensor | None
         See the function signature / summary for ``latent_window``.
     edge_indices : sequence of Tensor or None, optional
@@ -328,6 +359,8 @@ def inverse_propagate_latent(
             edge_weights=edge_weights,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             num_nodes_dict=num_nodes_dict,
         ),
     )
@@ -345,6 +378,8 @@ def advance_and_decode(
     default_delta_t: float | Tensor = 1.0,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    tail_index: Tensor | None = None,
+    head_index: Tensor | None = None,
     latent_window: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Advance latent state once and decode to physical node features.
@@ -376,6 +411,8 @@ def advance_and_decode(
         Static bipartite incidence for hypergraph operators.
     hyperedge_weight : Tensor or None, optional
         Optional hyperedge weights for hypergraph operators.
+    tail_index, head_index : Tensor or None, optional
+        Directed-hypergraph incidence for random-walk modes.
     latent_window : Tensor or None, optional
         Latent history for global/local operators.
 
@@ -394,6 +431,8 @@ def advance_and_decode(
         edge_weight=edge_weight,
         hyperedge_index=hyperedge_index,
         hyperedge_weight=hyperedge_weight,
+        tail_index=tail_index,
+        head_index=head_index,
         latent_window=latent_window,
     )
     prediction = decoder(z_next, edge_index, edge_weight)
@@ -497,9 +536,13 @@ def autoregressive_latent_rollout(
     topology_at: TopologyAtFn,
     control_at: ControlAtFn | None = None,
     delta_t_at: DeltaTAtFn | None = None,
+    presence_at: PresenceAtFn | None = None,
+    initial_features: Tensor | None = None,
     default_delta_t: float | Tensor = 1.0,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    tail_index: Tensor | None = None,
+    head_index: Tensor | None = None,
 ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
     """Run an autoregressive latent advance/decode loop.
 
@@ -507,8 +550,12 @@ def autoregressive_latent_rollout(
     initial graph once, then supply per-step topology / control / ``delta_t``
     policies. See the module docstring for topology policy guidance.
 
-    Hyperedge incidence is static (not scheduled by ``topology_at``) and is
-    forwarded unchanged to each advance for hypergraph operators.
+    Hyperedge / directed incidence is static (not scheduled by ``topology_at``)
+    and is forwarded unchanged to each advance for hypergraph operators.
+
+    When ``presence_at`` is set, inactive entities follow the **hold last
+    active state** policy (latent and decoded features). Matvecs still use the
+    full ``N_max`` latent width.
 
     Parameters
     ----------
@@ -529,13 +576,27 @@ def autoregressive_latent_rollout(
     delta_t_at : callable or None, optional
         ``delta_t_at(step) -> float | Tensor | None``. When omitted (or when a
         step returns ``None``), ``default_delta_t`` is used.
+    presence_at : callable or None, optional
+        ``presence_at(step) -> Tensor | None`` returning a boolean mask of
+        shape ``(num_nodes,)`` (``True`` = present). ``None`` return means all
+        present for that step. When the callable itself is omitted, no hold
+        policy is applied.
+    initial_features : Tensor or None, optional
+        Origin node features used to seed held decoded rows when an entity is
+        inactive before its first active decode. Shape
+        ``(num_nodes, feature_dim)``. When omitted, inactive rows with no
+        prior decode are zeroed until the entity is active once.
     default_delta_t : float or Tensor, optional
         Fallback continuous integration interval.
     hyperedge_index : Tensor or None, optional
         Static bipartite incidence for hypergraph operators.
     hyperedge_weight : Tensor or None, optional
         Optional hyperedge weights for hypergraph operators.
+    tail_index
+        See signature.
 
+    head_index
+        See signature.
     Returns
     -------
     list of tuple[Tensor, Tensor, Tensor or None]
@@ -545,14 +606,14 @@ def autoregressive_latent_rollout(
     Raises
     ------
     ValueError
-        If ``steps < 1``.
-    """
+        If ``steps < 1``."""
     if steps < 1:
         msg = f"steps must be >= 1, got {steps}"
         raise ValueError(msg)
 
     outputs: list[tuple[Tensor, Tensor, Tensor | None]] = []
     latent = z
+    held_features = None if initial_features is None else initial_features.clone()
     history: list[Tensor] = []
     accepts_window = "latent_window" in inspect.signature(koopman.advance).parameters
     local_window = int(getattr(koopman, "local_window", 0) or 0)
@@ -580,12 +641,38 @@ def autoregressive_latent_rollout(
             default_delta_t=default_delta_t,
             hyperedge_index=hyperedge_index,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             latent_window=latent_window,
         )
+        if presence_at is not None:
+            presence = presence_at(step)
+            if presence is not None:
+                present = presence.to(device=next_latent.device, dtype=torch.bool)
+                if present.numel() != next_latent.shape[0]:
+                    msg = (
+                        "presence_at mask length must match num_nodes, "
+                        f"got {present.numel()} vs {next_latent.shape[0]}"
+                    )
+                    raise ValueError(msg)
+                inactive = ~present
+                if bool(inactive.any()):
+                    next_latent = next_latent.clone()
+                    prediction = prediction.clone()
+                    next_latent[inactive] = latent[inactive]
+                    if held_features is None:
+                        prediction[inactive] = 0
+                    else:
+                        prediction[inactive] = held_features[inactive].to(
+                            dtype=prediction.dtype,
+                            device=prediction.device,
+                        )
         if accepts_window and local_window > 1:
             history.append(latent)
             history = history[-(local_window - 1) :]
         latent = next_latent
+        if presence_at is not None:
+            held_features = prediction.clone()
         outputs.append((prediction, edge_index, edge_weight))
     return outputs
 

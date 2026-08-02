@@ -9,6 +9,7 @@ Checkpoint format versions
     global_local / continuous_graph). Encoder/decoder ``type`` strings include
     ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
     ``"hyper_enc"``, ``"hyper_dec"``, ``"sim_enc"``, ``"sim_dec"``,
+    ``"sheaf_enc"``, ``"sheaf_dec"``, ``"cell_enc"``, ``"cell_dec"``,
     ``"inv_geom_enc"``, ``"relgraph_enc"``, and ``"relgraph_dec"``; missing
     decoder ``type`` defaults to ``"gcn"``. Hybrid ``physics`` blocks own
     ``dim``, ``preset``, and
@@ -21,10 +22,15 @@ Checkpoint format versions
     ``"block_diagonal"``, or ``"distributed"`` for supported networked kinds),
     ``adjacency`` (``"symmetric"`` / ``"random_walk"`` /
     ``"dual_random_walk"`` for graph / continuous-graph operators, else
-    ``None``), ``learn_topology`` (``None`` or ``"self_adaptive"``) with
-    ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
+    ``None``), additive ``hypergraph_incidence_mode``
+    (``"zhou_symmetric"`` / ``"forward_random_walk"`` /
+    ``"dual_random_walk"``; absent ⇒ ``"zhou_symmetric"`` for hypergraph;
+    ``None`` otherwise), ``learn_topology`` (``None`` or ``"self_adaptive"``)
+    with ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
     ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
-    graph / hypergraph operators).     When ``koopman_kind="hetero_graph"``,
+    graph / hypergraph operators; additive ``symmetry`` field
+    ``"orbit"`` / ``"isotypic"`` records ``koopman_symmetry`` without a
+    format bump). When ``koopman_kind="hetero_graph"``,
     additive keys ``node_types``, ``edge_types`` (JSON ``(src, rel, dst)``
     triples), ``relation_tying`` (``"independent"`` / ``"basis"``),
     ``basis_size``, and
@@ -36,6 +42,18 @@ Checkpoint format versions
     records per-type widths ``d_τ`` for rectangular hetero (Q1=A). Incomplete
     or mismatched ``latent_dims`` are rejected — never silently coerced from
     factor shapes. Homogeneous checkpoints omit and ignore these keys.
+    Additive sequence-contract keys ``allow_node_churn`` (bool; absent ⇒
+    ``False``), ``has_presence_masks`` (bool; absent ⇒ ``False``), and
+    optional ``entity_ids`` (JSON list of str/int; absent/null ⇒ ``None``)
+    record the training universe contract. Presence mask **tensors** are
+    sequence data and are **not** stored in checkpoints — reload them with
+    the sequence used for evaluation / further training.
+    Additive sequence-contract keys ``allow_node_churn`` (bool; absent ⇒
+    ``False``), ``has_presence_masks`` (bool; absent ⇒ ``False``), and
+    optional ``entity_ids`` (JSON list of str/int; absent/null ⇒ ``None``)
+    record the training universe contract. Presence mask **tensors** are
+    sequence data and are **not** stored in checkpoints — reload them with
+    the sequence used for evaluation / further training.
 
 Beta policy
     While the package is pre-1.0, ``FORMAT_VERSION`` stays at ``1``. Incomplete
@@ -52,6 +70,7 @@ silently writing incomplete factory metadata.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -63,6 +82,8 @@ from torch import nn
 from koopman_graph.data.hetero_layout import validate_latent_dims
 from koopman_graph.nn import (
     DEFAULT_TOPOLOGY_EMBEDDING_DIM,
+    CellComplexGNNDecoder,
+    CellComplexGNNEncoder,
     DelayEmbeddingEncoder,
     DiffConvDecoder,
     DiffConvEncoder,
@@ -79,6 +100,8 @@ from koopman_graph.nn import (
     RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
+    SheafGNNDecoder,
+    SheafGNNEncoder,
     SimplicialDecoder,
     SimplicialEncoder,
 )
@@ -142,6 +165,8 @@ Decoder = (
     | GraphTransformerDecoder
     | HypergraphDecoder
     | SimplicialDecoder
+    | SheafGNNDecoder
+    | CellComplexGNNDecoder
     | RelGraphDecoder
 )
 BaseEncoder = (
@@ -152,6 +177,8 @@ BaseEncoder = (
     | GraphTransformerEncoder
     | HypergraphEncoder
     | SimplicialEncoder
+    | SheafGNNEncoder
+    | CellComplexGNNEncoder
     | InvariantGeometryEncoder
     | RelGraphEncoder
 )
@@ -520,19 +547,22 @@ def _validate_hetero_latent_dims_vs_state(
 
 def _parse_symmetry_config(
     symmetry: Any,
-) -> tuple[list[list[int]] | None, bool, str]:
+) -> tuple[list[list[int]] | None, bool, str, str | None]:
     """Parse the format-1 ``symmetry`` config block into factory kwargs.
 
     Parameters
     ----------
     symmetry : Any
-        ``None`` or a dict with ``auto_orbits``, ``orbit_partition``, and
-        ``method``.
+        ``None`` or a dict with ``auto_orbits``, ``orbit_partition``,
+        ``method``, and optional additive ``symmetry``
+        (``"orbit"`` / ``"isotypic"``).
 
     Returns
     -------
     tuple
-        ``(orbit_partition, auto_orbits, orbit_method)``.
+        ``(orbit_partition, auto_orbits, orbit_method, koopman_symmetry)``.
+        ``koopman_symmetry`` is ``"isotypic"`` when the additive field says
+        so; otherwise ``None`` (orbit / legacy paths use the orbit kwargs).
 
     Raises
     ------
@@ -540,18 +570,26 @@ def _parse_symmetry_config(
         If the block shape or field types are invalid.
     """
     if symmetry is None:
-        return None, False, "auto"
+        return None, False, "auto", None
     if not isinstance(symmetry, dict):
         msg = f"symmetry config must be a dict or None, got {type(symmetry).__name__}"
         raise ValueError(msg)
+    mode = symmetry.get("symmetry")
+    if mode is not None and mode not in {"orbit", "isotypic"}:
+        msg = f"symmetry.symmetry must be 'orbit', 'isotypic', or absent, got {mode!r}"
+        raise ValueError(msg)
+    koopman_symmetry = "isotypic" if mode == "isotypic" else None
     auto_orbits = bool(symmetry.get("auto_orbits", False))
     method = symmetry.get("method", "auto")
+    if koopman_symmetry == "isotypic":
+        method = "exact"
+        auto_orbits = False
     if method not in {"auto", "exact"}:
         msg = f"symmetry.method must be 'auto' or 'exact', got {method!r}"
         raise ValueError(msg)
     raw_partition = symmetry.get("orbit_partition")
     if raw_partition is None:
-        return None, auto_orbits, method
+        return None, auto_orbits, method, koopman_symmetry
     if not isinstance(raw_partition, (list, tuple)):
         msg = "symmetry.orbit_partition must be a sequence of orbits or None"
         raise ValueError(msg)
@@ -561,7 +599,7 @@ def _parse_symmetry_config(
             msg = "each symmetry.orbit_partition orbit must be a sequence of ints"
             raise ValueError(msg)
         partition.append([int(node) for node in orbit])
-    return partition, auto_orbits, method
+    return partition, auto_orbits, method, koopman_symmetry
 
 
 def _package_version() -> str:
@@ -587,6 +625,8 @@ _SUPPORTED_ENCODER_TYPES: dict[str, type[BaseEncoder]] = {
     "transformer": GraphTransformerEncoder,
     "hyper_enc": HypergraphEncoder,
     "sim_enc": SimplicialEncoder,
+    "sheaf_enc": SheafGNNEncoder,
+    "cell_enc": CellComplexGNNEncoder,
     "inv_geom_enc": InvariantGeometryEncoder,
     "relgraph_enc": RelGraphEncoder,
 }
@@ -599,6 +639,8 @@ _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
     "transformer": GraphTransformerDecoder,
     "hyper_dec": HypergraphDecoder,
     "sim_dec": SimplicialDecoder,
+    "sheaf_dec": SheafGNNDecoder,
+    "cell_dec": CellComplexGNNDecoder,
     "relgraph_dec": RelGraphDecoder,
 }
 
@@ -616,8 +658,8 @@ def _encoder_type(encoder: BaseEncoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        ``"hyper_enc"``, ``"sim_enc"``, ``"inv_geom_enc"``, or
-        ``"relgraph_enc"``.
+        ``"hyper_enc"``, ``"sim_enc"``, ``"sheaf_enc"``, ``"cell_enc"``,
+        ``"inv_geom_enc"``, or ``"relgraph_enc"``.
 
     Raises
     ------
@@ -638,6 +680,10 @@ def _encoder_type(encoder: BaseEncoder) -> str:
         return "hyper_enc"
     if isinstance(encoder, SimplicialEncoder):
         return "sim_enc"
+    if isinstance(encoder, SheafGNNEncoder):
+        return "sheaf_enc"
+    if isinstance(encoder, CellComplexGNNEncoder):
+        return "cell_enc"
     if isinstance(encoder, InvariantGeometryEncoder):
         return "inv_geom_enc"
     if isinstance(encoder, RelGraphEncoder):
@@ -694,6 +740,8 @@ def _unwrap_base_encoder(
             GraphTransformerEncoder,
             HypergraphEncoder,
             SimplicialEncoder,
+            SheafGNNEncoder,
+            CellComplexGNNEncoder,
             InvariantGeometryEncoder,
             RelGraphEncoder,
         ),
@@ -716,7 +764,8 @@ def _decoder_type(decoder: Decoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        ``"hyper_dec"``, ``"sim_dec"``, or ``"relgraph_dec"``.
+        ``"hyper_dec"``, ``"sim_dec"``, ``"sheaf_dec"``, ``"cell_dec"``, or
+        ``"relgraph_dec"``.
 
     Raises
     ------
@@ -737,6 +786,10 @@ def _decoder_type(decoder: Decoder) -> str:
         return "hyper_dec"
     if isinstance(decoder, SimplicialDecoder):
         return "sim_dec"
+    if isinstance(decoder, SheafGNNDecoder):
+        return "sheaf_dec"
+    if isinstance(decoder, CellComplexGNNDecoder):
+        return "cell_dec"
     if isinstance(decoder, RelGraphDecoder):
         return "relgraph_dec"
     msg = f"Unsupported decoder type: {type(decoder).__name__}"
@@ -773,6 +826,137 @@ def _require_serializable_koopman(model: ModeShapeModel) -> None:
     raise TypeError(msg)
 
 
+def _operator_bound_num_nodes(model: ModeShapeModel) -> int | None:
+    """Return operator / adaptive-topology bound ``N_max`` when known.
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Model whose Koopman operator or adaptive topology may bind node count.
+
+    Returns
+    -------
+    int or None
+        Bound universe size, or ``None`` when the operator does not fix ``N``.
+    """
+    koopman = getattr(model, "koopman", None)
+    node_orbit = getattr(koopman, "_node_orbit", None)
+    if node_orbit is not None:
+        return int(node_orbit.numel())
+    adaptive = getattr(model, "adaptive_topology", None)
+    if adaptive is not None and getattr(adaptive, "num_nodes", None) is not None:
+        return int(adaptive.num_nodes)
+    return None
+
+
+def _coerce_checkpoint_entity_ids(
+    raw: object,
+) -> tuple[str | int, ...] | None:
+    """Validate optional checkpoint ``entity_ids`` into a typed tuple.
+
+    Parameters
+    ----------
+    raw : object
+        Checkpoint value (``None``, list, or tuple of str/int).
+
+    Returns
+    -------
+    tuple of str or int, or None
+        Coerced entity ids.
+
+    Raises
+    ------
+    ValueError
+        If the value is not a list/tuple of str/int, or is empty.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        msg = (
+            "Checkpoint config.entity_ids must be a list of str/int or null; "
+            f"got {type(raw).__name__}. Re-save with the current package."
+        )
+        raise ValueError(msg)
+    if len(raw) < 1:
+        msg = "Checkpoint config.entity_ids must be non-empty when provided"
+        raise ValueError(msg)
+    ids: list[str | int] = []
+    for idx, item in enumerate(raw):
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            msg = (
+                "Checkpoint config.entity_ids entries must be str or int; "
+                f"index {idx} has type {type(item).__name__}. Re-save with "
+                "the current package."
+            )
+            raise ValueError(msg)
+        ids.append(item)
+    return tuple(ids)
+
+
+def _reject_entity_ids_length_mismatch(
+    model: ModeShapeModel,
+    entity_ids: Sequence[str | int],
+) -> None:
+    """Reject ``entity_ids`` whose length disagrees with bound ``N_max``.
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Model that may expose a bound operator node count.
+    entity_ids : sequence of str or int
+        Candidate universe keys.
+
+    Raises
+    ------
+    ValueError
+        If a bound ``N_max`` exists and ``len(entity_ids)`` differs.
+    """
+    bound = _operator_bound_num_nodes(model)
+    if bound is None:
+        return
+    if len(entity_ids) == bound:
+        return
+    msg = (
+        f"Checkpoint entity_ids length ({len(entity_ids)}) disagrees with "
+        f"operator N_max ({bound}); re-save with matching entity_ids or "
+        "rebuild the model. Presence mask tensors are sequence data and are "
+        "not stored in checkpoints."
+    )
+    raise ValueError(msg)
+
+
+def _apply_churn_contract_from_config(
+    model: ModeShapeModel,
+    config: dict[str, Any],
+) -> None:
+    """Restore additive churn-contract keys onto ``model``.
+
+    Absent keys load as the 0.10 fixed-cardinality contract
+    (``allow_node_churn=False``, ``has_presence_masks=False``,
+    ``entity_ids=None``).
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Reconstructed model receiving the contract attributes.
+    config : dict
+        Architecture configuration block from a checkpoint.
+
+    Raises
+    ------
+    ValueError
+        If ``entity_ids`` are malformed or disagree with bound ``N_max``.
+    """
+    allow = bool(config.get("allow_node_churn", False))
+    has_presence = bool(config.get("has_presence_masks", False))
+    entity_ids = _coerce_checkpoint_entity_ids(config.get("entity_ids"))
+    if entity_ids is not None:
+        _reject_entity_ids_length_mismatch(model, entity_ids)
+    model._allow_node_churn = allow  # type: ignore[attr-defined]
+    model._has_presence_masks = has_presence  # type: ignore[attr-defined]
+    model._entity_ids = entity_ids  # type: ignore[attr-defined]
+
+
 def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
     """Extract architecture configuration from a :class:`GraphKoopmanModel`.
 
@@ -793,6 +977,8 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         :class:`~koopman_graph.operators.KoopmanOperator`,
         :class:`~koopman_graph.operators.ContinuousKoopmanOperator`, or
         :class:`~koopman_graph.operators.GraphKoopmanOperator`).
+    ValueError
+        If stamped ``entity_ids`` disagree with a bound operator ``N_max``.
     """
     _require_serializable_koopman(model)
     encoder, n_delays = _unwrap_base_encoder(model.encoder)
@@ -813,6 +999,11 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
     if isinstance(encoder, DiffConvEncoder):
         encoder_config["diffusion_steps"] = encoder.diffusion_steps
     if isinstance(encoder, SimplicialEncoder):
+        encoder_config["residual"] = encoder.residual
+    if isinstance(encoder, SheafGNNEncoder):
+        encoder_config["residual"] = encoder.residual
+        encoder_config["restriction_maps"] = encoder.restriction_maps
+    if isinstance(encoder, CellComplexGNNEncoder):
         encoder_config["residual"] = encoder.residual
     if isinstance(encoder, RelGraphEncoder):
         encoder_config["num_relations"] = encoder.num_relations
@@ -842,6 +1033,11 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         decoder_config["diffusion_steps"] = decoder.diffusion_steps
     if isinstance(decoder, SimplicialDecoder):
         decoder_config["residual"] = decoder.residual
+    if isinstance(decoder, SheafGNNDecoder):
+        decoder_config["residual"] = decoder.residual
+        decoder_config["restriction_maps"] = decoder.restriction_maps
+    if isinstance(decoder, CellComplexGNNDecoder):
+        decoder_config["residual"] = decoder.residual
     if isinstance(decoder, RelGraphDecoder):
         decoder_config["num_relations"] = decoder.num_relations
         decoder_config["normalization"] = decoder.normalization
@@ -863,6 +1059,7 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
 
     sparsity = getattr(model.koopman, "sparsity", "dense")
     adjacency = getattr(model.koopman, "adjacency", None)
+    incidence_mode = getattr(model.koopman, "incidence_mode", None)
     config: dict[str, Any] = {
         "latent_dim": model.latent_dim,
         "time_step": model.time_step,
@@ -905,6 +1102,11 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         "decoder": decoder_config,
         "sparsity": sparsity,
         "adjacency": adjacency,
+        "hypergraph_incidence_mode": (
+            str(incidence_mode)
+            if isinstance(model.koopman, HypergraphKoopmanOperator)
+            else None
+        ),
         "learn_topology": getattr(model, "learn_topology", None),
         "topology_embedding_dim": (
             int(model.topology_embedding_dim)
@@ -916,7 +1118,13 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
             if hasattr(model.koopman, "symmetry_config")
             else None
         ),
+        "allow_node_churn": bool(getattr(model, "allow_node_churn", False)),
+        "has_presence_masks": bool(getattr(model, "has_presence_masks", False)),
     }
+    entity_ids = getattr(model, "entity_ids", None)
+    if entity_ids is not None:
+        config["entity_ids"] = list(entity_ids)
+        _reject_entity_ids_length_mismatch(model, entity_ids)
     if isinstance(model.koopman, HeteroGraphKoopmanOperator):
         config["node_types"] = list(model.koopman.node_types)
         config["edge_types"] = [list(triple) for triple in model.koopman.edge_types]
@@ -991,6 +1199,17 @@ def _build_encoder(
             **common_kwargs,
             residual=config.get("residual", False),
         )
+    if encoder_type == "sheaf_enc":
+        return SheafGNNEncoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+            restriction_maps=config.get("restriction_maps", "diagonal"),
+        )
+    if encoder_type == "cell_enc":
+        return CellComplexGNNEncoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+        )
     if encoder_type == "inv_geom_enc":
         return InvariantGeometryEncoder(**common_kwargs)
     if encoder_type == "relgraph_enc":
@@ -1062,6 +1281,17 @@ def _build_decoder(
         return HypergraphDecoder(**common_kwargs)
     if decoder_type == "sim_dec":
         return SimplicialDecoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+        )
+    if decoder_type == "sheaf_dec":
+        return SheafGNNDecoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+            restriction_maps=config.get("restriction_maps", "diagonal"),
+        )
+    if decoder_type == "cell_dec":
+        return CellComplexGNNDecoder(
             **common_kwargs,
             residual=config.get("residual", False),
         )
@@ -1145,8 +1375,8 @@ def reconstruct_model(
         task = _RESERVED_KOOPMAN_KINDS[koopman_kind]
         msg = f"koopman_kind={koopman_kind!r} is planned; lands in {task}"
         raise ValueError(msg)
-    orbit_partition, auto_orbits, orbit_method = _parse_symmetry_config(
-        config.get("symmetry")
+    orbit_partition, auto_orbits, orbit_method, koopman_symmetry = (
+        _parse_symmetry_config(config.get("symmetry"))
     )
     koopman_adjacency = _resolve_checkpoint_adjacency(
         config["adjacency"],
@@ -1163,7 +1393,16 @@ def reconstruct_model(
         if koopman_kind == "hetero_graph"
         else None
     )
-    return GraphKoopmanModel(
+    # Isotypic is mutually exclusive with orbit kwargs at the factory; restore
+    # a saved partition after construction so state_dict bank shapes match.
+    # Factory requires the default orbit_method when isotypic (exact is forced
+    # inside the operator).
+    factory_orbit_partition = (
+        None if koopman_symmetry == "isotypic" else orbit_partition
+    )
+    factory_auto_orbits = False if koopman_symmetry == "isotypic" else auto_orbits
+    factory_orbit_method = "auto" if koopman_symmetry == "isotypic" else orbit_method
+    model = GraphKoopmanModel(
         encoder=encoder,
         decoder=decoder,
         latent_dim=config["latent_dim"],
@@ -1177,6 +1416,10 @@ def reconstruct_model(
         koopman_auxiliary_hidden_dims=config.get("koopman_auxiliary_hidden_dims"),
         koopman_sparsity=config.get("sparsity", "dense"),
         koopman_adjacency=koopman_adjacency,
+        koopman_hypergraph_incidence_mode=str(
+            config.get("hypergraph_incidence_mode", "zhou_symmetric")
+            or "zhou_symmetric"
+        ),
         koopman_local_window=(
             int(config["local_window"]) if config.get("local_window") is not None else 4
         ),
@@ -1184,9 +1427,10 @@ def reconstruct_model(
             int(config["local_rank"]) if config.get("local_rank") is not None else 2
         ),
         koopman_local_hidden_dims=config.get("local_hidden_dims"),
-        koopman_orbit_partition=orbit_partition,
-        koopman_auto_orbits=auto_orbits,
-        koopman_orbit_method=orbit_method,
+        koopman_orbit_partition=factory_orbit_partition,
+        koopman_auto_orbits=factory_auto_orbits,
+        koopman_orbit_method=factory_orbit_method,
+        koopman_symmetry=koopman_symmetry,
         learn_topology=learn_topology,
         topology_embedding_dim=(
             int(topology_embedding_dim)
@@ -1220,6 +1464,15 @@ def reconstruct_model(
         ),
         koopman_latent_dims=hetero_latent_dims,
     )
+    if (
+        koopman_symmetry == "isotypic"
+        and orbit_partition is not None
+        and hasattr(model.koopman, "set_orbit_partition")
+    ):
+        num_nodes = max(max(orbit) for orbit in orbit_partition) + 1
+        model.koopman.set_orbit_partition(orbit_partition, num_nodes=num_nodes)
+    _apply_churn_contract_from_config(model, config)
+    return model
 
 
 def build_checkpoint(model: ModeShapeModel) -> dict[str, Any]:
@@ -1354,6 +1607,8 @@ def load_checkpoint(
         _validate_hetero_latent_dims_vs_state(migrated_config, state_dict)
     model = reconstruct_model(migrated_config, physics_lifting_fn=physics_lifting_fn)
     _allocate_adaptive_topology_from_state(model, state_dict)
+    # Re-validate entity_ids once adaptive topology binds N_max from state.
+    _apply_churn_contract_from_config(model, migrated_config)
     model.load_state_dict(state_dict)
     model.eval()
     return model
