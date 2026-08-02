@@ -86,6 +86,8 @@ operator contract are unchanged.
   infinite-dimensional ResDMD, equivariant latent \(K\), full DPK /
   \(K^{2}\)VAE, etc.) are listed in Sphinx `limitations` without a deferred
   roadmap of the same shipped items.
+- Zenodo version DOI:
+  [10.5281/zenodo.21763908](https://doi.org/10.5281/zenodo.21763908).
 
 ## [0.10.0] - 2026-08-01
 
