@@ -5,6 +5,13 @@ the shared pseudoinverse-normalized Laplacian in :mod:`koopman_graph.graph_utils
 Benchmark diffusion in :mod:`koopman_graph.datasets.dynamics` uses the same
 ``L_sym`` definition but a dense one-step operator for offline rollouts. Both
 paths accumulate duplicate edges.
+
+Simplicial-1 / Hodge helpers (``hodge_gradient``, ``simplicial_one_laplacian``)
+use the combinatorial 1-Laplacian ``L_1 = B_1 B_1^T`` from a signed edge
+incidence ``B_1``. They are **not** sheaf or cell-complex operators and are
+distinct from ``L_sym``. Optional ``face_index`` on ``Data`` is validated for
+downstream simplicial encoders but does not change ``B_1`` (which comes from
+``edge_index``).
 """
 
 from __future__ import annotations
@@ -29,6 +36,8 @@ PhysicsPresetName = Literal[
     "graph_curvature",
     "graph_gradient",
     "graph_laplacian",
+    "hodge_gradient",
+    "simplicial_one_laplacian",
 ]
 
 PHYSICS_POSITION: PhysicsPosition = "prepend"
@@ -228,9 +237,255 @@ def make_polynomial_features(degree: int) -> PhysicsLiftingFn:
     return lift
 
 
+def coerce_face_index(face_index: Tensor, *, num_nodes: int) -> Tensor:
+    """Validate triangular ``face_index`` with shape ``(3, num_faces)``.
+
+    Each column is one 2-simplex (triangle) whose entries are node ids in
+    ``[0, num_nodes)``. Used by simplicial-1 pipelines; sheaf / cell complexes
+    are out of scope.
+
+    Parameters
+    ----------
+    face_index : Tensor
+        Candidate face incidence with shape ``(3, num_faces)``.
+    num_nodes : int
+        Number of nodes in the complex.
+
+    Returns
+    -------
+    Tensor
+        Cloned ``long`` tensor with the same shape.
+
+    Raises
+    ------
+    ValueError
+        If rank/shape is wrong, ``num_nodes`` is invalid, or any node id is
+        out of range.
+    """
+    if num_nodes < 1:
+        msg = f"num_nodes must be >= 1, got {num_nodes}"
+        raise ValueError(msg)
+    if face_index.ndim != 2 or face_index.shape[0] != 3:
+        msg = (
+            f"face_index must have shape (3, num_faces), got {tuple(face_index.shape)}"
+        )
+        raise ValueError(msg)
+    if face_index.numel() == 0:
+        return face_index.to(dtype=torch.long).detach().clone()
+    if not face_index.dtype.is_floating_point and face_index.dtype != torch.bool:
+        coerced = face_index.to(dtype=torch.long)
+    else:
+        msg = f"face_index must be an integer tensor, got dtype {face_index.dtype}"
+        raise ValueError(msg)
+    if bool((coerced < 0).any()) or bool((coerced >= num_nodes).any()):
+        msg = (
+            f"face_index node ids must lie in [0, {num_nodes}), "
+            f"got min={int(coerced.min())} max={int(coerced.max())}"
+        )
+        raise ValueError(msg)
+    return coerced.detach().clone()
+
+
+def boundary_incidence_b1(edge_index: Tensor, *, num_nodes: int) -> Tensor:
+    """Build the signed boundary incidence ``B_1`` with shape ``(N, E)``.
+
+    Column ``e`` corresponding to oriented edge ``(i → j)`` has ``+1`` at the
+    tail ``i`` and ``-1`` at the head ``j``. Pass **one oriented column per
+    undirected edge** (not a doubled symmetric ``edge_index``) so
+    ``L_1 = B_1 B_1^T`` matches the combinatorial graph Laplacian on that
+    undirected graph.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Oriented edges with shape ``(2, num_edges)``.
+    num_nodes : int
+        Number of nodes ``N``.
+
+    Returns
+    -------
+    Tensor
+        Dense signed incidence of shape ``(num_nodes, num_edges)``.
+
+    Raises
+    ------
+    ValueError
+        If ``edge_index`` shape or node ids are invalid.
+    """
+    if num_nodes < 1:
+        msg = f"num_nodes must be >= 1, got {num_nodes}"
+        raise ValueError(msg)
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        msg = (
+            f"edge_index must have shape (2, num_edges), got {tuple(edge_index.shape)}"
+        )
+        raise ValueError(msg)
+    edges = edge_index.to(dtype=torch.long)
+    if edges.numel() > 0 and (
+        bool((edges < 0).any()) or bool((edges >= num_nodes).any())
+    ):
+        msg = (
+            f"edge_index node ids must lie in [0, {num_nodes}), "
+            f"got min={int(edges.min())} max={int(edges.max())}"
+        )
+        raise ValueError(msg)
+    num_edges = int(edges.shape[1])
+    incidence = torch.zeros(
+        num_nodes,
+        num_edges,
+        dtype=torch.float32,
+        device=edges.device,
+    )
+    if num_edges == 0:
+        return incidence
+    tails = edges[0]
+    heads = edges[1]
+    edge_ids = torch.arange(num_edges, device=edges.device)
+    incidence[tails, edge_ids] = 1.0
+    incidence[heads, edge_ids] = -1.0
+    # Self-loops cancel to zero in the signed incidence.
+    self_loop = tails == heads
+    if bool(self_loop.any()):
+        incidence[:, self_loop] = 0.0
+    return incidence
+
+
+def _maybe_validate_face_index(data: Data, *, num_nodes: int) -> None:
+    """Validate optional ``data.face_index`` when present.
+
+    Parameters
+    ----------
+    data
+        Value for ``data``.
+    num_nodes
+        Value for ``num_nodes``.
+    """
+    face_index = getattr(data, "face_index", None)
+    if face_index is None:
+        return
+    coerce_face_index(face_index, num_nodes=num_nodes)
+
+
+def simplicial_one_laplacian_matvec(
+    edge_index: Tensor,
+    x: Tensor,
+    *,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply combinatorial ``L_1 = B_1 B_1^T`` as ``B_1 @ (B_1.T @ x)``.
+
+    This is the simplicial-1 / combinatorial graph Laplacian associated with
+    the oriented edges — **not** the symmetrically normalized ``L_sym`` used by
+    :func:`graph_laplacian_features`, and not a sheaf Laplacian.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Oriented edges ``(2, E)`` (one column per undirected edge).
+    x : Tensor
+        Node features with shape ``(num_nodes, in_channels)``.
+    num_nodes : int or None, optional
+        Node count. Defaults to ``x.size(0)``.
+
+    Returns
+    -------
+    Tensor
+        Features ``L_1 @ x`` with the same shape as ``x``.
+    """
+    if x.ndim != 2:
+        msg = f"x must be 2D, got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    resolved_nodes = x.size(0) if num_nodes is None else int(num_nodes)
+    if resolved_nodes != x.size(0):
+        msg = f"num_nodes={resolved_nodes} does not match x.size(0)={x.size(0)}"
+        raise ValueError(msg)
+    incidence = boundary_incidence_b1(edge_index, num_nodes=resolved_nodes).to(
+        dtype=x.dtype,
+        device=x.device,
+    )
+    edge_signal = incidence.T @ x
+    return incidence @ edge_signal
+
+
+def simplicial_one_laplacian_features(data: Data) -> Tensor:
+    """Return combinatorial 1-Laplacian features ``L_1 @ x``.
+
+    Requires ``data.x`` and oriented ``data.edge_index``. Optional
+    ``data.face_index`` is validated when present. Output shape is
+    ``(num_nodes, in_channels)`` so ``physics_dim`` equals ``in_channels``.
+
+    Parameters
+    ----------
+    data : Data
+        Graph snapshot with node features and oriented edges.
+
+    Returns
+    -------
+    Tensor
+        Simplicial-1 Laplacian features with the same shape as ``data.x``.
+    """
+    if data.x is None:
+        msg = "data.x is required for simplicial_one_laplacian_features"
+        raise ValueError(msg)
+    if data.x.dim() != 2:
+        msg = f"data.x must be 2D, got shape {tuple(data.x.shape)}"
+        raise ValueError(msg)
+    if data.edge_index is None:
+        msg = "data.edge_index is required for simplicial_one_laplacian_features"
+        raise ValueError(msg)
+    _maybe_validate_face_index(data, num_nodes=int(data.x.size(0)))
+    return simplicial_one_laplacian_matvec(
+        data.edge_index,
+        data.x,
+        num_nodes=int(data.x.size(0)),
+    )
+
+
+def hodge_gradient_features(data: Data) -> Tensor:
+    r"""Return nodewise Hodge-gradient magnitudes from oriented edges.
+
+    Computes the edge signal ``y = B_1^\top x`` and aggregates the RMS of
+    incident edge values onto each node (via ``|B_1|``). Isolated nodes map to
+    zero. This is a simplicial-1 Hodge-style gradient energy — not a sheaf
+    operator and not :func:`graph_gradient_features`.
+
+    Parameters
+    ----------
+    data : Data
+        Graph snapshot with two-dimensional ``x`` and oriented ``edge_index``.
+        Optional ``face_index`` is validated when present.
+
+    Returns
+    -------
+    Tensor
+        Non-negative node features with shape ``(num_nodes, in_channels)``.
+    """
+    if data.x is None:
+        msg = "data.x is required for hodge_gradient_features"
+        raise ValueError(msg)
+    if data.x.dim() != 2:
+        msg = f"data.x must be 2D, got shape {tuple(data.x.shape)}"
+        raise ValueError(msg)
+    if data.edge_index is None:
+        msg = "data.edge_index is required for hodge_gradient_features"
+        raise ValueError(msg)
+    x = data.x
+    num_nodes = int(x.size(0))
+    _maybe_validate_face_index(data, num_nodes=num_nodes)
+    incidence = boundary_incidence_b1(data.edge_index, num_nodes=num_nodes).to(
+        dtype=x.dtype,
+        device=x.device,
+    )
+    edge_signal = incidence.T @ x
+    energy = incidence.abs() @ edge_signal.square()
+    return energy.clamp_min(0).sqrt()
+
+
 PHYSICS_PRESETS["graph_gradient"] = graph_gradient_features
 PHYSICS_PRESETS["graph_curvature"] = graph_curvature_features
 PHYSICS_PRESETS["graph_laplacian"] = graph_laplacian_features
+PHYSICS_PRESETS["hodge_gradient"] = hodge_gradient_features
+PHYSICS_PRESETS["simplicial_one_laplacian"] = simplicial_one_laplacian_features
 
 
 def resolve_physics_lifting_fn(
@@ -244,8 +499,9 @@ def resolve_physics_lifting_fn(
     ----------
     physics_preset : str or None, optional
         Registered preset name such as ``"graph_laplacian"``,
-        ``"graph_gradient"``, or ``"graph_curvature"``. Dynamic polynomial
-        presets use ``"polynomial(degree)"``, for example ``"polynomial(3)"``.
+        ``"graph_gradient"``, ``"graph_curvature"``, ``"hodge_gradient"``,
+        or ``"simplicial_one_laplacian"``. Dynamic polynomial presets use
+        ``"polynomial(degree)"``, for example ``"polynomial(3)"``.
     physics_lifting_fn : callable or None, optional
         Custom lifting function. When both a preset and a custom function are
         provided, the custom function takes precedence.

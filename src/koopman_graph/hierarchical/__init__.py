@@ -6,7 +6,10 @@ Capability layout
     :class:`~koopman_graph.hierarchical.HierarchicalGraphKoopmanModel` —
     pool (TopK / optional SAG) → composed
     :class:`~koopman_graph.model.GraphKoopmanModel` on the coarse graph →
-    learned scatter-unpool.
+    learned scatter-unpool. Homogeneous, multiplex hetero (single node
+    type; union-bank TopK/SAG), and typed multi-node hetero (per-type
+    pool/unpool with paired cross-type bank induction) are supported.
+    Hetero ``fit`` requires ``pool_schedule="hold_perm"``.
 ``pooling``
     Pooling helpers (:func:`~koopman_graph.hierarchical.build_pool_layer`,
     :class:`~koopman_graph.hierarchical.ScatterUnpool`, control pooling).

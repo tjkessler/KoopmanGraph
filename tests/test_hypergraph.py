@@ -1023,19 +1023,19 @@ def test_hypergraph_block_diagonal_inverse_large_n_smoke() -> None:
     assert recovered.numel() * recovered.element_size() < 1_000_000
 
 
-def test_hypergraph_distributed_sparsity_rejected() -> None:
-    """distributed sparsity stays reserved with a planned message."""
+def test_hypergraph_distributed_sparsity_constructs() -> None:
+    """sparsity='distributed' constructs for hypergraph (checkpoint-compatible)."""
     from koopman_graph.operators import HypergraphKoopmanOperator
 
-    with pytest.raises(ValueError, match="planned; not in 0.6.0"):
-        HypergraphKoopmanOperator(2, sparsity="distributed")  # type: ignore[arg-type]
+    op = HypergraphKoopmanOperator(2, sparsity="distributed")
+    assert op.sparsity == "distributed"
 
 
 def test_hypergraph_invalid_sparsity_rejected() -> None:
     """Unsupported sparsity strings raise clearly."""
     from koopman_graph.operators import HypergraphKoopmanOperator
 
-    with pytest.raises(ValueError, match="must be 'dense' or 'block_diagonal'"):
+    with pytest.raises(ValueError, match="must be 'dense'"):
         HypergraphKoopmanOperator(2, sparsity="sparse")  # type: ignore[arg-type]
 
 

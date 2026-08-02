@@ -55,6 +55,12 @@ Capability layout
 ``heterogeneous``
     :class:`~koopman_graph.operators.heterogeneous.HeteroGraphKoopmanOperator`
     (multiplex per-relation discrete advance; package export).
+``matrix_free``
+    Matrix-free ``apply_k_eff_*`` matvecs, Richardson / Neumann
+    ``invert_k_eff_*`` solvers, and Arnoldi ``spectrum_k_eff_*`` helpers
+    for networked effective operators (primitives for
+    ``sparsity="distributed"``; **not** trainer DDP / ``[distributed]``
+    extras; does **not** enable multi-GPU training).
 ``global_local``
     :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
     (discrete global backbone + low-rank local window correction).
@@ -62,6 +68,10 @@ Capability layout
     :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
     (continuous networked generator; ``koopman="graph"`` + continuous or alias
     ``koopman="continuous_graph"``).
+``continuous_hetero``
+    :class:`~koopman_graph.operators.continuous_hetero.ContinuousHeteroGraphKoopmanOperator`
+    (continuous multiplex / typed relational generator; ``koopman="hetero_graph"``
+    + ``dynamics_mode="continuous"``).
 
 Prefer ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
@@ -87,6 +97,9 @@ from koopman_graph.operators.continuous import (
 from koopman_graph.operators.continuous_graph import (
     ContinuousGraphKoopmanOperator,
     ContinuousGraphSparsity,
+)
+from koopman_graph.operators.continuous_hetero import (
+    ContinuousHeteroGraphKoopmanOperator,
 )
 from koopman_graph.operators.contract import (
     DISSIPATIVE_MIN_EIGENVALUE,
@@ -123,17 +136,46 @@ from koopman_graph.operators.hypergraph import (
     HypergraphKoopmanOperator,
     HypergraphSparsity,
 )
+from koopman_graph.operators.matrix_free import (
+    DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES,
+    DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
+    DEFAULT_MATRIX_FREE_INVERSE_MAX_ITERS,
+    DEFAULT_MATRIX_FREE_INVERSE_TOL,
+    DEFAULT_MATRIX_FREE_SPECTRUM_TOL,
+    MatrixFreeInverseResult,
+    MatrixFreeSpectrumResult,
+    apply_k_eff_graph,
+    apply_k_eff_hetero,
+    flatten_node_latents,
+    invert_k_eff_graph,
+    invert_k_eff_hetero,
+    spectrum_k_eff_graph,
+    spectrum_k_eff_hetero,
+    unflatten_node_latents,
+)
+from koopman_graph.operators.stochastic import (
+    apply_process_noise,
+    attach_process_noise,
+    diagonal_process_covariance,
+    maybe_apply_process_noise,
+)
 
 __all__ = [
     "AuxiliarySpectralNetwork",
     "ContinuousGraphKoopmanOperator",
     "ContinuousGraphSparsity",
+    "ContinuousHeteroGraphKoopmanOperator",
     "ContinuousKoopmanOperator",
     "ControlMode",
     "DEFAULT_AUXILIARY_HIDDEN_DIMS",
     "DEFAULT_LOCAL_HIDDEN_DIMS",
     "DEFAULT_LOCAL_RANK",
     "DEFAULT_LOCAL_WINDOW",
+    "DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES",
+    "DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES",
+    "DEFAULT_MATRIX_FREE_INVERSE_MAX_ITERS",
+    "DEFAULT_MATRIX_FREE_INVERSE_TOL",
+    "DEFAULT_MATRIX_FREE_SPECTRUM_TOL",
     "DISSIPATIVE_MIN_EIGENVALUE",
     "DynamicsMode",
     "GeneratorParameterization",
@@ -148,24 +190,38 @@ __all__ = [
     "KoopmanKind",
     "KoopmanOperator",
     "KoopmanOperatorContract",
+    "MatrixFreeInverseResult",
+    "MatrixFreeSpectrumResult",
     "Parameterization",
     "STABILITY_EPS_MARGIN",
     "StabilityCertificate",
     "VAN_LOAN_WRITEBACK_ATOL",
+    "apply_k_eff_graph",
+    "apply_k_eff_hetero",
+    "apply_process_noise",
     "assemble_block_diagonal_generator",
+    "attach_process_noise",
     "bounded_diagonal",
     "build_stability_certificate",
     "cayley_orthogonal",
+    "diagonal_process_covariance",
+    "flatten_node_latents",
+    "invert_k_eff_graph",
+    "invert_k_eff_hetero",
     "matrix_log",
+    "maybe_apply_process_noise",
     "normalize_auxiliary_hidden_dims",
     "normalize_local_hidden_dims",
     "pad_latent_window",
     "resolve_factory_stability_bound",
     "safe_diagonal_inverse",
     "spectral_output_dim",
+    "spectrum_k_eff_graph",
+    "spectrum_k_eff_hetero",
     "stack_latent_window",
     "strict_diagonal_values",
     "strict_spectral_bound",
+    "unflatten_node_latents",
     "van_loan_factors",
     "van_loan_generator_from_discrete",
 ]

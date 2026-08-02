@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor, nn
 
+if TYPE_CHECKING:
+    from koopman_graph.operators.joint_stability import JointStabilityCertificate
+
+from koopman_graph.data.hetero_layout import (
+    latent_type_slices_from_dims,
+    node_type_offsets,
+    stacked_latent_numel,
+    validate_latent_dims,
+)
 from koopman_graph.graph_utils import (
     RELATION_NORMALIZATION_MODES,
     RelationNormalization,
     dense_relation_normalized_adjacency,
     relation_normalized_adjacency_matvec,
 )
+from koopman_graph.graph_utils.symmetry import OrbitMethod, node_orbit_partition
 from koopman_graph.operators.contract import (
     InitMode,
     Parameterization,
@@ -28,7 +38,16 @@ from koopman_graph.operators.control import (
 )
 from koopman_graph.operators.discrete import KoopmanOperator
 from koopman_graph.operators.discrete_propagation import dense_inverse_or_pinv
+from koopman_graph.operators.graph import _koopman_spectrum_from_eigenvalues
 from koopman_graph.operators.graph_types import GraphSparsity
+from koopman_graph.operators.matrix_free import (
+    DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
+    flatten_node_latents,
+    invert_k_eff_hetero,
+    spectrum_k_eff_hetero,
+    unflatten_node_latents,
+)
+from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 __all__ = [
@@ -281,7 +300,28 @@ def _normalize_edge_types(
     return tuple(resolved)
 
 
-class HeteroGraphKoopmanOperator(nn.Module):
+def _union_relation_edge_index(edge_indices: Sequence[Tensor]) -> Tensor:
+    """Concatenate nonempty relation banks into one stacked-global edge index.
+
+    Parameters
+    ----------
+    edge_indices : sequence of Tensor
+        Per-relation ``(2, E_r)`` banks (global numbering).
+
+    Returns
+    -------
+    Tensor
+        Union ``edge_index`` with shape ``(2, E_union)`` (may be empty).
+    """
+    nonempty = [bank for bank in edge_indices if bank.numel() > 0]
+    if not nonempty:
+        device = edge_indices[0].device if edge_indices else torch.device("cpu")
+        dtype = edge_indices[0].dtype if edge_indices else torch.long
+        return torch.zeros(2, 0, dtype=dtype, device=device)
+    return torch.cat(nonempty, dim=1)
+
+
+class HeteroGraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     """Discrete multiplex / typed Koopman step with per-relation coupling.
 
     Advances stacked node latents ``Z ∈ R^{N×d}`` via the linear map matching
@@ -304,8 +344,19 @@ class HeteroGraphKoopmanOperator(nn.Module):
     ``N = Σ_τ N_τ`` block ordered by :attr:`node_types`, take relation banks in
     **global** (offset) node numbering, and require ``num_nodes_dict`` so the
     self blocks can be sliced; see
-    :mod:`koopman_graph.data.hetero_layout` for the layout helpers. Per-type
-    latent widths ``d_τ`` are not supported.
+    :mod:`koopman_graph.data.hetero_layout` for the layout helpers.
+
+    **Opt-in unequal widths (``latent_dims``).** When ``latent_dims`` maps each
+    type to ``d_τ`` and at least one width differs from the shared
+    ``latent_dim``, the operator is **rectangular**: ``K_self^τ ∈ R^{d_τ×d_τ}``
+    and, for edge ``(τ_s, r, τ_d)``, ``K_r ∈ R^{d_{τ_s}×d_{τ_d}}`` (Appendix B /
+    Q2=A). Relation advance uses ``(Â_r Z_src) @ K_r`` (no transpose on
+    ``K_r``); the dense ``K_eff`` block for that relation is
+    ``Â_{dst←src} ⊗ K_r.T`` so ``flat_next = K_eff @ flat`` matches the
+    shared-d layout convention. Shared-d square factors (absent
+    ``latent_dims``, or all ``d_τ == latent_dim``) keep
+    ``(Â Z) @ K_r.T`` / ``Â ⊗ K_r``. RelGraph heads for unequal ``d_τ`` are
+    TASK-1816; inject this operator for oracles until then.
 
     where ``Â_r`` is the per-relation degree-normalized adjacency from
     :func:`~koopman_graph.graph_utils.relation_degree_normalize`
@@ -333,7 +384,13 @@ class HeteroGraphKoopmanOperator(nn.Module):
 
     Control (additive or bilinear) lives on the self factor only; relation
     factors are uncontrolled, and control is rejected for typed operators.
-    Orbit ties and continuous generators are out of scope here.
+    Multiplex orbit ties (``auto_orbits`` / ``orbit_partition``) reuse the
+    homogeneous stacked-``N`` partition on the **union** of relation banks.
+    Shared-d typed orbit ties partition **within each type block**
+    independently (intra-type edges); orbits must not mix type blocks.
+    Rectangular orbit ties are unsupported. Isotypic / irrep reduction is
+    reserved for 0.11. Continuous generators live in
+    :mod:`koopman_graph.operators.continuous_hetero`.
 
     Relation tying (R-GCN basis-decomposition motivation — not a full paper
     reproduction) is selected by ``relation_tying``::
@@ -370,7 +427,10 @@ class HeteroGraphKoopmanOperator(nn.Module):
     normalization : {"rgcn_in_degree", "random_walk"}
         Per-relation adjacency normalization mode.
     sparsity : {"dense", "block_diagonal", "distributed"}
-        Realization mode (forward shared for dense / block_diagonal).
+        Realization mode (forward shared for dense / block_diagonal /
+        distributed). ``"distributed"`` uses matrix-free Richardson /
+        Arnoldi inverse and spectrum helpers (not trainer DDP or multi-GPU
+        training).
     max_spectral_radius : float
         Stability bound forwarded to factorized matrices.
     """
@@ -393,13 +453,17 @@ class HeteroGraphKoopmanOperator(nn.Module):
         edge_types: Sequence[Sequence[str]] | None = None,
         relation_tying: RelationTying = "independent",
         basis_size: int | None = None,
+        latent_dims: Mapping[str, int] | None = None,
+        orbit_partition: Sequence[Sequence[int]] | None = None,
+        auto_orbits: bool = False,
+        orbit_method: OrbitMethod = "auto",
     ) -> None:
         """Initialize self and per-relation Koopman factors.
 
         Parameters
         ----------
         latent_dim : int
-            Latent dimension ``d``.
+            Shared latent width ``d`` (square path; rectangular reference).
         num_relations : int
             Number of relation banks (``|R| >= 1``).
         init_mode : {"identity", "identity_noise", "xavier"}, optional
@@ -409,14 +473,17 @@ class HeteroGraphKoopmanOperator(nn.Module):
         init_scale : float, optional
             Noise scale for ``identity_noise`` / relation jitter.
         parameterization : Parameterization, optional
-            Shared parameterization for every ``d×d`` factor.
+            Shared parameterization for every square factor. Rectangular
+            relation banks are dense ``nn.Parameter`` matrices only.
         max_spectral_radius : float, optional
             Spectral bound for soft/structural modes.
         sparsity : {"dense", "block_diagonal", "distributed"}, optional
             ``"dense"`` (default) uses an exact dense ``inverse_advance``.
             ``"block_diagonal"`` keeps the same forward advance and uses a
-            self-dominated approximate inverse. ``"distributed"`` is reserved
-            and rejected.
+            self-dominated approximate inverse. ``"distributed"`` uses
+            matrix-free Richardson inverse and Arnoldi spectrum (not trainer
+            DDP or multi-GPU training). Rectangular operators require
+            ``"dense"``.
         normalization : {"rgcn_in_degree", "random_walk"}, optional
             Per-relation degree normalization. Default is
             ``"rgcn_in_degree"``.
@@ -437,17 +504,35 @@ class HeteroGraphKoopmanOperator(nn.Module):
             Relation-factor tying. ``"basis"`` shares ``B`` matrices
             ``V_b`` with coefficients ``a_{r,b}`` (R-GCN basis-decomposition
             motivation — not a full paper reproduction). Default
-            ``"independent"``.
+            ``"independent"``. Unsupported when rectangular.
         basis_size : int or None, optional
             Basis size ``B`` when ``relation_tying="basis"``
             (``1 <= B <= |R|``). Must be ``None`` for independent tying.
+        latent_dims : mapping of str to int or None, optional
+            Opt-in per-type widths ``τ -> d_τ``. ``None`` (default) is the
+            shared-d square path. When set, keys must match ``node_types``.
+            Rectangular mode activates when any ``d_τ != latent_dim``.
+            Multiplex requires the sole width equal ``latent_dim``.
+        orbit_partition : sequence of sequence of int or None, optional
+            Explicit orbit partition on stacked ``N`` nodes. Multiplex uses
+            the union of relation banks; typed partitions must lie inside
+            type blocks (validated when ``num_nodes_dict`` is known).
+            Unsupported for rectangular operators.
+        auto_orbits : bool, optional
+            Bind orbits on first advance / fit-start. Multiplex uses the
+            union of relation banks; typed binds per type from intra-type
+            banks.
+        orbit_method : {"auto", "exact"}, optional
+            Orbit finder backend (see
+            :func:`~koopman_graph.graph_utils.node_orbit_partition`).
 
         Raises
         ------
         ValueError
             If dimensions, ``sparsity``, ``normalization``, tying metadata,
-            or type metadata are unsupported, or control is requested for a
-            typed operator.
+            or type metadata are unsupported, control is requested for a
+            typed operator, rectangular constraints are violated, or orbit
+            ties are requested for rectangular operators.
         """
         super().__init__()
         if latent_dim < 1:
@@ -459,16 +544,10 @@ class HeteroGraphKoopmanOperator(nn.Module):
         if control_dim < 0:
             msg = f"control_dim must be non-negative, got {control_dim}"
             raise ValueError(msg)
-        if sparsity == "distributed":
+        if sparsity not in {"dense", "block_diagonal", "distributed"}:
             msg = (
-                "HeteroGraphKoopmanOperator sparsity='distributed' is "
-                "planned and not implemented"
-            )
-            raise ValueError(msg)
-        if sparsity not in {"dense", "block_diagonal"}:
-            msg = (
-                "HeteroGraphKoopmanOperator sparsity must be 'dense' or "
-                f"'block_diagonal', got {sparsity!r}"
+                "HeteroGraphKoopmanOperator sparsity must be 'dense', "
+                f"'block_diagonal', or 'distributed', got {sparsity!r}"
             )
             raise ValueError(msg)
         if normalization not in RELATION_NORMALIZATION_MODES:
@@ -497,7 +576,52 @@ class HeteroGraphKoopmanOperator(nn.Module):
             )
             raise ValueError(msg)
 
+        resolved_latent_dims = validate_latent_dims(
+            resolved_node_types,
+            latent_dims,
+            shared_latent_dim=latent_dim,
+        )
+        is_rectangular = False
+        if resolved_latent_dims is not None:
+            if not is_typed:
+                sole = resolved_latent_dims[resolved_node_types[0]]
+                if sole != latent_dim:
+                    msg = (
+                        "multiplex latent_dims must equal latent_dim "
+                        f"({latent_dim}); got {resolved_latent_dims!r}"
+                    )
+                    raise ValueError(msg)
+            else:
+                is_rectangular = any(
+                    width != latent_dim for width in resolved_latent_dims.values()
+                )
+        if is_rectangular:
+            if resolved_tying != "independent":
+                msg = (
+                    "rectangular HeteroGraphKoopmanOperator requires "
+                    "relation_tying='independent'"
+                )
+                raise ValueError(msg)
+            if parameterization != "dense":
+                msg = (
+                    "rectangular HeteroGraphKoopmanOperator requires "
+                    "parameterization='dense'"
+                )
+                raise ValueError(msg)
+            if sparsity != "dense":
+                msg = "rectangular HeteroGraphKoopmanOperator requires sparsity='dense'"
+                raise ValueError(msg)
+
+        orbits_requested = orbit_partition is not None or auto_orbits
+        if orbits_requested and is_rectangular:
+            msg = (
+                "orbit ties are unsupported for rectangular HeteroGraphKoopmanOperator"
+            )
+            raise ValueError(msg)
+
         self.latent_dim = latent_dim
+        self.latent_dims = resolved_latent_dims
+        self.is_rectangular = is_rectangular
         self.num_relations = num_relations
         self.node_types = resolved_node_types
         self.is_typed = is_typed
@@ -514,8 +638,13 @@ class HeteroGraphKoopmanOperator(nn.Module):
         self.control_mode = control_mode
         self.bilinear_rank = bilinear_rank
 
-        def _build_self_factor() -> KoopmanOperator:
-            """Return a fresh self-coupling factor at the shared width ``d``.
+        def _build_self_factor(width: int) -> KoopmanOperator:
+            """Return a fresh self-coupling factor at width ``width``.
+
+            Parameters
+            ----------
+            width : int
+                Latent width for this self factor.
 
             Returns
             -------
@@ -523,7 +652,7 @@ class HeteroGraphKoopmanOperator(nn.Module):
                 Per-node self factor (typed operators build one per type).
             """
             return KoopmanOperator(
-                latent_dim,
+                width,
                 init_mode=init_mode,
                 init_scale=init_scale,
                 parameterization=parameterization,
@@ -554,12 +683,30 @@ class HeteroGraphKoopmanOperator(nn.Module):
         # typed operators key one factor per node type under ``_selves``.
         if is_typed:
             self._selves = nn.ModuleDict(
-                {name: _build_self_factor() for name in resolved_node_types}
+                {
+                    name: _build_self_factor(
+                        resolved_latent_dims[name]
+                        if is_rectangular and resolved_latent_dims is not None
+                        else latent_dim
+                    )
+                    for name in resolved_node_types
+                }
             )
         else:
-            self._self = _build_self_factor()
+            self._self = _build_self_factor(latent_dim)
 
-        if resolved_tying == "independent":
+        if is_rectangular:
+            assert resolved_latent_dims is not None
+            # Appendix B / Q2=A: K_r ∈ R^{d_src × d_dst}. Forward uses
+            # (Â Z_src) @ K_r; K_eff relation blocks use Â ⊗ K_r.T.
+            self._rel_rect = nn.ParameterDict()
+            for edge_type in resolved_edge_types:
+                src, _rel, dst = edge_type
+                d_src = resolved_latent_dims[src]
+                d_dst = resolved_latent_dims[dst]
+                key = relation_factor_key(edge_type)
+                self._rel_rect[key] = nn.Parameter(torch.zeros(d_src, d_dst))
+        elif resolved_tying == "independent":
             self._rel = nn.ModuleDict(
                 {
                     relation_factor_key(edge_type): _build_relation_factor()
@@ -580,6 +727,212 @@ class HeteroGraphKoopmanOperator(nn.Module):
             coeffs.copy_(eye)
             self._rel_coeff = nn.Parameter(coeffs)
         self._reset_relation_parameters()
+        self._init_orbit_config(
+            orbit_partition=orbit_partition,
+            auto_orbits=auto_orbits,
+            orbit_method=orbit_method,
+        )
+
+    def _orbits_requested(self) -> bool:
+        """Return whether orbit ties are configured (auto or explicit).
+
+        Returns
+        -------
+        bool
+            ``True`` when ``auto_orbits`` is set or a partition is bound /
+            pending.
+        """
+        return bool(self.auto_orbits or self.orbit_partition is not None)
+
+    def _type_global_ranges(
+        self,
+        num_nodes_dict: Mapping[str, int],
+    ) -> dict[str, range]:
+        """Return global stacked index ranges per node type.
+
+        Parameters
+        ----------
+        num_nodes_dict : mapping of str to int
+            Per-type node counts ``N_τ``.
+
+        Returns
+        -------
+        dict of str to range
+            Half-open global index range for each type in
+            :attr:`node_types` order.
+        """
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        offsets = node_type_offsets(self.node_types, counts)
+        return {
+            name: range(offsets[name], offsets[name] + counts[name])
+            for name in self.node_types
+        }
+
+    def _validate_orbits_within_type_blocks(
+        self,
+        partition: Sequence[Sequence[int]],
+        num_nodes_dict: Mapping[str, int],
+    ) -> None:
+        """Require every orbit to lie inside a single type block.
+
+        Parameters
+        ----------
+        partition : sequence of sequence of int
+            Global orbit partition on stacked ``N``.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts defining type block boundaries.
+
+        Raises
+        ------
+        ValueError
+            If an orbit spans more than one node type.
+        """
+        ranges = self._type_global_ranges(num_nodes_dict)
+        for orbit in partition:
+            owners: set[str] = set()
+            for node in orbit:
+                node_i = int(node)
+                matched = [name for name, block in ranges.items() if node_i in block]
+                if not matched:
+                    msg = (
+                        f"orbit node {node_i} lies outside typed stacked "
+                        f"ranges for num_nodes_dict={dict(num_nodes_dict)!r}"
+                    )
+                    raise ValueError(msg)
+                owners.add(matched[0])
+            if len(owners) != 1:
+                msg = (
+                    "typed orbit partition must not mix node-type blocks; "
+                    f"orbit {tuple(int(n) for n in orbit)!r} spans types "
+                    f"{sorted(owners)!r}"
+                )
+                raise ValueError(msg)
+
+    def _intra_type_edge_index(
+        self,
+        edge_indices: Sequence[Tensor],
+        type_name: str,
+        num_nodes_dict: Mapping[str, int],
+    ) -> Tensor:
+        """Return type-local edges for intra-type banks of ``type_name``.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor
+            Global per-relation banks aligned with :attr:`edge_types`.
+        type_name : str
+            Node type whose intra-type banks are kept.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Returns
+        -------
+        Tensor
+            Type-local ``edge_index`` with shape ``(2, E_τ)`` (may be empty).
+        """
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        offset = node_type_offsets(self.node_types, counts)[type_name]
+        local_banks: list[Tensor] = []
+        for bank, edge_type in zip(edge_indices, self.edge_types, strict=True):
+            src, _rel, dst = edge_type
+            if src != type_name or dst != type_name:
+                continue
+            if bank.numel() == 0:
+                continue
+            local_banks.append(bank - offset)
+        if not local_banks:
+            return torch.zeros(2, 0, dtype=torch.long)
+        return torch.cat(local_banks, dim=1)
+
+    def _bind_typed_auto_orbits(
+        self,
+        edge_indices: Sequence[Tensor],
+        num_nodes_dict: Mapping[str, int],
+    ) -> None:
+        """Bind auto orbits independently inside each type block.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor
+            Global relation banks.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Raises
+        ------
+        RuntimeError
+            If ``auto_orbits`` is false.
+        """
+        if not self.auto_orbits:
+            msg = "_bind_typed_auto_orbits requires auto_orbits=True"
+            raise RuntimeError(msg)
+        if self.orbit_partition is not None:
+            return
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        offsets = node_type_offsets(self.node_types, counts)
+        global_orbits: list[tuple[int, ...]] = []
+        for name in self.node_types:
+            local_edges = self._intra_type_edge_index(
+                edge_indices,
+                name,
+                counts,
+            )
+            if local_edges.device.type != "cpu":
+                local_edges = local_edges.cpu()
+            local_part = node_orbit_partition(
+                local_edges,
+                counts[name],
+                method=self.orbit_method,
+            )
+            base = offsets[name]
+            for orbit in local_part:
+                global_orbits.append(tuple(base + int(node) for node in orbit))
+        total = int(sum(counts[name] for name in self.node_types))
+        self.set_orbit_partition(global_orbits, num_nodes=total)
+
+    def ensure_typed_orbit_binding(
+        self,
+        edge_indices: Sequence[Tensor],
+        num_nodes_dict: Mapping[str, int],
+    ) -> None:
+        """Bind or validate typed orbit ties against ``num_nodes_dict``.
+
+        Auto-orbits compute per-type partitions from intra-type banks.
+        Explicit partitions are checked so no orbit mixes type blocks.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor
+            Global relation banks (used for auto-orbits).
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Raises
+        ------
+        ValueError
+            If the operator is not typed, rectangular, or an orbit crosses
+            type blocks / mismatches ``N``.
+        """
+        if not self.is_typed:
+            msg = (
+                "ensure_typed_orbit_binding requires a typed HeteroGraphKoopmanOperator"
+            )
+            raise ValueError(msg)
+        if self.is_rectangular:
+            msg = (
+                "orbit ties are unsupported for rectangular HeteroGraphKoopmanOperator"
+            )
+            raise ValueError(msg)
+        if not self._orbits_requested():
+            return
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        total = int(sum(counts[name] for name in self.node_types))
+        if self.auto_orbits and self.orbit_partition is None:
+            self._bind_typed_auto_orbits(edge_indices, counts)
+            return
+        assert self.orbit_partition is not None
+        self._validate_orbits_within_type_blocks(self.orbit_partition, counts)
+        self.ensure_orbit_binding(total)
 
     def self_operator_for(self, node_type: str) -> KoopmanOperator:
         """Return the self-coupling factor module for ``node_type``.
@@ -660,14 +1013,151 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Raises
         ------
         ValueError
-            If ``num_nodes_dict`` does not cover :attr:`node_types` exactly.
+            If the operator is rectangular, or ``num_nodes_dict`` does not
+            cover :attr:`node_types` exactly.
         """
+        if self.is_rectangular:
+            msg = (
+                "typed_k_self_blocks is undefined for rectangular "
+                "HeteroGraphKoopmanOperator; use effective_matrix / "
+                "pack_typed_latents with latent_dims"
+            )
+            raise ValueError(msg)
         counts = self._validate_num_nodes_dict(num_nodes_dict)
         blocks = [
             self.k_self_for(name).expand(counts[name], self.latent_dim, self.latent_dim)
             for name in self.node_types
         ]
         return torch.cat(blocks, dim=0)
+
+    def d_for(self, node_type: str) -> int:
+        """Return the latent width for ``node_type``.
+
+        Parameters
+        ----------
+        node_type : str
+            Node-type name from :attr:`node_types`.
+
+        Returns
+        -------
+        int
+            ``d_τ`` when ``latent_dims`` is set, else :attr:`latent_dim`.
+
+        Raises
+        ------
+        KeyError
+            If ``node_type`` is not in :attr:`node_types`.
+        """
+        if node_type not in self.node_types:
+            msg = (
+                f"unknown node type {node_type!r}; "
+                f"valid types are {list(self.node_types)!r}"
+            )
+            raise KeyError(msg)
+        if self.latent_dims is not None:
+            return int(self.latent_dims[node_type])
+        return int(self.latent_dim)
+
+    def pack_typed_latents(
+        self,
+        z_by_type: Mapping[str, Tensor],
+        num_nodes_dict: Mapping[str, int],
+    ) -> Tensor:
+        """Flatten per-type ``(N_τ, d_τ)`` blocks into one C-order vector.
+
+        Parameters
+        ----------
+        z_by_type : mapping of str to Tensor
+            Latents keyed by node type.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Returns
+        -------
+        Tensor
+            Flat vector of length ``Σ_τ N_τ·d_τ`` (rectangular) or
+            ``N·d`` (shared-d stacked rows flattened).
+
+        Raises
+        ------
+        ValueError
+            If keys or shapes disagree with the operator layout.
+        """
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        if set(z_by_type) != set(self.node_types):
+            msg = (
+                "z_by_type keys must match node_types "
+                f"{list(self.node_types)!r}; got {sorted(z_by_type)!r}"
+            )
+            raise ValueError(msg)
+        blocks: list[Tensor] = []
+        for name in self.node_types:
+            width = self.d_for(name)
+            expected = (counts[name], width)
+            block = z_by_type[name]
+            if tuple(block.shape) != expected:
+                msg = (
+                    f"z_by_type[{name!r}] must have shape {expected}, "
+                    f"got {tuple(block.shape)}"
+                )
+                raise ValueError(msg)
+            blocks.append(block.reshape(-1))
+        return torch.cat(blocks, dim=0)
+
+    def unpack_typed_latents(
+        self,
+        z_flat: Tensor,
+        num_nodes_dict: Mapping[str, int],
+    ) -> dict[str, Tensor]:
+        """Split a flat latent vector into per-type ``(N_τ, d_τ)`` blocks.
+
+        Parameters
+        ----------
+        z_flat : Tensor
+            Flat latent vector.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Returns
+        -------
+        dict of str to Tensor
+            Per-type blocks in :attr:`node_types` order.
+
+        Raises
+        ------
+        ValueError
+            If the flat length or counts are inconsistent.
+        """
+        counts = self._validate_num_nodes_dict(num_nodes_dict)
+        if self.is_rectangular:
+            assert self.latent_dims is not None
+            expected = stacked_latent_numel(
+                self.node_types,
+                counts,
+                self.latent_dims,
+            )
+            slices = latent_type_slices_from_dims(
+                self.node_types,
+                counts,
+                self.latent_dims,
+            )
+        else:
+            expected = sum(counts.values()) * self.latent_dim
+            slices = {
+                name: slice(
+                    sum(counts[n] for n in self.node_types[:idx]) * self.latent_dim,
+                    sum(counts[n] for n in self.node_types[: idx + 1])
+                    * self.latent_dim,
+                )
+                for idx, name in enumerate(self.node_types)
+            }
+        if z_flat.ndim != 1 or int(z_flat.numel()) != expected:
+            msg = f"z_flat must have shape ({expected},), got {tuple(z_flat.shape)}"
+            raise ValueError(msg)
+        return {
+            name: z_flat[slices[name]].reshape(counts[name], self.d_for(name))
+            for name in self.node_types
+        }
 
     def _validate_num_nodes_dict(
         self,
@@ -774,8 +1264,14 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Raises
         ------
         ValueError
-            If ``relation_tying="basis"``.
+            If ``relation_tying="basis"`` or the operator is rectangular.
         """
+        if self.is_rectangular:
+            msg = (
+                "_relation_modules is undefined for rectangular operators; "
+                "use relation_matrix() / _rel_rect"
+            )
+            raise ValueError(msg)
         if self.relation_tying != "independent":
             msg = (
                 "_relation_modules is only defined for "
@@ -823,7 +1319,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Assembled ``K_r`` with shape ``(latent_dim, latent_dim)``.
+            Assembled ``K_r``. Shared-d shape ``(latent_dim, latent_dim)``;
+            rectangular shape ``(d_src, d_dst)`` for
+            ``edge_types[relation_index]`` (Appendix B / Q2=A).
 
         Raises
         ------
@@ -836,6 +1334,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
                 f"got {relation_index}"
             )
             raise IndexError(msg)
+        if self.is_rectangular:
+            key = relation_factor_key(self.edge_types[relation_index])
+            return self._rel_rect[key]
         if self.relation_tying == "independent":
             return self._relation_modules()[relation_index].K
         assert self.basis_size is not None
@@ -882,6 +1383,13 @@ class HeteroGraphKoopmanOperator(nn.Module):
         -------
         None
         """
+        if self.is_rectangular:
+            with torch.no_grad():
+                for parameter in self._rel_rect.values():
+                    parameter.zero_()
+                    if self.init_mode in {"identity_noise", "xavier"}:
+                        parameter.add_(torch.randn_like(parameter) * self.init_scale)
+            return
         if self.relation_tying == "independent":
             for module in self._relation_modules():
                 self._reset_factor_parameters(module, allow_noise=True)
@@ -906,8 +1414,11 @@ class HeteroGraphKoopmanOperator(nn.Module):
         -------
         None
         """
-        for module in self._self_modules():
-            module.reset_parameters()
+        if self.uses_orbit_selves:
+            self.reset_orbit_selves()
+        else:
+            for module in self._self_modules():
+                module.reset_parameters()
         if self.relation_tying == "independent":
             for module in self._relation_modules():
                 module.reset_parameters()
@@ -1013,11 +1524,12 @@ class HeteroGraphKoopmanOperator(nn.Module):
         ----------
         k_self : Tensor or mapping of str to Tensor
             Dense self matrix ``(latent_dim, latent_dim)`` for multiplex, or a
-            mapping ``node_type -> (latent_dim, latent_dim)`` covering every
-            entry of :attr:`node_types` for typed operators.
+            mapping ``node_type -> (d_τ, d_τ)`` covering every entry of
+            :attr:`node_types` for typed operators.
         k_relations : sequence of Tensor
-            Dense relation matrices, length ``num_relations``, each
-            ``(latent_dim, latent_dim)``.
+            Dense relation matrices, length ``num_relations``. Shared-d
+            entries are ``(latent_dim, latent_dim)``; rectangular entries
+            are ``(d_src, d_dst)`` for the matching edge type.
         control_matrix : Tensor or None, optional
             Control matrix ``B`` when ``control_dim > 0``.
         bilinear_matrices : Tensor or None, optional
@@ -1027,8 +1539,8 @@ class HeteroGraphKoopmanOperator(nn.Module):
         ------
         ValueError
             If ``relation_tying="basis"``, the relation bank length mismatches
-            ``num_relations``, or the ``k_self`` form does not match the
-            multiplex / typed mode.
+            ``num_relations``, shapes disagree, or the ``k_self`` form does
+            not match the multiplex / typed mode.
         """
         if self.relation_tying == "basis":
             msg = (
@@ -1075,6 +1587,25 @@ class HeteroGraphKoopmanOperator(nn.Module):
                 control_matrix=control_matrix,
                 bilinear_matrices=bilinear_matrices,
             )
+        if self.is_rectangular:
+            assert self.latent_dims is not None
+            for relation_idx, k_rel in enumerate(k_relations):
+                src, _rel, dst = self.edge_types[relation_idx]
+                expected = (
+                    self.latent_dims[src],
+                    self.latent_dims[dst],
+                )
+                if tuple(k_rel.shape) != expected:
+                    msg = (
+                        f"k_relations[{relation_idx}] must have shape "
+                        f"{expected} for edge {self.edge_types[relation_idx]!r} "
+                        f"(Appendix B d_src×d_dst), got {tuple(k_rel.shape)}"
+                    )
+                    raise ValueError(msg)
+                key = relation_factor_key(self.edge_types[relation_idx])
+                with torch.no_grad():
+                    self._rel_rect[key].copy_(k_rel)
+            return
         for module, k_rel in zip(self._relation_modules(), k_relations, strict=True):
             module.set_dense_matrix(k_rel, control_matrix=None)
 
@@ -1137,6 +1668,14 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Tensor
             Scalar factor bound metric.
         """
+        if self.is_rectangular:
+            metric = self._self_modules()[0].bound_metric()
+            for module in self._self_modules()[1:]:
+                metric = torch.maximum(metric, module.bound_metric())
+            for parameter in self._rel_rect.values():
+                rel_norm = torch.linalg.matrix_norm(parameter, ord=2)
+                metric = torch.maximum(metric, rel_norm)
+            return metric
         if self.relation_tying == "independent":
             modules = (*self._self_modules(), *self._relation_modules())
         else:
@@ -1200,12 +1739,70 @@ class HeteroGraphKoopmanOperator(nn.Module):
         )
         return torch.linalg.eigvals(effective).abs().max().real
 
-    def stability_certificate(self) -> StabilityCertificate | None:
-        """Return the self-term certificate when a structural mode is active.
+    def joint_bound_metric(
+        self,
+        edge_indices: Sequence[Tensor] | None = None,
+        num_nodes: int | None = None,
+        *,
+        edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
+    ) -> Tensor:
+        """Return a Gershgorin upper bound on assembled ``ρ(K_eff)``.
+
+        Assembles :meth:`effective_matrix` (shared-d or rectangular) and
+        applies
+        :func:`~koopman_graph.operators.joint_stability.gershgorin_radius_bound`.
+        The bound is **sufficient, not tight** (DESIGN R4): ``ρ(K_eff) ≤``
+        the returned value, but the gap may be large. This is **not**
+        :meth:`bound_metric` (factor-level) and not a tight joint certificate
+        (TASK-1823). Prefer :meth:`spectral_radius` for the true assembled
+        radius when ``N·d`` is modest.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor or None
+            Ordered per-relation edge indices (required).
+        num_nodes : int or None
+            Stacked node count ``N`` (required).
+        edge_weights : sequence of Tensor or None, optional
+            Optional per-relation edge weights.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type node counts; required for typed operators.
+
+        Returns
+        -------
+        Tensor
+            Scalar Gershgorin upper bound on ``ρ(K_eff)``.
+
+        Raises
+        ------
+        ValueError
+            If topology arguments are omitted.
+        """
+        if edge_indices is None or num_nodes is None:
+            msg = (
+                "HeteroGraphKoopmanOperator.joint_bound_metric requires "
+                "edge_indices and num_nodes to assemble K_eff; use "
+                "bound_metric() for factor-level monitoring without topology"
+            )
+            raise ValueError(msg)
+        from koopman_graph.operators.joint_stability import gershgorin_radius_bound
+
+        effective = self.effective_matrix(
+            edge_indices,
+            num_nodes,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
+        )
+        return gershgorin_radius_bound(effective)
+
+    def factor_stability_certificate(self) -> StabilityCertificate | None:
+        """Return a **factor-level** self-term certificate, if any.
 
         Typed operators report the certificate of the **first** node type in
-        :attr:`node_types`; all self factors share ``parameterization``, and
-        factor-level certificates never certify joint ``ρ(K_eff)``.
+        :attr:`node_types`. Structural modes on individual factors never
+        certify joint ``ρ(K_eff)`` — use :meth:`stability_certificate` with
+        topology for the Gershgorin joint bound object.
 
         Returns
         -------
@@ -1213,6 +1810,81 @@ class HeteroGraphKoopmanOperator(nn.Module):
             Certificate from a self-coupling factor, if any.
         """
         return self._self_modules()[0].stability_certificate()
+
+    def stability_certificate(
+        self,
+        edge_indices: Sequence[Tensor] | None = None,
+        num_nodes: int | None = None,
+        *,
+        edge_weights: Sequence[Tensor | None] | None = None,
+        num_nodes_dict: Mapping[str, int] | None = None,
+        kind: str = "gershgorin",
+    ) -> JointStabilityCertificate:
+        """Return a joint bound / certificate object for assembled ``K_eff``.
+
+        Topology is required. Default ``kind="gershgorin"`` is a
+        **sufficient** upper bound on ``ρ(K_eff)``, not a tight certificate
+        and not soft assembled eigenvalue regularization. Opt-in
+        ``kind="schur"`` / ``"lyapunov"`` (TASK-1824) use the assembled
+        spectrum (and a discrete Lyapunov ``P`` when ``ρ < 1``) under size
+        ceilings. For factor-level Schur / Lyapunov / dissipative margins
+        use :meth:`factor_stability_certificate`.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor or None
+            Ordered per-relation edge indices (required).
+        num_nodes : int or None
+            Stacked node count ``N`` (required).
+        edge_weights : sequence of Tensor or None, optional
+            Optional per-relation edge weights.
+        num_nodes_dict : mapping of str to int or None, optional
+            Per-type node counts; required for typed operators.
+        kind : {"gershgorin", "schur", "lyapunov"}, optional
+            Joint certificate construction. Default ``"gershgorin"``.
+
+        Returns
+        -------
+        JointStabilityCertificate
+            Joint bound / unit-disk margin for ``K_eff``.
+
+        Raises
+        ------
+        ValueError
+            If topology arguments are omitted, ``kind`` is unsupported, or
+            an assembled Schur / Lyapunov size ceiling is exceeded.
+        """
+        from koopman_graph.operators.joint_stability import (
+            JOINT_BOUND_KINDS,
+            build_joint_stability_certificate,
+            joint_certificate_from_assembled,
+        )
+
+        if kind not in JOINT_BOUND_KINDS:
+            msg = f"kind must be one of {sorted(JOINT_BOUND_KINDS)}, got {kind!r}"
+            raise ValueError(msg)
+        if edge_indices is None or num_nodes is None:
+            msg = (
+                "HeteroGraphKoopmanOperator.stability_certificate requires "
+                "edge_indices and num_nodes to assemble K_eff; use "
+                "factor_stability_certificate() for factor-level margins"
+            )
+            raise ValueError(msg)
+        if kind == "gershgorin":
+            bound = self.joint_bound_metric(
+                edge_indices,
+                num_nodes,
+                edge_weights=edge_weights,
+                num_nodes_dict=num_nodes_dict,
+            )
+            return build_joint_stability_certificate(bound)
+        effective = self.effective_matrix(
+            edge_indices,
+            num_nodes,
+            edge_weights=edge_weights,
+            num_nodes_dict=num_nodes_dict,
+        )
+        return joint_certificate_from_assembled(effective, kind=kind)  # type: ignore[arg-type]
 
     def _resolve_relation_banks(
         self,
@@ -1349,7 +2021,19 @@ class HeteroGraphKoopmanOperator(nn.Module):
         -------
         Tensor
             Dense relation coupling with shape ``(N·d, N·d)``.
+
+        Raises
+        ------
+        ValueError
+            If the operator is rectangular (use
+            :meth:`_rectangular_effective_matrix`).
         """
+        if self.is_rectangular:
+            msg = (
+                "_relation_coupling_matrix is shared-d only; use "
+                "_rectangular_effective_matrix for unequal d_τ"
+            )
+            raise ValueError(msg)
         coupling = torch.zeros(
             (num_nodes * self.latent_dim, num_nodes * self.latent_dim),
             dtype=dtype,
@@ -1366,6 +2050,147 @@ class HeteroGraphKoopmanOperator(nn.Module):
             k_rel = self._assembled_relation_matrix(relation_idx)
             coupling = coupling + torch.kron(adj, k_rel)
         return coupling
+
+    def _rectangular_effective_matrix(
+        self,
+        edge_indices: Sequence[Tensor],
+        num_nodes: int,
+        edge_weights: Sequence[Tensor | None],
+        num_nodes_dict: Mapping[str, int],
+    ) -> Tensor:
+        """Assemble dense ``K_eff`` for unequal ``d_τ`` (Appendix B).
+
+        Self blocks are ``I_{N_τ} ⊗ K_self^τ``. For edge ``(src, r, dst)`` with
+        ``K_r ∈ R^{d_src×d_dst}``, the contribution on the flat layout is
+        ``Â_{dst←src} ⊗ K_r.T``, matching forward ``(Â Z_src) @ K_r``.
+
+        Parameters
+        ----------
+        edge_indices : sequence of Tensor
+            Ordered global relation edge indices.
+        num_nodes : int
+            Stacked node count ``N``.
+        edge_weights : sequence of Tensor or None
+            Ordered optional relation weights.
+        num_nodes_dict : mapping of str to int
+            Per-type node counts.
+
+        Returns
+        -------
+        Tensor
+            Dense matrix with shape ``(Σ N_τ·d_τ, Σ N_τ·d_τ)``.
+        """
+        assert self.latent_dims is not None
+        counts = self._validate_num_nodes_dict(num_nodes_dict, num_nodes=num_nodes)
+        total = stacked_latent_numel(self.node_types, counts, self.latent_dims)
+        slices = latent_type_slices_from_dims(
+            self.node_types,
+            counts,
+            self.latent_dims,
+        )
+        offsets = node_type_offsets(self.node_types, counts)
+        ref = self.k_self_for(self.node_types[0])
+        effective = torch.zeros(
+            (total, total),
+            dtype=ref.dtype,
+            device=ref.device,
+        )
+        for name in self.node_types:
+            width = self.latent_dims[name]
+            identity = torch.eye(
+                counts[name],
+                dtype=ref.dtype,
+                device=ref.device,
+            )
+            block = torch.kron(identity, self.k_self_for(name))
+            type_slice = slices[name]
+            expected_block = (counts[name] * width, counts[name] * width)
+            if tuple(block.shape) != expected_block:
+                msg = (
+                    f"self block for {name!r} has shape {tuple(block.shape)}, "
+                    f"expected {expected_block}"
+                )
+                raise ValueError(msg)
+            effective[type_slice, type_slice] = (
+                effective[type_slice, type_slice] + block
+            )
+
+        for relation_idx, edge_index in enumerate(edge_indices):
+            adj = dense_relation_normalized_adjacency(
+                edge_index,
+                num_nodes,
+                edge_weight=edge_weights[relation_idx],
+                dtype=ref.dtype,
+                normalization=self.normalization,
+            )
+            src, _rel, dst = self.edge_types[relation_idx]
+            src_nodes = slice(offsets[src], offsets[src] + counts[src])
+            dst_nodes = slice(offsets[dst], offsets[dst] + counts[dst])
+            adj_block = adj[dst_nodes, src_nodes]
+            k_rel = self._assembled_relation_matrix(relation_idx)
+            # Y = A X K_r  <=>  flat map uses A ⊗ K_r.T under row-major flats.
+            coupling = torch.kron(
+                adj_block,
+                k_rel.transpose(-2, -1).contiguous(),
+            )
+            effective[slices[dst], slices[src]] = (
+                effective[slices[dst], slices[src]] + coupling
+            )
+        return effective
+
+    def _sparse_relation_term_rectangular(
+        self,
+        z_by_type: Mapping[str, Tensor],
+        edge_indices: Sequence[Tensor],
+        edge_weights: Sequence[Tensor | None],
+        counts: Mapping[str, int],
+    ) -> dict[str, Tensor]:
+        """Accumulate rectangular relation messages into per-type blocks.
+
+        Parameters
+        ----------
+        z_by_type : mapping of str to Tensor
+            Per-type latents ``(N_τ, d_τ)``.
+        edge_indices : sequence of Tensor
+            Ordered global relation edge indices.
+        edge_weights : sequence of Tensor or None
+            Ordered optional relation weights.
+        counts : mapping of str to int
+            Validated per-type node counts.
+
+        Returns
+        -------
+        dict of str to Tensor
+            Relation contributions per destination type.
+        """
+        assert self.latent_dims is not None
+        offsets = node_type_offsets(self.node_types, counts)
+        num_nodes = sum(counts.values())
+        contribution = {
+            name: z_by_type[name].new_zeros(z_by_type[name].shape)
+            for name in self.node_types
+        }
+        for relation_idx, edge_index in enumerate(edge_indices):
+            src, _rel, dst = self.edge_types[relation_idx]
+            d_src = self.latent_dims[src]
+            z_pad = z_by_type[src].new_zeros(num_nodes, d_src)
+            src_start = offsets[src]
+            z_pad[src_start : src_start + counts[src]] = z_by_type[src]
+            aggregated = relation_normalized_adjacency_matvec(
+                edge_index,
+                z_pad,
+                edge_weight=edge_weights[relation_idx],
+                num_nodes=num_nodes,
+                normalization=self.normalization,
+            )
+            k_rel = self._assembled_relation_matrix(relation_idx)
+            # Appendix B: K_r ∈ R^{d_src×d_dst}; message = (Â Z_src) @ K_r.
+            message = aggregated @ k_rel
+            dst_start = offsets[dst]
+            contribution[dst] = (
+                contribution[dst] + message[dst_start : dst_start + counts[dst]]
+            )
+        return contribution
 
     def effective_matrix(
         self,
@@ -1385,6 +2210,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
         ``edge_indices`` must already use stacked global node numbering. This
         is a dense ``O((N·d)^2)`` representation — prefer modest ``N·d`` (see
         networked dense-ceiling notes in ``limitations.rst``).
+
+        Rectangular operators return shape ``(Σ N_τ·d_τ, Σ N_τ·d_τ)``; overrides
+        ``k_self`` / ``k_self_blocks`` are unsupported in that mode.
 
         Parameters
         ----------
@@ -1408,14 +2236,15 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Returns
         -------
         Tensor
-            Dense matrix with shape ``(N·d, N·d)``.
+            Dense matrix with shape ``(N·d, N·d)`` (shared-d) or
+            ``(Σ N_τ·d_τ, Σ N_τ·d_τ)`` (rectangular).
 
         Raises
         ------
         ValueError
             If relation bank lengths mismatch, ``num_nodes`` is invalid, both
-            ``k_self`` and ``k_self_blocks`` are set, or a typed operator lacks
-            ``num_nodes_dict``.
+            ``k_self`` and ``k_self_blocks`` are set, a typed operator lacks
+            ``num_nodes_dict``, or rectangular overrides are requested.
         """
         if num_nodes < 1:
             msg = f"num_nodes must be positive, got {num_nodes}"
@@ -1424,7 +2253,41 @@ class HeteroGraphKoopmanOperator(nn.Module):
             msg = "Pass at most one of k_self and k_self_blocks"
             raise ValueError(msg)
         indices, weights = self._resolve_relation_banks(edge_indices, edge_weights)
-        if self.is_typed and k_self is None and k_self_blocks is None:
+        if self.is_rectangular:
+            if k_self is not None or k_self_blocks is not None:
+                msg = (
+                    "k_self / k_self_blocks overrides are unsupported for "
+                    "rectangular HeteroGraphKoopmanOperator"
+                )
+                raise ValueError(msg)
+            if num_nodes_dict is None:
+                msg = (
+                    "HeteroGraphKoopmanOperator.effective_matrix requires "
+                    "num_nodes_dict when latent_dims is rectangular"
+                )
+                raise ValueError(msg)
+            return self._rectangular_effective_matrix(
+                indices,
+                num_nodes,
+                weights,
+                num_nodes_dict,
+            )
+        if k_self is None and k_self_blocks is None and self._orbits_requested():
+            if self.is_typed:
+                self._require_num_nodes_dict(
+                    num_nodes_dict,
+                    num_nodes=num_nodes,
+                    caller="HeteroGraphKoopmanOperator.effective_matrix",
+                )
+                assert num_nodes_dict is not None
+                self.ensure_typed_orbit_binding(indices, num_nodes_dict)
+            else:
+                self.ensure_orbit_binding(
+                    num_nodes,
+                    edge_index=_union_relation_edge_index(indices),
+                )
+            k_self_blocks = self.tied_self_blocks(num_nodes)
+        elif self.is_typed and k_self is None and k_self_blocks is None:
             self._require_num_nodes_dict(
                 num_nodes_dict,
                 num_nodes=num_nodes,
@@ -1434,8 +2297,7 @@ class HeteroGraphKoopmanOperator(nn.Module):
             k_self_blocks = self.typed_k_self_blocks(num_nodes_dict)
         if k_self is not None:
             self_matrix = k_self
-        elif self.is_typed:
-            assert k_self_blocks is not None
+        elif k_self_blocks is not None:
             self_matrix = k_self_blocks[0]
         else:
             self_matrix = self.K_self
@@ -1523,8 +2385,14 @@ class HeteroGraphKoopmanOperator(nn.Module):
         edge_weights: Sequence[Tensor | None] | None = None,
         time_step: float = 1.0,
         num_nodes_dict: Mapping[str, int] | None = None,
+        num_modes: int = DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
     ) -> KoopmanSpectrum:
         """Eigendecomposition of the effective ``N·d`` operator.
+
+        When ``sparsity="distributed"``, returns the ``num_modes``
+        largest-modulus Ritz values from matrix-free Arnoldi for multiplex
+        shared-``d`` operators (eigenvectors are a placeholder identity).
+        Typed / rectangular operators must use dense assembly.
 
         Parameters
         ----------
@@ -1538,12 +2406,38 @@ class HeteroGraphKoopmanOperator(nn.Module):
             Discrete sampling interval for growth rates / frequencies.
         num_nodes_dict : mapping of str to int or None, optional
             Per-type node counts; required for typed operators.
+        num_modes : int, optional
+            Leading-modulus count for ``sparsity="distributed"``.
 
         Returns
         -------
         KoopmanSpectrum
-            Spectrum of :meth:`effective_matrix`.
+            Full dense spectrum, or distributed leading-modulus surrogate.
+
+        Raises
+        ------
+        ValueError
+            If ``sparsity="distributed"`` is used with typed or rectangular
+            operators.
         """
+        if self.sparsity == "distributed":
+            if self.is_typed or self.is_rectangular:
+                msg = (
+                    "HeteroGraphKoopmanOperator sparsity='distributed' "
+                    "spectrum requires multiplex shared-d operators; use "
+                    "sparsity='dense' for typed / rectangular spectra"
+                )
+                raise ValueError(msg)
+            result = spectrum_k_eff_hetero(
+                k_self=self.K_self,
+                k_relations=list(self.K_relations),
+                edge_indices=edge_indices,
+                num_nodes=num_nodes,
+                num_modes=num_modes,
+                normalization=self.normalization,
+                edge_weights=edge_weights,
+            )
+            return _koopman_spectrum_from_eigenvalues(result.eigenvalues, time_step)
         return compute_spectrum(
             self.effective_matrix(
                 edge_indices,
@@ -1567,7 +2461,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Parameters
         ----------
         z : Tensor
-            Stacked latent node states with shape ``(num_nodes, latent_dim)``.
+            Shared-d: stacked latents ``(num_nodes, latent_dim)``. Rectangular:
+            flat vector of length ``Σ_τ N_τ·d_τ`` (see
+            :meth:`pack_typed_latents`).
         edge_indices : sequence of Tensor
             Ordered per-relation edge indices, length ``num_relations``. Typed
             operators expect stacked global node numbering.
@@ -1575,7 +2471,7 @@ class HeteroGraphKoopmanOperator(nn.Module):
             Optional per-relation edge weights.
         control : Tensor or None, optional
             Exogenous control when ``control_dim > 0`` (self-term only;
-            multiplex operators only).
+            multiplex operators only). Unsupported when rectangular.
         num_nodes_dict : mapping of str to int or None, optional
             Per-type node counts. Required for typed operators so the
             block-diagonal self term can be sliced from ``z``.
@@ -1591,6 +2487,45 @@ class HeteroGraphKoopmanOperator(nn.Module):
             If ``z`` shape, relation banks, ``num_nodes_dict``, or control
             arguments are invalid.
         """
+        if self.is_rectangular:
+            if control is not None:
+                msg = (
+                    "control is unsupported for rectangular HeteroGraphKoopmanOperator"
+                )
+                raise ValueError(msg)
+            if num_nodes_dict is None:
+                msg = (
+                    "HeteroGraphKoopmanOperator.forward requires "
+                    "num_nodes_dict when latent_dims is rectangular"
+                )
+                raise ValueError(msg)
+            if z.ndim != 1:
+                msg = (
+                    "rectangular HeteroGraphKoopmanOperator expects flat z "
+                    f"with shape (Σ N_τ·d_τ,), got {tuple(z.shape)}; "
+                    "use pack_typed_latents(...)"
+                )
+                raise ValueError(msg)
+            indices, weights = self._resolve_relation_banks(
+                edge_indices,
+                edge_weights,
+            )
+            counts = self._validate_num_nodes_dict(num_nodes_dict)
+            z_by_type = self.unpack_typed_latents(z, counts)
+            next_by_type: dict[str, Tensor] = {}
+            for name in self.node_types:
+                k_self = self.k_self_for(name)
+                next_by_type[name] = z_by_type[name] @ k_self.transpose(-2, -1)
+            relation = self._sparse_relation_term_rectangular(
+                z_by_type,
+                indices,
+                weights,
+                counts,
+            )
+            for name in self.node_types:
+                next_by_type[name] = next_by_type[name] + relation[name]
+            return self.pack_typed_latents(next_by_type, counts)
+
         if z.ndim != 2:
             msg = (
                 "HeteroGraphKoopmanOperator expects z with shape "
@@ -1609,11 +2544,18 @@ class HeteroGraphKoopmanOperator(nn.Module):
             num_nodes=int(z.shape[0]),
             caller="HeteroGraphKoopmanOperator.forward",
         )
-        self_term = (
-            self._typed_self_term(z, counts)
-            if self.is_typed
-            else z @ self.K_self.transpose(-2, -1)
-        )
+        if self.is_typed and self._orbits_requested():
+            assert counts is not None
+            self.ensure_typed_orbit_binding(indices, counts)
+            self_term = self.apply_tied_self(z)
+        elif self.is_typed:
+            self_term = self._typed_self_term(z, counts)
+        else:
+            self.ensure_orbit_binding(
+                z.shape[0],
+                edge_index=_union_relation_edge_index(indices),
+            )
+            self_term = self.apply_tied_self(z)
         z_next = self_term + self._sparse_relation_term(
             z,
             indices,
@@ -1677,16 +2619,21 @@ class HeteroGraphKoopmanOperator(nn.Module):
         ValueError
             If ``edge_indices`` is missing.
         """
+        from koopman_graph.operators.stochastic import maybe_apply_process_noise
+
         del delta_t  # discrete hetero advance ignores Δt
         if edge_indices is None:
             msg = "edge_indices is required for HeteroGraphKoopmanOperator.advance"
             raise ValueError(msg)
-        return self.forward(
-            z,
-            edge_indices,
-            edge_weights,
-            control=control,
-            num_nodes_dict=num_nodes_dict,
+        return maybe_apply_process_noise(
+            self.forward(
+                z,
+                edge_indices,
+                edge_weights,
+                control=control,
+                num_nodes_dict=num_nodes_dict,
+            ),
+            self,
         )
 
     def _bilinear_self_factors(
@@ -1762,7 +2709,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
         ``sparsity="dense"`` inverts the effective ``N·d`` map (exact for
         modest ``N``). ``sparsity="block_diagonal"`` uses a **self-dominated**
         approximate inverse that ignores relation coupling (exact when all
-        ``K_r = 0``; approximate otherwise). ``inverse_matrix`` is supported
+        ``K_r = 0``; approximate otherwise). ``sparsity="distributed"`` uses
+        matrix-free Richardson / Neumann iteration on multiplex shared-``d``
+        operators with a shared ``K_self``. ``inverse_matrix`` is supported
         only for ``sparsity="dense"``.
 
         For ``control_mode="bilinear"``, global controls fold into a shared
@@ -1795,8 +2744,9 @@ class HeteroGraphKoopmanOperator(nn.Module):
         Raises
         ------
         ValueError
-            If topology / shapes are invalid, or ``inverse_matrix`` is passed
-            with ``sparsity="block_diagonal"``.
+            If topology / shapes are invalid, ``inverse_matrix`` is passed
+            with non-dense sparsity, or distributed inverse is requested for
+            typed / rectangular / per-node-self operators.
         """
         from koopman_graph.operators.graph_inverse import (
             apply_self_inverse,
@@ -1809,6 +2759,36 @@ class HeteroGraphKoopmanOperator(nn.Module):
                 "HeteroGraphKoopmanOperator.inverse_advance"
             )
             raise ValueError(msg)
+        if self.is_rectangular:
+            if control is not None:
+                msg = (
+                    "control is unsupported for rectangular "
+                    "HeteroGraphKoopmanOperator.inverse_advance"
+                )
+                raise ValueError(msg)
+            if num_nodes_dict is None:
+                msg = (
+                    "HeteroGraphKoopmanOperator.inverse_advance requires "
+                    "num_nodes_dict when latent_dims is rectangular"
+                )
+                raise ValueError(msg)
+            if z.ndim != 1:
+                msg = (
+                    "rectangular inverse_advance expects flat z with shape "
+                    f"(Σ N_τ·d_τ,), got {tuple(z.shape)}"
+                )
+                raise ValueError(msg)
+            counts = self._validate_num_nodes_dict(num_nodes_dict)
+            num_nodes = sum(counts.values())
+            if inverse_matrix is None:
+                inverse_matrix = self.dense_effective_inverse(
+                    edge_indices,
+                    num_nodes,
+                    edge_weights=edge_weights,
+                    num_nodes_dict=counts,
+                )
+            return inverse_matrix @ z
+
         if z.ndim != 2 or z.shape[-1] != self.latent_dim:
             msg = (
                 "HeteroGraphKoopmanOperator.inverse_advance expects z with "
@@ -1837,7 +2817,21 @@ class HeteroGraphKoopmanOperator(nn.Module):
             control,
             num_nodes,
         )
-        if self.is_typed and k_self_blocks is None:
+        if (
+            k_self_blocks is None
+            and k_self_override is None
+            and self._orbits_requested()
+        ):
+            if self.is_typed:
+                assert counts is not None
+                self.ensure_typed_orbit_binding(edge_indices, counts)
+            else:
+                self.ensure_orbit_binding(
+                    num_nodes,
+                    edge_index=_union_relation_edge_index(edge_indices),
+                )
+            k_self_blocks = self.tied_self_blocks(num_nodes)
+        elif self.is_typed and k_self_blocks is None:
             assert counts is not None
             k_self_blocks = self.typed_k_self_blocks(counts)
 
@@ -1854,6 +2848,43 @@ class HeteroGraphKoopmanOperator(nn.Module):
             return apply_self_inverse(
                 adjusted,
                 k_self=k_self_override if k_self_override is not None else self.K_self,
+            )
+
+        if self.sparsity == "distributed":
+            if inverse_matrix is not None:
+                msg = (
+                    "inverse_matrix is only supported for "
+                    "HeteroGraphKoopmanOperator sparsity='dense'"
+                )
+                raise ValueError(msg)
+            if self.is_typed:
+                msg = (
+                    "HeteroGraphKoopmanOperator sparsity='distributed' "
+                    "inverse requires multiplex shared-d operators; use "
+                    "sparsity='dense' for typed operators"
+                )
+                raise ValueError(msg)
+            if k_self_blocks is not None:
+                msg = (
+                    "HeteroGraphKoopmanOperator sparsity='distributed' "
+                    "inverse requires a shared K_self (orbit ties / per-node "
+                    "bilinear self blocks are unsupported); use "
+                    "sparsity='dense' or 'block_diagonal'"
+                )
+                raise ValueError(msg)
+            result = invert_k_eff_hetero(
+                flatten_node_latents(adjusted),
+                k_self=k_self_override if k_self_override is not None else self.K_self,
+                k_relations=list(self.K_relations),
+                edge_indices=edge_indices,
+                num_nodes=num_nodes,
+                normalization=self.normalization,
+                edge_weights=edge_weights,
+            )
+            return unflatten_node_latents(
+                result.solution,
+                num_nodes=num_nodes,
+                latent_dim=self.latent_dim,
             )
 
         if inverse_matrix is None:

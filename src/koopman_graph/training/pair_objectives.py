@@ -1436,7 +1436,7 @@ def compute_backward_consistency_sequence_loss(
         | None
     ) = None
     koopman = model.koopman
-    if model.dynamics_mode == "discrete":
+    if model.dynamics_mode in {"discrete", "stochastic"}:
         if isinstance(koopman, (GraphKoopmanOperator, HypergraphKoopmanOperator)):
             # Bilinear: pair-local effective K — never share inverses (TASK-1504).
             if (

@@ -369,7 +369,7 @@ def test_fit_smoke_graph_operator_on_static_sequence() -> None:
 
 def test_unsupported_sparsity_raises() -> None:
     """Unknown sparsity strings are rejected with a clear error."""
-    with pytest.raises(ValueError, match="must be 'dense' or 'block_diagonal'"):
+    with pytest.raises(ValueError, match="must be 'dense'"):
         GraphKoopmanOperator(2, sparsity="bogus")  # type: ignore[arg-type]
 
 
@@ -401,7 +401,7 @@ def test_graph_operator_factorized_reset_and_monitoring() -> None:
     assert torch.equal(op.K, op.matrix)
     assert op.bound_metric().ndim == 0
     assert op.spectral_radius().ndim == 0
-    assert op.stability_certificate() is None
+    assert op.factor_stability_certificate() is None
 
     dense = GraphKoopmanOperator(
         2,
@@ -838,10 +838,73 @@ def test_block_diagonal_inverse_large_n_smoke() -> None:
     assert recovered.numel() * recovered.element_size() < 1_000_000
 
 
-def test_distributed_sparsity_rejected_with_planned_message() -> None:
-    """distributed sparsity stays reserved with an updated planned message."""
-    with pytest.raises(ValueError, match="planned; not in 0.6.0"):
-        GraphKoopmanOperator(2, sparsity="distributed")  # type: ignore[arg-type]
+def test_distributed_sparsity_constructs() -> None:
+    """sparsity='distributed' constructs and keeps the sparse forward path."""
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    assert op.sparsity == "distributed"
+    edge_index = _path_edge_index(3)
+    z = torch.randn(3, 2)
+    advanced = op.advance(z, edge_index=edge_index)
+    assert advanced.shape == z.shape
+
+
+def test_distributed_checkpoint_round_trip(tmp_path) -> None:
+    """Format-1 checkpoints round-trip koopman_sparsity=distributed."""
+    from pathlib import Path
+
+    encoder = GNNEncoder(2, 4, 3, num_layers=1)
+    decoder = GNNDecoder(3, 4, 2, num_layers=1)
+    model = GraphKoopmanModel(
+        encoder=encoder,
+        decoder=decoder,
+        latent_dim=3,
+        time_step=1.0,
+        koopman="graph",
+        koopman_sparsity="distributed",
+    )
+    assert model.koopman.sparsity == "distributed"
+    path = Path(tmp_path) / "dist.pt"
+    model.save(path)
+    loaded = GraphKoopmanModel.load(path)
+    assert loaded.koopman.sparsity == "distributed"
+
+
+def test_distributed_spectrum_and_inverse_match_dense_moduli() -> None:
+    """Distributed spectrum / inverse_advance agree with dense on modest N·d."""
+    num_nodes = 4
+    latent_dim = 2
+    edge_index = torch.tensor(
+        [[0, 0, 1, 2, 3], [1, 2, 2, 3, 0]],
+        dtype=torch.long,
+    )
+    dense = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        adjacency="random_walk",
+        sparsity="dense",
+    )
+    distributed = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        adjacency="random_walk",
+        sparsity="distributed",
+    )
+    k_self = torch.tensor([[0.45, 0.20], [0.05, 0.35]])
+    k_nbr = torch.tensor([[0.25, 0.10], [0.15, 0.05]])
+    dense.set_dense_matrices(k_self, k_nbr)
+    distributed.set_dense_matrices(k_self, k_nbr)
+
+    num_modes = 3
+    dense_spec = dense.spectrum(edge_index, num_nodes)
+    dist_spec = distributed.spectrum(edge_index, num_nodes, num_modes=num_modes)
+    assert dist_spec.eigenvalues.shape == (num_modes,)
+    dense_abs = dense_spec.eigenvalues.abs()[:num_modes]
+    assert torch.allclose(dist_spec.eigenvalues.abs(), dense_abs, atol=1e-4)
+
+    z = torch.randn(num_nodes, latent_dim)
+    y = dense.advance(z, edge_index=edge_index)
+    recovered = distributed.inverse_advance(y, edge_index=edge_index)
+    assert torch.allclose(recovered, z, atol=1e-4)
 
 
 def test_block_diagonal_rejects_inverse_matrix_kwarg() -> None:

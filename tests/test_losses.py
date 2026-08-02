@@ -653,6 +653,192 @@ def test_eigenvalue_loss_graph_edge_weight_affects_penalty() -> None:
     assert equal.item() != pytest.approx(unequal.item(), abs=1e-4)
 
 
+def test_eigenvalue_loss_distributed_graph_is_finite_without_assembly() -> None:
+    """Distributed graph eig-reg uses Arnoldi surrogate (finite penalty)."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator, HypergraphKoopmanOperator
+
+    edge_index = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    op.set_dense_matrices(1.2 * torch.eye(2), 0.3 * torch.eye(2))
+    loss_fn = EigenvalueRegularizationLoss()
+    penalty = loss_fn(op, edge_index=edge_index, num_nodes=3)
+    assert torch.isfinite(penalty)
+    assert penalty.item() > 0.0
+
+    continuous_penalty = loss_fn(
+        op,
+        edge_index=edge_index,
+        num_nodes=3,
+        dynamics_mode="continuous",
+    )
+    assert torch.isfinite(continuous_penalty)
+    assert continuous_penalty.item() > 0.0
+
+    with pytest.raises(ValueError, match="sparsity='distributed'"):
+        loss_fn(op)
+
+    # Hypergraph distributed disables assembled hinge (no matrix-free helper).
+    hyper = HypergraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    assert loss_fn(
+        hyper, hyperedge_index=edge_index, num_nodes=3
+    ).item() == pytest.approx(0.0, abs=1e-8)
+
+
+def test_eigenvalue_loss_schur_discrete_penalizes_bound_above_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discrete schur/lyapunov modes penalize factor bounds above unity."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    schur = KoopmanOperator(3, parameterization="schur")
+    monkeypatch.setattr(
+        schur,
+        "bound_metric",
+        lambda: torch.tensor(1.2, dtype=torch.float32),
+    )
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(schur).item() == pytest.approx(0.04, abs=1e-6)
+
+
+def test_eigenvalue_loss_continuous_graph_and_hetero_require_topology() -> None:
+    """Continuous networked operators require topology for eig-reg."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import (
+        ContinuousGraphKoopmanOperator,
+        ContinuousHeteroGraphKoopmanOperator,
+    )
+
+    loss_fn = EigenvalueRegularizationLoss()
+    graph = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    with pytest.raises(ValueError, match="ContinuousGraphKoopmanOperator"):
+        loss_fn(graph)
+
+    hetero = ContinuousHeteroGraphKoopmanOperator(2, num_relations=1)
+    with pytest.raises(ValueError, match="ContinuousHeteroGraphKoopmanOperator"):
+        loss_fn(hetero)
+
+
+def test_eigenvalue_loss_distributed_hetero_paths() -> None:
+    """Distributed hetero eig-reg requires topology; typed/rectangular no-op."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import HeteroGraphKoopmanOperator
+
+    edge_indices = [torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)]
+    op = HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+    op.set_dense_matrices(1.2 * torch.eye(2), [0.3 * torch.eye(2)])
+    loss_fn = EigenvalueRegularizationLoss()
+
+    with pytest.raises(ValueError, match="HeteroGraphKoopmanOperator"):
+        loss_fn(op)
+
+    penalty = loss_fn(op, edge_indices=edge_indices, num_nodes=3)
+    assert torch.isfinite(penalty)
+
+    typed = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=("a", "b"),
+        edge_types=(("a", "r0", "b"),),
+        sparsity="distributed",
+    )
+    assert loss_fn(
+        typed,
+        edge_indices=[torch.tensor([[0, 1], [2, 3]], dtype=torch.long)],
+        num_nodes=4,
+    ).item() == pytest.approx(0.0, abs=1e-8)
+
+
+def test_eigenvalue_loss_distributed_graph_arnoldi_failure_noops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distributed graph eig-reg returns zero when Arnoldi surrogate fails."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import GraphKoopmanOperator
+    from koopman_graph.operators import matrix_free as mf_mod
+
+    def _raise_value_error(**kwargs: object) -> None:  # noqa: ARG001
+        msg = "forced Arnoldi failure"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(mf_mod, "spectrum_k_eff_graph", _raise_value_error)
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    op.set_dense_matrices(torch.eye(2), 0.1 * torch.eye(2))
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(op, edge_index=edge_index, num_nodes=2).item() == pytest.approx(
+        0.0,
+        abs=1e-8,
+    )
+
+
+def test_eigenvalue_loss_distributed_hetero_arnoldi_failure_noops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distributed hetero eig-reg returns zero when Arnoldi surrogate fails."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+    from koopman_graph.operators import HeteroGraphKoopmanOperator
+    from koopman_graph.operators import matrix_free as mf_mod
+
+    def _raise_value_error(**kwargs: object) -> None:  # noqa: ARG001
+        msg = "forced hetero Arnoldi failure"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(mf_mod, "spectrum_k_eff_hetero", _raise_value_error)
+    edge_indices = [torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)]
+    op = HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+    op.set_dense_matrices(torch.eye(2), [0.1 * torch.eye(2)])
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(
+        op,
+        edge_indices=edge_indices,
+        num_nodes=3,
+    ).item() == pytest.approx(0.0, abs=1e-8)
+
+
+def test_eigenvalue_loss_rectangular_size_without_nodes_dict_noops() -> None:
+    """Rectangular hetero without num_nodes_dict skips assembled size accounting."""
+    from koopman_graph.losses.regularization import (
+        _assembled_eigreg_exceeds_ceiling,
+        _assembled_eigreg_size,
+    )
+    from koopman_graph.operators import HeteroGraphKoopmanOperator
+
+    op = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=("a", "b"),
+        edge_types=(("a", "r0", "b"),),
+        latent_dims={"a": 2, "b": 3},
+    )
+    assert _assembled_eigreg_size(op, num_nodes=5, num_nodes_dict=None) is None
+
+    dissipative_graph = GraphKoopmanOperator(2, parameterization="dissipative")
+    assert not _assembled_eigreg_exceeds_ceiling(
+        dissipative_graph,
+        num_nodes=3,
+    )
+
+
+def test_eigenvalue_loss_schur_continuous_penalizes_positive_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Continuous schur/lyapunov modes penalize positive bound metrics."""
+    from koopman_graph.losses import EigenvalueRegularizationLoss
+
+    schur = KoopmanOperator(3, parameterization="schur")
+    monkeypatch.setattr(
+        schur,
+        "bound_metric",
+        lambda: torch.tensor(0.2, dtype=torch.float32),
+    )
+    loss_fn = EigenvalueRegularizationLoss()
+    assert loss_fn(schur, dynamics_mode="continuous").item() == pytest.approx(
+        0.04,
+        abs=1e-6,
+    )
+
+
 def test_eigenvalue_loss_graph_structural_uses_factor_bound() -> None:
     """Graph structural modes keep factor bound_metric without topology."""
     from koopman_graph.losses import EigenvalueRegularizationLoss
@@ -1229,6 +1415,26 @@ def test_koopman_sparsity_loss_rejects_invalid_p() -> None:
     """Sparsity exponent must lie in (0, 1]."""
     with pytest.raises(ValueError, match="p must be in"):
         KoopmanSparsityLoss(p=1.5)
+    with pytest.raises(ValueError, match="eps must be positive"):
+        KoopmanSparsityLoss(eps=0.0)
+
+
+def test_koopman_sparsity_loss_hypergraph_targets_self_and_hedge() -> None:
+    """Hypergraph sparsity penalizes K_self and K_hedge factors."""
+    from koopman_graph.operators import HypergraphKoopmanOperator
+
+    op = HypergraphKoopmanOperator(2, init_mode="identity")
+    with torch.no_grad():
+        op.set_dense_matrices(
+            torch.tensor([[1.0, 0.0], [0.0, 0.5]]),
+            torch.tensor([[0.0, 2.0], [0.0, 0.0]]),
+        )
+    entries = torch.cat(
+        (op.K_self.reshape(-1), op.K_hedge.reshape(-1)),
+        dim=0,
+    )
+    expected = entries.abs().mean()
+    assert KoopmanSparsityLoss()(op).item() == pytest.approx(expected.item(), abs=1e-6)
 
 
 def test_koopman_sparsity_loss_graph_targets_self_and_nbr_not_effective() -> None:

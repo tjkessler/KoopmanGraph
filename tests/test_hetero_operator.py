@@ -141,10 +141,41 @@ def test_block_diagonal_shares_dense_forward() -> None:
     assert torch.allclose(dense(z, edge_indices), block(z, edge_indices), atol=_ATOL)
 
 
-def test_rejects_distributed_sparsity() -> None:
-    """Reserved sparsity='distributed' raises at construction."""
-    with pytest.raises(ValueError, match="distributed"):
-        HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+def test_distributed_sparsity_constructs() -> None:
+    """sparsity='distributed' constructs for multiplex hetero."""
+    op = HeteroGraphKoopmanOperator(2, num_relations=1, sparsity="distributed")
+    assert op.sparsity == "distributed"
+
+
+def test_distributed_spectrum_and_inverse_smoke() -> None:
+    """Distributed hetero spectrum / inverse agree with dense on modest N·d."""
+    num_nodes = 4
+    latent_dim = 2
+    edge_indices = _two_relation_banks(num_nodes)
+    dense = HeteroGraphKoopmanOperator(
+        latent_dim, num_relations=2, init_mode="identity", sparsity="dense"
+    )
+    distributed = HeteroGraphKoopmanOperator(
+        latent_dim, num_relations=2, init_mode="identity", sparsity="distributed"
+    )
+    k_self = torch.tensor([[0.7, 0.1], [0.0, 0.6]])
+    k_relations = [
+        torch.tensor([[0.2, 0.0], [0.05, 0.15]]),
+        torch.tensor([[0.0, 0.1], [0.1, 0.0]]),
+    ]
+    dense.set_dense_matrices(k_self, k_relations)
+    distributed.set_dense_matrices(k_self, k_relations)
+
+    num_modes = 3
+    dense_abs = dense.spectrum(edge_indices, num_nodes).eigenvalues.abs()[:num_modes]
+    dist_spec = distributed.spectrum(edge_indices, num_nodes, num_modes=num_modes)
+    assert dist_spec.eigenvalues.shape == (num_modes,)
+    assert torch.allclose(dist_spec.eigenvalues.abs(), dense_abs, atol=1e-4)
+
+    z = torch.randn(num_nodes, latent_dim)
+    y = dense.advance(z, edge_indices=edge_indices)
+    recovered = distributed.inverse_advance(y, edge_indices=edge_indices)
+    assert torch.allclose(recovered, z, atol=_INV_ATOL)
 
 
 def test_advance_requires_edge_indices() -> None:
@@ -548,3 +579,125 @@ def test_set_dense_matrices_rejects_basis_mode() -> None:
     )
     with pytest.raises(ValueError, match="set_basis_factors"):
         op.set_dense_matrices(torch.eye(2), [torch.eye(2), torch.eye(2)])
+
+
+def test_constructor_rejects_unknown_sparsity() -> None:
+    """Heterogeneous operators reject unsupported sparsity labels."""
+    with pytest.raises(ValueError, match="sparsity must be"):
+        HeteroGraphKoopmanOperator(
+            2,
+            num_relations=1,
+            sparsity="unknown",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"latent_dim": 0, "num_relations": 1}, "latent_dim must be positive"),
+        ({"latent_dim": 2, "num_relations": 0}, "num_relations must be positive"),
+        (
+            {"latent_dim": 2, "num_relations": 1, "control_dim": -1},
+            "control_dim must be non-negative",
+        ),
+        (
+            {"latent_dim": 2, "num_relations": 1, "normalization": "bogus"},
+            "normalization must be one of",
+        ),
+    ],
+)
+def test_constructor_rejects_invalid_scalar_configuration(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    """Constructor scalar and normalization boundaries raise clear errors."""
+    with pytest.raises(ValueError, match=message):
+        HeteroGraphKoopmanOperator(**kwargs)  # type: ignore[arg-type]
+
+
+def test_matrix_aliases_and_effective_matrix_node_count_validation() -> None:
+    """Matrix aliases expose K_self and dense assembly requires positive N."""
+    op = HeteroGraphKoopmanOperator(2, num_relations=1)
+    assert op.matrix is op.K_self
+    assert op.K is op.K_self
+    with pytest.raises(ValueError, match="num_nodes must be positive"):
+        op.effective_matrix([torch.empty((2, 0), dtype=torch.long)], 0)
+    with pytest.raises(ValueError, match="at most one"):
+        op.effective_matrix(
+            [torch.empty((2, 0), dtype=torch.long)],
+            1,
+            k_self=torch.eye(2),
+            k_self_blocks=torch.eye(2).unsqueeze(0),
+        )
+
+
+def test_shared_forward_and_inverse_reject_malformed_latents_or_topology() -> None:
+    """Shared-d forward/inverse validate latent shapes and required topology."""
+    op = HeteroGraphKoopmanOperator(2, num_relations=1)
+    bank = [torch.empty((2, 0), dtype=torch.long)]
+    with pytest.raises(ValueError, match="expects z with shape"):
+        op.forward(torch.zeros(2), bank)
+    with pytest.raises(ValueError, match="trailing dimension"):
+        op.forward(torch.zeros(2, 3), bank)
+    with pytest.raises(ValueError, match="edge_indices is required"):
+        op.inverse_advance(torch.zeros(2, 2))
+
+    block = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        sparsity="block_diagonal",
+    )
+    with pytest.raises(ValueError, match="requires sparsity='dense'"):
+        block.dense_effective_inverse(bank, 2)
+
+
+def test_hetero_stability_certificate_rejects_unknown_kind() -> None:
+    """Heterogeneous joint certificates reject unknown construction kinds."""
+    op = HeteroGraphKoopmanOperator(2, num_relations=1)
+    with pytest.raises(ValueError, match="kind must be one of"):
+        op.stability_certificate(
+            [torch.empty((2, 0), dtype=torch.long)],
+            1,
+            kind="bogus",
+        )
+
+
+def test_distributed_paths_reject_typed_and_per_node_self_modes() -> None:
+    """Distributed spectrum/inverse enforce multiplex shared-self constraints."""
+    bank = [torch.empty((2, 0), dtype=torch.long)]
+    typed = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        node_types=("a", "b"),
+        edge_types=(("a", "to", "b"),),
+        sparsity="distributed",
+    )
+    with pytest.raises(ValueError, match="requires multiplex shared-d"):
+        typed.spectrum(bank, 2, num_nodes_dict={"a": 1, "b": 1})
+    with pytest.raises(ValueError, match="requires multiplex shared-d"):
+        typed.inverse_advance(
+            torch.zeros(2, 2),
+            edge_indices=bank,
+            num_nodes_dict={"a": 1, "b": 1},
+        )
+
+    distributed = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        sparsity="distributed",
+    )
+    with pytest.raises(ValueError, match="inverse_matrix is only supported"):
+        distributed.inverse_advance(
+            torch.zeros(2, 2),
+            edge_indices=bank,
+            inverse_matrix=torch.eye(4),
+        )
+
+    orbit_tied = HeteroGraphKoopmanOperator(
+        2,
+        num_relations=1,
+        sparsity="distributed",
+        orbit_partition=((0, 1),),
+    )
+    with pytest.raises(ValueError, match="requires a shared K_self"):
+        orbit_tied.inverse_advance(torch.zeros(2, 2), edge_indices=bank)

@@ -109,12 +109,14 @@ Ray, and Dask). Native PyTorch DistributedDataParallel (DDP) /
 
    pip install -e ".[lightning]"      # Fabric + KoopmanLightningModule (Trainer)
    pip install -e ".[ray]"            # fit_ensemble_with_ray (ensemble members)
-   pip install -e ".[dask]"           # reserved pin (no library helpers in 0.8.0)
+   pip install -e ".[dask]"           # dask_prep materialize helpers (offline)
+   pip install -e ".[msm]"            # deeptime (VAMP-2 oracle tests; optional)
+   pip install -e ".[equivariance]"   # e3nn Tier-B steerable encoder (optional)
    pip install -e ".[distributed]"    # meta-extra: lightning + ray + dask
 
 These trainer extras are **not** related to operator
-``sparsity="distributed"`` (that sparsity mode remains unimplemented and
-raises ``ValueError``; see :doc:`faq` and :doc:`limitations`). The
+``sparsity="distributed"`` (matrix-free inverse / spectrum on discrete
+graph and multiplex hetero; see :doc:`faq` and :doc:`limitations`). The
 ``[lightning]`` extra covers Fabric and the optional
 :class:`~koopman_graph.distributed.KoopmanLightningModule` Trainer sugar.
 The ``[ray]`` extra covers
@@ -122,9 +124,13 @@ The ``[ray]`` extra covers
 independent ensemble member fits; sequential remains default) and is also
 used by the examples-only Tune script
 ``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
-script; no library Tune / AutoML API). Dask is **docs-only** in 0.8.0 —
-no library prep helpers or training loop; the ``[dask]`` extra is a
-reserved pin for optional future use (see :doc:`faq`).
+script; no library Tune / AutoML API). The ``[dask]`` extra activates
+:mod:`koopman_graph.distributed.dask_prep` materialize helpers; it is
+**not** a Dask training loop (see :doc:`faq`). The ``[msm]`` extra pins
+deeptime for VAMP-2 oracle tests; the precursor score/loss helpers
+themselves need no extra. The ``[equivariance]`` extra pins ``e3nn`` for
+:class:`~koopman_graph.nn.E3EquivariantEncoder` (steerable encode to
+invariant latents; latent :math:`K` remains non-equivariant).
 
 uv (project sync)
 ~~~~~~~~~~~~~~~~~

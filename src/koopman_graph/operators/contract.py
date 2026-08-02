@@ -17,9 +17,11 @@ Parameterization = Literal[
     "lyapunov",
     "auxiliary_spectral",
 ]
-#: Canonical discrete vs continuous dynamics vocabulary. Re-exported from
+#: Canonical dynamics vocabulary. Re-exported from
 #: :mod:`koopman_graph.protocols` as :data:`~koopman_graph.protocols.DynamicsMode`.
-DynamicsMode = Literal["discrete", "continuous"]
+#: ``"stochastic"`` is discrete linear advance plus learned diagonal process
+#: noise (not continuous matrix-exp / SDE generators).
+DynamicsMode = Literal["discrete", "continuous", "stochastic"]
 #: Built-in discrete factory kind for :class:`~koopman_graph.model.GraphKoopmanModel`.
 KoopmanKind = Literal[
     "pernode",
@@ -36,7 +38,14 @@ DISSIPATIVE_MIN_EIGENVALUE = 1e-3
 
 @dataclass(frozen=True)
 class StabilityCertificate:
-    """Lyapunov or spectral stability certificate for constrained operators.
+    """Lyapunov or spectral stability certificate for **factor** operators.
+
+    Applies to a single ``d×d`` (or continuous generator) factor under
+    structural parameterization. On networked operators this is **not** a
+    joint ``ρ(K_eff)`` certificate — use
+    :class:`~koopman_graph.analysis.JointStabilityCertificate` via
+    topology-aware ``stability_certificate(...)`` on graph / hetero
+    operators.
 
     Public result types in this package are frozen dataclasses with attribute
     access (not mapping/dict styles).
@@ -207,8 +216,9 @@ def resolve_factory_stability_bound(
     ----------
     operator : object
         Built-in discrete or continuous Koopman operator.
-    dynamics_mode : {"discrete", "continuous"}
+    dynamics_mode : {"discrete", "continuous", "stochastic"}
         Model dynamics mode selecting which attribute to read.
+        ``"stochastic"`` uses the discrete bound attribute.
 
     Returns
     -------
@@ -223,11 +233,14 @@ def resolve_factory_stability_bound(
     if dynamics_mode == "continuous":
         bound = getattr(operator, "max_real_eigenvalue", None)
         attr_name = "max_real_eigenvalue"
-    elif dynamics_mode == "discrete":
+    elif dynamics_mode in {"discrete", "stochastic"}:
         bound = getattr(operator, "max_spectral_radius", None)
         attr_name = "max_spectral_radius"
     else:
-        msg = f"dynamics_mode must be 'discrete' or 'continuous', got {dynamics_mode!r}"
+        msg = (
+            "dynamics_mode must be 'discrete', 'continuous', or 'stochastic', "
+            f"got {dynamics_mode!r}"
+        )
         raise TypeError(msg)
     if bound is None:
         msg = (

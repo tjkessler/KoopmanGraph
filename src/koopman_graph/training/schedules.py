@@ -16,6 +16,7 @@ def constant_loss_weights(
     pde: float = 0.0,
     sparsity: float = 0.0,
     worst_case: float = 0.0,
+    vamp2: float = 0.0,
 ) -> LossWeights:
     """Build static loss weights for all training epochs.
 
@@ -39,6 +40,8 @@ def constant_loss_weights(
         Weight on Koopman-matrix sparsity. Default is ``0.0``.
     worst_case : float, optional
         Weight on the worst-case reconstruction term. Default is ``0.0``.
+    vamp2 : float, optional
+        Weight on the VAMP-2 precursor term. Default is ``0.0``.
 
     Returns
     -------
@@ -55,6 +58,7 @@ def constant_loss_weights(
         pde=pde,
         sparsity=sparsity,
         worst_case=worst_case,
+        vamp2=vamp2,
     )
 
 
@@ -115,6 +119,7 @@ def linear_ramp_loss_weights(
             pde=start.pde + t * (end.pde - start.pde),
             sparsity=start.sparsity + t * (end.sparsity - start.sparsity),
             worst_case=start.worst_case + t * (end.worst_case - start.worst_case),
+            vamp2=start.vamp2 + t * (end.vamp2 - start.vamp2),
         )
 
     return schedule

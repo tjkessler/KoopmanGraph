@@ -8,28 +8,34 @@ Checkpoint format versions
     embeddings, and built-in operator kinds (per-node / graph / hypergraph /
     global_local / continuous_graph). Encoder/decoder ``type`` strings include
     ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-    ``"hyper_enc"``, ``"hyper_dec"``, ``"relgraph_enc"``, and
-    ``"relgraph_dec"``; missing decoder ``type`` defaults to
-    ``"gcn"``. Hybrid ``physics`` blocks own ``dim``, ``preset``, and
+    ``"hyper_enc"``, ``"hyper_dec"``, ``"sim_enc"``, ``"sim_dec"``,
+    ``"inv_geom_enc"``, ``"relgraph_enc"``, and ``"relgraph_dec"``; missing
+    decoder ``type`` defaults to ``"gcn"``. Hybrid ``physics`` blocks own
+    ``dim``, ``preset``, and
     ``position``; ``position`` is round-tripped and validated on load
     (currently only ``"prepend"``). Missing ``position`` defaults to
     ``"prepend"``. Optional ``n_delays`` records Hankel delay embedding; the
     stored encoder block is always the base encoder config with
     ``in_channels = n_delays * feature_dim``. Format-1 also stores placeholder
-    keys ``sparsity`` (operator realization; ``"dense"`` or
-    ``"block_diagonal"`` for supported networked kinds),
+    keys ``sparsity`` (operator realization; ``"dense"``,
+    ``"block_diagonal"``, or ``"distributed"`` for supported networked kinds),
     ``adjacency`` (``"symmetric"`` / ``"random_walk"`` /
     ``"dual_random_walk"`` for graph / continuous-graph operators, else
     ``None``), ``learn_topology`` (``None`` or ``"self_adaptive"``) with
     ``topology_embedding_dim``, and ``symmetry`` (``None`` or a dict with
     ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
-    graph / hypergraph operators). When ``koopman_kind="hetero_graph"``,
+    graph / hypergraph operators).     When ``koopman_kind="hetero_graph"``,
     additive keys ``node_types``, ``edge_types`` (JSON ``(src, rel, dst)``
     triples), ``relation_tying`` (``"independent"`` / ``"basis"``),
     ``basis_size``, and
     ``relation_normalization`` (``"rgcn_in_degree"`` /
-    ``"random_walk"``) are required on load; homogeneous checkpoints omit
-    and ignore these keys.
+    ``"random_walk"``) are required on load; optional
+    ``synthesize_reverse_relations`` (bool; absent ⇒ ``False``) records
+    whether reverse relations were factory-synthesized. Optional additive
+    ``latent_dims`` (``dict[str, int]``; absent ⇒ shared ``latent_dim``)
+    records per-type widths ``d_τ`` for rectangular hetero (Q1=A). Incomplete
+    or mismatched ``latent_dims`` are rejected — never silently coerced from
+    factor shapes. Homogeneous checkpoints omit and ignore these keys.
 
 Beta policy
     While the package is pre-1.0, ``FORMAT_VERSION`` stays at ``1``. Incomplete
@@ -54,6 +60,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from koopman_graph.data.hetero_layout import validate_latent_dims
 from koopman_graph.nn import (
     DEFAULT_TOPOLOGY_EMBEDDING_DIM,
     DelayEmbeddingEncoder,
@@ -67,10 +74,13 @@ from koopman_graph.nn import (
     GraphTransformerEncoder,
     HypergraphDecoder,
     HypergraphEncoder,
+    InvariantGeometryEncoder,
     RelGraphDecoder,
     RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
+    SimplicialDecoder,
+    SimplicialEncoder,
 )
 from koopman_graph.observables import (
     PHYSICS_POSITION,
@@ -131,6 +141,7 @@ Decoder = (
     | DiffConvDecoder
     | GraphTransformerDecoder
     | HypergraphDecoder
+    | SimplicialDecoder
     | RelGraphDecoder
 )
 BaseEncoder = (
@@ -140,6 +151,8 @@ BaseEncoder = (
     | DiffConvEncoder
     | GraphTransformerEncoder
     | HypergraphEncoder
+    | SimplicialEncoder
+    | InvariantGeometryEncoder
     | RelGraphEncoder
 )
 _SERIALIZABLE_KOOPMAN_TYPES = (
@@ -371,6 +384,37 @@ def _require_hetero_schema(config: dict[str, Any]) -> None:
         )
         raise ValueError(msg)
 
+    if "synthesize_reverse_relations" in config:
+        flag = config["synthesize_reverse_relations"]
+        if not isinstance(flag, bool):
+            msg = (
+                "Checkpoint config.synthesize_reverse_relations must be a "
+                f"bool when present, got {flag!r}"
+            )
+            raise ValueError(msg)
+
+    if "latent_dims" in config:
+        latent_dims = config["latent_dims"]
+        if not isinstance(latent_dims, dict):
+            msg = (
+                "Checkpoint config.latent_dims must be a mapping of node type "
+                f"to positive int when present, got {type(latent_dims).__name__}"
+            )
+            raise ValueError(msg)
+        try:
+            validate_latent_dims(
+                node_types,
+                latent_dims,
+                shared_latent_dim=int(config["latent_dim"]),
+            )
+        except ValueError as exc:
+            msg = (
+                f"Checkpoint config.latent_dims is incomplete or invalid: {exc}. "
+                "Re-save with the current package (FORMAT_VERSION=1 additive "
+                "latent_dims); shared-d checkpoints omit this key."
+            )
+            raise ValueError(msg) from exc
+
     encoder = config.get("encoder")
     if (
         isinstance(encoder, dict)
@@ -383,6 +427,95 @@ def _require_hetero_schema(config: dict[str, Any]) -> None:
             f"encoder.normalization ({encoder['normalization']!r})"
         )
         raise ValueError(msg)
+
+
+def _state_dict_has_rectangular_hetero_markers(
+    state_dict: dict[str, Any],
+) -> bool:
+    """Return whether ``state_dict`` contains rectangular hetero factor keys.
+
+    Parameters
+    ----------
+    state_dict
+        Value for ``state_dict``.
+
+    Returns
+    -------
+    object
+        Function result.
+    """
+    for key in state_dict:
+        if key.startswith("koopman._rel_rect."):
+            return True
+        if ".type_latent." in key or ".type_latent_in." in key:
+            return True
+    return False
+
+
+def _validate_hetero_latent_dims_vs_state(
+    config: dict[str, Any],
+    state_dict: dict[str, Any],
+) -> None:
+    """Reject rectangular weights without ``latent_dims`` or shape mismatches.
+
+    Parameters
+    ----------
+    config : dict
+        Migrated hetero architecture config.
+    state_dict : dict
+        Checkpoint weight dictionary.
+
+    Raises
+    ------
+    ValueError
+        If rectangular markers disagree with ``latent_dims``, or per-type
+        self-factor shapes disagree with declared ``d_τ``.
+    """
+    has_rect = _state_dict_has_rectangular_hetero_markers(state_dict)
+    latent_dims = config.get("latent_dims")
+    if has_rect and latent_dims is None:
+        msg = (
+            "Checkpoint state_dict contains rectangular hetero factors "
+            "(_rel_rect / type_latent*) but config.latent_dims is missing; "
+            "re-save with the current package (FORMAT_VERSION=1 additive "
+            "latent_dims). Rectangular mode is never inferred from weights alone."
+        )
+        raise ValueError(msg)
+    if latent_dims is None:
+        return
+
+    validated = validate_latent_dims(
+        config["node_types"],
+        latent_dims,
+        shared_latent_dim=int(config["latent_dim"]),
+    )
+    assert validated is not None
+    is_rectangular = any(
+        width != int(config["latent_dim"]) for width in validated.values()
+    )
+    if is_rectangular and not any(
+        key.startswith("koopman._rel_rect.") for key in state_dict
+    ):
+        msg = (
+            "Checkpoint config.latent_dims implies rectangular relation "
+            "factors but state_dict has no koopman._rel_rect.* keys; "
+            "re-save with the current package."
+        )
+        raise ValueError(msg)
+
+    for name, width in validated.items():
+        self_key = f"koopman._selves.{name}.K"
+        if self_key not in state_dict:
+            continue
+        shape = tuple(state_dict[self_key].shape)
+        expected = (int(width), int(width))
+        if shape != expected:
+            msg = (
+                f"Checkpoint state_dict[{self_key!r}] has shape {shape} but "
+                f"config.latent_dims[{name!r}]={width} expects {expected}; "
+                "re-save with matching latent_dims / factors."
+            )
+            raise ValueError(msg)
 
 
 def _parse_symmetry_config(
@@ -453,6 +586,8 @@ _SUPPORTED_ENCODER_TYPES: dict[str, type[BaseEncoder]] = {
     "diffconv": DiffConvEncoder,
     "transformer": GraphTransformerEncoder,
     "hyper_enc": HypergraphEncoder,
+    "sim_enc": SimplicialEncoder,
+    "inv_geom_enc": InvariantGeometryEncoder,
     "relgraph_enc": RelGraphEncoder,
 }
 
@@ -463,6 +598,7 @@ _SUPPORTED_DECODER_TYPES: dict[str, type[Decoder]] = {
     "diffconv": DiffConvDecoder,
     "transformer": GraphTransformerDecoder,
     "hyper_dec": HypergraphDecoder,
+    "sim_dec": SimplicialDecoder,
     "relgraph_dec": RelGraphDecoder,
 }
 
@@ -480,7 +616,8 @@ def _encoder_type(encoder: BaseEncoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        ``"hyper_enc"``, or ``"relgraph_enc"``.
+        ``"hyper_enc"``, ``"sim_enc"``, ``"inv_geom_enc"``, or
+        ``"relgraph_enc"``.
 
     Raises
     ------
@@ -499,6 +636,10 @@ def _encoder_type(encoder: BaseEncoder) -> str:
         return "gcn"
     if isinstance(encoder, HypergraphEncoder):
         return "hyper_enc"
+    if isinstance(encoder, SimplicialEncoder):
+        return "sim_enc"
+    if isinstance(encoder, InvariantGeometryEncoder):
+        return "inv_geom_enc"
     if isinstance(encoder, RelGraphEncoder):
         return "relgraph_enc"
     msg = f"Unsupported encoder type: {type(encoder).__name__}"
@@ -552,6 +693,8 @@ def _unwrap_base_encoder(
             DiffConvEncoder,
             GraphTransformerEncoder,
             HypergraphEncoder,
+            SimplicialEncoder,
+            InvariantGeometryEncoder,
             RelGraphEncoder,
         ),
     ):
@@ -573,7 +716,7 @@ def _decoder_type(decoder: Decoder) -> str:
     -------
     str
         ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
-        ``"hyper_dec"``, or ``"relgraph_dec"``.
+        ``"hyper_dec"``, ``"sim_dec"``, or ``"relgraph_dec"``.
 
     Raises
     ------
@@ -592,6 +735,8 @@ def _decoder_type(decoder: Decoder) -> str:
         return "gcn"
     if isinstance(decoder, HypergraphDecoder):
         return "hyper_dec"
+    if isinstance(decoder, SimplicialDecoder):
+        return "sim_dec"
     if isinstance(decoder, RelGraphDecoder):
         return "relgraph_dec"
     msg = f"Unsupported decoder type: {type(decoder).__name__}"
@@ -667,6 +812,8 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         encoder_config["edge_dim"] = encoder.edge_dim
     if isinstance(encoder, DiffConvEncoder):
         encoder_config["diffusion_steps"] = encoder.diffusion_steps
+    if isinstance(encoder, SimplicialEncoder):
+        encoder_config["residual"] = encoder.residual
     if isinstance(encoder, RelGraphEncoder):
         encoder_config["num_relations"] = encoder.num_relations
         encoder_config["normalization"] = encoder.normalization
@@ -693,6 +840,8 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         decoder_config["edge_dim"] = decoder.edge_dim
     if isinstance(decoder, DiffConvDecoder):
         decoder_config["diffusion_steps"] = decoder.diffusion_steps
+    if isinstance(decoder, SimplicialDecoder):
+        decoder_config["residual"] = decoder.residual
     if isinstance(decoder, RelGraphDecoder):
         decoder_config["num_relations"] = decoder.num_relations
         decoder_config["normalization"] = decoder.normalization
@@ -774,28 +923,33 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         config["relation_tying"] = model.koopman.relation_tying
         config["basis_size"] = model.koopman.basis_size
         config["relation_normalization"] = model.koopman.normalization
+        config["synthesize_reverse_relations"] = bool(
+            getattr(model, "synthesize_reverse_relations", False)
+        )
         config["adjacency"] = None
+        if model.koopman.latent_dims is not None:
+            config["latent_dims"] = dict(model.koopman.latent_dims)
     return config
 
 
-def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
+def _build_encoder(
+    config: dict[str, Any],
+    *,
+    latent_dims: dict[str, int] | None = None,
+) -> BaseEncoder:
     """Instantiate an encoder from a checkpoint configuration block.
 
     Parameters
     ----------
-    config : dict
-        Encoder configuration block from a saved checkpoint.
+    config
+        Value for ``config``.
+    latent_dims
+        Value for ``latent_dims``.
 
     Returns
     -------
-    GNNEncoder, GATEncoder, SAGEEncoder, DiffConvEncoder, or
-        GraphTransformerEncoder
-        Reconstructed encoder matching the saved architecture.
-
-    Raises
-    ------
-    ValueError
-        If the encoder ``type`` field is unsupported.
+    object
+        Function result.
     """
     encoder_type = config["type"]
     encoder_cls = _SUPPORTED_ENCODER_TYPES.get(encoder_type)
@@ -832,6 +986,13 @@ def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
         )
     if encoder_type == "hyper_enc":
         return HypergraphEncoder(**common_kwargs)
+    if encoder_type == "sim_enc":
+        return SimplicialEncoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+        )
+    if encoder_type == "inv_geom_enc":
+        return InvariantGeometryEncoder(**common_kwargs)
     if encoder_type == "relgraph_enc":
         return RelGraphEncoder(
             **common_kwargs,
@@ -840,30 +1001,29 @@ def _build_encoder(config: dict[str, Any]) -> BaseEncoder:
             root_weight=config.get("root_weight", True),
             node_types=config.get("node_types"),
             edge_types=config.get("edge_types"),
+            latent_dims=latent_dims,
         )
     return GNNEncoder(**common_kwargs)
 
 
-def _build_decoder(config: dict[str, Any]) -> Decoder:
+def _build_decoder(
+    config: dict[str, Any],
+    *,
+    latent_dims: dict[str, int] | None = None,
+) -> Decoder:
     """Instantiate a decoder from a checkpoint configuration block.
 
     Parameters
     ----------
-    config : dict
-        Decoder configuration block from a saved checkpoint. Missing ``type``
-        defaults to ``"gcn"`` for checkpoints written before GAT decoder
-        support.
+    config
+        Value for ``config``.
+    latent_dims
+        Value for ``latent_dims``.
 
     Returns
     -------
-    GNNDecoder, GATDecoder, SAGEDecoder, DiffConvDecoder, or
-        GraphTransformerDecoder
-        Reconstructed decoder matching the saved architecture.
-
-    Raises
-    ------
-    ValueError
-        If the decoder ``type`` field is unsupported.
+    object
+        Function result.
     """
     decoder_type = config.get("type", "gcn")
     decoder_cls = _SUPPORTED_DECODER_TYPES.get(decoder_type)
@@ -900,6 +1060,11 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
         )
     if decoder_type == "hyper_dec":
         return HypergraphDecoder(**common_kwargs)
+    if decoder_type == "sim_dec":
+        return SimplicialDecoder(
+            **common_kwargs,
+            residual=config.get("residual", False),
+        )
     if decoder_type == "relgraph_dec":
         return RelGraphDecoder(
             **common_kwargs,
@@ -908,6 +1073,7 @@ def _build_decoder(config: dict[str, Any]) -> Decoder:
             root_weight=config.get("root_weight", True),
             node_types=config.get("node_types"),
             edge_types=config.get("edge_types"),
+            latent_dims=latent_dims,
         )
     return GNNDecoder(**common_kwargs)
 
@@ -944,8 +1110,14 @@ def reconstruct_model(
     estimator_mod = importlib.import_module("koopman_graph.model.estimator")
     GraphKoopmanModel = estimator_mod.GraphKoopmanModel
 
-    decoder = _build_decoder(config["decoder"])
-    encoder = _build_encoder(config["encoder"])
+    hetero_latent_dims = (
+        dict(config["latent_dims"])
+        if config.get("koopman_kind") == "hetero_graph"
+        and config.get("latent_dims") is not None
+        else None
+    )
+    decoder = _build_decoder(config["decoder"], latent_dims=hetero_latent_dims)
+    encoder = _build_encoder(config["encoder"], latent_dims=hetero_latent_dims)
 
     physics_config = config.get("physics")
     physics_dim = 0
@@ -1041,6 +1213,12 @@ def reconstruct_model(
             if koopman_kind != "hetero_graph" or config["basis_size"] is None
             else int(config["basis_size"])
         ),
+        koopman_synthesize_reverse_relations=(
+            bool(config.get("synthesize_reverse_relations", False))
+            if koopman_kind == "hetero_graph"
+            else False
+        ),
+        koopman_latent_dims=hetero_latent_dims,
     )
 
 
@@ -1172,6 +1350,8 @@ def load_checkpoint(
         raise ValueError(msg)
 
     migrated_config = _migrate_config(config, format_version=int(format_version))
+    if migrated_config.get("koopman_kind") == "hetero_graph":
+        _validate_hetero_latent_dims_vs_state(migrated_config, state_dict)
     model = reconstruct_model(migrated_config, physics_lifting_fn=physics_lifting_fn)
     _allocate_adaptive_topology_from_state(model, state_dict)
     model.load_state_dict(state_dict)

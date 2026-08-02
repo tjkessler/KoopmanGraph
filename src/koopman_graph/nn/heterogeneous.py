@@ -31,10 +31,14 @@ into one ``(N, hidden_channels)`` block ordered by ``node_types``, and run the
 shared :class:`RelGraphConv` stack on relation banks lifted into stacked global
 node numbering (see :mod:`koopman_graph.data.hetero_layout`). Typed RelGraph
 decoders mirror that: shared convolutions down to ``hidden_channels``, then
-per-type output heads, returning ``dict[str, Tensor]``. The latent width
-``d`` is shared by every node type. HGT peers use the same stacked latent
-contract and type order, with type-local PyG edge indices inside the HGT
-stack.
+per-type output heads, returning ``dict[str, Tensor]``. By default the latent
+width ``d`` is shared by every node type. Opt-in ``latent_dims`` enables
+unequal per-type widths ``d_τ``: message passing stays at uniform
+``hidden_channels``, and per-type Linear heads map to / from ``d_τ``. In that
+mode encode/decode use a flat latent of length ``Σ_τ N_τ·d_τ`` (matching
+:class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`). HGT peers use
+the shared-``d`` stacked latent contract and type order, with type-local PyG
+edge indices inside the HGT stack.
 """
 
 from __future__ import annotations
@@ -48,8 +52,11 @@ from torch_geometric.nn import HGTConv
 
 from koopman_graph.data.hetero_layout import (
     global_relation_edge_indices,
+    latent_type_slices_from_dims,
     node_type_slices,
     snapshot_num_nodes_dict,
+    stacked_latent_numel,
+    validate_latent_dims,
 )
 from koopman_graph.graph_utils.topology import (
     RELATION_NORMALIZATION_MODES,
@@ -87,6 +94,150 @@ def _validate_normalization(normalization: RelationNormalization) -> None:
             f"{sorted(RELATION_NORMALIZATION_MODES)}, got {normalization!r}"
         )
         raise ValueError(msg)
+
+
+def _resolve_relgraph_latent_dims(
+    node_types: Sequence[str] | None,
+    latent_dims: Mapping[str, int] | None,
+    *,
+    latent_dim: int,
+    is_typed: bool,
+) -> tuple[dict[str, int] | None, bool]:
+    """Validate opt-in RelGraph ``latent_dims`` and detect rectangular mode.
+
+    Parameters
+    ----------
+    node_types : sequence of str or None
+        Ordered node-type names (typed path).
+    latent_dims : mapping of str to int or None
+        Opt-in ``τ -> d_τ``.
+    latent_dim : int
+        Shared reference width ``d``.
+    is_typed : bool
+        Whether the peer uses typed channels.
+
+    Returns
+    -------
+    latent_dims : dict of str to int or None
+        Validated mapping, or ``None`` for the shared-d path.
+    is_rectangular : bool
+        ``True`` when typed widths differ from ``latent_dim``.
+
+    Raises
+    ------
+    ValueError
+        If metadata is inconsistent with multiplex / typed rules.
+    """
+    if latent_dims is None:
+        return None, False
+    if not is_typed:
+        if node_types is None:
+            names: Sequence[str] = ("node",)
+        else:
+            names = tuple(str(name) for name in node_types)
+            if len(names) != 1:
+                msg = (
+                    "multiplex RelGraph latent_dims requires a single node "
+                    f"type; got {list(names)!r}"
+                )
+                raise ValueError(msg)
+        resolved = validate_latent_dims(
+            names, latent_dims, shared_latent_dim=latent_dim
+        )
+        assert resolved is not None
+        if resolved[names[0]] != latent_dim:
+            msg = (
+                "multiplex RelGraph latent_dims must equal latent_dim "
+                f"({latent_dim}); got {resolved!r}"
+            )
+            raise ValueError(msg)
+        return resolved, False
+    assert node_types is not None
+    resolved = validate_latent_dims(
+        node_types,
+        latent_dims,
+        shared_latent_dim=latent_dim,
+    )
+    assert resolved is not None
+    is_rectangular = any(width != latent_dim for width in resolved.values())
+    return resolved, is_rectangular
+
+
+def _pack_relgraph_latents(
+    node_types: Sequence[str],
+    z_by_type: Mapping[str, Tensor],
+    num_nodes_dict: Mapping[str, int],
+    latent_dims: Mapping[str, int],
+) -> Tensor:
+    """Flatten per-type ``(N_τ, d_τ)`` blocks into one C-order vector.
+
+    Parameters
+    ----------
+    node_types
+        Value for ``node_types``.
+    z_by_type
+        Value for ``z_by_type``.
+    num_nodes_dict
+        Value for ``num_nodes_dict``.
+    latent_dims
+        Value for ``latent_dims``.
+
+    Returns
+    -------
+    object
+        Function result.
+    """
+    blocks: list[Tensor] = []
+    for name in node_types:
+        width = int(latent_dims[name])
+        count = int(num_nodes_dict[name])
+        block = z_by_type[name]
+        if tuple(block.shape) != (count, width):
+            msg = (
+                f"latent block for {name!r} must have shape {(count, width)}, "
+                f"got {tuple(block.shape)}"
+            )
+            raise ValueError(msg)
+        blocks.append(block.reshape(-1))
+    return torch.cat(blocks, dim=0)
+
+
+def _unpack_relgraph_latents(
+    z_flat: Tensor,
+    node_types: Sequence[str],
+    num_nodes_dict: Mapping[str, int],
+    latent_dims: Mapping[str, int],
+) -> dict[str, Tensor]:
+    """Split a flat latent vector into per-type ``(N_τ, d_τ)`` blocks.
+
+    Parameters
+    ----------
+    z_flat
+        Value for ``z_flat``.
+    node_types
+        Value for ``node_types``.
+    num_nodes_dict
+        Value for ``num_nodes_dict``.
+    latent_dims
+        Value for ``latent_dims``.
+
+    Returns
+    -------
+    object
+        Function result.
+    """
+    expected = stacked_latent_numel(node_types, num_nodes_dict, latent_dims)
+    if z_flat.ndim != 1 or int(z_flat.numel()) != expected:
+        msg = f"z_flat must have shape ({expected},), got {tuple(z_flat.shape)}"
+        raise ValueError(msg)
+    slices = latent_type_slices_from_dims(node_types, num_nodes_dict, latent_dims)
+    return {
+        name: z_flat[slices[name]].reshape(
+            int(num_nodes_dict[name]),
+            int(latent_dims[name]),
+        )
+        for name in node_types
+    }
 
 
 def build_relgraph_convs(
@@ -771,14 +922,15 @@ def _relgraph_message_passing(
 
 
 class RelGraphEncoder(BaseGNNModule):
-    """Relational encoder lifting node features into shared-width latents.
+    """Relational encoder lifting node features into Koopman latents.
 
     Applies stacked :class:`RelGraphConv` layers with a configurable hidden
-    activation. The final layer maps to ``latent_dim`` without an activation.
-    Output latents are stacked as ``(num_nodes, latent_dim)``: a single node
-    type for the multiplex path, ``N = Σ_τ N_τ`` rows ordered by
-    :attr:`node_types` for the typed path. Degree normalization follows
-    Schlichtkrull et al. (R-GCN) in-degree convention via
+    activation. On the shared-d path the final layer maps to ``latent_dim``
+    without an activation and returns ``(num_nodes, latent_dim)``. Opt-in
+    ``latent_dims`` keeps message passing at ``hidden_channels`` and applies
+    per-type Linear heads to ``d_τ``, returning a flat vector of length
+    ``Σ_τ N_τ·d_τ``. Degree normalization follows Schlichtkrull et al.
+    (R-GCN) in-degree convention via
     :func:`~koopman_graph.graph_utils.relation_degree_normalize` — not a full
     paper reproduction.
 
@@ -795,7 +947,11 @@ class RelGraphEncoder(BaseGNNModule):
     hidden_channels : int
         Hidden relational channel width.
     latent_dim : int
-        Output latent dimension per node (shared by all node types).
+        Shared reference latent width ``d``.
+    latent_dims : dict of str to int or None
+        Opt-in per-type widths ``d_τ``; ``None`` is the shared-d path.
+    is_rectangular : bool
+        ``True`` when typed ``latent_dims`` differ from ``latent_dim``.
     num_relations : int
         Number of relation banks.
     node_types : tuple of str or None
@@ -823,6 +979,7 @@ class RelGraphEncoder(BaseGNNModule):
         root_weight: bool = True,
         node_types: Sequence[str] | None = None,
         edge_types: Sequence[Sequence[str]] | None = None,
+        latent_dims: Mapping[str, int] | None = None,
     ) -> None:
         """Initialize the relational encoder stack.
 
@@ -836,7 +993,7 @@ class RelGraphEncoder(BaseGNNModule):
             Hidden channel width for intermediate layers (and for the typed
             per-type input projections).
         latent_dim : int
-            Output latent dimension per node.
+            Shared reference latent width ``d``.
         num_relations : int
             Number of relation banks (``|R| >= 1``).
         num_layers : int, optional
@@ -856,6 +1013,10 @@ class RelGraphEncoder(BaseGNNModule):
             order; **required** for the typed path and must match the paired
             operator's ``edge_types``. When omitted on the multiplex path,
             ``HeteroData`` edge types are ordered by sorted ``repr``.
+        latent_dims : mapping of str to int or None, optional
+            Opt-in per-type latent widths. When rectangular, the convolution
+            stack ends at ``hidden_channels`` and ``type_latent`` maps to
+            ``d_τ``.
 
         Raises
         ------
@@ -891,11 +1052,20 @@ class RelGraphEncoder(BaseGNNModule):
             num_relations=num_relations,
             required=typed,
         )
+        resolved_latent_dims, is_rectangular = _resolve_relgraph_latent_dims(
+            resolved_node_types,
+            latent_dims,
+            latent_dim=latent_dim,
+            is_typed=typed,
+        )
+        conv_out = hidden_channels if is_rectangular else latent_dim
 
         self.in_channels = dict(in_channels) if typed else in_channels
         self.in_channels_dict = in_channels_dict
         self.hidden_channels = hidden_channels
         self.latent_dim = latent_dim
+        self.latent_dims = resolved_latent_dims
+        self.is_rectangular = is_rectangular
         self.num_relations = num_relations
         self.is_typed = typed
         self.node_types = resolved_node_types
@@ -911,7 +1081,7 @@ class RelGraphEncoder(BaseGNNModule):
             convs=build_relgraph_convs(
                 first_layer_in,
                 hidden_channels,
-                latent_dim,
+                conv_out,
                 num_layers,
                 num_relations,
                 normalization=normalization,
@@ -923,6 +1093,14 @@ class RelGraphEncoder(BaseGNNModule):
                 {
                     name: nn.Linear(width, hidden_channels)
                     for name, width in in_channels_dict.items()
+                }
+            )
+        if is_rectangular:
+            assert resolved_latent_dims is not None
+            self.type_latent = nn.ModuleDict(
+                {
+                    name: nn.Linear(hidden_channels, width)
+                    for name, width in resolved_latent_dims.items()
                 }
             )
 
@@ -950,25 +1128,47 @@ class RelGraphEncoder(BaseGNNModule):
         Returns
         -------
         Tensor
-            Latent node features with shape ``(num_nodes, latent_dim)``, rows
-            ordered by :attr:`node_types` for the typed path.
+            Shared-d: ``(num_nodes, latent_dim)`` ordered by
+            :attr:`node_types`. Rectangular: flat ``(Σ N_τ·d_τ,)``.
         """
         if self.is_typed:
             assert self.node_types is not None
-            features, edge_indices, edge_weights, _ = resolve_typed_relation_inputs(
-                x_or_data,  # type: ignore[arg-type]
-                edge_index,
-                edge_weight,
-                node_types=self.node_types,
-                edge_types=self.edge_types,
-                num_relations=self.num_relations,
+            features, edge_indices, edge_weights, counts = (
+                resolve_typed_relation_inputs(
+                    x_or_data,  # type: ignore[arg-type]
+                    edge_index,
+                    edge_weight,
+                    node_types=self.node_types,
+                    edge_types=self.edge_types,
+                    num_relations=self.num_relations,
+                )
             )
             projected = [
                 self.activation(self.type_input[name](features[name]))
                 for name in self.node_types
             ]
             x = torch.cat(projected, dim=0)
-            return _relgraph_message_passing(self, x, edge_indices, edge_weights)
+            hidden = _relgraph_message_passing(
+                self,
+                x,
+                edge_indices,
+                edge_weights,
+            )
+            if not self.is_rectangular:
+                return hidden
+            assert self.latent_dims is not None
+            slices = node_type_slices(self.node_types, counts)
+            activated = self.activation(hidden)
+            z_by_type = {
+                name: self.type_latent[name](activated[slices[name]])
+                for name in self.node_types
+            }
+            return _pack_relgraph_latents(
+                self.node_types,
+                z_by_type,
+                counts,
+                self.latent_dims,
+            )
 
         x, edge_indices, edge_weights = _resolve_relgraph_forward_inputs(
             x_or_data,  # type: ignore[arg-type]
@@ -980,22 +1180,28 @@ class RelGraphEncoder(BaseGNNModule):
 
 
 class RelGraphDecoder(BaseGNNModule):
-    """Relational decoder mapping shared-width latents to physical features.
+    """Relational decoder mapping Koopman latents to physical features.
 
     Applies stacked :class:`RelGraphConv` layers with a configurable hidden
     activation. Normalization citations match :class:`RelGraphEncoder`.
 
     For the multiplex path the final convolution maps to ``out_channels``
     without an activation and :meth:`forward` returns a ``Tensor``. For the
-    typed path (mapping ``out_channels``) the convolution stack ends at
-    ``hidden_channels``, the hidden activation is applied, and per-type
+    typed shared-d path (mapping ``out_channels``) the convolution stack ends
+    at ``hidden_channels``, the hidden activation is applied, and per-type
     :class:`~torch.nn.Linear` heads produce one ``(N_τ, F_τ)`` tensor per node
-    type; :meth:`forward` then returns ``dict[str, Tensor]``.
+    type. Opt-in rectangular ``latent_dims`` accept a flat latent
+    ``(Σ N_τ·d_τ,)``, project each type into ``hidden_channels``, then share
+    the same convolution + output-head path.
 
     Attributes
     ----------
     latent_dim : int
-        Input latent dimension per node (shared by all node types).
+        Shared reference latent width ``d``.
+    latent_dims : dict of str to int or None
+        Opt-in per-type widths ``d_τ``; ``None`` is the shared-d path.
+    is_rectangular : bool
+        ``True`` when typed ``latent_dims`` differ from ``latent_dim``.
     hidden_channels : int
         Hidden relational channel width.
     out_channels : int or dict of str to int
@@ -1029,13 +1235,14 @@ class RelGraphDecoder(BaseGNNModule):
         root_weight: bool = True,
         node_types: Sequence[str] | None = None,
         edge_types: Sequence[Sequence[str]] | None = None,
+        latent_dims: Mapping[str, int] | None = None,
     ) -> None:
         """Initialize the relational decoder stack.
 
         Parameters
         ----------
         latent_dim : int
-            Input latent dimension per node.
+            Shared reference latent width ``d``.
         hidden_channels : int
             Hidden channel width for intermediate layers (and the width fed to
             typed per-type output heads).
@@ -1061,6 +1268,9 @@ class RelGraphDecoder(BaseGNNModule):
             Explicit ordered ``(src, rel, dst)`` triples defining relation-bank
             order; **required** for the typed path. Match the paired encoder /
             operator.
+        latent_dims : mapping of str to int or None, optional
+            Opt-in per-type latent widths. When rectangular, ``type_latent_in``
+            maps ``d_τ -> hidden_channels`` before the shared stack.
 
         Raises
         ------
@@ -1096,8 +1306,17 @@ class RelGraphDecoder(BaseGNNModule):
             num_relations=num_relations,
             required=typed,
         )
+        resolved_latent_dims, is_rectangular = _resolve_relgraph_latent_dims(
+            resolved_node_types,
+            latent_dims,
+            latent_dim=latent_dim,
+            is_typed=typed,
+        )
+        conv_in = hidden_channels if is_rectangular else latent_dim
 
         self.latent_dim = latent_dim
+        self.latent_dims = resolved_latent_dims
+        self.is_rectangular = is_rectangular
         self.hidden_channels = hidden_channels
         self.out_channels = dict(out_channels) if typed else out_channels
         self.out_channels_dict = out_channels_dict
@@ -1109,12 +1328,12 @@ class RelGraphDecoder(BaseGNNModule):
         self.root_weight = root_weight
 
         super().__init__(
-            input_channels=latent_dim,
-            input_dim_name="latent_dim",
+            input_channels=conv_in,
+            input_dim_name=("hidden_channels" if is_rectangular else "latent_dim"),
             num_layers=num_layers,
             activation=activation,
             convs=build_relgraph_convs(
-                latent_dim,
+                conv_in,
                 hidden_channels,
                 final_layer_out,
                 num_layers,
@@ -1123,6 +1342,14 @@ class RelGraphDecoder(BaseGNNModule):
                 root_weight=root_weight,
             ),
         )
+        if is_rectangular:
+            assert resolved_latent_dims is not None
+            self.type_latent_in = nn.ModuleDict(
+                {
+                    name: nn.Linear(width, hidden_channels)
+                    for name, width in resolved_latent_dims.items()
+                }
+            )
         if out_channels_dict is not None:
             self.type_output = nn.ModuleDict(
                 {
@@ -1144,9 +1371,9 @@ class RelGraphDecoder(BaseGNNModule):
         Parameters
         ----------
         x_or_data : Tensor or HeteroData
-            Latent features (stacked ``(num_nodes, latent_dim)``) or a
-            multiplex ``HeteroData`` whose node features are treated as the
-            decoder input (unusual; prefer tensor + banks).
+            Shared-d: stacked ``(num_nodes, latent_dim)``. Rectangular: flat
+            ``(Σ N_τ·d_τ,)``. Multiplex ``HeteroData`` is also accepted
+            (unusual; prefer tensor + banks).
         edge_index : sequence/mapping of Tensor or None, optional
             Per-relation edge indices when ``x_or_data`` is a tensor. Ignored
             for ``HeteroData``. Typed banks must already use stacked global
@@ -1155,8 +1382,8 @@ class RelGraphDecoder(BaseGNNModule):
             Optional per-relation weights for tensor input; ignored for
             ``HeteroData``.
         num_nodes_dict : mapping of str to int or None, optional
-            Per-type node counts. Required for the typed path so stacked rows
-            can be routed to per-type output heads.
+            Per-type node counts. Required for the typed path so latent rows
+            can be routed to per-type heads.
 
         Returns
         -------
@@ -1170,6 +1397,61 @@ class RelGraphDecoder(BaseGNNModule):
         ValueError
             If the typed path is used without ``num_nodes_dict``.
         """
+        if self.is_rectangular:
+            assert self.node_types is not None
+            assert self.latent_dims is not None
+            if num_nodes_dict is None:
+                msg = (
+                    "num_nodes_dict is required for rectangular RelGraphDecoder "
+                    f"(node_types={list(self.node_types)!r})"
+                )
+                raise ValueError(msg)
+            if not isinstance(x_or_data, Tensor):
+                msg = (
+                    "rectangular RelGraphDecoder expects a flat latent Tensor; "
+                    f"got {type(x_or_data).__name__}"
+                )
+                raise TypeError(msg)
+            if edge_index is None:
+                msg = "edge_index relation banks are required for rectangular decode"
+                raise ValueError(msg)
+            z_by_type = _unpack_relgraph_latents(
+                x_or_data,
+                self.node_types,
+                num_nodes_dict,
+                self.latent_dims,
+            )
+            projected = [
+                self.activation(self.type_latent_in[name](z_by_type[name]))
+                for name in self.node_types
+            ]
+            x = torch.cat(projected, dim=0)
+            edge_indices = _as_ordered_banks(
+                edge_index,
+                num_relations=self.num_relations,
+                kind="edge_index",
+            )
+            if edge_weight is None:
+                edge_weights: list[Tensor | None] = [None] * self.num_relations
+            else:
+                edge_weights = _as_ordered_banks(
+                    edge_weight,
+                    num_relations=self.num_relations,
+                    kind="edge_weight",
+                )
+            hidden = _relgraph_message_passing(
+                self,
+                x,
+                edge_indices,
+                edge_weights,
+            )
+            slices = node_type_slices(self.node_types, num_nodes_dict)
+            activated = self.activation(hidden)
+            return {
+                name: self.type_output[name](activated[slices[name]])
+                for name in self.node_types
+            }
+
         x, edge_indices, edge_weights = _resolve_relgraph_forward_inputs(
             x_or_data,
             edge_index,

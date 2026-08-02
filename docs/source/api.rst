@@ -106,6 +106,34 @@ Import from :mod:`koopman_graph.nn` (not on the root façade).
    :members:
    :show-inheritance:
 
+Simplicial Encoders / Decoders
+--------------------------------
+
+Combinatorial simplicial-1 / Hodge peers
+(:class:`~koopman_graph.nn.SimplicialEncoder`,
+:class:`~koopman_graph.nn.SimplicialDecoder`) are root-stable ``__all__``
+members. Prefer ``from koopman_graph import SimplicialEncoder,
+SimplicialDecoder``. Oriented ``edge_index`` and optional ``face_index``;
+**not** sheaf Laplacians or full cell-complex TDL.
+
+.. automodule:: koopman_graph.nn.simplicial
+   :members:
+   :show-inheritance:
+
+Geometry / steerable encoders
+-----------------------------
+
+Tier A :class:`~koopman_graph.nn.InvariantGeometryEncoder` and optional
+Tier B :class:`~koopman_graph.nn.E3EquivariantEncoder` (``e3nn``,
+``[equivariance]``) are root-stable ``__all__`` members. Prefer
+``from koopman_graph import InvariantGeometryEncoder`` /
+``E3EquivariantEncoder``. Steerable or invariant *encode* paths do
+**not** make latent :math:`K` E(n)/SE(3) equivariant.
+
+.. automodule:: koopman_graph.nn.equivariant
+   :members:
+   :show-inheritance:
+
 Decoder
 -------
 
@@ -184,6 +212,13 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``clustering`` / ``topology_estimation`` submodules.
 ``attribute_mode_energy`` is an interpretive diagnostic on assembled
 :math:`K_{\mathrm{eff}}` (not a causal claim; not a ResDMD residual).
+Finite-dictionary ResDMD
+(:func:`~koopman_graph.analysis.resdmd`,
+:class:`~koopman_graph.analysis.ResDMDReport`) and the finite-matrix
+resolvent-norm grid
+(:func:`~koopman_graph.analysis.resolvent_norm_grid`) are package exports;
+they are distinct from ``spectral_residuals`` and are **not**
+infinite-dimensional certified pseudospectra.
 ``plot_spectrum`` requires Matplotlib (``pip install matplotlib`` or the
 ``[dev]`` extra).
 
@@ -193,10 +228,18 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 
 .. automodule:: koopman_graph.analysis
    :members:
-   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals
+   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.residuals
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.resdmd
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.pseudospectra
    :members:
    :show-inheritance:
 
@@ -218,16 +261,28 @@ Baselines
 ---------
 
 Classical DMD-family baselines live in the ``koopman_graph.baselines``
-capability package (``base`` / ``dmd`` / ``dmdc`` / ``edmd`` submodules). They
-share :class:`~koopman_graph.baselines.ClassicalBaseline` scaffolding and
-satisfy :class:`~koopman_graph.protocols.ForecastModel` (``fit`` / ``predict`` /
-``spectrum``). Call sites are **not** fully interchangeable — see the
-``ForecastModel`` call-site matrix in :doc:`architecture`.
+capability package (``base`` / ``dmd`` / ``dmdc`` / ``edmd`` and related peer
+modules). They share :class:`~koopman_graph.baselines.ClassicalBaseline`
+scaffolding and satisfy :class:`~koopman_graph.protocols.ForecastModel`
+(``fit`` / ``predict`` / ``spectrum``). Call sites are **not** fully
+interchangeable — see the ``ForecastModel`` call-site matrix in
+:doc:`architecture`.
 :class:`~koopman_graph.baselines.EDMDBaseline` exposes
 ``reconstruction_matrix`` for observable-to-state least squares (not a GNN
 decoder) and supports ``dictionary`` in ``{"polynomial", "rbf", "kernel"}``
 (Williams2015 polynomial / RBF EDMD; kernel sections following
 Williams2015KernelDMD / Klus2018TransferOperator).
+Additional classical peers include
+:class:`~koopman_graph.baselines.FBDMDBaseline`,
+:class:`~koopman_graph.baselines.TLSDMDBaseline`,
+:class:`~koopman_graph.baselines.OptDMDBaseline`,
+:class:`~koopman_graph.baselines.StreamingDMDBaseline`,
+:class:`~koopman_graph.baselines.MRDMDBaseline`, and
+:class:`~koopman_graph.baselines.UlamTransferOperatorBaseline`.
+Topology-blind VAMP-2 precursor helpers
+(:func:`~koopman_graph.baselines.vamp2_score`,
+:func:`~koopman_graph.baselines.vamp2_loss`) are package exports — not
+GraphVAMPnets.
 Truncated-SVD ``rank`` accepts ``None`` (full least squares), a positive
 integer, or ``"auto"`` (Gavish–Donoho median threshold;
 ``koopman_graph.baselines.base.optimal_hard_threshold_rank``); fitted
@@ -251,6 +306,10 @@ raises ``RuntimeError`` (no linear Koopman operator). Prefer
 .. automodule:: koopman_graph.baselines
    :members:
    :exclude-members: STGCNBaseline, DCRNNBaseline, GraphWaveNetBaseline
+   :show-inheritance:
+
+.. automodule:: koopman_graph.baselines.vamp2
+   :members:
    :show-inheritance:
 
 .. automodule:: koopman_graph.baselines.gnn
@@ -375,6 +434,28 @@ export.
    :exclude-members: GraphSnapshotSequence
    :show-inheritance:
 
+Distributed trainers and Dask prep (power-user)
+------------------------------------------------
+
+Optional multi-process / multi-GPU *trainer orchestration* and offline
+Dask materialize helpers live under :mod:`koopman_graph.distributed`
+(not on root ``__all__``). This is **not** the operator flag
+``sparsity="distributed"``. Prefer
+``from koopman_graph.distributed import …``. Lazy symbols
+(``KoopmanLightningModule``, ``fit_ensemble_with_ray``,
+``materialize_sequences``, ``materialize_window_index_list``) require the
+matching extras (``[lightning]`` / ``[ray]`` / ``[dask]``).
+``dask_prep`` is offline prep only — not a Dask training loop.
+
+.. automodule:: koopman_graph.distributed
+   :members:
+   :imported-members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.distributed.dask_prep
+   :members:
+   :show-inheritance:
+
 Metrics
 -------
 
@@ -403,7 +484,8 @@ package.
 Uncertainty Quantification (power-user)
 ---------------------------------------
 
-Deep ensembles, latent-Gaussian forecast UQ, and conformal intervals live under
+Deep ensembles, latent-Gaussian forecast UQ, conformal intervals, and
+Bayesian Laplace UQ over operator factors live under
 :mod:`koopman_graph.uq` and are **not** on the root façade.
 :class:`~koopman_graph.uq.EnsembleGraphKoopmanModel` composes independently
 seeded :class:`~koopman_graph.model.GraphKoopmanModel` members
@@ -419,9 +501,13 @@ dependence (prefer ACI under drift). Nonconformity ``score`` modes are
 ``"aggregate"``, legacy ``"per_node"`` (max-pool over nodes into a scalar),
 and ``"node_wise"`` (per-node marginal half-widths; optional
 ``neighbor_smoothing``). Calibration persistence uses kind
-``ConformalKoopmanUQ.calibration.v2``. Neither ensemble nor Gaussian path is
-Deep Probabilistic Koopman (time-varying distribution parameters), and the
-Gaussian peer is **not** a full VAE + KalmanNet reimplementation.
+``ConformalKoopmanUQ.calibration.v2``.
+:class:`~koopman_graph.uq.BayesianKoopmanUQ` fits a diagonal Laplace
+posterior over linear Koopman factors (seeded ``sample_forecast``); it is
+**not** a Bayesian neural net over encoder weights.
+Neither ensemble nor Gaussian path is Deep Probabilistic Koopman
+(time-varying distribution parameters), and the Gaussian peer is **not**
+a full VAE + KalmanNet reimplementation.
 
 .. automodule:: koopman_graph.uq
    :members:

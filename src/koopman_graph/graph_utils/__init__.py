@@ -10,7 +10,9 @@ Capability layout
 ``topology``
     Degree / adjacency / Laplacian mathematics and graph-input resolution
     (``resolve_graph_inputs``, ``snapshot_to_device``, ``L_sym = P - Â``,
-    per-relation ``relation_degree_normalize``).
+    per-relation ``relation_degree_normalize``,
+    ``synthesize_reverse_edge_types``,
+    ``materialize_reverse_relation_edges``).
 ``propagation``
     Latent advance / inverse, decode helpers, autoregressive rollout, and
     decoded-rollout → ``Data`` packing (``propagate_latent``,
@@ -70,6 +72,7 @@ from koopman_graph.graph_utils.topology import (
     dense_symmetric_normalized_laplacian,
     hyperedge_normalized_adjacency_matvec,
     hyperedge_normalized_incidence_weights,
+    materialize_reverse_relation_edges,
     node_degrees,
     random_walk_normalized_adjacency_edge_weights,
     random_walk_normalized_adjacency_matvec,
@@ -85,6 +88,7 @@ from koopman_graph.graph_utils.topology import (
     symmetric_normalized_adjacency_edge_weights,
     symmetric_normalized_adjacency_matvec,
     symmetric_normalized_laplacian_matvec,
+    synthesize_reverse_edge_types,
 )
 
 __all__ = [
@@ -119,6 +123,7 @@ __all__ = [
     "hyperedge_two_section",
     "identity_orbit_partition",
     "inverse_propagate_latent",
+    "materialize_reverse_relation_edges",
     "node_degrees",
     "node_orbit_index",
     "node_orbit_partition",
@@ -130,6 +135,7 @@ __all__ = [
     "relation_degree_normalize",
     "relation_normalized_adjacency_matvec",
     "resolve_delta_t",
+    "synthesize_reverse_edge_types",
     "resolve_edge_index",
     "resolve_edge_weight",
     "resolve_graph_inputs",

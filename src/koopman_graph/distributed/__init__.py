@@ -27,11 +27,16 @@ Capability layout
 ``ray_jobs``
     :func:`~koopman_graph.distributed.fit_ensemble_with_ray` (optional
     parallel ensemble member fits; lazy Ray import).
+``dask_prep``
+    :func:`~koopman_graph.distributed.materialize_sequences` and
+    :func:`~koopman_graph.distributed.materialize_window_index_list`
+    (sole library Dask API; offline prep for fit / DDP; lazy Dask import).
+    Not a Dask training loop.
 
 Power-user module: import as ``koopman_graph.distributed``. Symbols are
 intentionally omitted from root ``koopman_graph.__all__`` (see architecture
-docs). Dask adapters may follow; ``process`` and ``seed`` stay free of
-Lightning, Ray, and Dask imports.
+docs). ``process`` and ``seed`` stay free of Lightning, Ray, and Dask
+imports.
 
 Single-process defaults (no active process group): rank ``0``, world size
 ``1``, :func:`~koopman_graph.distributed.barrier` is a no-op; DDP wrapping
@@ -71,6 +76,8 @@ __all__ = [
     "get_world_size",
     "init_process_group_from_env",
     "is_main_process",
+    "materialize_sequences",
+    "materialize_window_index_list",
     "prepare_ddp_model",
     "run_ddp_fit_loop",
     "seed_everything",
@@ -80,7 +87,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy-load optional-extra symbols without importing Lightning / Ray early.
+    """Lazy-load optional-extra symbols without importing Lightning / Ray / Dask.
 
     Parameters
     ----------
@@ -105,5 +112,13 @@ def __getattr__(name: str) -> Any:
         from koopman_graph.distributed.ray_jobs import fit_ensemble_with_ray
 
         return fit_ensemble_with_ray
+    if name == "materialize_sequences":
+        from koopman_graph.distributed.dask_prep import materialize_sequences
+
+        return materialize_sequences
+    if name == "materialize_window_index_list":
+        from koopman_graph.distributed.dask_prep import materialize_window_index_list
+
+        return materialize_window_index_list
     msg = f"module {__name__!r} has no attribute {name!r}"
     raise AttributeError(msg)

@@ -1,6 +1,13 @@
 """Shared pytest fixtures for KoopmanGraph tests."""
 
+from __future__ import annotations
+
+import os
 from collections.abc import Callable, Iterator
+
+# Before any test imports Ray: keep workers on the synced driver interpreter
+# under ``uv run --no-sync`` (Ray's UV rewrite can miss installed extras).
+os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
 import pytest
 import torch

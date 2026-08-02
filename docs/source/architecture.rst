@@ -178,19 +178,21 @@ leading-underscore helpers across training peers.
   for full schedules and rank-aware sampling)
 * ``ray_jobs`` — ``fit_ensemble_with_ray`` (lazy Ray import; parallel
   independent ensemble member fits; not a multi-GPU model DDP backend)
+* ``dask_prep`` — ``materialize_sequences`` /
+  ``materialize_window_index_list`` (lazy Dask import behind ``[dask]``;
+  offline prep only — not a training loop; see :doc:`faq`)
 * ``_fit_epochs`` — private shared epoch driver used by DDP and Fabric
   (not public ``__all__``)
-* No ``dask_prep`` peer in 0.8.0 — Dask remains docs-only (offline prep in
-  user code; see :doc:`faq`)
 
-**Hetero composition (0.9):** device movers, window sampling / sharding,
-DDP, Fabric, Lightning, and Ray ensemble paths accept
+**Hetero composition (0.9 / 0.10):** device movers, window sampling /
+sharding, DDP, Fabric, Lightning, and Ray ensemble paths accept
 :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` /
 ``HeteroData`` without silent cast to homogeneous ``Data``.
 ``find_unused_parameters`` defaults to ``True`` for RelGraph hetero
-stacks on the DDP path. Single-process windowed ``run_fit_loop`` still
-rejects windowed hetero (use DDP / Fabric samplers). Dense
-:math:`N\cdot d` ceilings are unchanged.
+stacks on the DDP path. Single-process windowed ``run_fit_loop`` accepts
+windowed hetero sequences (parity with world-size-1 DDP window sampling).
+Dense :math:`N\cdot d` / stacked :math:`\sum_\tau N_\tau d_\tau`
+ceilings are unchanged by trainers.
 
 **Dependency rule:** ``distributed`` may import ``training``, ``data``,
 ``model``, and ``uq`` (ensemble helpers only). ``training`` must **not**
@@ -390,20 +392,28 @@ power-user losses stay package imports outside root ``__all__``.
   (discrete relational multiplex / typed advance
   :math:`K_{\mathrm{eff}} = I\otimes K_{\mathrm{self}} + \sum_r
   \widehat{A}_r \otimes K_r`; select via ``koopman="hetero_graph"`` with
-  RelGraph encode/decode by default). Shared latent width :math:`d`;
-  typed self is block-diagonal per type. Factor-wise structural modes do
-  **not** certify joint :math:`\rho(K_{\mathrm{eff}})`. Dense
-  :math:`N\cdot d` spectrum / inverse ceiling unchanged by trainers
+  RelGraph encode/decode by default). Shared latent width :math:`d` by
+  default; opt-in ``latent_dims`` / per-type :math:`d_\tau` use
+  rectangular relation maps :math:`K_r`. Continuous hetero
+  (``dynamics_mode="continuous"``) forms dense stacked :math:`\Phi`.
+  Typed self is block-diagonal per type. Factor-wise structural modes do
+  **not** certify joint :math:`\rho(K_{\mathrm{eff}})`. Topology-aware
+  ``stability_certificate`` defaults to a Gershgorin joint bound; opt-in
+  ``kind="schur"|"lyapunov"`` post-hoc assembled certificates are
+  size-capped (see :mod:`koopman_graph.analysis.joint_stability`). Dense
+  assembly ceilings are unchanged by trainers
 * ``global_local`` —
   :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
   (discrete global backbone ``K_g`` plus low-rank local window correction
   ``K_ℓ``; select via ``koopman="global_local"``)
 * ``orbit_ties`` — shared ``OrbitTiedSelfMixin`` and
   ``build_orbit_self_bank`` helpers for discrete ``koopman="graph"`` /
-  ``"hypergraph"`` orbit-tied ``K_self`` factors (two hosts only; not a
-  deep inheritance tree). Symmetry discovery stays in
-  :mod:`koopman_graph.graph_utils.symmetry`; fit-start auto-orbit binding
-  is orchestrated by ``training.loop.bind_pending_orbit_ties``.
+  ``"hypergraph"`` / multiplex and shared-d typed ``"hetero_graph"``
+  orbit-tied ``K_self`` factors (not a deep inheritance tree). Symmetry
+  discovery stays in :mod:`koopman_graph.graph_utils.symmetry`; fit-start
+  auto-orbit binding is orchestrated by
+  ``training.loop.bind_pending_orbit_ties``. Rectangular hetero orbits
+  remain unsupported; isotypic / irrep reduction is reserved for 0.11.
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
@@ -464,6 +474,20 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   Default ``learn_topology=None`` is a numerical no-op. Static per fit (node
   count binds on first use). Framing: forecasting inductive bias, **not**
   causal structure discovery.
+* ``simplicial`` —
+  :class:`~koopman_graph.nn.simplicial.SimplicialEncoder` /
+  :class:`~koopman_graph.nn.simplicial.SimplicialDecoder` (combinatorial
+  simplicial-1 / Hodge lifts on oriented ``edge_index``; optional
+  ``face_index``). Root-façade peers. **Not** sheaf Laplacians or full
+  cell-complex TDL (reserved for 0.11).
+* ``equivariant`` —
+  :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
+  (Tier A invariant distance / angle features from ``Data.pos`` + GCN
+  lift; root façade) and optional
+  :class:`~koopman_graph.nn.equivariant.E3EquivariantEncoder`
+  (Tier B ``e3nn`` / ``[equivariance]``; steerable encode → invariant
+  scalar latents; root façade). Neither makes latent :math:`K`
+  E(n)/SE(3) equivariant.
 
 Prefer ``from koopman_graph.nn import …`` (or the root façade for public
 classes). Former root modules ``koopman_graph.encoder``,
@@ -505,6 +529,15 @@ plotting / residuals / topology estimation / SINDy / clustering):
   leading Koopman mode embeddings; sign/ordering canonicalized by
   magnitude-sorted ``|λ|`` and largest-magnitude positive pivot). Cluster
   quality inherits operator / spectrum quality.
+* ``resdmd`` —
+  :func:`~koopman_graph.analysis.resdmd` and frozen
+  :class:`~koopman_graph.analysis.ResDMDReport` (finite-dictionary ResDMD
+  MVP; distinct from ``spectral_residuals``; not infinite-dimensional
+  certified pseudospectra)
+* ``pseudospectra`` —
+  :func:`~koopman_graph.analysis.resolvent_norm_grid` and related finite-
+  matrix resolvent helpers (pair with ResDMD MVP; see
+  ``examples/40_resdmd_pseudospectra.ipynb``)
 
 :mod:`koopman_graph.spectrum_types` remains a **top-level neutral leaf** so
 :mod:`koopman_graph.protocols`, :mod:`koopman_graph.operators`, and
@@ -531,6 +564,14 @@ public API.
 * ``dmd`` — :class:`~koopman_graph.baselines.DMDBaseline`
 * ``dmdc`` — :class:`~koopman_graph.baselines.DMDcBaseline`
 * ``edmd`` — :class:`~koopman_graph.baselines.EDMDBaseline`
+* Classical peers — ``FBDMDBaseline``, ``TLSDMDBaseline``,
+  ``OptDMDBaseline``, ``StreamingDMDBaseline``, ``MRDMDBaseline``,
+  ``UlamTransferOperatorBaseline`` (package ``__all__``; import from
+  :mod:`koopman_graph.baselines`)
+* ``vamp2`` — :func:`~koopman_graph.baselines.vamp2.vamp2_score` /
+  :func:`~koopman_graph.baselines.vamp2.vamp2_loss` (topology-blind
+  VAMP-2 precursor; optional ``[msm]`` for deeptime oracles; not
+  GraphVAMPnets — reserved for 0.11)
 * ``gnn`` — spatiotemporal GNN forecaster baselines
   (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
   :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
@@ -689,7 +730,7 @@ code stays valid; capability packages
 alternate import paths. Do not silently demote either without a separately
 versioned breaking migration.
 
-**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 27):
+**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 31):
 
 * :class:`~koopman_graph.model.GraphKoopmanModel`
 * :class:`~koopman_graph.nn.encoder.GNNEncoder`,
@@ -698,6 +739,9 @@ versioned breaking migration.
   :class:`~koopman_graph.nn.encoder.DiffConvEncoder`,
   :class:`~koopman_graph.nn.encoder.GraphTransformerEncoder`,
   :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder`,
+  :class:`~koopman_graph.nn.simplicial.SimplicialEncoder`,
+  :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`,
+  :class:`~koopman_graph.nn.equivariant.E3EquivariantEncoder`,
   :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder`,
   :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`,
   :class:`~koopman_graph.nn.decoder.GNNDecoder`,
@@ -706,8 +750,10 @@ versioned breaking migration.
   :class:`~koopman_graph.nn.decoder.DiffConvDecoder`,
   :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`,
   :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`,
+  :class:`~koopman_graph.nn.simplicial.SimplicialDecoder`,
   :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
-  (also via :mod:`koopman_graph.nn`)
+  (also via :mod:`koopman_graph.nn`; ``E3EquivariantEncoder`` requires the
+  ``[equivariance]`` extra at construct time)
 * :class:`~koopman_graph.operators.KoopmanOperator`,
   :class:`~koopman_graph.operators.ContinuousKoopmanOperator`,
   :class:`~koopman_graph.operators.GraphKoopmanOperator`,
@@ -1228,8 +1274,11 @@ always the sparse message-passing matvec (pairwise ``Â`` or Zhou ``Ĥ``).
        :class:`~koopman_graph.operators.GraphKoopmanOperator` and
        :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
    * - ``"distributed"``
-     - — (rejected)
-     - Planned; not in 0.6.0
+     - Matrix-free Richardson inverse and Arnoldi leading-modulus
+       spectrum (discrete graph / multiplex hetero); forward stays the
+       sparse matvec. Hypergraph / continuous peers may still assemble
+     - Operator math only — **not** trainer DDP /
+       ``[distributed]`` extras
 
 The stored checkpoint field is ``config.sparsity`` (format 1). Continuous-graph
 ``block_diagonal`` remains the self-dominated advance / inverse shortcut
@@ -1260,10 +1309,16 @@ migrated). Hypergraph operators stay Zhou-symmetric and do not expose
 ``adjacency``.
 
 **Symmetry-adapted self factors (orbit ties).** Opt-in inductive bias for
-discrete ``koopman="graph"`` / ``"hypergraph"``: nodes in the same orbit
-share a ``K_self`` factor. Neighbor / hyperedge factors
-(``K_nbr`` / ``K_fwd`` / ``K_bwd`` / ``K_hedge``) stay globally shared and
-are **not** orbit-tied.
+discrete ``koopman="graph"`` / ``"hypergraph"`` / multiplex and shared-d
+typed ``"hetero_graph"``: nodes in the same orbit share a ``K_self``
+factor. Neighbor / hyperedge / relation factors
+(``K_nbr`` / ``K_fwd`` / ``K_bwd`` / ``K_hedge`` / ``K_r``) stay globally
+shared and are **not** orbit-tied. Multiplex hetero orbits use the
+**union** of relation banks on the stacked ``N`` nodes; typed hetero
+orbits are computed independently inside each type block from intra-type
+banks (orbits must not mix types). Rectangular hetero orbits are
+unsupported. Isotypic / irrep block-diagonalization is reserved for
+0.11. Continuous hetero rejects orbit kwargs.
 Default (symmetry off) keeps today's single shared ``K_self``. Enable via
 factory kwargs ``koopman_orbit_partition=...`` (explicit) or
 ``koopman_auto_orbits=True`` (bind from topology on first advance, and
@@ -1283,7 +1338,7 @@ Dynamics mode and stability-bound vocabulary
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 :data:`~koopman_graph.protocols.DynamicsMode` is the single
-``Literal["discrete", "continuous"]`` type, defined next to
+``Literal["discrete", "continuous", "stochastic"]`` type, defined next to
 :data:`~koopman_graph.operators.Parameterization` in
 :mod:`koopman_graph.operators` and re-exported from
 :mod:`koopman_graph.protocols`. ``GraphKoopmanModel`` imports it from
@@ -2255,8 +2310,11 @@ new operator classes are the 0.6.0 root additions).
   :func:`~koopman_graph.distributed.fit_ensemble_with_ray`; Tune remains
   examples-only (``examples/scripts/ray_tune_koopman_example.py``; no
   library search-space DSL)
-* ``[dask]`` — reserved dependency pin; **docs-only** in 0.8.0 (no library
-  ``dask_prep`` API or Dask training loop)
+* ``[dask]`` — activates
+  :mod:`koopman_graph.distributed.dask_prep` materialize helpers (not a
+  Dask training loop)
+* ``[msm]`` — deeptime for VAMP-2 oracle tests (optional; precursor helpers
+  themselves need no extra)
 * ``[distributed]`` — meta-extra (``lightning`` + ``ray`` + ``dask``)
 * ``[dev]`` / ``[docs]`` — tests and Sphinx (unchanged)
 
@@ -2319,12 +2377,77 @@ do not conflate trainers with ``sparsity="distributed"``.
      - Optional; not factory default; typed path only
    * - :mod:`koopman_graph.operators.heterogeneous`
      - Package export
-     - Linear advance; joint-stability non-certificate; dense
-       :math:`N\cdot d` ceiling
+     - Linear advance; default Gershgorin joint cert (opt-in Schur /
+       Lyapunov); dense :math:`N\cdot d` ceiling
    * - :mod:`koopman_graph.distributed` (hetero)
      - Power-user
      - Compose 0.8 adapters; ``find_unused_parameters`` default ``True`` for
        RelGraph hetero
+
+v0.10.0 capability architecture
+-------------------------------
+
+v0.10.0 extends the 0.9 hetero stack with continuous hetero, opt-in
+per-type latent widths, joint-certificate honesty, finite ResDMD /
+resolvent-grid analysis, classical DMD-family peers, a topology-blind
+VAMP-2 precursor, simplicial-1 encode/decode, Tier A invariant geometry
+from ``Data.pos``, optional Tier B ``e3nn`` steerable encode
+(``[equivariance]``), Bayesian Laplace UQ over operator factors, and
+``dask_prep`` materialize helpers. Homogeneous scientific defaults remain
+unchanged. Representation-theoretic isotypic / irrep reduction / equivariant
+:math:`K`, GraphVAMPnets / MD toolchains, sheaf / cell TDL, and
+infinite-dimensional ResDMD remain reserved for 0.11 (see
+:doc:`limitations`).
+
+**Shipped capability list (0.10 peers)**
+
+* Continuous hetero + ``latent_dims`` / rectangular :math:`K_r` on
+  :class:`~koopman_graph.operators.HeteroGraphKoopmanOperator`
+* Windowed hetero on single-process ``run_fit_loop``
+* :func:`~koopman_graph.analysis.resdmd` /
+  :func:`~koopman_graph.analysis.resolvent_norm_grid` (finite MVP)
+* Classical peers (FB-/TLS-/opt-/streaming-/MR-DMD, Ulam) and
+  ``vamp2_score`` / ``vamp2_loss``
+* :class:`~koopman_graph.nn.simplicial.SimplicialEncoder` /
+  :class:`~koopman_graph.nn.simplicial.SimplicialDecoder`
+* :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
+* :class:`~koopman_graph.nn.equivariant.E3EquivariantEncoder`
+  (optional ``[equivariance]`` / ``e3nn``)
+* :class:`~koopman_graph.uq.BayesianKoopmanUQ`
+* :mod:`koopman_graph.distributed.dask_prep`
+* Tutorial ``40_resdmd_pseudospectra.ipynb``; :doc:`limitations` 0.11
+  roadmap
+
+**Capability and API-tier map (0.10 peers)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - Capability home
+     - API tier
+     - Contracts to preserve
+   * - :mod:`koopman_graph.analysis.resdmd` /
+       :mod:`koopman_graph.analysis.pseudospectra`
+     - Package (``analysis.__all__``)
+     - Finite dictionary only; ≠ ``spectral_residuals``; not infinite-dim
+       certificates
+   * - :mod:`koopman_graph.nn.simplicial`
+     - Public root façade
+     - Combinatorial simplicial-1; not sheaf / cell TDL
+   * - :mod:`koopman_graph.nn.equivariant`
+     - Public root façade
+     - Tier A invariant + optional Tier B ``e3nn`` encode; latent
+       :math:`K` not equivariant
+   * - :mod:`koopman_graph.baselines.vamp2`
+     - Package export
+     - Topology-blind precursor; not GraphVAMPnets
+   * - :mod:`koopman_graph.uq` (Bayesian Laplace)
+     - Power-user
+     - Factors only; not BNN over encoder weights
+   * - :mod:`koopman_graph.distributed.dask_prep`
+     - Power-user (lazy ``[dask]``)
+     - Offline materialize only; trainers stay DDP / Fabric / Ray ensemble
 
 Related documentation
 ---------------------

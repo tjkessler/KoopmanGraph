@@ -68,6 +68,9 @@ class LossWeights:
     worst_case : float
         Weight on the batch :math:`L_\\infty`-style reconstruction term (robust
         training only; not a generalization bound).
+    vamp2 : float
+        Weight on the topology-blind VAMP-2 precursor
+        (``-vamp2_score`` on flattened encoder latents).
     """
 
     reconstruction: float = 1.0
@@ -79,6 +82,7 @@ class LossWeights:
     pde: float = 0.0
     sparsity: float = 0.0
     worst_case: float = 0.0
+    vamp2: float = 0.0
 
 
 LossWeightSchedule = Callable[[int], LossWeights]
@@ -123,6 +127,8 @@ class TrainingLossBreakdown:
         Koopman-matrix sparsity penalty.
     worst_case : Tensor
         Worst-case (max over nodes) reconstruction loss.
+    vamp2 : Tensor
+        Topology-blind VAMP-2 precursor loss (``-vamp2_score``).
     total : Tensor
         Weighted sum of all active loss terms.
     """
@@ -137,6 +143,7 @@ class TrainingLossBreakdown:
     pde: Tensor = field(default_factory=lambda: torch.tensor(0.0))
     sparsity: Tensor = field(default_factory=lambda: torch.tensor(0.0))
     worst_case: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    vamp2: Tensor = field(default_factory=lambda: torch.tensor(0.0))
 
     @classmethod
     def zeros(cls, device: torch.device) -> TrainingLossBreakdown:
@@ -164,6 +171,7 @@ class TrainingLossBreakdown:
             pde=zero,
             sparsity=zero,
             worst_case=zero,
+            vamp2=zero,
         )
 
     def to_floats(self) -> dict[str, float]:
@@ -174,7 +182,7 @@ class TrainingLossBreakdown:
         dict of str to float
             Mapping with keys ``reconstruction``, ``forward``, ``backward``,
             ``rollout``, ``eigenvalue``, ``lie``, ``pde``, ``sparsity``,
-            ``worst_case``, and ``total``.
+            ``worst_case``, ``vamp2``, and ``total``.
         """
         return {
             "reconstruction": float(self.reconstruction.detach().cpu()),
@@ -186,6 +194,7 @@ class TrainingLossBreakdown:
             "pde": float(self.pde.detach().cpu()),
             "sparsity": float(self.sparsity.detach().cpu()),
             "worst_case": float(self.worst_case.detach().cpu()),
+            "vamp2": float(self.vamp2.detach().cpu()),
             "total": float(self.total.detach().cpu()),
         }
 
@@ -224,6 +233,7 @@ def mean_training_loss_breakdown(
         pde=sum(b.pde for b in breakdowns) / count,
         sparsity=sum(b.sparsity for b in breakdowns) / count,
         worst_case=sum(b.worst_case for b in breakdowns) / count,
+        vamp2=sum(b.vamp2 for b in breakdowns) / count,
         total=sum(b.total for b in breakdowns) / count,
     )
 
@@ -260,6 +270,8 @@ class FitHistory:
         Per-epoch unweighted Koopman sparsity penalty.
     worst_case_loss : tuple of float
         Per-epoch unweighted worst-case reconstruction loss.
+    vamp2_loss : tuple of float
+        Per-epoch unweighted VAMP-2 precursor loss (``-vamp2_score``).
     val_loss : tuple of float or None
         Per-epoch validation loss when a validation sequence is provided.
     val_reconstruction_loss : tuple of float or None
@@ -280,6 +292,8 @@ class FitHistory:
         Per-epoch unweighted validation sparsity loss.
     val_worst_case_loss : tuple of float or None
         Per-epoch unweighted validation worst-case reconstruction loss.
+    val_vamp2_loss : tuple of float or None
+        Per-epoch unweighted validation VAMP-2 precursor loss.
     stopped_early : bool
         Whether training stopped before the requested epoch count.
     best_epoch : int or None
@@ -301,6 +315,7 @@ class FitHistory:
     pde_loss: tuple[float, ...] = ()
     sparsity_loss: tuple[float, ...] = ()
     worst_case_loss: tuple[float, ...] = ()
+    vamp2_loss: tuple[float, ...] = ()
     val_loss: tuple[float, ...] | None = None
     val_reconstruction_loss: tuple[float, ...] | None = None
     val_forward_loss: tuple[float, ...] | None = None
@@ -311,6 +326,7 @@ class FitHistory:
     val_pde_loss: tuple[float, ...] | None = None
     val_sparsity_loss: tuple[float, ...] | None = None
     val_worst_case_loss: tuple[float, ...] | None = None
+    val_vamp2_loss: tuple[float, ...] | None = None
     stopped_early: bool = False
     best_epoch: int | None = None
     best_loss: float | None = None

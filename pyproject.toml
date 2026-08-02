@@ -79,6 +79,14 @@ ray = [
 dask = [
     "dask[distributed]>=2024.1.0",
 ]
+# Optional deeptime for VAMP-2 oracle comparison tests only (not GraphVAMPnets/MD).
+msm = [
+    "deeptime>=0.4",
+]
+# Optional e3nn for Tier-B steerable SE(3) encode (not equivariant K).
+equivariance = [
+    "e3nn>=0.5.1",
+]
 distributed = [
     "lightning>=2.4.0,!=2.6.2,!=2.6.3",
     "ray>=2.9.0",

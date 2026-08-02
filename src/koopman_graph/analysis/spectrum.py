@@ -9,7 +9,10 @@ import torch
 from torch import Tensor
 from torch_geometric.data import Data
 
-from koopman_graph.data.hetero_layout import latent_type_slices
+from koopman_graph.data.hetero_layout import (
+    latent_type_slices,
+    latent_type_slices_from_dims,
+)
 from koopman_graph.graph_utils.topology import resolve_edge_index, resolve_edge_weight
 from koopman_graph.protocols import ModeShapeModel
 from koopman_graph.spectrum_types import (
@@ -42,11 +45,13 @@ class ModeEnergyAttribution:
     operator-action concentration on declared index / coupling blocks of an
     assembled ``K_eff``. They are **not** causal attribution, interventional
     importance, or a ResDMD residual bound on relation-attributed modes.
+    Factor-wise spectral modes / ``bound_metric`` values do **not** certify
+    joint ``ρ(K_eff)``.
 
     Type fractions use projected mass on flat latent slices and sum to 1
-    when the supplied type slices tile ``[0, N·d)``. Relation fractions use
-    coupling-action mass and may **not** sum to 1 when relation supports
-    overlap or leave residual mass outside the supplied blocks.
+    when the supplied type slices tile the assembled dimension. Relation
+    fractions use coupling-action mass and may **not** sum to 1 when relation
+    supports overlap or leave residual mass outside the supplied blocks.
 
     Attributes
     ----------
@@ -57,7 +62,7 @@ class ModeEnergyAttribution:
     relation_fractions : dict of str to Tensor
         Per-relation action-mass fractions with shape ``(num_modes,)``.
     latent_dim : int
-        Shared latent width ``d`` used to expand node slices.
+        Shared reference width ``d`` (façade / multiplex width).
     """
 
     mode_indices: tuple[int, ...]
@@ -74,6 +79,9 @@ def attribute_mode_energy(
     node_type_slices: Mapping[str, slice] | None = None,
     relation_blocks: Mapping[str, Tensor] | None = None,
     mode_indices: Sequence[int] | None = None,
+    latent_dims: Mapping[str, int] | None = None,
+    num_nodes_dict: Mapping[str, int] | None = None,
+    flat_type_slices: Mapping[str, slice] | None = None,
 ) -> ModeEnergyAttribution:
     """Attribute Koopman modes to type self-blocks and relation couplings.
 
@@ -82,7 +90,8 @@ def attribute_mode_energy(
     This helper reports **interpretive** energy fractions on declared blocks
     of an assembled effective operator ``K_eff``. It does **not** claim
     causal / interventional importance and is **not** a ResDMD-certified
-    residual on relation-attributed modes.
+    residual on relation-attributed modes. Factor-wise modes do **not**
+    certify joint ``ρ(K_eff)``.
 
     For each selected eigenvector column ``v`` of ``eigenvectors``:
 
@@ -90,35 +99,49 @@ def attribute_mode_energy(
 
           ‖P_τ v‖² / ‖v‖²
 
-      where ``P_τ`` keeps the flat indices of type ``τ`` (node-row slice
-      expanded by ``latent_dim``).
+      where ``P_τ`` keeps the flat indices of type ``τ``. Shared-d expands
+      node-row slices by ``latent_dim``; rectangular uses
+      :func:`~koopman_graph.data.latent_type_slices_from_dims` (or caller
+      ``flat_type_slices``).
 
     * **Relation fraction** (coupling action mass)::
 
           ‖C_r v‖² / ‖K_eff v‖²
 
-      where ``C_r`` is the caller-supplied coupling block
-      (typically ``Â_r ⊗ K_r``). Relation fractions are raw and need not
-      sum to one under overlapping supports.
+      where ``C_r`` is the caller-supplied coupling block. Shared-d typically
+      uses ``Â_r ⊗ K_r``; rectangular discrete hetero uses
+      ``Â_{dst←src} ⊗ K_r.T`` for Appendix B ``K_r ∈ R^{d_src×d_dst}``.
+      Relation fractions are raw and need not sum to one under overlapping
+      supports.
 
     Parameters
     ----------
     k_eff : Tensor
-        Assembled effective operator with shape ``(N·d, N·d)``.
+        Assembled effective operator (square). Shared-d shape ``(N·d, N·d)``;
+        rectangular shape ``(Σ N_τ·d_τ, Σ N_τ·d_τ)``.
     eigenvectors : Tensor
-        Eigenvector matrix with shape ``(N·d, num_modes_total)`` (columns
-        are modes), typically from
+        Eigenvector matrix with matching leading dimension (columns are
+        modes), typically from
         :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`.
     latent_dim : int
-        Shared latent width ``d``.
+        Shared reference latent width ``d``.
     node_type_slices : mapping of str to slice or None, optional
         Node-row slices (from :func:`~koopman_graph.data.node_type_slices`).
-        When ``None``, type fractions are empty.
+        Used with shared-d expansion by ``latent_dim``. Ignored when
+        ``flat_type_slices`` or ``latent_dims`` + ``num_nodes_dict`` are set.
     relation_blocks : mapping of str to Tensor or None, optional
-        Per-relation coupling matrices ``C_r`` with shape ``(N·d, N·d)``.
+        Per-relation coupling matrices ``C_r`` matching ``k_eff`` shape.
         When ``None``, relation fractions are empty.
     mode_indices : sequence of int or None, optional
         Columns of ``eigenvectors`` to attribute. Defaults to every column.
+    latent_dims : mapping of str to int or None, optional
+        Opt-in unequal ``d_τ``. Requires ``num_nodes_dict``; builds flat
+        slices via :func:`~koopman_graph.data.latent_type_slices_from_dims`.
+    num_nodes_dict : mapping of str to int or None, optional
+        Per-type node counts for rectangular type slices.
+    flat_type_slices : mapping of str to slice or None, optional
+        Precomputed flat latent slices. Takes precedence over
+        ``latent_dims`` / ``node_type_slices``.
 
     Returns
     -------
@@ -129,17 +152,15 @@ def attribute_mode_energy(
     ------
     ValueError
         If shapes are inconsistent, ``latent_dim`` is invalid, a mode index
-        is out of range, or a relation block has the wrong shape.
+        is out of range, rectangular args are incomplete, or a relation
+        block has the wrong shape.
     """
     if k_eff.ndim != 2 or k_eff.shape[0] != k_eff.shape[1]:
-        msg = (
-            "k_eff must be a square matrix with shape (N*d, N*d); "
-            f"got {tuple(k_eff.shape)}"
-        )
+        msg = f"k_eff must be a square matrix; got {tuple(k_eff.shape)}"
         raise ValueError(msg)
     if eigenvectors.ndim != 2:
         msg = (
-            "eigenvectors must have shape (N*d, num_modes); "
+            "eigenvectors must have shape (assembled_dim, num_modes); "
             f"got {tuple(eigenvectors.shape)}"
         )
         raise ValueError(msg)
@@ -152,12 +173,36 @@ def attribute_mode_energy(
     if latent_dim < 1:
         msg = f"latent_dim must be positive, got {latent_dim}"
         raise ValueError(msg)
-    if k_eff.shape[0] % latent_dim != 0:
-        msg = (
-            f"k_eff dimension {k_eff.shape[0]} is not divisible by "
-            f"latent_dim={latent_dim}"
+
+    rectangular = flat_type_slices is not None or latent_dims is not None
+    if rectangular:
+        if flat_type_slices is None:
+            if num_nodes_dict is None or latent_dims is None:
+                msg = (
+                    "rectangular attribute_mode_energy requires latent_dims "
+                    "and num_nodes_dict (or precomputed flat_type_slices)"
+                )
+                raise ValueError(msg)
+            # Preserve Mapping insertion order (operator latent_dims are in
+            # node_types order from validate_latent_dims).
+            node_type_names = tuple(latent_dims)
+            flat_slices = latent_type_slices_from_dims(
+                node_type_names,
+                num_nodes_dict,
+                latent_dims,
+            )
+        else:
+            flat_slices = dict(flat_type_slices)
+    else:
+        if k_eff.shape[0] % latent_dim != 0:
+            msg = (
+                f"k_eff dimension {k_eff.shape[0]} is not divisible by "
+                f"latent_dim={latent_dim}"
+            )
+            raise ValueError(msg)
+        flat_slices = (
+            latent_type_slices(node_type_slices, latent_dim) if node_type_slices else {}
         )
-        raise ValueError(msg)
 
     num_modes_total = eigenvectors.shape[1]
     indices = (
@@ -171,19 +216,17 @@ def attribute_mode_energy(
     # Prefer real arithmetic when modes are real; otherwise use |·|² via conj.
     mode_norms_sq = _column_energy(selected)
     type_fractions: dict[str, Tensor] = {}
-    if node_type_slices:
-        flat_slices = latent_type_slices(node_type_slices, latent_dim)
-        for name, flat_slice in flat_slices.items():
-            if flat_slice.stop > k_eff.shape[0] or flat_slice.start < 0:
-                msg = (
-                    f"latent slice for type {name!r} {flat_slice!r} is outside "
-                    f"[0, {k_eff.shape[0]})"
-                )
-                raise ValueError(msg)
-            projected = selected[flat_slice, :]
-            type_fractions[name] = _column_energy(projected) / mode_norms_sq.clamp_min(
-                torch.finfo(mode_norms_sq.dtype).tiny
+    for name, flat_slice in flat_slices.items():
+        if flat_slice.stop > k_eff.shape[0] or flat_slice.start < 0:
+            msg = (
+                f"latent slice for type {name!r} {flat_slice!r} is outside "
+                f"[0, {k_eff.shape[0]})"
             )
+            raise ValueError(msg)
+        projected = selected[flat_slice, :]
+        type_fractions[name] = _column_energy(projected) / mode_norms_sq.clamp_min(
+            torch.finfo(mode_norms_sq.dtype).tiny
+        )
 
     relation_fractions: dict[str, Tensor] = {}
     if relation_blocks:

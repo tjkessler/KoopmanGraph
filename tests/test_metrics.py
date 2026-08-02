@@ -2,11 +2,16 @@
 
 import pytest
 import torch
+from torch_geometric.data import Data, HeteroData
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
+from koopman_graph.data import GraphSnapshotSequence, HeteroGraphSnapshotSequence
 from koopman_graph.metrics import (
     EvaluationResult,
     HorizonMetrics,
+    _hetero_eval_feature_vector,
+    _resolve_evaluate_sequence,
+    _validate_hetero_evaluate_surface,
     evaluate_forecast,
     mae,
     mape,
@@ -188,3 +193,157 @@ def test_evaluate_forecast_with_dynamic_topology(trainable_model) -> None:
     result = evaluate_forecast(trainable_model, sequence, horizons=(1,))
 
     assert result.num_origins == 3
+
+
+def _hetero_snapshot(*, seed: int = 0) -> HeteroData:
+    generator = torch.Generator().manual_seed(seed)
+    data = HeteroData()
+    data["node"].x = torch.randn(4, 3, generator=generator)
+    data["node", "r1", "node"].edge_index = torch.tensor(
+        [[0, 1, 2], [1, 2, 0]],
+        dtype=torch.long,
+    )
+    return data
+
+
+def test_hetero_eval_feature_vector_validation() -> None:
+    """Stacked hetero features require present node types with ``x``."""
+    snap = _hetero_snapshot()
+    vec = _hetero_eval_feature_vector(snap, ("node",))
+    assert vec.ndim == 1
+    assert vec.numel() == 4 * 3
+
+    with pytest.raises(ValueError, match="missing node type"):
+        _hetero_eval_feature_vector(snap, ("node", "other"))
+
+    class _NodeWithoutFeatures:
+        x = None
+
+    class _SnapshotMissingX:
+        node_types = ["node"]
+
+        def __getitem__(self, name: str) -> _NodeWithoutFeatures:
+            return _NodeWithoutFeatures()
+
+    with pytest.raises(ValueError, match="missing feature matrix x"):
+        _hetero_eval_feature_vector(_SnapshotMissingX(), ("node",))
+
+
+def test_validate_hetero_evaluate_surface_rejects_unsupported_options() -> None:
+    """Hetero evaluate rejects dynamic topology, controls, and masks."""
+    snaps = [_hetero_snapshot(seed=t) for t in range(3)]
+    dynamic_snaps = [_hetero_snapshot(seed=0), _hetero_snapshot(seed=1)]
+    dynamic_snaps[1]["node", "r1", "node"].edge_index = torch.tensor(
+        [[0, 1], [1, 0]],
+        dtype=torch.long,
+    )
+    dynamic = HeteroGraphSnapshotSequence(
+        dynamic_snaps,
+        allow_dynamic_topology=True,
+    )
+    assert dynamic.is_dynamic_topology
+    with pytest.raises(
+        ValueError,
+        match="dynamic-topology HeteroGraphSnapshotSequence",
+    ):
+        _validate_hetero_evaluate_surface(dynamic)
+
+    controlled = HeteroGraphSnapshotSequence(
+        snaps,
+        control_inputs=torch.zeros(3, 1),
+    )
+    with pytest.raises(ValueError, match="controlled HeteroGraphSnapshotSequence"):
+        _validate_hetero_evaluate_surface(controlled)
+
+    masks = HeteroGraphSnapshotSequence(
+        snaps,
+        observation_masks={
+            "node": torch.ones(len(snaps), 4, dtype=torch.bool),
+        },
+    )
+    with pytest.raises(
+        ValueError,
+        match="observation-masked HeteroGraphSnapshotSequence",
+    ):
+        _validate_hetero_evaluate_surface(masks)
+
+
+def test_resolve_evaluate_sequence_wraps_inputs() -> None:
+    """Plain Data / HeteroData lists and containers resolve correctly."""
+    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    homo = _resolve_evaluate_sequence(
+        [
+            Data(x=torch.randn(2, 3), edge_index=edge_index),
+            Data(x=torch.randn(2, 3), edge_index=edge_index),
+        ]
+    )
+    assert isinstance(homo, GraphSnapshotSequence)
+
+    hetero = _resolve_evaluate_sequence([_hetero_snapshot(), _hetero_snapshot(seed=1)])
+    assert isinstance(hetero, HeteroGraphSnapshotSequence)
+
+    wrapped = GraphSnapshotSequence(
+        [Data(x=torch.randn(2, 3), edge_index=edge_index) for _ in range(2)]
+    )
+    assert _resolve_evaluate_sequence(wrapped) is wrapped
+
+    with pytest.raises(ValueError, match="at least one snapshot"):
+        _resolve_evaluate_sequence([])
+    with pytest.raises(TypeError, match="evaluate_forecast expects"):
+        _resolve_evaluate_sequence(42)  # type: ignore[arg-type]
+
+
+def test_evaluate_forecast_hetero_guardrails() -> None:
+    """Hetero evaluate rejects delay embedding, homo models, and bad predict types."""
+    from koopman_graph.nn import RelGraphDecoder, RelGraphEncoder
+
+    snaps = [_hetero_snapshot(seed=t) for t in range(4)]
+    sequence = HeteroGraphSnapshotSequence(snaps)
+    hetero_model = GraphKoopmanModel(
+        encoder=RelGraphEncoder(3, hidden_channels=8, latent_dim=4, num_relations=1),
+        decoder=RelGraphDecoder(
+            latent_dim=4,
+            hidden_channels=8,
+            out_channels=3,
+            num_relations=1,
+        ),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hetero_graph",
+        koopman_edge_types=(("node", "r1", "node"),),
+    )
+    homo_model = GraphKoopmanModel(
+        encoder=GNNEncoder(in_channels=3, hidden_channels=8, latent_dim=4),
+        decoder=GNNDecoder(latent_dim=4, hidden_channels=8, out_channels=3),
+        latent_dim=4,
+        time_step=1.0,
+    )
+
+    with pytest.raises(TypeError, match="koopman='hetero_graph'"):
+        evaluate_forecast(homo_model, sequence, horizons=(1,))
+
+    delay_model = GraphKoopmanModel(
+        encoder=RelGraphEncoder(3, hidden_channels=8, latent_dim=4, num_relations=1),
+        decoder=RelGraphDecoder(
+            latent_dim=4,
+            hidden_channels=8,
+            out_channels=3,
+            num_relations=1,
+        ),
+        latent_dim=4,
+        time_step=1.0,
+        koopman="hetero_graph",
+        koopman_edge_types=(("node", "r1", "node"),),
+    )
+    delay_model.n_delays = 2
+    with pytest.raises(ValueError, match="delay embedding"):
+        evaluate_forecast(delay_model, sequence, horizons=(1,))
+
+    def _bad_predict(_initial, steps: int):  # noqa: ANN001
+        edge_index = snaps[0]["node", "r1", "node"].edge_index
+        bad = Data(x=torch.zeros(4, 3), edge_index=edge_index)
+        return [bad] * steps
+
+    hetero_model.predict = _bad_predict  # type: ignore[method-assign]
+    with pytest.raises(TypeError, match="expects predict\\(\\) to return HeteroData"):
+        evaluate_forecast(hetero_model, sequence, horizons=(1,), start_indices=[0])

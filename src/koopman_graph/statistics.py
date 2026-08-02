@@ -447,6 +447,18 @@ def _rosenstein_delay_theiler(
         threshold = acorr[n - 1] * (1.0 - 1.0 / math.e)
 
         def _neighbors_remaining(lag: int) -> int:
+            """Internal helper: neighbors remaining.
+
+            Parameters
+            ----------
+            lag
+                Value for ``lag``.
+
+            Returns
+            -------
+            object
+                Function result.
+            """
             min_len = (embedding_dim - 1) * lag + trajectory_len + theiler * 2
             return max(0, n - min_len)
 

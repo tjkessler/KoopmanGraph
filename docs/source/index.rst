@@ -7,14 +7,16 @@ space, a learned linear operator advances those states, and a matching decoder
 reconstructs physical node features for multi-step forecasting and spectral
 analysis.
 
-Version **0.6.0** extends the library with hypergraph encode/decode/operators,
-self-adaptive topology, global/local and continuous networked operators,
-symmetry-adapted orbit ties, SINDy / spectral clustering / topology-estimation
-diagnostics, conformal UQ, and Koopman-MPC, on top of the v0.5.0 ensemble /
-latent-Gaussian UQ, auxiliary-spectral generators, physics-residual and
-sparsity losses, expanded GNN encoder zoo, and hierarchical forecasting.
-See :doc:`capabilities` for the full inventory, :doc:`limitations` for scope
-boundaries, and :doc:`architecture` for the public vs power-user API contract.
+Version **0.10.0** extends the library with continuous heterogeneous /
+multiplex operators (opt-in per-type latent widths), finite-dictionary
+ResDMD and resolvent-grid analysis, classical DMD-family peers and a
+topology-blind VAMP-2 precursor, simplicial-1 encode/decode, Tier A
+invariant geometry from ``Data.pos``, Bayesian Laplace UQ over operator
+factors, and ``dask_prep`` materialize helpers — on top of the 0.9 hetero
+RelGraph stack, 0.8 distributed trainers, and earlier hypergraph /
+stability / conformal / MPC surfaces. See :doc:`capabilities` for the
+full inventory, :doc:`limitations` for scope boundaries and the 0.11
+roadmap, and :doc:`architecture` for the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2

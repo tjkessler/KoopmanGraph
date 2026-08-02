@@ -734,3 +734,15 @@ def test_default_factory_path_unchanged() -> None:
 
     assert isinstance(model.koopman, KoopmanOperator)
     assert model.koopman.parameterization == "dense"
+
+
+def test_homogeneous_bit_compat_matches_shared_d_regression_golden() -> None:
+    """Homogeneous seeded one-step golden (TASK-1820 release blocker).
+
+    Full multiplex / typed shared-d suite lives in
+    ``tests/test_hetero_shared_d_regression.py``.
+    """
+    import importlib
+
+    regression = importlib.import_module("test_hetero_shared_d_regression")
+    regression.test_homogeneous_seeded_one_step_loss_matches_golden()

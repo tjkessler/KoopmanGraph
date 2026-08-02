@@ -28,11 +28,27 @@ Topology-aware learning
   (``RelGraphEncoder`` / ``RelGraphDecoder``) with
   ``koopman="hetero_graph"`` on ``HeteroGraphSnapshotSequence`` /
   PyG ``HeteroData`` (R-GCN-lite per-relation messages; Schlichtkrull et
-  al. 2018 motivation only). Typed multi-node graphs use a shared latent
-  width :math:`d` and stacked layout
-  (:mod:`koopman_graph.data.hetero_layout`). Optional HGT peers
-  (``HGTEncoder`` / ``HGTDecoder`` in :mod:`koopman_graph.nn`) wrap PyG
-  ``HGTConv`` and are **not** required for hetero support
+  al. 2018 motivation only). Shared latent width :math:`d` is the default
+  (stacked layout in :mod:`koopman_graph.data.hetero_layout`); opt-in
+  per-type widths :math:`d_\tau` via ``latent_dims`` use rectangular
+  relation maps :math:`K_r`. Continuous hetero
+  (``dynamics_mode="continuous"``) is supported with documented dense
+  :math:`\Phi` cost. Optional HGT peers (``HGTEncoder`` / ``HGTDecoder``
+  in :mod:`koopman_graph.nn`) wrap PyG ``HGTConv`` and are **not**
+  required for hetero support. Windowed single-process
+  ``run_fit_loop`` accepts windowed hetero sequences
+* Combinatorial simplicial-1 / Hodge lifts via
+  ``SimplicialEncoder`` / ``SimplicialDecoder``
+  (:mod:`koopman_graph.nn.simplicial`; oriented ``edge_index``, optional
+  ``face_index``) — not sheaf / full cell-complex TDL
+* ``InvariantGeometryEncoder``
+  (:mod:`koopman_graph.nn.equivariant`) — Tier A invariant distance /
+  angle features from ``Data.pos`` lifted by a GCN; invariant features
+  do **not** make latent :math:`K` E(n)/SE(3) equivariant
+* Optional ``E3EquivariantEncoder`` (``e3nn``,
+  ``pip install "koopman-graph[equivariance]"``) — Tier B steerable
+  encode to invariant scalar latents; still **not** an equivariant
+  :math:`K`
 * ``DelayEmbeddingEncoder`` / ``n_delays`` for Hankel-style partial
   observability
 * Per-snapshot ``edge_index`` (dynamic topology) and end-to-end
@@ -77,6 +93,11 @@ Dynamics
   ``koopman="continuous_graph"``; ``adjacency`` modes match discrete
   ``GraphKoopmanOperator``; dense ``N·d`` matrix-exp cost caveat —
   prefer modest ``N`` or ``sparsity="block_diagonal"`` self-only shortcut)
+* Continuous hetero generators on ``koopman="hetero_graph"`` +
+  ``dynamics_mode="continuous"`` (dense stacked :math:`\Phi` cost; see
+  :doc:`limitations`)
+* Opt-in ``dynamics_mode="stochastic"`` — discrete linear map plus learned
+  diagonal process noise (not a continuous-time SDE)
 * Continuous ``koopman_parameterization="auxiliary_spectral"`` — state-dependent
   ``generator_at(z)`` / instantaneous spectrum (Lusch-style; locally linear,
   not a fixed global matrix). Prefer delay embeddings first for continuous-
@@ -90,9 +111,11 @@ Forecasting and training
 * Multi-step rollout from a single initial state
 * Consistency losses (forward / backward), optional eigenvalue regularization,
   fit-time PIKN-style Lie / PINN-style PDE residual terms, optional
-  :math:`L_1` / smoothed :math:`L_p` Koopman sparsity, and an optional
+  :math:`L_1` / smoothed :math:`L_p` Koopman sparsity, an optional
   worst-case (:math:`L_{\infty}`\-style) reconstruction term (robust training
-  only — not a generalization bound)
+  only — not a generalization bound), and optional topology-blind VAMP-2
+  precursor weight (``LossWeights.vamp2`` /
+  :func:`~koopman_graph.baselines.vamp2.vamp2_score`; not GraphVAMPnets)
 * LR schedulers, per-term loss history, ``MultiTrajectory`` fit, and
   windowed mini-batching
 * Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via
@@ -131,8 +154,8 @@ Optional multi-process / multi-GPU *trainer orchestration* around the same
 scientific fit loop (``run_fit_loop`` / epoch helpers /
 ``compute_training_loss``). Import from
 :mod:`koopman_graph.distributed` (power-user; not on root ``__all__``).
-This is **not** the unimplemented operator flag ``sparsity="distributed"``
-(see :doc:`faq` and :doc:`limitations`).
+This is **not** the operator flag ``sparsity="distributed"`` (matrix-free
+inverse / spectrum; see :doc:`faq` and :doc:`limitations`).
 
 * Native PyTorch DDP via :func:`~koopman_graph.distributed.run_ddp_fit_loop`
   or ``GraphKoopmanModel.fit(..., strategy="ddp")`` (core install;
@@ -174,15 +197,14 @@ This is **not** the unimplemented operator flag ``sparsity="distributed"``
 
 Ray Tune is **examples-only**: see
 ``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
-script; the library does not expose a Tune / AutoML API). Dask is
-**docs-only** in 0.8.0: there is no library ``dask_prep`` API and no Dask
-training loop. Use Dask in *user* code to materialize trajectories or
-window lists offline, then pass in-memory
-:class:`~koopman_graph.data.GraphSnapshotSequence` objects into ``fit`` /
-:class:`~koopman_graph.distributed.DistributedWindowSampler` (see
-:doc:`faq`). The ``[dask]`` extra remains a reserved dependency pin.
-Distributed data-parallel training does **not** reduce dense
-:math:`N\cdot d` operator ceilings — see :doc:`limitations` (Scale).
+script; the library does not expose a Tune / AutoML API). Optional
+``pip install "koopman-graph[dask]"`` activates
+:mod:`koopman_graph.distributed.dask_prep` helpers
+(``materialize_sequences``, ``materialize_window_index_list``) for offline
+prep. The library does **not** import Dask on the training path; trainers
+remain native DDP / Fabric / Ray ensemble (see :doc:`faq`). Distributed
+data-parallel training does **not** reduce dense :math:`N\cdot d`
+operator ceilings — see :doc:`limitations` (Scale).
 
 Analysis
 ~~~~~~~~
@@ -196,6 +218,13 @@ Analysis
   ``plot_spectrum(..., annotate_untrustworthy=True)``. Diagnostic in the
   learned observable space, **not** a certified ResDMD bound
   (``ColbrookTownsend2023ResDMD``, ``Colbrook2023ResidualDMD``)
+* Finite-dictionary ResDMD MVP
+  (:func:`~koopman_graph.analysis.resdmd`,
+  :class:`~koopman_graph.analysis.ResDMDReport`) and finite-matrix
+  resolvent-norm grid
+  (:func:`~koopman_graph.analysis.resolvent_norm_grid`) — **not**
+  infinite-dimensional certified pseudospectra; see
+  ``examples/40_resdmd_pseudospectra.ipynb``
 * Long-horizon statistics via ``koopman_graph.statistics`` (power-user):
   Welch PSD (``Welch1967``), ``spectral_distance``,
   ``invariant_measure_distance``, Rosenstein
@@ -242,6 +271,9 @@ Uncertainty quantification (power-user)
   optional ``neighbor_smoothing`` following DAPS-style diffusion,
   ``Zargarbashi2023ConformalGNN``). Calibration payload kind
   ``ConformalKoopmanUQ.calibration.v2``
+* ``koopman_graph.uq.BayesianKoopmanUQ`` — diagonal Laplace posterior over
+  linear Koopman factors with seeded ``sample_forecast`` intervals (not a
+  BNN over encoder weights; not full DPK / :math:`K^{2}`\ VAE)
 * See notebooks ``21_uncertainty_quantification.ipynb`` and
   ``30_conformal_uncertainty.ipynb``
 
@@ -261,10 +293,16 @@ Research tooling
 
 * Classical baselines via ``koopman_graph.baselines``: ``DMDBaseline``,
   ``EDMDBaseline`` (polynomial / RBF / kernel dictionaries; kernel path is
-  :math:`O(T^2)` — small/medium ``T``), ``DMDcBaseline``. Truncated-SVD
+  :math:`O(T^2)` — small/medium ``T``; Nyström / random-feature
+  approximations available), ``DMDcBaseline``, ``FBDMDBaseline``,
+  ``TLSDMDBaseline``, ``OptDMDBaseline``, ``StreamingDMDBaseline``,
+  ``MRDMDBaseline``, and ``UlamTransferOperatorBaseline``. Truncated-SVD
   ``rank`` accepts ``None``, a positive integer, or ``"auto"``
   (Gavish–Donoho median threshold, ``GavishDonoho2014``); fitted
   ``selected_rank`` is recorded
+* Topology-blind VAMP-2 precursor helpers
+  (``vamp2_score`` / ``vamp2_loss``; optional ``[msm]`` for deeptime
+  oracle tests) — not GraphVAMPnets
 * Lightweight STGCN / DCRNN / Graph WaveNet references in
   ``koopman_graph.baselines.gnn`` (teaching baselines, not dedicated-library
   SOTA)

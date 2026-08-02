@@ -14,7 +14,32 @@ Capability layout
     :class:`~koopman_graph.baselines.DMDcBaseline`.
 ``edmd``
     :class:`~koopman_graph.baselines.EDMDBaseline` (polynomial / RBF / kernel
-    dictionaries; full kernel centers are O(T^2)).
+    dictionaries; Nyström / random-feature kernel approximations; full
+    kernel centers are O(T^2)).
+``fbdmd``
+    :class:`~koopman_graph.baselines.FBDMDBaseline` — forward–backward DMD
+    on flattened node states (topology-blind).
+``tlsdmd``
+    :class:`~koopman_graph.baselines.TLSDMDBaseline` — total-least-squares
+    DMD on flattened node states (topology-blind).
+``optdmd``
+    :class:`~koopman_graph.baselines.OptDMDBaseline` — optimized DMD MVP
+    (variable-projection style) on flattened node states.
+``streaming_dmd``
+    :class:`~koopman_graph.baselines.StreamingDMDBaseline` — online Gram
+    least-squares DMD with :meth:`~koopman_graph.baselines.StreamingDMDBaseline.update`.
+``mrdmd``
+    :class:`~koopman_graph.baselines.MRDMDBaseline` — depth-2 multi-resolution
+    DMD tree (forecast uses the root operator).
+``transfer_operator``
+    :class:`~koopman_graph.baselines.UlamTransferOperatorBaseline` — Ulam
+    Galerkin transfer / Perron–Frobenius matrix on a fixed box indicator
+    dictionary (density propagation; topology-blind).
+``vamp2``
+    Topology-blind VAMP-2 score / loss helpers
+    (:func:`~koopman_graph.baselines.vamp2.vamp2_score`,
+    :func:`~koopman_graph.baselines.vamp2.vamp2_loss`). Not a ForecastModel;
+    not GraphVAMPnets / MD.
 ``gnn``
     Spatiotemporal GNN forecaster baselines
     (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
@@ -46,11 +71,18 @@ from koopman_graph.baselines.base import ClassicalBaseline
 from koopman_graph.baselines.dmd import DMDBaseline
 from koopman_graph.baselines.dmdc import DMDcBaseline
 from koopman_graph.baselines.edmd import EDMDBaseline
+from koopman_graph.baselines.fbdmd import FBDMDBaseline
 from koopman_graph.baselines.gnn import (
     DCRNNBaseline,
     GraphWaveNetBaseline,
     STGCNBaseline,
 )
+from koopman_graph.baselines.mrdmd import MRDMDBaseline
+from koopman_graph.baselines.optdmd import OptDMDBaseline
+from koopman_graph.baselines.streaming_dmd import StreamingDMDBaseline
+from koopman_graph.baselines.tlsdmd import TLSDMDBaseline
+from koopman_graph.baselines.transfer_operator import UlamTransferOperatorBaseline
+from koopman_graph.baselines.vamp2 import vamp2_loss, vamp2_score
 
 __all__ = [
     "ClassicalBaseline",
@@ -58,6 +90,14 @@ __all__ = [
     "DMDBaseline",
     "DMDcBaseline",
     "EDMDBaseline",
+    "FBDMDBaseline",
     "GraphWaveNetBaseline",
+    "MRDMDBaseline",
+    "OptDMDBaseline",
     "STGCNBaseline",
+    "StreamingDMDBaseline",
+    "TLSDMDBaseline",
+    "UlamTransferOperatorBaseline",
+    "vamp2_loss",
+    "vamp2_score",
 ]

@@ -6,8 +6,9 @@ Capability layout
     Shared non-private helpers and result types
     (:class:`~koopman_graph.uq.PredictionInterval`,
     :func:`~koopman_graph.uq.quantile_levels`,
-    :func:`~koopman_graph.uq.snapshot_with_features`) used by ensemble and
-    latent-Gaussian peers — no cross-module leading-``_`` imports and no
+    :func:`~koopman_graph.uq.snapshot_with_features`,
+    :func:`~koopman_graph.uq.hetero_snapshot_with_features`) used by ensemble
+    and latent-Gaussian peers — no cross-module leading-``_`` imports and no
     peer-to-peer import of the shared interval type.
 ``ensemble``
     :class:`~koopman_graph.uq.EnsembleGraphKoopmanModel` deep ensembles with
@@ -22,9 +23,18 @@ Capability layout
 ``conformal``
     :class:`~koopman_graph.uq.ConformalKoopmanUQ` split / adaptive (ACI)
     conformal intervals returning
-    :class:`~koopman_graph.uq.PredictionInterval`. Calibration state is
-    wrapper-local (not model ``FORMAT_VERSION``). Marginal coverage
-    ``≥ 1 − α`` under exchangeability; prefer ACI under drift.
+    :class:`~koopman_graph.uq.PredictionInterval` (``Data`` or
+    ``HeteroData`` bands). Hetero models score stacked decoded features
+    (``N = Σ_τ N_τ``). Calibration state is wrapper-local (not model
+    ``FORMAT_VERSION``). Marginal coverage ``≥ 1 − α`` under
+    exchangeability; prefer ACI under drift.
+``bayesian``
+    :class:`~koopman_graph.uq.BayesianKoopmanUQ` diagonal Laplace posterior
+    over dense linear factors (``K`` / ``K_self``+``K_nbr``) with
+    :meth:`~koopman_graph.uq.BayesianKoopmanUQ.sample_forecast` intervals,
+    plus :class:`~koopman_graph.uq.LaplacePosterior` and
+    :class:`~koopman_graph.uq.LaplaceFactorSpec`. Not a BNN over
+    encoder/decoder weights; no coverage guarantee.
 
 Power-user module: import as ``koopman_graph.uq``. Types are intentionally
 omitted from root ``koopman_graph.__all__`` (see architecture docs).
@@ -35,7 +45,8 @@ et al., NeurIPS 2017). :class:`~koopman_graph.uq.LatentGaussianKoopmanUQ` is a
 linear-Gaussian / Kalman-refined latent path related to the Kalman half of
 K²VAE-style pipelines — **not** Deep Probabilistic Koopman (DPK), which
 predicts time-varying distribution parameters, and **not** a full K²VAE
-(VAE + KalmanNet) reimplementation.
+(VAE + KalmanNet) reimplementation. :class:`~koopman_graph.uq.BayesianKoopmanUQ`
+is a diagonal Laplace approximation over operator factors only.
 
 Latent-Gaussian forecasts reuse
 :meth:`~koopman_graph.model.GraphKoopmanModel.encode_rollout_origin` and
@@ -43,8 +54,14 @@ Latent-Gaussian forecasts reuse
 scheduling; closed-form Gaussian moment updates remain local to this package.
 """
 
+from koopman_graph.uq.bayesian import (
+    BayesianKoopmanUQ,
+    LaplaceFactorSpec,
+    LaplacePosterior,
+)
 from koopman_graph.uq.common import (
     PredictionInterval,
+    hetero_snapshot_with_features,
     quantile_levels,
     snapshot_with_features,
 )
@@ -62,14 +79,18 @@ from koopman_graph.uq.latent_gaussian import (
 )
 
 __all__ = [
+    "BayesianKoopmanUQ",
     "ConformalKoopmanUQ",
     "EnsembleGraphKoopmanModel",
     "IntervalForecastModel",
+    "LaplaceFactorSpec",
+    "LaplacePosterior",
     "LatentGaussianForecast",
     "LatentGaussianKoopmanUQ",
     "PredictionInterval",
     "dense_nodewise_transition",
     "empirical_coverage",
+    "hetero_snapshot_with_features",
     "propagate_gaussian_covariance",
     "quantile_levels",
     "snapshot_with_features",

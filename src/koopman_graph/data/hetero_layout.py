@@ -2,32 +2,42 @@
 
 Layout contract
 ---------------
-Typed heterogeneous graphs are represented in a **single stacked block**. For
-ordered node types ``(τ_0, …, τ_{M-1})`` with per-type cardinalities ``N_τ``,
-node-level quantities (physical features and Koopman latents alike) are stacked
-row-wise into one matrix with ``N = Σ_τ N_τ`` rows::
+Typed heterogeneous graphs use ordered node types ``(τ_0, …, τ_{M-1})`` with
+per-type cardinalities ``N_τ``. Type order is the caller-supplied
+``node_type_names`` order (for
+:class:`~koopman_graph.data.HeteroGraphSnapshotSequence`, snapshot-0 schema
+order via ``node_type_names``).
+
+**Shared-d path (default).** When opt-in ``latent_dims`` is absent, physical
+features and Koopman latents are stacked row-wise into one matrix with
+``N = Σ_τ N_τ`` rows and a shared trailing width ``d``::
 
     rows [0, N_{τ_0})                    -> type τ_0
     rows [N_{τ_0}, N_{τ_0} + N_{τ_1})    -> type τ_1
     …
 
-so latents live in ``Z ∈ R^{N×d}`` at a **shared** latent width ``d``. Type
-order is the caller-supplied ``node_type_names`` order, which for containers
-built from :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` is the
-snapshot-0 schema order exposed by its ``node_type_names`` attribute.
-Per-type latent widths ``d_τ`` are not part of this layout.
+so latents live in ``Z ∈ R^{N×d}``. Flat ``vec(Z)`` slices use
+:func:`latent_type_slices` (``[a·d, b·d)`` for node rows ``[a, b)``).
 
-Because a stacked block has one global node numbering, per-relation
+**Opt-in per-type widths.** :func:`validate_latent_dims` accepts
+``latent_dims: Mapping[str, int]`` with exactly the keys in
+``node_type_names``. Unequal ``d_τ`` latents are **block-concatenated**
+(not a single ``(N, d)`` matrix): type ``τ`` contributes an ``(N_τ, d_τ)``
+block flattened in C-order, so the flat length is ``Σ_τ N_τ·d_τ``. Use
+:func:`latent_type_slices_from_dims` for those flat slices. Providing
+``latent_dims`` never silently falls back to the shared-d path.
+
+Because a stacked node block has one global numbering, per-relation
 ``edge_index`` tensors stored per PyG ``(src, rel, dst)`` edge type use
 **type-local** indices and must be shifted into the global numbering with
 :func:`offset_edge_index` (or, for a whole snapshot,
-:func:`global_relation_edge_indices`) before they index stacked rows.
-Destination in-degree normalization is unaffected by the shift, so a single
-relation bank can be aggregated against the stacked block directly.
+:func:`global_relation_edge_indices`) before they index shared-d stacked
+rows. Destination in-degree normalization is unaffected by the shift.
 
 Dict-valued per-type features appear only at the encode / decode boundary;
 :func:`stack_typed_features` and :func:`unstack_typed_features` convert between
-the two views when every type shares a feature width.
+the two views when every type shares a **feature** width ``F`` (independent of
+``latent_dims``).
 """
 
 from __future__ import annotations
@@ -41,13 +51,16 @@ from torch_geometric.data import HeteroData
 __all__ = [
     "global_relation_edge_indices",
     "latent_type_slices",
+    "latent_type_slices_from_dims",
     "mask_hetero_snapshot_features",
     "node_type_offsets",
     "node_type_slices",
     "offset_edge_index",
     "snapshot_num_nodes_dict",
     "stack_typed_features",
+    "stacked_latent_numel",
     "unstack_typed_features",
+    "validate_latent_dims",
 ]
 
 EdgeTypeTriple = tuple[str, str, str]
@@ -167,10 +180,12 @@ def latent_type_slices(
     node_type_slices: Mapping[str, slice],
     latent_dim: int,
 ) -> dict[str, slice]:
-    """Expand node-row slices into flat ``vec(Z)`` index slices.
+    """Expand node-row slices into flat ``vec(Z)`` index slices (shared ``d``).
 
     Under the stacked ``(N, d)`` layout with C-order ``Z.reshape(-1)``, node
-    rows ``[a, b)`` occupy flat indices ``[a·d, b·d)``.
+    rows ``[a, b)`` occupy flat indices ``[a·d, b·d)``. For opt-in unequal
+    ``d_τ``, use :func:`latent_type_slices_from_dims` instead — this helper
+    never interprets a ``latent_dims`` mapping.
 
     Parameters
     ----------
@@ -210,6 +225,152 @@ def latent_type_slices(
             raise ValueError(msg)
         expanded[str(name)] = slice(int(start) * latent_dim, int(stop) * latent_dim)
     return expanded
+
+
+def validate_latent_dims(
+    node_type_names: Sequence[str],
+    latent_dims: Mapping[str, int] | None,
+    *,
+    shared_latent_dim: int | None = None,
+) -> dict[str, int] | None:
+    """Validate opt-in per-type latent widths ``d_τ``.
+
+    Parameters
+    ----------
+    node_type_names : sequence of str
+        Ordered node-type names defining the stacking order.
+    latent_dims : mapping of str to int or None
+        Opt-in ``τ -> d_τ``. ``None`` selects the shared-d path (return
+        ``None``). When provided, keys must match ``node_type_names``
+        exactly — missing or extra keys raise (no silent ignore).
+    shared_latent_dim : int or None, optional
+        Shared width ``d`` used when ``latent_dims is None``. When set, must
+        be positive. Ignored when ``latent_dims`` is provided (callers that
+        need ``d_τ == shared_latent_dim`` for every type should compare
+        explicitly).
+
+    Returns
+    -------
+    dict of str to int or None
+        Frozen ``τ -> d_τ`` in ``node_type_names`` order, or ``None`` for the
+        shared-d path.
+
+    Raises
+    ------
+    ValueError
+        If names are invalid, ``shared_latent_dim`` is invalid on the shared
+        path, keys disagree with ``node_type_names``, or a width is not
+        positive.
+    """
+    resolved = _validate_node_type_names(node_type_names)
+    if latent_dims is None:
+        if shared_latent_dim is not None and int(shared_latent_dim) < 1:
+            msg = f"shared_latent_dim must be positive, got {shared_latent_dim}"
+            raise ValueError(msg)
+        return None
+
+    missing = [name for name in resolved if name not in latent_dims]
+    if missing:
+        msg = (
+            f"latent_dims is missing node type(s) {missing!r}; "
+            f"expected keys {list(resolved)!r}, got {sorted(latent_dims)!r}"
+        )
+        raise ValueError(msg)
+    extra = set(latent_dims) - set(resolved)
+    if extra:
+        msg = (
+            f"latent_dims has node types outside node_type_names: "
+            f"{sorted(extra)!r}; expected keys {list(resolved)!r}"
+        )
+        raise ValueError(msg)
+
+    validated: dict[str, int] = {}
+    for name in resolved:
+        width = int(latent_dims[name])
+        if width < 1:
+            msg = f"latent_dims[{name!r}] must be positive, got {width}"
+            raise ValueError(msg)
+        validated[name] = width
+    return validated
+
+
+def stacked_latent_numel(
+    node_type_names: Sequence[str],
+    num_nodes_dict: Mapping[str, int],
+    latent_dims: Mapping[str, int],
+) -> int:
+    """Return flat latent length ``Σ_τ N_τ · d_τ`` for opt-in ``latent_dims``.
+
+    Parameters
+    ----------
+    node_type_names : sequence of str
+        Ordered node-type names.
+    num_nodes_dict : mapping of str to int
+        Node count ``N_τ`` for every name in ``node_type_names``.
+    latent_dims : mapping of str to int
+        Validated (or to-be-validated) ``τ -> d_τ``.
+
+    Returns
+    -------
+    int
+        Total number of latent scalars in the block-concatenated layout.
+
+    Raises
+    ------
+    ValueError
+        If counts / widths fail validation.
+    """
+    dims = validate_latent_dims(node_type_names, latent_dims)
+    assert dims is not None
+    # Reuse count validation from node_type_offsets.
+    _ = node_type_offsets(node_type_names, num_nodes_dict)
+    return sum(int(num_nodes_dict[name]) * dims[name] for name in dims)
+
+
+def latent_type_slices_from_dims(
+    node_type_names: Sequence[str],
+    num_nodes_dict: Mapping[str, int],
+    latent_dims: Mapping[str, int],
+) -> dict[str, slice]:
+    """Return flat latent slices for opt-in unequal ``d_τ`` layouts.
+
+    Block-concatenates per-type ``(N_τ, d_τ)`` matrices in
+    ``node_type_names`` order (C-order flatten within each type). Type ``τ``
+    occupies ``N_τ · d_τ`` consecutive flat indices. This is distinct from
+    :func:`latent_type_slices`, which assumes a shared trailing width ``d``.
+
+    Parameters
+    ----------
+    node_type_names : sequence of str
+        Ordered node-type names defining the stacking order.
+    num_nodes_dict : mapping of str to int
+        Node count ``N_τ`` for every name in ``node_type_names``.
+    latent_dims : mapping of str to int
+        Opt-in ``τ -> d_τ`` (validated via :func:`validate_latent_dims`).
+
+    Returns
+    -------
+    dict of str to slice
+        Half-open flat slices tiling ``[0, Σ_τ N_τ·d_τ)`` without gaps.
+
+    Raises
+    ------
+    ValueError
+        If names, counts, or ``latent_dims`` fail validation.
+    """
+    dims = validate_latent_dims(node_type_names, latent_dims)
+    assert dims is not None
+    # Validate N_τ keys / positivity (shared with the shared-d row layout).
+    _ = node_type_offsets(node_type_names, num_nodes_dict)
+    slices: dict[str, slice] = {}
+    cursor = 0
+    for name in dims:
+        width = dims[name]
+        count = int(num_nodes_dict[name])
+        stop = cursor + count * width
+        slices[name] = slice(cursor, stop)
+        cursor = stop
+    return slices
 
 
 def snapshot_num_nodes_dict(

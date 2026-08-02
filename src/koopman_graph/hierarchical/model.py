@@ -16,9 +16,9 @@ from typing import Any, Literal
 
 import torch
 from torch import Tensor, nn
-from torch_geometric.data import Data
+from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.data import GraphSnapshotSequence, HeteroGraphSnapshotSequence
 from koopman_graph.hierarchical.pooling import (
     PoolingKind,
     PoolSchedule,
@@ -26,14 +26,25 @@ from koopman_graph.hierarchical.pooling import (
     ScatterUnpool,
     apply_pool_layer,
     build_pool_layer,
+    induce_relation_banks,
+    induce_typed_relation_banks,
+    multiplex_snapshot_from_features,
     pool_control,
     pool_control_sequence,
     pool_features_with_steps,
+    pool_multiplex_features_with_steps,
+    pool_typed_features_with_steps,
     resolve_snapshot_inputs,
     snapshot_from_features,
+    typed_snapshot_from_features,
+    union_relation_edge_index,
+    within_type_scoring_edge_index,
 )
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.training import FitHistory
+
+SnapshotLike = Data | HeteroData
+ReferenceSequence = GraphSnapshotSequence | HeteroGraphSnapshotSequence
 
 ResolutionArg = Literal["fine", "coarse"] | int
 
@@ -43,19 +54,23 @@ _WRAPPER_NAME = "wrapper.pt"
 
 
 def _encoder_in_channels(model: GraphKoopmanModel) -> int:
-    """Infer scoring / unpool feature width from the composed encoder.
+    """Infer scoring feature width from a homogeneous / multiplex encoder.
 
     Parameters
     ----------
-
     model : GraphKoopmanModel
-        See the function signature / summary for ``model``.
+        Composed model with integer ``encoder.in_channels``.
 
     Returns
     -------
-
     int
-        Positive encoder input width."""
+        Positive encoder input width.
+
+    Raises
+    ------
+    ValueError
+        If ``encoder.in_channels`` is missing or not a positive int.
+    """
     encoder = model.encoder
     in_channels = getattr(encoder, "in_channels", None)
     if isinstance(in_channels, int) and in_channels > 0:
@@ -68,25 +83,62 @@ def _encoder_in_channels(model: GraphKoopmanModel) -> int:
 
 
 def _encoder_out_channels(model: GraphKoopmanModel) -> int:
-    """Return the decoded feature width used for unpooling.
+    """Return decoded feature width for homogeneous / multiplex unpooling.
 
     Parameters
     ----------
-
     model : GraphKoopmanModel
-        See the function signature / summary for ``model``.
+        Composed model with integer ``decoder.out_channels``.
 
     Returns
     -------
-
     int
-        Positive decoder output width."""
+        Positive decoder output width.
+
+    Raises
+    ------
+    ValueError
+        If ``decoder.out_channels`` is missing or not a positive int.
+    """
     decoder = model.decoder
     out_channels = getattr(decoder, "out_channels", None)
     if isinstance(out_channels, int) and out_channels > 0:
         return out_channels
     msg = "could not infer decoder.out_channels for hierarchical unpooling"
     raise ValueError(msg)
+
+
+def _channels_by_type(mapping: object, *, role: str) -> dict[str, int]:
+    """Normalize a typed channel mapping to ``{type: positive int}``.
+
+    Parameters
+    ----------
+    mapping : object
+        Encoder / decoder channel mapping.
+    role : str
+        Label for error messages (``"encoder.in_channels"`` / …).
+
+    Returns
+    -------
+    dict[str, int]
+        Per-type positive widths.
+
+    Raises
+    ------
+    ValueError
+        If ``mapping`` is not a non-empty dict of positive ints.
+    """
+    if not isinstance(mapping, dict) or not mapping:
+        msg = f"could not infer typed {role} for hierarchical pooling"
+        raise ValueError(msg)
+    out: dict[str, int] = {}
+    for key, value in mapping.items():
+        width = int(value)
+        if width <= 0:
+            msg = f"typed {role}[{key!r}] must be positive, got {width}"
+            raise ValueError(msg)
+        out[str(key)] = width
+    return out
 
 
 class HierarchicalGraphKoopmanModel(nn.Module):
@@ -118,6 +170,19 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         scores stay patch-compatible with 0.7.0. ``"hold_perm"`` pools
         ``sequence[0]`` once and reuses that perm / coarse topology for all
         timesteps (faster on static graphs; scores are not recomputed).
+
+    Notes
+    -----
+    Multiplex hetero models (``koopman="hetero_graph"``, single node type)
+    score TopK/SAG on the union of relation banks and induce each coarse
+    relation with the same ``perm``. Typed multi-node models pool **per
+    node type** on within-type banks and induce all relation banks
+    (including cross-type) with paired source/destination perms.
+
+    Hetero ``fit`` (multiplex or typed) requires ``pool_schedule="hold_perm"``
+    because feature-dependent ``per_snapshot`` coarse banks are dynamic
+    topology, which hetero ``GraphKoopmanModel.fit`` does not support yet.
+    ``pool_down`` / ``predict`` accept either schedule.
     """
 
     def __init__(
@@ -153,12 +218,8 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Constructor parameters are documented on the class."""
         super().__init__()
-        if getattr(model, "uses_hetero_koopman", False):
-            msg = (
-                "HierarchicalGraphKoopmanModel is homogeneous-only; multiplex / "
-                "koopman='hetero_graph' models are not supported yet"
-            )
-            raise TypeError(msg)
+        uses_hetero = bool(getattr(model, "uses_hetero_koopman", False))
+        uses_typed = uses_hetero and bool(getattr(model, "uses_typed_hetero", False))
         if len(pool_ratios) == 0:
             msg = "pool_ratios must contain at least one ratio"
             raise ValueError(msg)
@@ -169,27 +230,122 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             )
             raise ValueError(msg)
         self.model = model
+        self._uses_hetero = uses_hetero
+        self._uses_typed = uses_typed
+        self._node_types: tuple[str, ...] = ()
+        if uses_hetero:
+            koopman = model.koopman
+            node_types = tuple(str(t) for t in koopman.node_types)
+            self._edge_types = tuple(
+                (str(src), str(rel), str(dst)) for src, rel, dst in koopman.edge_types
+            )
+            if uses_typed:
+                if len(node_types) < 2:
+                    msg = (
+                        "typed hierarchical pooling requires at least two node "
+                        f"types; got {node_types!r}"
+                    )
+                    raise TypeError(msg)
+                self._node_types = node_types
+                self._node_type = ""
+            else:
+                if len(node_types) != 1:
+                    msg = (
+                        "multiplex hierarchical pooling requires exactly one "
+                        f"node type; got {node_types!r}"
+                    )
+                    raise TypeError(msg)
+                self._node_type = node_types[0]
+                self._node_types = node_types
+        else:
+            self._node_type = ""
+            self._edge_types = ()
         self.pool_ratios = tuple(float(r) for r in pool_ratios)
         self.pooling: PoolingKind = pooling
         self.pool_schedule: PoolSchedule = pool_schedule
-        channels = _encoder_in_channels(model) if in_channels is None else in_channels
-        self.in_channels = channels
-        out_channels = _encoder_out_channels(model)
-        self.out_channels = out_channels
 
-        self.pool_layers = nn.ModuleList(
-            [
-                build_pool_layer(channels, ratio, pooling=pooling)
-                for ratio in self.pool_ratios
-            ]
-        )
-        # One unpool per level (coarse→…→fine), operating on decoded features.
-        self.unpool_layers = nn.ModuleList(
-            [
-                ScatterUnpool(out_channels, refine=refine_unpool)
-                for _ in self.pool_ratios
-            ]
-        )
+        if uses_typed:
+            if in_channels is not None:
+                msg = (
+                    "typed hierarchical pooling infers per-type channels from "
+                    "the encoder; do not pass in_channels="
+                )
+                raise ValueError(msg)
+            in_by_type = _channels_by_type(
+                getattr(model.encoder, "in_channels", None),
+                role="encoder.in_channels",
+            )
+            out_by_type = _channels_by_type(
+                getattr(model.decoder, "out_channels", None),
+                role="decoder.out_channels",
+            )
+            missing_in = set(self._node_types) - set(in_by_type)
+            missing_out = set(self._node_types) - set(out_by_type)
+            if missing_in or missing_out:
+                msg = (
+                    "typed encoder/decoder channels must cover all node types; "
+                    f"missing in={sorted(missing_in)} out={sorted(missing_out)}"
+                )
+                raise ValueError(msg)
+            self.in_channels_by_type = {
+                node_type: in_by_type[node_type] for node_type in self._node_types
+            }
+            self.out_channels_by_type = {
+                node_type: out_by_type[node_type] for node_type in self._node_types
+            }
+            # Scalar fields unused for typed; kept for wrapper payload shape.
+            self.in_channels = -1
+            self.out_channels = -1
+            self.pool_layers = nn.ModuleDict(
+                {
+                    node_type: nn.ModuleList(
+                        [
+                            build_pool_layer(
+                                self.in_channels_by_type[node_type],
+                                ratio,
+                                pooling=pooling,
+                            )
+                            for ratio in self.pool_ratios
+                        ]
+                    )
+                    for node_type in self._node_types
+                }
+            )
+            self.unpool_layers = nn.ModuleDict(
+                {
+                    node_type: nn.ModuleList(
+                        [
+                            ScatterUnpool(
+                                self.out_channels_by_type[node_type],
+                                refine=refine_unpool,
+                            )
+                            for _ in self.pool_ratios
+                        ]
+                    )
+                    for node_type in self._node_types
+                }
+            )
+        else:
+            self.in_channels_by_type = {}
+            self.out_channels_by_type = {}
+            channels = (
+                _encoder_in_channels(model) if in_channels is None else in_channels
+            )
+            self.in_channels = channels
+            out_channels = _encoder_out_channels(model)
+            self.out_channels = out_channels
+            self.pool_layers = nn.ModuleList(
+                [
+                    build_pool_layer(channels, ratio, pooling=pooling)
+                    for ratio in self.pool_ratios
+                ]
+            )
+            self.unpool_layers = nn.ModuleList(
+                [
+                    ScatterUnpool(out_channels, refine=refine_unpool)
+                    for _ in self.pool_ratios
+                ]
+            )
 
     @property
     def n_levels(self) -> int:
@@ -215,25 +371,43 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
     def pool_down(
         self,
-        graph: Tensor | Data,
+        graph: Tensor | SnapshotLike,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
-    ) -> tuple[Data, list[PoolStep]]:
+    ) -> tuple[SnapshotLike, list[PoolStep]]:
         """Apply all pooling levels fine → coarse.
 
         Parameters
         ----------
-        graph : Tensor or Data
-            Fine snapshot or node features.
+        graph : Tensor, Data, or HeteroData
+            Fine snapshot or node features. ``HeteroData`` is required when
+            the composed model is hetero (multiplex or typed).
         edge_index, edge_weight
-            Required when ``graph`` is a tensor.
+            Required when ``graph`` is a tensor (homogeneous only).
 
         Returns
         -------
         tuple
-            Coarse ``Data`` and per-level :class:`PoolStep` metadata (fine→coarse
-            order).
+            Coarse ``Data`` or multiplex ``HeteroData`` and per-level
+            :class:`PoolStep` metadata (fine→coarse order).
         """
+        if self._uses_hetero:
+            if not isinstance(graph, HeteroData):
+                msg = (
+                    "hetero hierarchical pool_down requires HeteroData; "
+                    f"got {type(graph).__name__}"
+                )
+                raise TypeError(msg)
+            if self._uses_typed:
+                return self._pool_down_typed(graph)
+            return self._pool_down_multiplex(graph)
+        if isinstance(graph, HeteroData):
+            msg = (
+                "homogeneous HierarchicalGraphKoopmanModel cannot pool "
+                "HeteroData snapshots"
+            )
+            raise TypeError(msg)
+        assert isinstance(self.pool_layers, nn.ModuleList)
         x, edge_index, edge_weight = resolve_snapshot_inputs(
             graph, edge_index, edge_weight
         )
@@ -253,19 +427,205 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             )
         return snapshot_from_features(x, edge_index, edge_weight), steps
 
+    def _pool_down_multiplex(
+        self,
+        graph: HeteroData,
+    ) -> tuple[HeteroData, list[PoolStep]]:
+        """Pool a multiplex hetero snapshot on the union of relation banks.
+
+        Parameters
+        ----------
+        graph : HeteroData
+            Multiplex fine snapshot.
+
+        Returns
+        -------
+        tuple
+            Coarse multiplex ``HeteroData`` and :class:`PoolStep` metadata.
+        """
+        if len(tuple(graph.node_types)) != 1:
+            msg = (
+                "multiplex hierarchical pooling requires exactly one node "
+                f"type; got {tuple(graph.node_types)!r}"
+            )
+            raise ValueError(msg)
+        present = {tuple(edge_type) for edge_type in graph.edge_types}
+        edge_indices: list[Tensor] = []
+        edge_weights: list[Tensor | None] = []
+        for triple in self._edge_types:
+            if triple not in present:
+                msg = (
+                    f"HeteroData snapshot is missing edge type {triple!r}; "
+                    f"present edge types are {sorted(present)!r}"
+                )
+                raise ValueError(msg)
+            edge_indices.append(graph[triple].edge_index)
+            edge_weights.append(graph[triple].get("edge_weight", None))
+
+        x = graph[self._node_type].x
+        if x is None:
+            msg = f"HeteroData node type {self._node_type!r} is missing features x"
+            raise ValueError(msg)
+        union_index = union_relation_edge_index(edge_indices)
+        union_weight: Tensor | None = None
+        steps: list[PoolStep] = []
+        for layer in self.pool_layers:
+            num_fine = x.size(0)
+            x, union_index, union_weight, perm = apply_pool_layer(
+                layer, x, union_index, union_weight
+            )
+            rel_indices, rel_weights = induce_relation_banks(
+                perm,
+                num_fine,
+                edge_indices,
+                edge_weights,
+            )
+            edge_indices = list(rel_indices)
+            edge_weights = list(rel_weights)
+            steps.append(
+                PoolStep(
+                    perm=perm,
+                    num_fine=num_fine,
+                    edge_index=union_index,
+                    edge_weight=union_weight,
+                    relation_edge_indices=rel_indices,
+                    relation_edge_weights=rel_weights,
+                )
+            )
+        coarse = multiplex_snapshot_from_features(
+            x,
+            node_type=self._node_type,
+            edge_types=self._edge_types,
+            relation_edge_indices=edge_indices,
+            relation_edge_weights=edge_weights,
+        )
+        return coarse, steps
+
+    def _pool_down_typed(
+        self,
+        graph: HeteroData,
+    ) -> tuple[HeteroData, list[PoolStep]]:
+        """Pool a typed hetero snapshot with per-type TopK/SAG permutations.
+
+        Parameters
+        ----------
+        graph : HeteroData
+            Typed fine snapshot.
+
+        Returns
+        -------
+        tuple
+            Coarse typed ``HeteroData`` and :class:`PoolStep` metadata.
+        """
+        present_nodes = {str(t) for t in graph.node_types}
+        expected_nodes = set(self._node_types)
+        if present_nodes != expected_nodes:
+            msg = (
+                "typed hierarchical pooling requires node types "
+                f"{self._node_types!r}; snapshot has {sorted(present_nodes)!r}"
+            )
+            raise ValueError(msg)
+        present_edges = {tuple(edge_type) for edge_type in graph.edge_types}
+        edge_indices: list[Tensor] = []
+        edge_weights: list[Tensor | None] = []
+        for triple in self._edge_types:
+            if triple not in present_edges:
+                msg = (
+                    f"HeteroData snapshot is missing edge type {triple!r}; "
+                    f"present edge types are {sorted(present_edges)!r}"
+                )
+                raise ValueError(msg)
+            edge_indices.append(graph[triple].edge_index)
+            edge_weights.append(graph[triple].get("edge_weight", None))
+
+        features: dict[str, Tensor] = {}
+        for node_type in self._node_types:
+            x = graph[node_type].x
+            if x is None:
+                msg = f"HeteroData node type {node_type!r} is missing features x"
+                raise ValueError(msg)
+            features[node_type] = x
+
+        assert isinstance(self.pool_layers, nn.ModuleDict)
+        steps: list[PoolStep] = []
+        for level in range(self.n_levels):
+            num_fine_by_type = {
+                node_type: int(features[node_type].size(0))
+                for node_type in self._node_types
+            }
+            perms_by_type: dict[str, Tensor] = {}
+            scoring_edges_first: Tensor | None = None
+            for node_type in self._node_types:
+                layer = self.pool_layers[node_type][level]
+                scoring = within_type_scoring_edge_index(
+                    self._edge_types,
+                    edge_indices,
+                    node_type=node_type,
+                )
+                if scoring_edges_first is None:
+                    scoring_edges_first = scoring
+                x_c, _edge_c, _w_c, perm = apply_pool_layer(
+                    layer,
+                    features[node_type],
+                    scoring,
+                    None,
+                )
+                features[node_type] = x_c
+                perms_by_type[node_type] = perm
+            rel_indices, rel_weights = induce_typed_relation_banks(
+                self._edge_types,
+                edge_indices,
+                edge_weights,
+                perms_by_type=perms_by_type,
+                num_fine_by_type=num_fine_by_type,
+            )
+            edge_indices = list(rel_indices)
+            edge_weights = list(rel_weights)
+            first_type = self._node_types[0]
+            steps.append(
+                PoolStep(
+                    perm=perms_by_type[first_type],
+                    num_fine=num_fine_by_type[first_type],
+                    edge_index=(
+                        scoring_edges_first
+                        if scoring_edges_first is not None
+                        else features[first_type].new_zeros(2, 0, dtype=torch.long)
+                    ),
+                    edge_weight=None,
+                    relation_edge_indices=rel_indices,
+                    relation_edge_weights=rel_weights,
+                    typed_node_types=self._node_types,
+                    typed_perms=tuple(
+                        perms_by_type[node_type] for node_type in self._node_types
+                    ),
+                    typed_num_fine=tuple(
+                        num_fine_by_type[node_type] for node_type in self._node_types
+                    ),
+                )
+            )
+        coarse = typed_snapshot_from_features(
+            features,
+            node_types=self._node_types,
+            edge_types=self._edge_types,
+            relation_edge_indices=edge_indices,
+            relation_edge_weights=edge_weights,
+        )
+        return coarse, steps
+
     def unpool_up(
         self,
-        coarse_x: Tensor,
+        coarse_x: Tensor | dict[str, Tensor],
         steps: Sequence[PoolStep],
         *,
         levels: int | None = None,
-    ) -> Tensor:
+    ) -> Tensor | dict[str, Tensor]:
         """Unpool coarse features toward fine resolution.
 
         Parameters
         ----------
-        coarse_x : Tensor
+        coarse_x : Tensor or dict[str, Tensor]
             Features at the coarsest level (or an intermediate start).
+            Typed hetero models require a ``{node_type: features}`` mapping.
         steps : sequence of PoolStep
             Pool metadata in fine→coarse order (same as :meth:`pool_down`).
         levels : int or None, optional
@@ -274,8 +634,8 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Returns
         -------
-        Tensor
-            Features after the requested unpool steps.
+        Tensor or dict[str, Tensor]
+            Features after the requested unpool steps (dict when typed).
         """
         if len(steps) != self.n_levels:
             msg = f"expected {self.n_levels} pool steps, got {len(steps)}"
@@ -284,6 +644,21 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         if n_unpool < 0 or n_unpool > self.n_levels:
             msg = f"levels must be in [0, {self.n_levels}], got {n_unpool}"
             raise ValueError(msg)
+        if self._uses_typed:
+            if not isinstance(coarse_x, dict):
+                msg = (
+                    "typed hierarchical unpool_up requires a "
+                    "{node_type: features} mapping"
+                )
+                raise TypeError(msg)
+            return self._unpool_up_typed(coarse_x, steps, levels=n_unpool)
+        if isinstance(coarse_x, dict):
+            msg = (
+                "homogeneous/multiplex hierarchical unpool_up expects a "
+                "feature Tensor, not a dict"
+            )
+            raise TypeError(msg)
+        assert isinstance(self.unpool_layers, nn.ModuleList)
         x = coarse_x
         # Unpool reverse: last pool step first.
         for offset in range(n_unpool):
@@ -291,6 +666,52 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             unpool = self.unpool_layers[-(offset + 1)]
             x = unpool(x, step.perm, step.num_fine)
         return x
+
+    def _unpool_up_typed(
+        self,
+        coarse_by_type: dict[str, Tensor],
+        steps: Sequence[PoolStep],
+        *,
+        levels: int,
+    ) -> dict[str, Tensor]:
+        """Unpool typed coarse features with per-type ScatterUnpool modules.
+
+        Parameters
+        ----------
+        coarse_by_type : dict[str, Tensor]
+            Coarse features keyed by node type.
+        steps : sequence of PoolStep
+            Fine→coarse metadata with typed perm fields.
+        levels : int
+            Number of unpool steps from the coarse end.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            Features after ``levels`` unpool steps.
+        """
+        assert isinstance(self.unpool_layers, nn.ModuleDict)
+        features = {
+            node_type: coarse_by_type[node_type] for node_type in self._node_types
+        }
+        for offset in range(levels):
+            step = steps[-(offset + 1)]
+            if (
+                step.typed_node_types is None
+                or step.typed_perms is None
+                or step.typed_num_fine is None
+            ):
+                msg = "typed unpool requires typed perm fields on PoolStep"
+                raise ValueError(msg)
+            for node_type, perm, num_fine in zip(
+                step.typed_node_types,
+                step.typed_perms,
+                step.typed_num_fine,
+                strict=True,
+            ):
+                unpool = self.unpool_layers[node_type][-(offset + 1)]
+                features[node_type] = unpool(features[node_type], perm, num_fine)
+        return features
 
     def _perms(self, steps: Sequence[PoolStep]) -> list[Tensor]:
         """Extract fine-to-coarse node permutations.
@@ -405,34 +826,34 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
     def predict(
         self,
-        initial_graph: Tensor | Data,
+        initial_graph: Tensor | SnapshotLike,
         steps: int,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
-        future_topologies: Sequence[Data] | None = None,
-        history: Sequence[Data] | None = None,
+        future_topologies: Sequence[SnapshotLike] | None = None,
+        history: Sequence[SnapshotLike] | None = None,
         *,
         resolution: ResolutionArg = "fine",
-    ) -> list[Data]:
+    ) -> list[SnapshotLike]:
         """Pool once, forecast on the coarse graph, optionally unpool.
 
         Parameters
         ----------
-        initial_graph : Tensor or Data
+        initial_graph : Tensor, Data, or HeteroData
             Fine initial snapshot.
         steps : int
             Forecast horizon.
         edge_index, edge_weight
-            Topology when ``initial_graph`` is a tensor.
+            Topology when ``initial_graph`` is a tensor (homogeneous only).
         controls : sequence of Tensor or None, optional
             Fine-level controls (global or per-node). Per-node rows are pooled
             with the initial pooling ``perm`` chain.
-        future_topologies : sequence of Data or None, optional
+        future_topologies : sequence of Data or HeteroData or None, optional
             Fine future topologies; each is pooled with the **same** pool
             layers (scores recomputed) before being forwarded to the composed
             model.
-        history : sequence of Data or None, optional
+        history : sequence of Data or HeteroData or None, optional
             Delay history; each snapshot is pooled independently.
         resolution : {"fine", "coarse"} or int, optional
             ``"fine"`` / ``n_levels`` fully unpools; ``"coarse"`` / ``0`` returns
@@ -440,7 +861,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Returns
         -------
-        list of Data
+        list of Data or HeteroData
             Forecasts at the requested resolution. Fine outputs carry the
             initial fine topology (hold-last at the fine level).
         """
@@ -448,8 +869,28 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         self.eval()
         try:
             with torch.no_grad():
+                if self._uses_hetero:
+                    if self._uses_typed:
+                        return self._predict_typed(
+                            initial_graph,
+                            steps,
+                            controls=controls,
+                            future_topologies=future_topologies,
+                            history=history,
+                            resolution=resolution,
+                        )
+                    return self._predict_multiplex(
+                        initial_graph,
+                        steps,
+                        controls=controls,
+                        future_topologies=future_topologies,
+                        history=history,
+                        resolution=resolution,
+                    )
                 fine_x, fine_edge, fine_weight = resolve_snapshot_inputs(
-                    initial_graph, edge_index, edge_weight
+                    initial_graph,
+                    edge_index,
+                    edge_weight,  # type: ignore[arg-type]
                 )
                 fine_template = snapshot_from_features(fine_x, fine_edge, fine_weight)
                 coarse, pool_steps = self.pool_down(fine_template)
@@ -460,6 +901,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
                     coarse_future = []
                     for topo in future_topologies:
                         pooled_topo, _ = self.pool_down(topo)
+                        assert isinstance(pooled_topo, Data)
                         coarse_future.append(
                             snapshot_from_features(
                                 pooled_topo.x.new_zeros(pooled_topo.x.shape),
@@ -470,8 +912,13 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
                 coarse_history: list[Data] | None = None
                 if history is not None:
-                    coarse_history = [self.pool_down(snap)[0] for snap in history]
+                    coarse_history = []
+                    for snap in history:
+                        pooled, _ = self.pool_down(snap)
+                        assert isinstance(pooled, Data)
+                        coarse_history.append(pooled)
 
+                assert isinstance(coarse, Data)
                 coarse_preds = self.model.predict(
                     coarse,
                     steps,
@@ -482,9 +929,9 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
                 n_unpool = self._resolve_resolution(resolution)
                 if n_unpool == 0:
-                    return coarse_preds
+                    return list(coarse_preds)
 
-                output: list[Data] = []
+                output: list[SnapshotLike] = []
                 for pred in coarse_preds:
                     fine_feat = self.unpool_up(pred.x, pool_steps, levels=n_unpool)
                     if n_unpool == self.n_levels:
@@ -505,20 +952,295 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         finally:
             self.train(was_training)
 
+    def _predict_multiplex(
+        self,
+        initial_graph: Tensor | SnapshotLike,
+        steps: int,
+        *,
+        controls: Sequence[Tensor] | None,
+        future_topologies: Sequence[SnapshotLike] | None,
+        history: Sequence[SnapshotLike] | None,
+        resolution: ResolutionArg,
+    ) -> list[SnapshotLike]:
+        """Pool / forecast / unpool path for multiplex hetero models.
+
+        Parameters
+        ----------
+        initial_graph
+            Value for ``initial_graph``.
+        steps
+            Value for ``steps``.
+        controls
+            Value for ``controls``.
+        future_topologies
+            Value for ``future_topologies``.
+        history
+            Value for ``history``.
+        resolution
+            Value for ``resolution``.
+
+        Returns
+        -------
+        object
+            Function result.
+        """
+        if not isinstance(initial_graph, HeteroData):
+            msg = (
+                "multiplex hierarchical predict requires a HeteroData origin; "
+                f"got {type(initial_graph).__name__}"
+            )
+            raise TypeError(msg)
+        fine_template = initial_graph
+        coarse, pool_steps = self.pool_down(fine_template)
+        coarse_controls = self._pool_controls(controls, pool_steps)
+
+        coarse_future: list[HeteroData] | None = None
+        if future_topologies is not None:
+            coarse_future = []
+            for topo in future_topologies:
+                if not isinstance(topo, HeteroData):
+                    msg = "future_topologies must be HeteroData for multiplex hetero"
+                    raise TypeError(msg)
+                pooled_topo, _ = self.pool_down(topo)
+                assert isinstance(pooled_topo, HeteroData)
+                zero = pooled_topo.clone()
+                zero[self._node_type].x = pooled_topo[self._node_type].x.new_zeros(
+                    pooled_topo[self._node_type].x.shape
+                )
+                coarse_future.append(zero)
+
+        coarse_history: list[HeteroData] | None = None
+        if history is not None:
+            coarse_history = []
+            for snap in history:
+                if not isinstance(snap, HeteroData):
+                    msg = "history must be HeteroData for multiplex hetero"
+                    raise TypeError(msg)
+                pooled, _ = self.pool_down(snap)
+                assert isinstance(pooled, HeteroData)
+                coarse_history.append(pooled)
+
+        assert isinstance(coarse, HeteroData)
+        coarse_preds = self.model.predict(
+            coarse,
+            steps,
+            controls=coarse_controls,
+            future_topologies=coarse_future,
+            history=coarse_history,
+        )
+
+        n_unpool = self._resolve_resolution(resolution)
+        if n_unpool == 0:
+            return list(coarse_preds)
+
+        output: list[SnapshotLike] = []
+        for pred in coarse_preds:
+            assert isinstance(pred, HeteroData)
+            fine_feat = self.unpool_up(
+                pred[self._node_type].x,
+                pool_steps,
+                levels=n_unpool,
+            )
+            if n_unpool == self.n_levels:
+                out = fine_template.clone()
+                out[self._node_type].x = fine_feat
+                output.append(out)
+            else:
+                stop = self.n_levels - n_unpool
+                mid = pool_steps[stop - 1]
+                if mid.relation_edge_indices is None:
+                    msg = "intermediate multiplex unpool requires relation banks"
+                    raise RuntimeError(msg)
+                output.append(
+                    multiplex_snapshot_from_features(
+                        fine_feat,
+                        node_type=self._node_type,
+                        edge_types=self._edge_types,
+                        relation_edge_indices=mid.relation_edge_indices,
+                        relation_edge_weights=mid.relation_edge_weights,
+                    )
+                )
+        return output
+
+    def _predict_typed(
+        self,
+        initial_graph: Tensor | SnapshotLike,
+        steps: int,
+        *,
+        controls: Sequence[Tensor] | None,
+        future_topologies: Sequence[SnapshotLike] | None,
+        history: Sequence[SnapshotLike] | None,
+        resolution: ResolutionArg,
+    ) -> list[SnapshotLike]:
+        """Pool / forecast / unpool path for typed hetero models.
+
+        Parameters
+        ----------
+        initial_graph
+            Value for ``initial_graph``.
+        steps
+            Value for ``steps``.
+        controls
+            Value for ``controls``.
+        future_topologies
+            Value for ``future_topologies``.
+        history
+            Value for ``history``.
+        resolution
+            Value for ``resolution``.
+
+        Returns
+        -------
+        list of HeteroData
+            Forecasts at the requested resolution.
+        """
+        if not isinstance(initial_graph, HeteroData):
+            msg = (
+                "typed hierarchical predict requires a HeteroData origin; "
+                f"got {type(initial_graph).__name__}"
+            )
+            raise TypeError(msg)
+        fine_template = initial_graph
+        coarse, pool_steps = self.pool_down(fine_template)
+        coarse_controls = self._pool_controls(controls, pool_steps)
+
+        coarse_future: list[HeteroData] | None = None
+        if future_topologies is not None:
+            coarse_future = []
+            for topo in future_topologies:
+                if not isinstance(topo, HeteroData):
+                    msg = "future_topologies must be HeteroData for typed hetero"
+                    raise TypeError(msg)
+                pooled_topo, _ = self.pool_down(topo)
+                assert isinstance(pooled_topo, HeteroData)
+                zero = pooled_topo.clone()
+                for node_type in self._node_types:
+                    zero[node_type].x = pooled_topo[node_type].x.new_zeros(
+                        pooled_topo[node_type].x.shape
+                    )
+                coarse_future.append(zero)
+
+        coarse_history: list[HeteroData] | None = None
+        if history is not None:
+            coarse_history = []
+            for snap in history:
+                if not isinstance(snap, HeteroData):
+                    msg = "history must be HeteroData for typed hetero"
+                    raise TypeError(msg)
+                pooled, _ = self.pool_down(snap)
+                assert isinstance(pooled, HeteroData)
+                coarse_history.append(pooled)
+
+        assert isinstance(coarse, HeteroData)
+        coarse_preds = self.model.predict(
+            coarse,
+            steps,
+            controls=coarse_controls,
+            future_topologies=coarse_future,
+            history=coarse_history,
+        )
+
+        n_unpool = self._resolve_resolution(resolution)
+        if n_unpool == 0:
+            return list(coarse_preds)
+
+        output: list[SnapshotLike] = []
+        for pred in coarse_preds:
+            assert isinstance(pred, HeteroData)
+            coarse_feats = {
+                node_type: pred[node_type].x for node_type in self._node_types
+            }
+            fine_feats = self.unpool_up(coarse_feats, pool_steps, levels=n_unpool)
+            assert isinstance(fine_feats, dict)
+            if n_unpool == self.n_levels:
+                out = fine_template.clone()
+                for node_type in self._node_types:
+                    out[node_type].x = fine_feats[node_type]
+                output.append(out)
+            else:
+                stop = self.n_levels - n_unpool
+                mid = pool_steps[stop - 1]
+                if mid.relation_edge_indices is None:
+                    msg = "intermediate typed unpool requires relation banks"
+                    raise RuntimeError(msg)
+                output.append(
+                    typed_snapshot_from_features(
+                        fine_feats,
+                        node_types=self._node_types,
+                        edge_types=self._edge_types,
+                        relation_edge_indices=mid.relation_edge_indices,
+                        relation_edge_weights=mid.relation_edge_weights,
+                    )
+                )
+        return output
+
+    def _snapshot_features(self, snap: SnapshotLike) -> Tensor:
+        """Return homogeneous ``x`` or multiplex node features.
+
+        Parameters
+        ----------
+        snap
+            Value for ``snap``.
+
+        Returns
+        -------
+        Tensor
+            Node feature matrix.
+        """
+        if isinstance(snap, HeteroData):
+            features = snap[self._node_type].x
+            if features is None:
+                msg = (
+                    f"HeteroData node type {self._node_type!r} is missing "
+                    "feature matrix x"
+                )
+                raise ValueError(msg)
+            return features
+        if snap.x is None:
+            msg = "hold_perm pooling requires snapshot.x"
+            raise ValueError(msg)
+        return snap.x
+
+    def _typed_snapshot_features(self, snap: SnapshotLike) -> dict[str, Tensor]:
+        """Return per-type feature matrices from a typed hetero snapshot.
+
+        Parameters
+        ----------
+        snap : Data or HeteroData
+            Fine typed snapshot.
+
+        Returns
+        -------
+        dict[str, Tensor]
+            Features keyed by node type.
+        """
+        if not isinstance(snap, HeteroData):
+            msg = "typed hierarchical fit requires HeteroData snapshots"
+            raise TypeError(msg)
+        features: dict[str, Tensor] = {}
+        for node_type in self._node_types:
+            x = snap[node_type].x
+            if x is None:
+                msg = f"HeteroData node type {node_type!r} is missing features x"
+                raise ValueError(msg)
+            features[node_type] = x
+        return features
+
     def _pool_sequence(
         self,
-        sequence: GraphSnapshotSequence,
-    ) -> tuple[GraphSnapshotSequence, list[list[PoolStep]]]:
+        sequence: ReferenceSequence,
+    ) -> tuple[ReferenceSequence, list[list[PoolStep]]]:
         """Pool every snapshot and retain per-step metadata.
 
         Under ``pool_schedule="per_snapshot"``, runs :meth:`pool_down` once per
         timestep (feature-dependent TopK/SAG scores). Under ``"hold_perm"``,
         pools ``sequence[0]`` once and applies those perms / coarse edges to
-        every timestep via :func:`pool_features_with_steps`.
+        every timestep via :func:`pool_features_with_steps` (or the multiplex /
+        typed peer).
 
         Parameters
         ----------
-        sequence : GraphSnapshotSequence
+        sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
             Fine-resolution training sequence.
 
         Returns
@@ -526,20 +1248,45 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         tuple
             Coarse sequence and pooling metadata for every snapshot.
         """
+        if self._uses_hetero and not isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = "hetero hierarchical fit requires HeteroGraphSnapshotSequence"
+            raise TypeError(msg)
+        if not self._uses_hetero and isinstance(sequence, HeteroGraphSnapshotSequence):
+            msg = "homogeneous hierarchical fit cannot use HeteroGraphSnapshotSequence"
+            raise TypeError(msg)
         if sequence.num_timesteps < 1:
             msg = "sequence must contain at least one snapshot"
             raise ValueError(msg)
 
-        coarse_snaps: list[Data] = []
+        coarse_snaps: list[SnapshotLike] = []
         all_steps: list[list[PoolStep]] = []
         if self.pool_schedule == "hold_perm":
             _, held_steps = self.pool_down(sequence[0])
             for snap in sequence:
-                x = snap.x
-                if x is None:
-                    msg = "hold_perm pooling requires snapshot.x"
-                    raise ValueError(msg)
-                coarse_snaps.append(pool_features_with_steps(x, held_steps))
+                if self._uses_typed:
+                    coarse_snaps.append(
+                        pool_typed_features_with_steps(
+                            self._typed_snapshot_features(snap),
+                            held_steps,
+                            node_types=self._node_types,
+                            edge_types=self._edge_types,
+                        )
+                    )
+                elif self._uses_hetero:
+                    coarse_snaps.append(
+                        pool_multiplex_features_with_steps(
+                            self._snapshot_features(snap),
+                            held_steps,
+                            node_type=self._node_type,
+                            edge_types=self._edge_types,
+                        )
+                    )
+                else:
+                    coarse_snaps.append(
+                        pool_features_with_steps(
+                            self._snapshot_features(snap), held_steps
+                        )
+                    )
                 all_steps.append(held_steps)
             allow_dynamic_topology = False
         else:
@@ -562,9 +1309,18 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         if sequence.timestamps is not None:
             kwargs["timestamps"] = sequence.timestamps
         # Observation masks are fine-node specific; drop on coarse (documented).
+        if self._uses_hetero:
+            return (
+                HeteroGraphSnapshotSequence(
+                    coarse_snaps,  # type: ignore[arg-type]
+                    control_inputs=control_inputs,
+                    **kwargs,
+                ),
+                all_steps,
+            )
         return (
             GraphSnapshotSequence(
-                coarse_snaps,
+                coarse_snaps,  # type: ignore[arg-type]
                 control_inputs=control_inputs,
                 **kwargs,
             ),
@@ -573,7 +1329,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
     def _fit_unpool(
         self,
-        sequence: GraphSnapshotSequence,
+        sequence: ReferenceSequence,
         all_steps: Sequence[Sequence[PoolStep]],
         *,
         epochs: int,
@@ -584,7 +1340,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         Parameters
         ----------
 
-        sequence : GraphSnapshotSequence
+        sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
             See the function signature / summary for ``sequence``.
         all_steps : Sequence[Sequence[PoolStep]]
             See the function signature / summary for ``all_steps``.
@@ -599,31 +1355,55 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         A non-positive epoch count leaves the refine layers unchanged."""
         if epochs <= 0 or len(self.unpool_layers) == 0:
             return
-        params = [p for layer in self.unpool_layers for p in layer.parameters()]
+        params = list(self.unpool_layers.parameters())
         if not params:
             return
         opt = torch.optim.Adam(params, lr=lr)
         for _ in range(epochs):
             opt.zero_grad(set_to_none=True)
-            loss = sequence[0].x.new_zeros(())
-            for snap, steps in zip(sequence, all_steps, strict=True):
-                # Teacher: pool features without refine, then unpool back.
-                x = snap.x
-                assert x is not None
-                # Reconstruct from the last coarse features obtained by
-                # indexing fine features with the perm chain (no score net).
-                coarse_x = x
-                for step in steps:
-                    coarse_x = coarse_x[step.perm]
-                recon = self.unpool_up(coarse_x, steps)
-                loss = loss + torch.mean((recon - x) ** 2)
+            if self._uses_typed:
+                feats0 = self._typed_snapshot_features(sequence[0])
+                loss = next(iter(feats0.values())).new_zeros(())
+                for snap, steps in zip(sequence, all_steps, strict=True):
+                    features = self._typed_snapshot_features(snap)
+                    coarse = dict(features)
+                    for step in steps:
+                        if step.typed_node_types is None or step.typed_perms is None:
+                            msg = (
+                                "typed unpool fit requires typed perm fields "
+                                "on PoolStep"
+                            )
+                            raise ValueError(msg)
+                        for node_type, perm in zip(
+                            step.typed_node_types, step.typed_perms, strict=True
+                        ):
+                            coarse[node_type] = coarse[node_type][perm]
+                    recon = self.unpool_up(coarse, steps)
+                    assert isinstance(recon, dict)
+                    for node_type in self._node_types:
+                        loss = loss + torch.mean(
+                            (recon[node_type] - features[node_type]) ** 2
+                        )
+            else:
+                loss = self._snapshot_features(sequence[0]).new_zeros(())
+                for snap, steps in zip(sequence, all_steps, strict=True):
+                    # Teacher: pool features without refine, then unpool back.
+                    x = self._snapshot_features(snap)
+                    # Reconstruct from the last coarse features obtained by
+                    # indexing fine features with the perm chain (no score net).
+                    coarse_x = x
+                    for step in steps:
+                        coarse_x = coarse_x[step.perm]
+                    recon = self.unpool_up(coarse_x, steps)
+                    assert isinstance(recon, Tensor)
+                    loss = loss + torch.mean((recon - x) ** 2)
             loss = loss / len(sequence)
             loss.backward()
             opt.step()
 
     def fit(
         self,
-        sequence: GraphSnapshotSequence,
+        sequence: ReferenceSequence,
         *,
         epochs: int = 100,
         lr: float = 1e-3,
@@ -642,8 +1422,9 @@ class HierarchicalGraphKoopmanModel(nn.Module):
 
         Parameters
         ----------
-        sequence : GraphSnapshotSequence
-            Fine-resolution training sequence.
+        sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+            Fine-resolution training sequence (container type must match the
+            composed model).
         epochs : int, optional
             Epochs for the composed :meth:`GraphKoopmanModel.fit`.
         lr : float, optional
@@ -660,6 +1441,20 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         FitHistory
             History from the composed model ``fit``.
         """
+        if (
+            self._uses_hetero
+            and self.pool_schedule == "per_snapshot"
+            and isinstance(sequence, HeteroGraphSnapshotSequence)
+        ):
+            msg = (
+                "hetero hierarchical fit with pool_schedule='per_snapshot' "
+                "produces dynamic coarse relation banks, which hetero "
+                "GraphKoopmanModel.fit does not support; use "
+                "pool_schedule='hold_perm' (or pool_down/predict under "
+                "per_snapshot)"
+            )
+            raise ValueError(msg)
+
         was_training = self.training
         self.pool_layers.eval()
         try:
@@ -697,7 +1492,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             },
             root / _WRAPPER_NAME,
         )
-        manifest = {
+        manifest: dict[str, Any] = {
             "kind": "HierarchicalGraphKoopmanModel",
             "model_file": _MODEL_NAME,
             "wrapper_file": _WRAPPER_NAME,
@@ -706,6 +1501,11 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             "pooling": self.pooling,
             "pool_schedule": self.pool_schedule,
         }
+        if self._uses_hetero:
+            # Coarse relation schema preserved across pool levels.
+            manifest["node_types"] = list(self._node_types)
+            manifest["edge_types"] = [list(triple) for triple in self._edge_types]
+            manifest["hetero_mode"] = "typed" if self._uses_typed else "multiplex"
         (root / _MANIFEST_NAME).write_text(
             json.dumps(manifest, indent=2) + "\n",
             encoding="utf-8",
@@ -748,11 +1548,15 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             map_location=map_location,
             weights_only=False,
         )
+        in_channels = payload["in_channels"]
+        # Typed wrappers store sentinel -1; channels are inferred from the model.
+        if in_channels is not None and int(in_channels) < 0:
+            in_channels = None
         inst = cls(
             model,
             pool_ratios=payload["pool_ratios"],
             pooling=payload["pooling"],
-            in_channels=payload["in_channels"],
+            in_channels=in_channels,
             pool_schedule=payload.get("pool_schedule", "per_snapshot"),
         )
         inst.pool_layers.load_state_dict(payload["pool_state_dict"])
