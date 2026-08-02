@@ -832,6 +832,7 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         edge_weight: Tensor | None = None,
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[SnapshotLike] | None = None,
+        future_presence: Tensor | None = None,
         history: Sequence[SnapshotLike] | None = None,
         *,
         resolution: ResolutionArg = "fine",
@@ -853,6 +854,12 @@ class HierarchicalGraphKoopmanModel(nn.Module):
             Fine future topologies; each is pooled with the **same** pool
             layers (scores recomputed) before being forwarded to the composed
             model.
+        future_presence : Tensor or None, optional
+            Accepted for call-site parity with
+            :class:`~koopman_graph.model.GraphKoopmanModel` /
+            :func:`~koopman_graph.metrics.evaluate_forecast`. Hierarchical
+            pooling does not implement presence-mask hold; the argument must
+            be ``None``.
         history : sequence of Data or HeteroData or None, optional
             Delay history; each snapshot is pooled independently.
         resolution : {"fine", "coarse"} or int, optional
@@ -864,7 +871,18 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         list of Data or HeteroData
             Forecasts at the requested resolution. Fine outputs carry the
             initial fine topology (hold-last at the fine level).
+
+        Raises
+        ------
+        ValueError
+            If ``future_presence`` is not ``None``.
         """
+        if future_presence is not None:
+            msg = (
+                "HierarchicalGraphKoopmanModel does not support future_presence; "
+                "presence-mask hold is not defined across pool/unpool"
+            )
+            raise ValueError(msg)
         was_training = self.training
         self.eval()
         try:

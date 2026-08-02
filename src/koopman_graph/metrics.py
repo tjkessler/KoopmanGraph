@@ -529,8 +529,12 @@ def _evaluate_homogeneous_forecast(
                 predict_kwargs: dict[str, object] = {
                     "controls": controls,
                     "future_topologies": future_topologies,
-                    "future_presence": future_presence,
                 }
+                # Only forward when present so models without the kwarg (or with
+                # call-site parity that rejects non-None) keep working under
+                # evaluate_forecast on all-present sequences.
+                if future_presence is not None:
+                    predict_kwargs["future_presence"] = future_presence
                 if n_delays > 1:
                     history = [
                         sequence[t] for t in range(max(0, start - n_delays + 1), start)
