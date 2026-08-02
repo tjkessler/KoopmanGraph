@@ -110,22 +110,26 @@ def test_module_doc_honesty_keywords() -> None:
 
 
 def test_deeptime_oracle_agrees_when_installed() -> None:
-    """Optional deeptime VAMP-2 oracle on the same mean-free features.
+    """Optional deeptime VAMP-2 oracle on a shared AR(1) trajectory.
 
-    Compares :func:`vamp2_score` to deeptime's VAMP-2 score built from the
-    same lag matrices. Tolerances absorb covariance / SVD convention drift.
+    Compares :func:`vamp2_score` on lag-1 pairs to deeptime ``VAMP.score(2)``.
+    deeptime's score includes the constant singular value (+1); our mean-free
+    Frobenius score omits it, so the oracle is ``dt_score - 1``.
     """
     deeptime = pytest.importorskip("deeptime")
     from deeptime.decomposition import VAMP
 
-    x, y = _seeded_lag_features(n_samples=128, n_features=3, seed=7)
+    generator = torch.Generator().manual_seed(7)
+    state = torch.randn(3, generator=generator)
+    frames = [state]
+    for _ in range(200):
+        state = 0.7 * state + 0.3 * torch.randn(3, generator=generator)
+        frames.append(state)
+    trajectory = torch.stack(frames)
+    x = trajectory[:-1]
+    y = trajectory[1:]
     our_score = float(vamp2_score(x, y))
-    # deeptime expects stacked data with lag; use explicit lag pairs via
-    # Covariance / VAMP on concatenated trajectory with lag=1 when possible.
-    data = torch.cat([x[:1], y], dim=0).numpy()
-    model = VAMP(lagtime=1, dim=None).fit(data)
-    # score(2) typically includes the constant singular value (+1).
+    model = VAMP(lagtime=1, dim=None).fit(trajectory.numpy())
     dt_score = float(model.fetch_model().score(2))
-    # Our score is mean-free Frobenius² without the +1 constant mode.
-    assert our_score == pytest.approx(dt_score - 1.0, rel=0.15, abs=0.5)
+    assert our_score == pytest.approx(dt_score - 1.0, rel=0.05, abs=0.05)
     del deeptime
