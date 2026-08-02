@@ -790,3 +790,654 @@ def test_resolve_future_presence_at_guards() -> None:
             steps=2,
             num_nodes=3,
         )
+
+
+# ---------------------------------------------------------------------------
+# Additional 0.11.0 Codecov patch gaps (worker / guards / accessors)
+# ---------------------------------------------------------------------------
+
+
+def test_ray_train_worker_seed_val_and_non_main_report() -> None:
+    """Invoke train_loop in-process: seed+rank, val_sequences, non-main report."""
+    pytest.importorskip("ray.train")
+    import tempfile
+    from contextlib import ExitStack, contextmanager
+    from pathlib import Path
+
+    from koopman_graph.distributed import ray_train as ray_train_mod
+    from koopman_graph.training.history import FitHistory
+
+    fake_history = FitHistory(loss=(0.25,), epochs=1)
+    captured: dict[str, object] = {}
+    seed_calls: list[int] = []
+    model = _tiny_model()
+    train_seq = _tiny_sequence()
+    val_seq = _tiny_sequence()
+
+    def _torch_trainer_factory(*, train_loop_per_worker, scaling_config):
+        captured["loop"] = train_loop_per_worker
+        captured["scaling"] = scaling_config
+        return captured["trainer"]
+
+    real_import_module = ray_train_mod.importlib.import_module
+
+    def _import_module(name: str, package: str | None = None) -> object:
+        if name == "ray":
+            return MagicMock(name="ray")
+        if name == "ray.train":
+            mod = MagicMock(name="ray.train")
+            mod.ScalingConfig = MagicMock(return_value=MagicMock())
+            mod.Checkpoint = MagicMock()
+            mod.Checkpoint.from_directory = MagicMock(return_value=MagicMock())
+            mod.report = MagicMock()
+            ctx = MagicMock()
+            ctx.get_world_rank.return_value = 1
+            mod.get_context.return_value = ctx
+            return mod
+        if name == "ray.train.torch":
+            mod = MagicMock(name="ray.train.torch")
+            mod.TorchTrainer = MagicMock(side_effect=_torch_trainer_factory)
+            mod.get_device = MagicMock(return_value="cpu")
+            return mod
+        return real_import_module(name, package)
+
+    result_dir = tempfile.mkdtemp()
+    torch.save(
+        {
+            "fit_history": fake_history,
+            "state_dict": model.state_dict(),
+        },
+        Path(result_dir) / ray_train_mod._RESULT_FILENAME,
+    )
+
+    @contextmanager
+    def _as_directory():
+        yield result_dir
+
+    fake_checkpoint = MagicMock()
+    fake_checkpoint.as_directory = _as_directory
+    fake_trainer = MagicMock()
+    captured["trainer"] = fake_trainer
+
+    def _run_loop(*, is_main: bool) -> None:
+        loop = captured["loop"]
+        assert callable(loop)
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(ray_train_mod, "init_process_group_from_env")
+            )
+            stack.enter_context(
+                patch.object(
+                    ray_train_mod,
+                    "fit_epochs_distributed",
+                    return_value=fake_history,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    ray_train_mod,
+                    "prepare_ddp_model",
+                    side_effect=lambda module, **_kwargs: module,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    ray_train_mod,
+                    "seed_everything",
+                    side_effect=lambda value: seed_calls.append(int(value)),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    ray_train_mod,
+                    "shard_sequences_for_rank",
+                    side_effect=lambda sequences: sequences,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    ray_train_mod,
+                    "is_main_process",
+                    return_value=is_main,
+                )
+            )
+            loop()
+
+    def _fit() -> SimpleNamespace:
+        # Non-main report branch, then main-process checkpoint report.
+        _run_loop(is_main=False)
+        _run_loop(is_main=True)
+        return SimpleNamespace(error=None, checkpoint=fake_checkpoint)
+
+    fake_trainer.fit.side_effect = _fit
+
+    with patch.object(
+        ray_train_mod.importlib,
+        "import_module",
+        side_effect=_import_module,
+    ):
+        history = ray_train_mod.run_ray_train_fit_loop(
+            model,
+            [train_seq],
+            epochs=1,
+            num_workers=1,
+            seed=7,
+            val_sequences=[val_seq],
+            window_length=3,
+            windows_per_epoch=1,
+            batch_size=1,
+            window_seed=0,
+        )
+    assert history.epochs == 1
+    assert history.loss == (0.25,)
+    # seed + rank (world_rank mocked to 1) → seed_everything(8) twice
+    assert seed_calls.count(8) >= 2
+
+    # Shard branch (no window sampler) in a second in-process fit.
+    with patch.object(
+        ray_train_mod.importlib,
+        "import_module",
+        side_effect=_import_module,
+    ):
+        history2 = ray_train_mod.run_ray_train_fit_loop(
+            _tiny_model(seed=1),
+            [_tiny_sequence()],
+            epochs=1,
+            num_workers=1,
+            seed=3,
+            val_sequences=[_tiny_sequence()],
+        )
+    assert history2.epochs == 1
+    assert seed_calls.count(4) >= 2
+
+
+def test_ray_train_worker_device_resolves_ray_torch_device() -> None:
+    """``_worker_device`` reads ``ray.train.torch.get_device``."""
+    pytest.importorskip("ray.train")
+    from koopman_graph.distributed import ray_train as ray_train_mod
+
+    fake_torch = MagicMock()
+    fake_torch.get_device.return_value = "cpu"
+    with patch.object(
+        ray_train_mod.importlib,
+        "import_module",
+        return_value=fake_torch,
+    ):
+        device = ray_train_mod._worker_device()
+    assert device == torch.device("cpu")
+    fake_torch.get_device.assert_called_once_with()
+
+
+def test_cell_complex_encoder_decoder_forward_guards() -> None:
+    """Encoder/decoder refuse missing topology, bad shapes, and bad stacks."""
+    from koopman_graph.nn.cell_complex import (
+        CellComplexGNNDecoder,
+        CellComplexGNNEncoder,
+        bind_cell_complex_decoder,
+        build_cell_complex_convs,
+        hodge_laplacian_matvec,
+    )
+
+    encoder = CellComplexGNNEncoder(in_channels=2, hidden_channels=4, latent_dim=2)
+    decoder = CellComplexGNNDecoder(latent_dim=2, hidden_channels=4, out_channels=2)
+    edge = torch.tensor([[0, 1, 0], [1, 2, 2]], dtype=torch.long)
+    faces = torch.tensor([[0], [1], [2]], dtype=torch.long)
+
+    with pytest.raises(ValueError, match="data.x is required"):
+        encoder(Data(edge_index=edge, face_index=faces))
+    with pytest.raises(ValueError, match="data.edge_index is required"):
+        encoder(Data(x=torch.randn(3, 2), face_index=faces))
+    with pytest.raises(ValueError, match="edge_index is required when"):
+        encoder(torch.randn(3, 2))
+    with pytest.raises(ValueError, match="Expected x with shape"):
+        encoder(torch.randn(3), edge)
+    with pytest.raises(ValueError, match="in_channels=2"):
+        encoder(torch.randn(3, 5), edge)
+
+    encoder.convs[0] = torch.nn.Linear(2, 2)  # type: ignore[assignment]
+    with pytest.raises(TypeError, match="expected CellComplexConv"):
+        encoder(torch.randn(3, 2), edge)
+
+    with pytest.raises(ValueError, match=r"edge_index must have shape \(2"):
+        bind_cell_complex_decoder(decoder, torch.zeros(3, 2), faces)
+
+    layers = build_cell_complex_convs(2, 4, 3, num_layers=3)
+    assert len(layers) == 3
+
+    complex_ = CellComplex(num_nodes=3, edge_index=edge, face_index=faces)
+    with pytest.raises(ValueError, match=r"degree k must be in"):
+        complex_.num_cells(3)
+    vec = hodge_laplacian_matvec(complex_, 0, torch.randn(3))
+    assert vec.shape == (3,)
+
+
+def test_serialization_symmetry_entity_and_cell_sheaf_guards() -> None:
+    """Symmetry / entity_ids parsers and cell/sheaf rebuild branches."""
+    from koopman_graph.model.factory import build_encoder_peers
+    from koopman_graph.serialization import (
+        _build_decoder,
+        _build_encoder,
+        _coerce_checkpoint_entity_ids,
+        _parse_symmetry_config,
+        build_model_config,
+        reconstruct_model,
+    )
+
+    with pytest.raises(ValueError, match="symmetry config must be a dict"):
+        _parse_symmetry_config("orbit")
+    with pytest.raises(ValueError, match="symmetry.symmetry must be"):
+        _parse_symmetry_config({"symmetry": "perm"})
+    with pytest.raises(ValueError, match="symmetry.method must be"):
+        _parse_symmetry_config({"method": "wl"})
+    with pytest.raises(ValueError, match="orbit_partition must be a sequence"):
+        _parse_symmetry_config({"orbit_partition": 3})
+    with pytest.raises(ValueError, match="orbit must be a sequence of ints"):
+        _parse_symmetry_config({"orbit_partition": [1]})
+    parsed = _parse_symmetry_config(
+        {"symmetry": "isotypic", "orbit_partition": [[0], [1]], "method": "auto"}
+    )
+    assert parsed[2] == "exact" and parsed[1] is False and parsed[3] == "isotypic"
+    assert (
+        _parse_symmetry_config({"auto_orbits": True, "orbit_partition": None})[0]
+        is None
+    )
+
+    with pytest.raises(ValueError, match="entity_ids must be a list"):
+        _coerce_checkpoint_entity_ids("a")
+    with pytest.raises(ValueError, match="non-empty"):
+        _coerce_checkpoint_entity_ids([])
+    with pytest.raises(ValueError, match="entries must be str or int"):
+        _coerce_checkpoint_entity_ids([1.5])
+    assert _coerce_checkpoint_entity_ids(["n0", 1]) == ("n0", 1)
+
+    sheaf_enc, sheaf_dec = build_encoder_peers(
+        "sheaf",
+        in_channels=2,
+        hidden_channels=4,
+        latent_dim=2,
+        out_channels=2,
+        num_layers=1,
+    )
+    cell_enc, cell_dec = build_encoder_peers(
+        "cell_complex",
+        in_channels=2,
+        hidden_channels=4,
+        latent_dim=2,
+        out_channels=2,
+        num_layers=1,
+    )
+    for encoder, decoder in ((sheaf_enc, sheaf_dec), (cell_enc, cell_dec)):
+        model = GraphKoopmanModel(
+            encoder=encoder,
+            decoder=decoder,
+            latent_dim=2,
+            time_step=1.0,
+            koopman="graph",
+        )
+        config = build_model_config(model)
+        rebuilt_enc = _build_encoder(config["encoder"])
+        rebuilt_dec = _build_decoder(config["decoder"])
+        assert type(rebuilt_enc) is type(encoder)
+        assert type(rebuilt_dec) is type(decoder)
+
+    with (
+        patch(
+            "koopman_graph.serialization._RESERVED_KOOPMAN_KINDS",
+            {"future_kind": "TASK-9999"},
+        ),
+        pytest.raises(ValueError, match="planned; lands in TASK-9999"),
+    ):
+        reconstruct_model(
+            {
+                "latent_dim": 2,
+                "time_step": 1.0,
+                "dynamics_mode": "discrete",
+                "koopman_kind": "future_kind",
+                "koopman_init_mode": "identity",
+                "koopman_init_scale": 0.01,
+                "koopman_parameterization": "dense",
+                "koopman_max_spectral_radius": 1.0,
+                "control_dim": 0,
+                "control_mode": "additive",
+                "n_delays": 1,
+                "encoder": {
+                    "type": "gcn",
+                    "in_channels": 2,
+                    "hidden_channels": 4,
+                    "latent_dim": 2,
+                    "num_layers": 1,
+                    "activation": "relu",
+                },
+                "decoder": {
+                    "type": "gcn",
+                    "latent_dim": 2,
+                    "hidden_channels": 4,
+                    "out_channels": 2,
+                    "num_layers": 1,
+                    "activation": "relu",
+                },
+                "sparsity": "dense",
+                "adjacency": None,
+            }
+        )
+
+
+def test_contact_edge_index_cutoff_shape_and_residue_guards() -> None:
+    """Cutoff / position / granularity / residue_ids validation branches."""
+    positions = torch.zeros(2, 3)
+    with pytest.raises(ValueError, match="must be a real number"):
+        contact_edge_index("0.5", cutoff_nm="bad")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="positions_nm must be a Tensor"):
+        contact_edge_index([[0.0, 0.0, 0.0]], cutoff_nm=0.5)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="at least one atom"):
+        contact_edge_index(torch.zeros(0, 3), cutoff_nm=0.5)
+    with pytest.raises(ValueError, match="granularity must be"):
+        contact_edge_index(positions, cutoff_nm=0.5, granularity="chain")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="residue_ids must be a Tensor"):
+        contact_edge_index(
+            positions,
+            cutoff_nm=0.5,
+            granularity="residue",
+            residue_ids=[0, 1],  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match=r"residue_ids must have shape"):
+        contact_edge_index(
+            positions,
+            cutoff_nm=0.5,
+            granularity="residue",
+            residue_ids=torch.zeros(3, dtype=torch.long),
+        )
+    with pytest.raises(ValueError, match="integer tensor"):
+        contact_edge_index(
+            positions,
+            cutoff_nm=0.5,
+            granularity="residue",
+            residue_ids=torch.zeros(2),
+        )
+    # Empty contacts (atoms farther than cutoff).
+    far = torch.tensor([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    empty = contact_edge_index(far, cutoff_nm=0.1)
+    assert empty.shape == (2, 0)
+
+
+def test_factory_isotypic_and_hypergraph_incidence_guards() -> None:
+    """Isotypic factory conflicts and hypergraph incidence-mode validation."""
+    from koopman_graph.model.factory import (
+        build_encoder_peers,
+        build_koopman,
+        resolve_injected_koopman,
+    )
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    with pytest.raises(ValueError, match="Unknown encoder"):
+        build_encoder_peers(
+            "mlp",  # type: ignore[arg-type]
+            in_channels=2,
+            hidden_channels=4,
+            latent_dim=2,
+            out_channels=2,
+        )
+    with pytest.raises(ValueError, match="omit koopman_orbit_method"):
+        GraphKoopmanModel(
+            encoder=GNNEncoder(2, 4, 2, num_layers=1),
+            decoder=GNNDecoder(2, 4, 2, num_layers=1),
+            latent_dim=2,
+            time_step=1.0,
+            koopman="graph",
+            koopman_symmetry="isotypic",
+            koopman_orbit_method="exact",
+        )
+    with pytest.raises(ValueError, match="unsupported for dynamics_mode"):
+        GraphKoopmanModel(
+            encoder=GNNEncoder(2, 4, 2, num_layers=1),
+            decoder=GNNDecoder(2, 4, 2, num_layers=1),
+            latent_dim=2,
+            time_step=1.0,
+            koopman="graph",
+            dynamics_mode="continuous",
+            koopman_symmetry="isotypic",
+        )
+    with pytest.raises(ValueError, match="incidence_mode must be one of"):
+        build_koopman(
+            koopman="hypergraph",
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="discrete",
+            koopman_init_mode="identity_noise",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=None,
+            koopman_hypergraph_incidence_mode="not_a_mode",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="only meaningful for koopman='hypergraph'"):
+        build_koopman(
+            koopman="graph",
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="discrete",
+            koopman_init_mode="identity_noise",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=None,
+            koopman_hypergraph_incidence_mode="forward_random_walk",
+        )
+    with pytest.raises(ValueError, match="mutually exclusive with non-default"):
+        resolve_injected_koopman(
+            GraphKoopmanOperator(2, init_mode="identity"),
+            latent_dim=2,
+            control_dim=0,
+            control_mode="additive",
+            bilinear_rank=None,
+            dynamics_mode="discrete",
+            koopman_init_mode="identity_noise",
+            koopman_init_scale=0.01,
+            koopman_parameterization="dense",
+            koopman_max_spectral_radius=1.0,
+            koopman_auxiliary_hidden_dims=None,
+            koopman_symmetry="isotypic",
+        )
+
+
+def test_orbit_ties_isotypic_bind_mismatch_and_symmetry_config() -> None:
+    """Isotypic bind / topology-mismatch / symmetry_config paths."""
+    from koopman_graph.operators import GraphKoopmanOperator
+
+    edge = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    mock_report = MagicMock()
+    mock_report.dimensions = (1, 1)
+    mock_report.group_order = 2
+
+    op = GraphKoopmanOperator(2, init_mode="identity", isotypic_symmetry=True)
+    with (
+        patch(
+            "koopman_graph.operators.orbit_ties.compute_isotypic_decomposition",
+            return_value=mock_report,
+        ),
+        patch(
+            "koopman_graph.operators.orbit_ties.node_orbit_partition",
+            return_value=((0,), (1,)),
+        ),
+    ):
+        op.bind_auto_orbits(num_nodes=2, edge_index=edge)
+    assert op.isotypic_decomposition is mock_report
+    cfg = op.symmetry_config()
+    assert cfg is not None
+    assert cfg["symmetry"] == "isotypic"
+    assert cfg["isotypic_dimensions"] == [1, 1]
+    assert cfg["group_order"] == 2
+
+    # Matching topology: both ensure_orbit_binding isotypic checks run.
+    with patch(
+        "koopman_graph.operators.orbit_ties.node_orbit_partition",
+        return_value=((0,), (1,)),
+    ):
+        op.ensure_orbit_binding(2, edge_index=edge)
+
+    with (
+        patch(
+            "koopman_graph.operators.orbit_ties.node_orbit_partition",
+            return_value=((0, 1),),
+        ),
+        pytest.raises(ValueError, match="does not match the current topology"),
+    ):
+        op.ensure_orbit_binding(2, edge_index=edge)
+
+    # Hyperedge 2-section path when only hyperedge_index is supplied.
+    pending = GraphKoopmanOperator(2, init_mode="identity", auto_orbits=True)
+    hyper = torch.tensor([[0, 1], [0, 0]], dtype=torch.long)
+    with patch(
+        "koopman_graph.operators.orbit_ties.node_orbit_partition",
+        return_value=((0, 1),),
+    ):
+        pending.bind_auto_orbits(num_nodes=2, hyperedge_index=hyper)
+    assert pending.orbit_partition == ((0, 1),)
+    tied = pending.apply_tied_self(torch.randn(2, 2))
+    assert tied.shape == (2, 2)
+    blocks = pending.tied_self_blocks(2)
+    assert blocks is not None and blocks.shape[0] == 2
+    pending.reset_orbit_selves()
+
+
+def test_hypergraph_forward_rw_inverse_and_dense_paths() -> None:
+    """forward_random_walk spectrum/forward, inverse guards, dual bound_metric."""
+    tail = torch.tensor([[0], [0]], dtype=torch.long)
+    head = torch.tensor([[1], [0]], dtype=torch.long)
+    z = torch.randn(2, 2)
+
+    fwd = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="forward_random_walk",
+    )
+    with pytest.raises(ValueError, match="requires tail_index and head_index"):
+        fwd.forward(z)
+    out = fwd.forward(z, tail_index=tail, head_index=head)
+    assert out.shape == z.shape
+    matrix = fwd.effective_matrix(None, 2, tail_index=tail, head_index=head)
+    assert matrix.shape == (4, 4)
+    spec = fwd.spectrum(None, 2, tail_index=tail, head_index=head)
+    assert spec.eigenvalues.numel() == 4
+
+    # Empty directed incidence → empty 2-section for orbit binding.
+    empty_t = torch.zeros(2, 0, dtype=torch.long)
+    empty_h = torch.zeros(2, 0, dtype=torch.long)
+    orbit_op = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="forward_random_walk",
+        auto_orbits=True,
+    )
+    with patch(
+        "koopman_graph.operators.orbit_ties.node_orbit_partition",
+        return_value=((0,), (1,)),
+    ):
+        _ = orbit_op.forward(
+            z,
+            tail_index=empty_t,
+            head_index=empty_h,
+        )
+
+    dual = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="dual_random_walk",
+    )
+    dual.set_dense_matrices(
+        0.8 * torch.eye(2), 0.1 * torch.eye(2), k_bwd=0.05 * torch.eye(2)
+    )
+    dual.reset_parameters()
+    assert dual.bound_metric().ndim == 0
+
+    block = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="forward_random_walk",
+        sparsity="block_diagonal",
+    )
+    with pytest.raises(
+        ValueError, match="supports only incidence_mode='zhou_symmetric'"
+    ):
+        block.inverse_advance(z, tail_index=tail, head_index=head)
+    zhou_block = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="zhou_symmetric",
+        sparsity="block_diagonal",
+    )
+    with pytest.raises(ValueError, match="hyperedge_index is required"):
+        zhou_block.inverse_advance(z)
+
+    controlled = HypergraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        incidence_mode="zhou_symmetric",
+        control_dim=1,
+        control_mode="bilinear",
+    )
+    hyp = torch.tensor([[0, 1], [0, 0]], dtype=torch.long)
+    with pytest.raises(ValueError, match="control input must have shape"):
+        controlled.inverse_advance(
+            z,
+            hyperedge_index=hyp,
+            control=torch.ones(1, 1, 1),
+        )
+
+
+def test_containers_presence_observation_accessor_gaps() -> None:
+    """Missing-mask raises, presence-only loss masks, hetero index errors."""
+    from koopman_graph.data import HeteroGraphSnapshotSequence
+
+    edge = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+    snaps = [Data(x=torch.ones(2, 1), edge_index=edge) for _ in range(3)]
+    bare = GraphSnapshotSequence(snaps)
+    with pytest.raises(ValueError, match="does not contain presence_masks"):
+        bare.pair_presence_mask(0)
+    with pytest.raises(ValueError, match="does not contain observation_masks"):
+        bare.observation_mask_at(0)
+    assert bare.loss_mask_at(0) is None
+
+    presence = torch.ones(3, 2, dtype=torch.bool)
+    presence[1, 0] = False
+    presence_only = GraphSnapshotSequence(
+        snaps,
+        presence_masks=presence,
+        allow_node_churn=True,
+    )
+    assert presence_only.has_presence_masks
+    assert torch.equal(presence_only.loss_mask_at(1), presence[1])
+    assert torch.equal(
+        presence_only.pair_loss_mask(0),
+        presence[0] & presence[1],
+    )
+
+    from torch_geometric.data import HeteroData
+
+    hetero_snap = HeteroData()
+    hetero_snap["node"].x = torch.randn(3, 2)
+    hetero_snap["node", "to", "node"].edge_index = torch.tensor(
+        [[0, 1], [1, 2]],
+        dtype=torch.long,
+    )
+    hetero_bare = HeteroGraphSnapshotSequence([hetero_snap, hetero_snap, hetero_snap])
+    with pytest.raises(ValueError, match="does not contain presence_masks"):
+        hetero_bare.presence_mask_at(0)
+    with pytest.raises(ValueError, match="does not contain presence_masks"):
+        hetero_bare.pair_presence_mask(0)
+
+    masks = {"node": torch.ones(3, 3, dtype=torch.bool)}
+    hetero = HeteroGraphSnapshotSequence(
+        [hetero_snap, hetero_snap, hetero_snap],
+        presence_masks=masks,
+        allow_node_churn=True,
+    )
+    with pytest.raises(IndexError, match="0 <= index < 3"):
+        hetero.presence_mask_at(3)
+    with pytest.raises(IndexError, match="0 <= index < 2"):
+        hetero.pair_presence_mask(2)
+    assert set(hetero.presence_mask_at(0)) == {"node"}
