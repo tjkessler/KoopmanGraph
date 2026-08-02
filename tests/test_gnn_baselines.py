@@ -8,10 +8,15 @@ from torch_geometric.data import Data
 
 from koopman_graph import GraphSnapshotSequence
 from koopman_graph.baselines.gnn import (
+    AGCRNBaseline,
     DCRNNBaseline,
+    GraphCastBaseline,
     GraphWaveNetBaseline,
+    MTGNNBaseline,
     STGCNBaseline,
+    STGODEBaseline,
 )
+from koopman_graph.baselines.gnn.graphcast import build_teaching_mesh_edge_index
 from koopman_graph.metrics import evaluate_forecast
 from koopman_graph.protocols import ForecastModel
 
@@ -54,6 +59,8 @@ def _diffusion_sequence(
             GraphWaveNetBaseline,
             {"history_len": 2, "num_layers": 2, "adaptive_adj": True},
         ),
+        (AGCRNBaseline, {"history_len": 2, "embed_dim": 4}),
+        (MTGNNBaseline, {"history_len": 2, "num_layers": 2, "embed_dim": 4}),
     ],
 )
 def test_gnn_baseline_forecast_protocol_and_shapes(
@@ -87,6 +94,8 @@ def test_gnn_baseline_forecast_protocol_and_shapes(
             GraphWaveNetBaseline,
             {"history_len": 2, "num_layers": 2, "adaptive_adj": False},
         ),
+        (AGCRNBaseline, {"history_len": 2, "embed_dim": 4}),
+        (MTGNNBaseline, {"history_len": 2, "num_layers": 2, "embed_dim": 4}),
     ],
 )
 def test_gnn_baseline_overfits_small_synthetic(
@@ -121,7 +130,16 @@ def test_gnn_baseline_overfits_small_synthetic(
     assert after < 0.15
 
 
-@pytest.mark.parametrize("cls", [STGCNBaseline, DCRNNBaseline, GraphWaveNetBaseline])
+@pytest.mark.parametrize(
+    "cls",
+    [
+        STGCNBaseline,
+        DCRNNBaseline,
+        GraphWaveNetBaseline,
+        AGCRNBaseline,
+        MTGNNBaseline,
+    ],
+)
 def test_gnn_baseline_spectrum_raises(cls: type) -> None:
     """Verify spectrum is intentionally unsupported for nonlinear GNN baselines."""
     sequence = _diffusion_sequence(timesteps=6)
@@ -135,6 +153,10 @@ def test_gnn_baseline_spectrum_raises(cls: type) -> None:
             if cls is STGCNBaseline
             else {"num_layers": 1, "adaptive_adj": False}
             if cls is GraphWaveNetBaseline
+            else {"embed_dim": 4}
+            if cls is AGCRNBaseline
+            else {"num_layers": 1, "embed_dim": 4}
+            if cls is MTGNNBaseline
             else {"diffusion_steps": 1}
         ),
     )
@@ -225,6 +247,8 @@ def test_gnn_forecaster_base_helpers_and_validation() -> None:
             GraphWaveNetBaseline,
             {"history_len": 2, "num_layers": 2, "adaptive_adj": True},
         ),
+        (AGCRNBaseline, {"history_len": 2, "embed_dim": 4}),
+        (MTGNNBaseline, {"history_len": 2, "num_layers": 2, "embed_dim": 4}),
     ],
 )
 def test_gnn_baseline_batched_predict_next_matches_single(
@@ -313,3 +337,126 @@ def test_gnn_baseline_constructor_and_rank_validation() -> None:
     assert y2d.shape == (4, 2)
     with pytest.raises(ValueError, match="x must have shape"):
         conv(torch.randn(4), supports)
+
+
+def _mesh_diffusion_sequence(
+    *,
+    timesteps: int = 12,
+    seed: int = 0,
+    num_lat: int = 3,
+    num_lon: int = 4,
+) -> GraphSnapshotSequence:
+    """Generate a smooth diffusion trajectory on the teaching lat–lon mesh."""
+    generator = torch.Generator().manual_seed(seed)
+    edge_index = build_teaching_mesh_edge_index(num_lat=num_lat, num_lon=num_lon)
+    num_nodes = num_lat * num_lon
+    state = torch.randn(num_nodes, 1, generator=generator)
+    adjacency = torch.zeros(num_nodes, num_nodes)
+    adjacency[edge_index[0], edge_index[1]] = 1.0
+    degree = adjacency.sum(dim=1).clamp_min(1.0)
+    normalized = adjacency / degree.unsqueeze(1)
+    snapshots: list[Data] = []
+    for _ in range(timesteps):
+        snapshots.append(Data(x=state.clone(), edge_index=edge_index))
+        state = 0.85 * state + 0.15 * (normalized @ state)
+    return GraphSnapshotSequence(snapshots)
+
+
+def test_graphcast_teaching_mesh_and_fit_predict_smoke() -> None:
+    """Mesh fixture + GraphCastBaseline fit/predict; honesty in protocol."""
+    import koopman_graph
+    import koopman_graph.baselines.gnn as gnn_pkg
+
+    edge_index = build_teaching_mesh_edge_index(num_lat=3, num_lon=4)
+    assert edge_index.shape[0] == 2
+    assert edge_index.shape[1] > 0
+    with pytest.raises(ValueError, match="num_lat"):
+        build_teaching_mesh_edge_index(num_lat=1, num_lon=4)
+
+    sequence = _mesh_diffusion_sequence(timesteps=10, seed=4)
+    model = GraphCastBaseline(1, 8, 1, history_len=2, num_processor_layers=2)
+    assert isinstance(model, ForecastModel)
+    protocol = model.protocol()
+    assert protocol.name == "graphcast"
+    assert any("PEMS" in item or "METR" in item for item in protocol.deviations)
+    assert any("ERA5" in item for item in protocol.deviations)
+    assert "GraphCastBaseline" in gnn_pkg.__all__
+    assert "GraphCastBaseline" not in koopman_graph.__all__
+
+    model.fit(sequence, epochs=3, lr=1e-2)
+    predictions = model.predict(sequence[0], steps=2)
+    assert len(predictions) == 2
+    assert predictions[0].x.shape == (sequence.num_nodes, 1)
+    with pytest.raises(RuntimeError, match="no linear Koopman operator spectrum"):
+        model.spectrum()
+
+    features = torch.stack([snapshot.x for snapshot in sequence])
+    h0 = features[0:2]
+    h1 = features[1:3]
+    single = torch.stack(
+        [
+            model.predict_next(h0, edge_index, None),
+            model.predict_next(h1, edge_index, None),
+        ]
+    )
+    batched = model.predict_next(torch.stack([h0, h1]), edge_index, None)
+    assert torch.allclose(batched, single, atol=1e-5, rtol=1e-5)
+
+    with pytest.raises(ValueError, match="num_processor_layers"):
+        GraphCastBaseline(1, 4, 1, num_processor_layers=0)
+
+
+def test_stgode_imports_and_protocol_without_extra() -> None:
+    """STGODEBaseline constructs and exposes protocol without torchdiffeq use."""
+    import koopman_graph
+    import koopman_graph.baselines.gnn as gnn_pkg
+
+    model = STGODEBaseline(1, 4, 1, history_len=2, num_layers=1)
+    protocol = model.protocol()
+    assert protocol.name == "stgode"
+    assert any("dopri5" in item for item in protocol.deviations)
+    assert any("baselines-ode" in item for item in protocol.deviations)
+    assert "STGODEBaseline" in gnn_pkg.__all__
+    assert "STGODEBaseline" not in koopman_graph.__all__
+
+
+def test_stgode_requires_baselines_ode_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing torchdiffeq raises ImportError naming [baselines-ode]."""
+    import koopman_graph.baselines.gnn.stgode as stgode_module
+
+    monkeypatch.setattr(stgode_module, "_odeint", None)
+    model = STGODEBaseline(1, 4, 1, history_len=1, num_layers=1)
+    history = torch.randn(1, 4, 1)
+    edge_index = _ring_edge_index(4)
+    with pytest.raises(ImportError, match=r"koopman-graph\[baselines-ode\]"):
+        model.predict_next(history, edge_index, None)
+    with pytest.raises(ImportError, match=r"koopman-graph\[baselines-ode\]"):
+        model.fit(_diffusion_sequence(timesteps=4), epochs=1)
+
+
+def test_stgode_fit_predict_smoke() -> None:
+    """Fit/predict smoke when torchdiffeq is installed."""
+    pytest.importorskip("torchdiffeq")
+    sequence = _diffusion_sequence(timesteps=10, seed=3)
+    model = STGODEBaseline(1, 8, 1, history_len=2, num_layers=1)
+    assert isinstance(model, ForecastModel)
+    model.fit(sequence, epochs=3, lr=1e-2)
+    predictions = model.predict(sequence[0], steps=2)
+    assert len(predictions) == 2
+    assert predictions[0].x.shape == (sequence.num_nodes, 1)
+    with pytest.raises(RuntimeError, match="no linear Koopman operator spectrum"):
+        model.spectrum()
+
+    # Batched predict_next matches stacked singles.
+    features = torch.stack([snapshot.x for snapshot in sequence])
+    h0 = features[0:2]
+    h1 = features[1:3]
+    edge_index = sequence.edge_index
+    single = torch.stack(
+        [
+            model.predict_next(h0, edge_index, None),
+            model.predict_next(h1, edge_index, None),
+        ]
+    )
+    batched = model.predict_next(torch.stack([h0, h1]), edge_index, None)
+    assert torch.allclose(batched, single, atol=1e-4, rtol=1e-4)

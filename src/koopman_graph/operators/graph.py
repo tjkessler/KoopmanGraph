@@ -162,6 +162,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         orbit_partition: Sequence[Sequence[int]] | None = None,
         auto_orbits: bool = False,
         orbit_method: OrbitMethod = "auto",
+        isotypic_symmetry: bool = False,
     ) -> None:
         """Initialize self and neighbor Koopman factors.
 
@@ -203,6 +204,11 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             (requires the ``[symmetry]`` extra for non-identity partitions).
         orbit_method : {"auto", "exact"}, optional
             Orbit backend for ``auto_orbits``. Default ``"auto"``.
+        isotypic_symmetry : bool, optional
+            When ``True``, bind exact ``Aut(G)`` orbits for ``K_self`` ties
+            and store the isotypic decomposition (factory
+            ``koopman_symmetry="isotypic"``). Mutually exclusive with
+            ``auto_orbits`` / ``orbit_partition``. Default ``False``.
 
         Raises
         ------
@@ -272,6 +278,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             orbit_partition=orbit_partition,
             auto_orbits=auto_orbits,
             orbit_method=orbit_method,
+            isotypic_symmetry=isotypic_symmetry,
         )
 
     def _reset_factor_parameters(

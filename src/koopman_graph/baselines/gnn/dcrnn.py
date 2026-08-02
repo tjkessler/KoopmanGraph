@@ -13,6 +13,7 @@ from koopman_graph.baselines.gnn.base import (
     dense_adjacency,
     random_walk_normalize,
 )
+from koopman_graph.baselines.gnn.protocol import ForecasterProtocol
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight
 
@@ -244,6 +245,27 @@ class DCRNNBaseline(GNNForecasterBaseline):
         self.decoder = _DCGRUCell(out_channels, hidden_channels, diffusion_steps)
         self.readout = nn.Linear(hidden_channels, out_channels)
         self._cached_supports: list[Tensor] | None = None
+
+    def protocol(self) -> ForecasterProtocol:
+        """Return the DCRNN teaching protocol (non-empty deviations).
+
+        Returns
+        -------
+        ForecasterProtocol
+            Lookback, claimed evaluation horizon, split ratios, and deviations
+            versus Li et al. / LibCity-style DCRNN scripts.
+        """
+        return self._teaching_protocol(
+            name="dcrnn",
+            deviations=(
+                "architecture: single DCGRU encoder–decoder cell pair without "
+                "scheduled sampling or multi-step teacher forcing at paper "
+                "horizons (Li et al.)",
+                "architecture: diffusion supports are dense random-walk powers "
+                "on the fitted static graph, not the METR-LA / PEMS-BAY "
+                "precomputed adjacency pipeline",
+            ),
+        )
 
     def fit(
         self,

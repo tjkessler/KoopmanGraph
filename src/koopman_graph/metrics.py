@@ -404,8 +404,12 @@ def evaluate_forecast(
     For each forecast origin, the model predicts up to ``max(horizons)`` steps
     ahead and metrics are averaged across origins at each requested horizon.
 
-    Homogeneous sequences compare ``Data.x``. Heterogeneous sequences compare
-    concatenated flattened per-type features in
+    Homogeneous sequences compare ``Data.x``. When presence masks are attached,
+    ``predict`` receives the corresponding ``future_presence`` schedule (hold
+    last active state for inactive entities; matvecs still use ``N_max``) and
+    metrics use :meth:`~koopman_graph.data.GraphSnapshotSequence.loss_mask_at`
+    so absent or unobserved rows do not contribute. Heterogeneous sequences
+    compare concatenated flattened per-type features in
     :attr:`~koopman_graph.data.HeteroGraphSnapshotSequence.node_type_names`
     order (stacked aggregate over all physical channels; not a certified
     per-type coverage or metric report). Hetero evaluate requires static
@@ -516,6 +520,17 @@ def _evaluate_homogeneous_forecast(
                     ]
                 history = None
                 n_delays = int(getattr(model, "n_delays", 1))
+                future_presence = None
+                if sequence.has_presence_masks:
+                    assert sequence.presence_masks is not None
+                    future_presence = sequence.presence_masks[
+                        start + 1 : start + max_horizon + 1
+                    ]
+                predict_kwargs: dict[str, object] = {
+                    "controls": controls,
+                    "future_topologies": future_topologies,
+                    "future_presence": future_presence,
+                }
                 if n_delays > 1:
                     history = [
                         sequence[t] for t in range(max(0, start - n_delays + 1), start)
@@ -523,22 +538,20 @@ def _evaluate_homogeneous_forecast(
                     predictions = model.predict(
                         initial_graph,
                         steps=max_horizon,
-                        controls=controls,
-                        future_topologies=future_topologies,
                         history=history,
+                        **predict_kwargs,  # type: ignore[arg-type]
                     )
                 else:
                     predictions = model.predict(
                         initial_graph,
                         steps=max_horizon,
-                        controls=controls,
-                        future_topologies=future_topologies,
+                        **predict_kwargs,  # type: ignore[arg-type]
                     )
                 for horizon in horizons:
                     pred = predictions[horizon - 1].x
                     target = sequence[start + horizon].x
-                    if sequence.has_observation_masks:
-                        node_mask = sequence.observation_mask_at(start + horizon)
+                    node_mask = sequence.loss_mask_at(start + horizon)
+                    if node_mask is not None:
                         mae_sums[horizon] += float(
                             masked_mae(pred, target, node_mask).cpu()
                         )

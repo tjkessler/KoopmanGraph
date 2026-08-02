@@ -22,6 +22,10 @@ Capability layout
     Node-orbit partitions for symmetry-adapted operators
     (``node_orbit_partition``, ``validate_orbit_partition``; ``[symmetry]``
     extra).
+``representation``
+    Exact-automorphism isotypic projectors
+    (:func:`~koopman_graph.graph_utils.compute_isotypic_decomposition`;
+    requires ``pynauty``; WL methods refused).
 
 Prefer ``from koopman_graph.graph_utils import …``. Peer modules may be imported
 directly for power-user work; do not reach into leading-underscore helpers
@@ -33,6 +37,7 @@ from koopman_graph.graph_utils.propagation import (
     DecoderFn,
     DeltaTAtFn,
     KoopmanPropagator,
+    PresenceAtFn,
     RelationDecoderFn,
     RelationTopologyAtFn,
     TopologyAtFn,
@@ -47,6 +52,12 @@ from koopman_graph.graph_utils.propagation import (
     propagate_latent,
     resolve_delta_t,
     snapshot_topology_at,
+)
+from koopman_graph.graph_utils.representation import (
+    MAX_ISOTYPIC_NODES,
+    IsotypicDecomposition,
+    IsotypicMethod,
+    compute_isotypic_decomposition,
 )
 from koopman_graph.graph_utils.symmetry import (
     OrbitMethod,
@@ -65,11 +76,17 @@ from koopman_graph.graph_utils.topology import (
     RelationNormalization,
     clear_hyperedge_cache,
     degree_support_mask,
+    dense_hyperedge_backward_random_walk_adjacency,
+    dense_hyperedge_dual_random_walk_adjacency,
+    dense_hyperedge_dual_random_walk_factors,
+    dense_hyperedge_forward_random_walk_adjacency,
     dense_hyperedge_normalized_adjacency,
     dense_random_walk_normalized_adjacency,
     dense_relation_normalized_adjacency,
     dense_symmetric_normalized_adjacency,
     dense_symmetric_normalized_laplacian,
+    hyperedge_dual_random_walk_matvec,
+    hyperedge_forward_random_walk_matvec,
     hyperedge_normalized_adjacency_matvec,
     hyperedge_normalized_incidence_weights,
     materialize_reverse_relation_edges,
@@ -82,8 +99,10 @@ from koopman_graph.graph_utils.topology import (
     resolve_edge_weight,
     resolve_graph_inputs,
     snapshot_edge_weight,
+    snapshot_head_index,
     snapshot_hyperedge_index,
     snapshot_hyperedge_weight,
+    snapshot_tail_index,
     snapshot_to_device,
     symmetric_normalized_adjacency_edge_weights,
     symmetric_normalized_adjacency_matvec,
@@ -96,8 +115,12 @@ __all__ = [
     "DecoderFn",
     "DeltaTAtFn",
     "KoopmanPropagator",
+    "IsotypicDecomposition",
+    "IsotypicMethod",
+    "MAX_ISOTYPIC_NODES",
     "OrbitMethod",
     "OrbitPartition",
+    "PresenceAtFn",
     "RELATION_NORMALIZATION_MODES",
     "RandomWalkDirection",
     "RelationDecoderFn",
@@ -110,7 +133,12 @@ __all__ = [
     "autoregressive_hetero_latent_rollout",
     "autoregressive_latent_rollout",
     "clear_hyperedge_cache",
+    "compute_isotypic_decomposition",
     "degree_support_mask",
+    "dense_hyperedge_backward_random_walk_adjacency",
+    "dense_hyperedge_dual_random_walk_adjacency",
+    "dense_hyperedge_dual_random_walk_factors",
+    "dense_hyperedge_forward_random_walk_adjacency",
     "dense_hyperedge_normalized_adjacency",
     "dense_random_walk_normalized_adjacency",
     "dense_relation_normalized_adjacency",
@@ -118,6 +146,8 @@ __all__ = [
     "dense_symmetric_normalized_laplacian",
     "hold_last_relation_topology_at",
     "hold_last_topology_at",
+    "hyperedge_dual_random_walk_matvec",
+    "hyperedge_forward_random_walk_matvec",
     "hyperedge_normalized_adjacency_matvec",
     "hyperedge_normalized_incidence_weights",
     "hyperedge_two_section",
@@ -140,8 +170,10 @@ __all__ = [
     "resolve_edge_weight",
     "resolve_graph_inputs",
     "snapshot_edge_weight",
+    "snapshot_head_index",
     "snapshot_hyperedge_index",
     "snapshot_hyperedge_weight",
+    "snapshot_tail_index",
     "snapshot_to_device",
     "snapshot_topology_at",
     "symmetric_normalized_adjacency_edge_weights",

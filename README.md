@@ -53,7 +53,7 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
-**Scope.** KoopmanGraph targets topology-aware Koopman autoencoders on graphs and hypergraphs, not traffic-forecasting leaderboards, simplicial/Hodge layers, or molecular-dynamics MSM toolchains. Measured limits (transfer, factorization cost, residual diagnostics, UQ assumptions) are consolidated in [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html).
+**Scope.** KoopmanGraph targets topology-aware Koopman autoencoders on graphs and hypergraphs, not traffic-forecasting leaderboards or full simplicial/Hodge / TopologicX parity. Optional GraphVAMP and synthetic molecular helpers are teaching / diagnostic paths — not Folding@home-scale MD or a PyEMMA replacement. Measured limits (transfer, factorization cost, residual diagnostics, UQ assumptions) are consolidated in [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html).
 
 ## Installation
 
@@ -126,7 +126,7 @@ More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/qu
 
 <p align="center"><em>METR-LA aggregate RMSE vs in-repo STGCN / DCRNN / Graph WaveNet <strong>teaching baselines</strong> (not dedicated-library SOTA) from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb">examples/22_gnn_forecaster_comparison.ipynb</a>.</em></p>
 
-Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [39 hetero RelGraph](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
+Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [37 topology transfer](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb) · [39 hetero RelGraph](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb) · [42 teaching baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/42_traffic_teaching_baselines.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
 
 ## Learn more
 
@@ -136,9 +136,10 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.9.0: heterogeneous / multiplex RelGraph +
-  `koopman="hetero_graph"`, composed with 0.8 DDP / Fabric / Lightning / Ray
-  trainers — see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.11.0: measured topology transfer, directed hypergraph
+  incidence, Ray Train model DDP, presence-mask churn, teaching traffic /
+  GraphCast ports, sheaf / cell-complex MVPs, GraphVAMP + synthetic molecular
+  path, and isotypic self-block ties — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -163,7 +164,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21752937},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.10.0},
+  version      = {0.11.0},
 }
 ```
 

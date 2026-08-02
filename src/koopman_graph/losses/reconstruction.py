@@ -11,11 +11,18 @@ def masked_mse_loss(
     target: Tensor,
     mask: Tensor,
 ) -> Tensor:
-    """Compute mean squared error over observed nodes only.
+    """Compute mean squared error over contributing nodes only.
 
     Averages squared errors over all feature channels of masked nodes::
 
         sum_{n in O, f} (pred_{n,f} - target_{n,f})^2 / (|O| * feature_dim)
+
+    The denominator uses the count of contributing nodes ``|O|``, not the
+    padded universe size ``N_max``. Callers should pass a mask that already
+    composes presence and observation (see
+    :meth:`~koopman_graph.data.GraphSnapshotSequence.loss_mask_at`) so inactive
+    or unobserved rows neither contribute to the numerator nor inflate the
+    mean.
 
     Parameters
     ----------
@@ -24,8 +31,8 @@ def masked_mse_loss(
     target : Tensor
         Ground-truth node features with the same shape as ``prediction``.
     mask : Tensor
-        Boolean node mask with shape ``(num_nodes,)``. ``True`` marks an
-        observed node included in the average.
+        Boolean node mask with shape ``(num_nodes,)``. ``True`` marks a
+        contributing node included in the average.
 
     Returns
     -------

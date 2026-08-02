@@ -348,11 +348,22 @@ def induce_neighbor_subgraph_sequence(
     if observation_masks is not None:
         observation_masks = observation_masks[:, subset]
 
+    presence_masks = sequence.presence_masks
+    if presence_masks is not None:
+        presence_masks = presence_masks[:, subset]
+
+    entity_ids = None
+    if sequence.entity_ids is not None:
+        entity_ids = tuple(sequence.entity_ids[int(i)] for i in subset.tolist())
+
     return GraphSnapshotSequence(
         snapshots,
         control_inputs=control_inputs,
         timestamps=sequence.timestamps,
         observation_masks=observation_masks,
+        presence_masks=presence_masks,
+        entity_ids=entity_ids,
+        allow_node_churn=sequence.allow_node_churn,
     )
 
 

@@ -24,8 +24,10 @@ from koopman_graph.data import (
 from koopman_graph.graph_utils import (
     propagate_latent,
     snapshot_edge_weight,
+    snapshot_head_index,
     snapshot_hyperedge_index,
     snapshot_hyperedge_weight,
+    snapshot_tail_index,
 )
 from koopman_graph.losses import (
     BackwardConsistencyLoss,
@@ -322,12 +324,72 @@ def stack_typed_masks(
     return torch.cat(blocks, dim=0)
 
 
+def _model_is_rectangular_hetero(model: TrainableKoopmanModel) -> bool:
+    """Return whether ``model`` uses unequal per-type latent widths.
+
+    Parameters
+    ----------
+    model
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    koopman = getattr(model, "koopman", None)
+    if koopman is not None and bool(getattr(koopman, "is_rectangular", False)):
+        return True
+    encoder = getattr(model, "encoder", None)
+    return bool(getattr(encoder, "is_rectangular", False))
+
+
+def _reject_rectangular_presence_stack(
+    sequence: SnapshotSequence,
+    model: TrainableKoopmanModel | None,
+) -> None:
+    """Reject stacked latent masks when rectangular widths meet presence.
+
+    Per-type feature-space losses remain valid under unequal ``d_τ``. The
+    stacked latent consistency path assumes one mask entry per node row and
+    shared latent width; rectangular stacking is ``Σ_τ N_τ d_τ``.
+
+    Parameters
+    ----------
+    sequence : HeteroGraphSnapshotSequence
+        Sequence that may carry presence masks.
+    model : TrainableKoopmanModel or None
+        Model whose rectangular flag is checked when provided.
+
+    Raises
+    ------
+    ValueError
+        If presence masks are attached and the model is rectangular.
+    """
+    if model is None or not sequence.has_presence_masks:
+        return
+    if not _model_is_rectangular_hetero(model):
+        return
+    msg = (
+        "presence_masks cannot be used with rectangular latent_dims on the "
+        "stacked latent consistency path (unequal per-type widths yield "
+        "Σ_τ N_τ d_τ latent rows, not node-aligned masks); use shared "
+        "latent_dim, omit presence_masks, or rely on per-type feature-space "
+        "losses"
+    )
+    raise ValueError(msg)
+
+
 def _hetero_pair_mask(
     sequence: SnapshotSequence,
     timestep: int,
     node_types: Sequence[str] | None,
+    *,
+    model: TrainableKoopmanModel | None = None,
 ) -> Tensor | None:
     """Return the stacked latent pair mask for a hetero sequence.
+
+    Uses :meth:`~koopman_graph.data.HeteroGraphSnapshotSequence.pair_loss_mask`
+    (present ∧ observed). Raises when presence masks meet rectangular
+    ``latent_dims`` on this stacked path.
 
     Parameters
     ----------
@@ -337,16 +399,19 @@ def _hetero_pair_mask(
         Index of the source snapshot in the pair.
     node_types : sequence of str or None
         Typed stacking order, or ``None`` for the multiplex path.
+    model : TrainableKoopmanModel or None, optional
+        Used to detect rectangular ``latent_dims`` when presence masks exist.
 
     Returns
     -------
     Tensor or None
         Boolean mask over stacked rows, or ``None`` when masks are absent.
     """
-    if not sequence.has_observation_masks:
+    assert isinstance(sequence, HeteroGraphSnapshotSequence)
+    masks = sequence.pair_loss_mask(timestep)
+    if masks is None:
         return None
-    masks = sequence.pair_observation_mask(timestep)
-    assert isinstance(masks, Mapping)
+    _reject_rectangular_presence_stack(sequence, model)
     order = tuple(masks) if node_types is None else tuple(node_types)
     return stack_typed_masks(masks, order)
 
@@ -356,6 +421,10 @@ def _hetero_target_masks(
     timestep: int,
 ) -> dict[str, Tensor] | None:
     """Return per-type target masks at ``timestep`` for a hetero sequence.
+
+    Uses :meth:`~koopman_graph.data.HeteroGraphSnapshotSequence.loss_mask_at`
+    (present ∧ observed). Feature-space losses accept these masks under both
+    shared-d and rectangular ``latent_dims``.
 
     Parameters
     ----------
@@ -369,10 +438,10 @@ def _hetero_target_masks(
     dict of str to Tensor or None
         Per-type boolean masks, or ``None`` when masks are absent.
     """
-    if not sequence.has_observation_masks:
+    assert isinstance(sequence, HeteroGraphSnapshotSequence)
+    masks = sequence.loss_mask_at(timestep)
+    if masks is None:
         return None
-    masks = sequence.observation_mask_at(timestep)
-    assert isinstance(masks, Mapping)
     return dict(masks)
 
 
@@ -719,18 +788,15 @@ def _forward_consistency_pair(
             control=control,
             delta_t=delta_t,
             default_delta_t=default_delta_t,
-            mask=_hetero_pair_mask(sequence, timestep, node_types),
+            mask=_hetero_pair_mask(sequence, timestep, node_types, model=model),
             edge_indices=edge_indices,
             edge_weights=edge_weights,
             num_nodes_dict=num_nodes_dict,
             latent_window=_pair_latent_window(model, sequence, timestep, cache=cache),
         )
 
-    pair_mask = (
-        sequence.pair_observation_mask(timestep)
-        if sequence.has_observation_masks
-        else None
-    )
+    assert isinstance(sequence, GraphSnapshotSequence)
+    pair_mask = sequence.pair_loss_mask(timestep)
     # Align with rollout decode policy: advance under the target snapshot topology.
     edge_index = snapshot_t1.edge_index
     edge_weight = getattr(snapshot_t1, "edge_weight", None)
@@ -746,6 +812,8 @@ def _forward_consistency_pair(
         edge_weight=edge_weight,
         hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
         hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
+        tail_index=snapshot_tail_index(snapshot_t1),
+        head_index=snapshot_head_index(snapshot_t1),
         latent_window=_pair_latent_window(model, sequence, timestep, cache=cache),
     )
 
@@ -798,11 +866,8 @@ def _backward_consistency_pair(
         default_time_step=default_delta_t,
     )
     control = pair_control(sequence, timestep)
-    pair_mask = (
-        sequence.pair_observation_mask(timestep)
-        if sequence.has_observation_masks
-        else None
-    )
+    assert isinstance(sequence, GraphSnapshotSequence)
+    pair_mask = sequence.pair_loss_mask(timestep)
     edge_index = snapshot_t1.edge_index
     edge_weight = getattr(snapshot_t1, "edge_weight", None)
     return _BACKWARD_CONSISTENCY_LOSS(
@@ -818,6 +883,8 @@ def _backward_consistency_pair(
         edge_weight=edge_weight,
         hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
         hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
+        tail_index=snapshot_tail_index(snapshot_t1),
+        head_index=snapshot_head_index(snapshot_t1),
     )
 
 
@@ -930,6 +997,8 @@ def one_step_prediction(
             edge_weight=getattr(snapshot_t1, "edge_weight", None),
             hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
             hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
+            tail_index=snapshot_tail_index(snapshot_t1),
+            head_index=snapshot_head_index(snapshot_t1),
             latent_window=_pair_latent_window(model, sequence, timestep, cache=cache),
         )
         if isinstance(model.decoder, HypergraphDecoder):
@@ -1050,12 +1119,9 @@ def _reconstruction_from_predictions(
             )
             continue
         assert isinstance(prediction, Tensor)
+        assert isinstance(sequence, GraphSnapshotSequence)
         target = target_snapshot.x
-        target_mask = (
-            sequence.observation_mask_at(timestep + 1)
-            if sequence.has_observation_masks
-            else None
-        )
+        target_mask = sequence.loss_mask_at(timestep + 1)
         if target_mask is None:
             total_loss = total_loss + nn.functional.mse_loss(prediction, target)
         else:
@@ -1111,9 +1177,8 @@ def _one_step_pair(
             target_masks=target_masks,
         )
 
-    target_mask = None
-    if sequence.has_observation_masks:
-        target_mask = sequence.observation_mask_at(timestep + 1)
+    assert isinstance(sequence, GraphSnapshotSequence)
+    target_mask = sequence.loss_mask_at(timestep + 1)
 
     # Without a cache on the plain one-step path, keep ``one_step_loss`` so
     # deep-import monkeypatches of that helper remain effective.

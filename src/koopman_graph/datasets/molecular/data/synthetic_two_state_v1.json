@@ -1,0 +1,31 @@
+{
+  "dataset_id": "synthetic_two_state_v1",
+  "version": "v1",
+  "scope": "Seeded two-state Markov teaching trajectory on a fixed four-atom contact graph for GraphVAMP / implied-timescale CI oracles.",
+  "num_nodes": 4,
+  "num_features": 2,
+  "default_num_timesteps": 256,
+  "default_seed": 0,
+  "transition_prob": 0.05,
+  "slow_eigenvalue": 0.9,
+  "oracle_lag_steps": 1,
+  "oracle_slow_timescale_steps": 9.491221581029905,
+  "timestep_ps": 1.0,
+  "cutoff_nm": 0.5,
+  "positions_nm": [
+    [0.0, 0.0, 0.0],
+    [0.4, 0.0, 0.0],
+    [0.8, 0.0, 0.0],
+    [1.2, 0.0, 0.0]
+  ],
+  "format": "Procedural GraphSnapshotSequence of PyG Data (float32 node features, long edge_index); oracle constants in this JSON.",
+  "provenance": "In-repo synthetic generator (koopman_graph.datasets.molecular.synthetic); not experimental molecular dynamics.",
+  "license": "Apache-2.0",
+  "units": {
+    "positions": "nm",
+    "cutoff": "nm",
+    "timestep": "ps",
+    "oracle_slow_timescale": "snapshot steps (at oracle_lag_steps)"
+  },
+  "limitations": "Toy two-state Markov switching with additive Gaussian feature noise; not a biomolecule, not Folding@home-scale MD, and not a PyEMMA replacement."
+}

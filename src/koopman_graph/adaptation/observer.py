@@ -267,6 +267,13 @@ class KoopmanObserver:
                 if sequence.observation_masks is None
                 else sequence.observation_masks.clone()
             ),
+            presence_masks=(
+                None
+                if sequence.presence_masks is None
+                else sequence.presence_masks.clone()
+            ),
+            entity_ids=sequence.entity_ids,
+            allow_node_churn=sequence.allow_node_churn,
         )
 
     def _forward_filter(

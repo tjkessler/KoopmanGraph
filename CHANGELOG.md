@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-02
+
+Domain-and-structure release on the 0.10 stack: measured topology transfer,
+directed hypergraph incidence, Ray Train model DDP, fixed-union presence-mask
+churn, teaching traffic forecaster ports, in-repo sheaf / cell-complex MVPs,
+GraphVAMP + molecular teaching path, and exact-automorphism isotypic
+self-block ties. Homogeneous scientific defaults and the linear latent
+operator contract are unchanged.
+
+### Added
+
+- Public measured cross-topology transfer API
+  (`koopman_graph.analysis.evaluate_topology_transfer` /
+  `TopologyTransferReport`) with mandatory `pernode` control; negative
+  transfer advantage is a valid outcome. Tutorial
+  `examples/37_cross_topology_transfer.ipynb` calls the API.
+- Directed hypergraph incidence modes on
+  `HypergraphKoopmanOperator`: `zhou_symmetric` (default),
+  `forward_random_walk`, `dual_random_walk` (factory
+  `koopman_hypergraph_incidence_mode`). Forward walk follows Ducournau &
+  Bretto (`Ducournau2014DirectedHypergraphs`); encode/advance orientations
+  may differ by design.
+- Optional Ray Train model-DDP fit path
+  (`koopman_graph.distributed.run_ray_train_fit_loop`, `[ray]` /
+  `[distributed]` with `ray[train]`). Distinct from
+  `fit_ensemble_with_ray` (ensemble *members*). Native DDP / Fabric remain
+  the recommended multi-GPU defaults; multi-node Ray Train is outside CI.
+- Fixed-union node churn: `allow_node_churn` + `presence_masks` at capacity
+  \(N_{\max}\) (typed hetero peers included). Losses ignore inactive nodes;
+  matvecs stay at capacity. Tutorial
+  `examples/41_node_churn_presence_masks.ipynb`.
+- Teaching traffic forecaster ports with `ForecasterProtocol` deviation
+  tables: `AGCRNBaseline` (`Bai2020AGCRN`), `MTGNNBaseline`
+  (`Wu2020MTGNN`), `STGODEBaseline` (`Fang2021STGODE`; optional
+  `[baselines-ode]`), `GraphCastBaseline` (`Lam2023GraphCast`; small-mesh
+  weather teaching slice). Tutorial
+  `examples/42_traffic_teaching_baselines.ipynb`.
+- Sheaf and cell-complex encode/decode MVPs (`encoder="sheaf"` /
+  `"cell_complex"`; `Hansen2020SheafNeuralNetworks`,
+  `Bodnar2022NeuralSheaf`, `Bodnar2021CWNetworks` motivation). Same linear
+  Koopman head as GNN / simplicial-1. Tutorial
+  `examples/43_tdl_sheaf_cell_ablation.ipynb`.
+- Contact-graph GraphVAMP teaching baseline (`GraphVAMPBaseline`) with
+  synthetic molecular oracle under `koopman_graph.datasets.molecular` and
+  optional deeptime interop (`koopman_graph.interop`, `[msm]` / `[md]`).
+  Positioning relative to GraphVAMPnets (`Ghorbani2022GraphVAMPNet`) /
+  VAMPnets (`Mardt2018VAMPnets`, `Wu2020VAMP`). Tutorial
+  `examples/44_graphvamp_md.ipynb`.
+- Exact-automorphism isotypic self-block ties
+  (`koopman_symmetry="isotypic"`; `compute_isotypic_decomposition`;
+  textbook \(K_n\) / \(C_n\) oracles — `Serre1977LinearRepresentations`).
+  Tutorial `examples/45_isotypic_symmetry.ipynb`. Neighbor-factor
+  (\(K_{\mathrm{nbr}}\)) isotypic tying is **not** shipped.
+- Sphinx: rewritten `limitations.rst` / `capabilities.rst`, architecture
+  v0.11 map, FAQ (Ray Train choice, transfer honesty, teaching vs
+  leaderboard), API / installation extras, molecular dataset card and
+  presence-vs-observation mask semantics, tutorials 37 / 41–45.
+
+### Notes
+
+- Teaching baselines are **not** LibCity / BasicTS leaderboard reproductions.
+  GraphCast is **not** a PEMS sensor-graph forecaster and **not** ERA5-scale
+  production training.
+- Presence-mask churn is a fixed-union \(N_{\max}\) MVP — not unbounded
+  open-world graph growth.
+- Sheaf / cell MVPs are **not** full TopologicX / cellular TDL parity. An
+  optional richer external-complex bridge was **cut** for this release.
+- GraphVAMP path is teaching / diagnostic — not Folding@home-scale MD, not
+  a PyEMMA replacement. A public alanine-dipeptide loader was **cut**; CI
+  uses the synthetic two-state oracle.
+- Isotypic mode requires exact Aut (pynauty); WL methods are refused. Do
+  not read orbit-label ties as isotypic reduction. Sample-efficiency wins
+  are not guaranteed.
+- Dense \(N\cdot d\) (or \(N_{\max}\cdot d\)) ceilings are unchanged by
+  trainers or presence masks.
+- Remaining honesty boundaries (leaderboard protocols, multi-node Ray Train,
+  infinite-dimensional ResDMD, equivariant latent \(K\), full DPK /
+  \(K^{2}\)VAE, etc.) are listed in Sphinx `limitations` without a deferred
+  roadmap of the same shipped items.
+
 ## [0.10.0] - 2026-08-01
 
 Heterogeneous-operator completion, matrix-free sparsity, ResDMD MVP,

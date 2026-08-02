@@ -241,8 +241,8 @@ def coerce_face_index(face_index: Tensor, *, num_nodes: int) -> Tensor:
     """Validate triangular ``face_index`` with shape ``(3, num_faces)``.
 
     Each column is one 2-simplex (triangle) whose entries are node ids in
-    ``[0, num_nodes)``. Used by simplicial-1 pipelines; sheaf / cell complexes
-    are out of scope.
+    ``[0, num_nodes)``. Used by simplicial-1 pipelines and by
+    :mod:`koopman_graph.nn.cell_complex` 2-cell incidence.
 
     Parameters
     ----------
@@ -366,6 +366,166 @@ def _maybe_validate_face_index(data: Data, *, num_nodes: int) -> None:
     coerce_face_index(face_index, num_nodes=num_nodes)
 
 
+def diagonal_sheaf_laplacian_matvec(
+    edge_index: Tensor,
+    x: Tensor,
+    source_diag: Tensor,
+    target_diag: Tensor,
+    *,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply a sheaf Laplacian with **diagonal** restriction maps.
+
+    Uses the same oriented-edge convention as
+    :func:`simplicial_one_laplacian_matvec` / ``B_1``: one column per undirected
+    edge. With identity diagonals this reduces to combinatorial
+    ``L_1 = B_1 B_1^T``. General (non-diagonal) restriction maps are out of
+    scope for the teaching MVP.
+
+    Coboundary on edge ``e = (s → t)``::
+
+        (δx)_e = r_t ⊙ x_t - r_s ⊙ x_s
+
+    then ``L_F x = δ* δ x`` with the adjoint that scatters ``r ⊙ (δx)`` back
+    to endpoints. For dense linear maps see
+    :func:`general_sheaf_laplacian_matvec`.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Oriented edges ``(2, E)``.
+    x : Tensor
+        Node features ``(num_nodes, channels)``.
+    source_diag : Tensor
+        Diagonal restriction at edge sources, shape ``(channels,)``.
+    target_diag : Tensor
+        Diagonal restriction at edge targets, shape ``(channels,)``.
+    num_nodes : int or None, optional
+        Node count. Defaults to ``x.size(0)``.
+
+    Returns
+    -------
+    Tensor
+        Features ``L_F @ x`` with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If shapes of ``x`` / diagonals are incompatible.
+    """
+    if x.ndim != 2:
+        msg = f"x must be 2D, got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    channels = int(x.size(1))
+    if source_diag.shape != (channels,) or target_diag.shape != (channels,):
+        msg = (
+            f"source_diag/target_diag must have shape ({channels},), "
+            f"got {tuple(source_diag.shape)} / {tuple(target_diag.shape)}"
+        )
+        raise ValueError(msg)
+    resolved_nodes = x.size(0) if num_nodes is None else int(num_nodes)
+    if resolved_nodes != x.size(0):
+        msg = f"num_nodes={resolved_nodes} does not match x.size(0)={x.size(0)}"
+        raise ValueError(msg)
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        msg = (
+            f"edge_index must have shape (2, num_edges), got {tuple(edge_index.shape)}"
+        )
+        raise ValueError(msg)
+
+    src = edge_index[0].to(dtype=torch.long)
+    tgt = edge_index[1].to(dtype=torch.long)
+    source_diag = source_diag.to(dtype=x.dtype, device=x.device)
+    target_diag = target_diag.to(dtype=x.dtype, device=x.device)
+    # δx on edges, then δ* back to nodes (diagonal real maps: R^T = R).
+    edge_signal = target_diag * x[tgt] - source_diag * x[src]
+    out = torch.zeros_like(x)
+    out.index_add_(0, tgt, target_diag * edge_signal)
+    out.index_add_(0, src, -source_diag * edge_signal)
+    return out
+
+
+def general_sheaf_laplacian_matvec(
+    edge_index: Tensor,
+    x: Tensor,
+    source_map: Tensor,
+    target_map: Tensor,
+    *,
+    num_nodes: int | None = None,
+) -> Tensor:
+    """Apply a sheaf Laplacian with general linear restriction maps.
+
+    Uses the same oriented-edge convention as
+    :func:`diagonal_sheaf_laplacian_matvec`. Coboundary on edge
+    ``e = (s → t)``::
+
+        (δx)_e = R_t x_t - R_s x_s
+
+    then ``L_F x = δ* δ x`` with adjoints ``R^T`` scattering edge signals
+    back to endpoints. Identity maps recover combinatorial ``L_1``.
+
+    Parameter cost is ``O(C^2)`` per endpoint map (vs ``O(C)`` for the
+    diagonal MVP). Callers should enforce a channel ceiling before allocating
+    learned maps.
+
+    Parameters
+    ----------
+    edge_index : Tensor
+        Oriented edges ``(2, E)``.
+    x : Tensor
+        Node features ``(num_nodes, channels)``.
+    source_map : Tensor
+        Restriction at edge sources, shape ``(channels, channels)``.
+    target_map : Tensor
+        Restriction at edge targets, shape ``(channels, channels)``.
+    num_nodes : int or None, optional
+        Node count. Defaults to ``x.size(0)``.
+
+    Returns
+    -------
+    Tensor
+        Features ``L_F @ x`` with the same shape as ``x``.
+
+    Raises
+    ------
+    ValueError
+        If shapes of ``x`` / maps are incompatible.
+    """
+    if x.ndim != 2:
+        msg = f"x must be 2D, got shape {tuple(x.shape)}"
+        raise ValueError(msg)
+    channels = int(x.size(1))
+    expected = (channels, channels)
+    if source_map.shape != expected or target_map.shape != expected:
+        msg = (
+            f"source_map/target_map must have shape {expected}, "
+            f"got {tuple(source_map.shape)} / {tuple(target_map.shape)}"
+        )
+        raise ValueError(msg)
+    resolved_nodes = x.size(0) if num_nodes is None else int(num_nodes)
+    if resolved_nodes != x.size(0):
+        msg = f"num_nodes={resolved_nodes} does not match x.size(0)={x.size(0)}"
+        raise ValueError(msg)
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        msg = (
+            f"edge_index must have shape (2, num_edges), got {tuple(edge_index.shape)}"
+        )
+        raise ValueError(msg)
+
+    src = edge_index[0].to(dtype=torch.long)
+    tgt = edge_index[1].to(dtype=torch.long)
+    source_map = source_map.to(dtype=x.dtype, device=x.device)
+    target_map = target_map.to(dtype=x.dtype, device=x.device)
+    # Batched R @ x_i  ==  x_batch @ R.T ; adjoint R.T @ s  ==  s @ R.
+    edge_signal = x[tgt] @ target_map.transpose(0, 1) - x[src] @ source_map.transpose(
+        0, 1
+    )
+    out = torch.zeros_like(x)
+    out.index_add_(0, tgt, edge_signal @ target_map)
+    out.index_add_(0, src, -(edge_signal @ source_map))
+    return out
+
+
 def simplicial_one_laplacian_matvec(
     edge_index: Tensor,
     x: Tensor,
@@ -376,7 +536,8 @@ def simplicial_one_laplacian_matvec(
 
     This is the simplicial-1 / combinatorial graph Laplacian associated with
     the oriented edges — **not** the symmetrically normalized ``L_sym`` used by
-    :func:`graph_laplacian_features`, and not a sheaf Laplacian.
+    :func:`graph_laplacian_features`, and not a sheaf Laplacian (see
+    :func:`diagonal_sheaf_laplacian_matvec` for the diagonal-restriction MVP).
 
     Parameters
     ----------

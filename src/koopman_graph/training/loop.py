@@ -125,7 +125,10 @@ def bind_pending_orbit_ties(
     ensure = getattr(koopman, "ensure_orbit_binding", None)
     if koopman is None or ensure is None:
         return
-    if not bool(getattr(koopman, "auto_orbits", False)):
+    pending_symmetry = bool(getattr(koopman, "auto_orbits", False)) or bool(
+        getattr(koopman, "isotypic_symmetry", False)
+    )
+    if not pending_symmetry:
         return
     if getattr(koopman, "orbit_partition", None) is not None:
         return

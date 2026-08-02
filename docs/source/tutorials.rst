@@ -58,6 +58,10 @@ Forecasting and benchmarks
      - SIR ring wave with Schur-stable spectrum
    * - `22_gnn_forecaster_comparison.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb>`_
      - GraphKoopman vs STGCN / DCRNN / Graph WaveNet references
+   * - `42_traffic_teaching_baselines.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/42_traffic_teaching_baselines.ipynb>`_
+     - Teaching AGCRN / MTGNN / STGODE on a METR-LA slice, plus GraphCast on a
+       separate small weather mesh (deviation tables; not leaderboard or
+       METR/PEMS score comparisons)
    * - `24_nonlinear_chaotic_benchmarks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/24_nonlinear_chaotic_benchmarks.ipynb>`_
      - Nonlinear/chaotic graph benchmarks vs linear vector DMD (RMSE + late-window PSD/Wasserstein on KS & Lorenz-96)
    * - `27_hypergraph_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/27_hypergraph_koopman.ipynb>`_
@@ -93,9 +97,15 @@ Analysis and stability
    * - `09_topology_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/09_topology_ablation.ipynb>`_
      - Topology ablation + GCN/SAGE/DiffConv/Transformer encoder zoo on anisotropic advection
    * - `37_cross_topology_transfer.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb>`_
-     - Zero-shot :math:`N_1\to N_2` transfer for ``koopman="graph"`` vs ``pernode`` (honest measurement; adaptive/orbit boundaries)
+     - Measured zero-shot :math:`N_1\to N_2` transfer via ``evaluate_topology_transfer`` (mandatory ``pernode``; negative advantage allowed; adaptive/orbit/isotypic excluded)
    * - `38_operator_factorization_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/38_operator_factorization_ablation.ipynb>`_
      - Factorized :math:`I\otimes K_{\mathrm{self}}+\hat{A}\otimes K_{\mathrm{nbr}}` vs joint :math:`Nd\times Nd` latent map (MSE, params, spectrum)
+   * - `41_node_churn_presence_masks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/41_node_churn_presence_masks.ipynb>`_
+     - Fixed-union presence-mask churn (:math:`N_{\max}`) vs observation masks; losses ignore inactive nodes
+   * - `43_tdl_sheaf_cell_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/43_tdl_sheaf_cell_ablation.ipynb>`_
+     - Sheaf / cell-complex / simplicial-1 / GNN encode ablation with the same linear Koopman head
+   * - `44_graphvamp_md.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/44_graphvamp_md.ipynb>`_
+     - GraphVAMP teaching path on the synthetic two-state contact-graph oracle (VAMP-2 / implied timescales; not production MD)
    * - `11_long_horizon_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/11_long_horizon_stability.ipynb>`_
      - Structural stability parameterizations, long rollouts
    * - `16_spectral_similarity_anomalies.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/16_spectral_similarity_anomalies.ipynb>`_
@@ -144,6 +154,8 @@ Control, observation, and advanced dynamics
      - Networked ``koopman="graph"`` under mid-horizon rewiring
    * - `35_symmetry_adapted_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/35_symmetry_adapted_operator.ipynb>`_
      - Orbit-tied ``K_self`` on a KS ring (``[symmetry]``); params / spectra / sample-efficiency
+   * - `45_isotypic_symmetry.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/45_isotypic_symmetry.ipynb>`_
+     - Isotypic vs auto-orbit vs shared ``K_self`` on a star (``pynauty``); params / holdout RMSE
    * - `19_bilinear_control_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/19_bilinear_control_koopman.ipynb>`_
      - Bilinear vs additive control (synthetic + SIR intervention)
    * - `25_kalman_koopman_state_estimation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/25_kalman_koopman_state_estimation.ipynb>`_

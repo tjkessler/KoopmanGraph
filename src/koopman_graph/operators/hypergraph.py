@@ -27,34 +27,66 @@ from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
 HypergraphSparsity = Literal["dense", "block_diagonal", "distributed"]
+HypergraphIncidenceMode = Literal[
+    "zhou_symmetric", "forward_random_walk", "dual_random_walk"
+]
+HYPERGRAPH_INCIDENCE_MODES: frozenset[str] = frozenset(
+    {"zhou_symmetric", "forward_random_walk", "dual_random_walk"}
+)
 
 
 class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     """Discrete Koopman step with self and hyperedge-mediated coupling.
 
-    Advances stacked node latents ``Z ∈ R^{N×d}`` via the linear map::
+    Advances stacked node latents ``Z ∈ R^{N×d}`` via a linear map whose
+    incidence factor depends on ``incidence_mode``:
 
-        vec(Z_{t+1}) = (I_N ⊗ K_self + Ĥ ⊗ K_hedge) vec(Z_t)
+    * ``"zhou_symmetric"`` (default)::
 
-    implemented as::
+          Z_next = Z @ K_self.T + (Ĥ Z) @ K_hedge.T
 
-        Z_next = Z @ K_self.T + (Ĥ Z) @ K_hedge.T
+      with Zhou ``Ĥ = D_v^{-1/2} B W_e D_e^{-1} Bᵀ D_v^{-1/2}`` on undirected
+      bipartite ``hyperedge_index``.
 
-    where ``Ĥ`` is the Zhou incidence-normalized hypergraph adjacency
-    ``D_v^{-1/2} B W_e D_e^{-1} Bᵀ D_v^{-1/2}``. Discrete-time only;
-    continuous hypergraph generators are out of scope for this module.
+    * ``"forward_random_walk"``::
 
-    Directed pairwise ``adjacency`` modes
-    (``"random_walk"`` / ``"dual_random_walk"`` on
-    :class:`~koopman_graph.operators.GraphKoopmanOperator`) are **not**
-    supported here: hypergraph coupling stays Zhou-symmetric by design.
-    Passing ``adjacency=...`` is rejected as an unexpected keyword.
+          Z_next = Z @ K_self.T + (P_fwd Z) @ K_hedge.T
 
-    When ``K_hedge = 0``, the step reduces exactly to the per-node map
-    ``Z @ K_self.T``. A 2-uniform hypergraph is related to
+      with Ducournau–Bretto ``P_fwd`` on directed ``tail_index`` /
+      ``head_index``.
+
+    * ``"dual_random_walk"``::
+
+          Z_next = Z @ K_self.T + (P_fwd Z) @ K_hedge.T + (P_bwd Z) @ K_bwd.T
+
+      (``K_hedge`` is the forward factor; ``K_bwd`` is the reverse factor).
+
+    Encode / advance orientation
+        The default encoder / decoder stacks
+        (:class:`~koopman_graph.nn.HypergraphEncoder`,
+        :class:`~torch_geometric.nn.HypergraphConv`) remain **undirected**:
+        they consume bipartite ``hyperedge_index``. Random-walk
+        ``incidence_mode`` values may still use directed ``tail_index`` /
+        ``head_index`` on advance. Encode and advance therefore need not
+        share an orientation; that asymmetry is intentional.
+
+    Directed-mode scope
+        ``forward_random_walk`` and ``dual_random_walk`` implement **one**
+        documented directed-hypergraph random-walk normalization
+        (Ducournau & Bretto, 2014), chosen and verified for this package.
+        The literature admits other normalizations; these modes are not
+        presented as the unique or canonical choice. They make **no** claim
+        of equivalence to simplicial or Hodge Laplacians.
+
+    Discrete-time only; continuous hypergraph generators are out of scope.
+    Passing graph-style ``adjacency=...`` is rejected as an unexpected
+    keyword — use ``incidence_mode`` instead.
+
+    When ``K_hedge = 0`` (and ``K_bwd = 0`` in dual mode), the step reduces
+    exactly to the per-node map ``Z @ K_self.T``. A 2-uniform undirected
+    hypergraph under Zhou mode is related to
     :class:`~koopman_graph.operators.GraphKoopmanOperator` by
-    ``Ĥ = ½(I + Â)`` (unweighted), which implies a matching factor map
-    (see tests).
+    ``Ĥ = ½(I + Â)`` (unweighted).
 
     Dense Zhou ``Ĥ`` for a static incidence may be reused across advances
     via :func:`~koopman_graph.graph_utils.clear_hyperedge_cache` /
@@ -68,7 +100,10 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     control_dim : int
         Exogenous control dimension (``0`` disables control).
     parameterization : Parameterization
-        Shared soft/structural parameterization for ``K_self`` and ``K_hedge``.
+        Shared soft/structural parameterization for ``K_self`` and
+        hyperedge factors.
+    incidence_mode : {"zhou_symmetric", "forward_random_walk", "dual_random_walk"}
+        Incidence normalization (default ``"zhou_symmetric"``).
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` and ``"block_diagonal"`` share the same
         forward hyperedge matvec; they differ in ``inverse_advance`` (exact
@@ -93,6 +128,7 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         control_mode: ControlMode = "additive",
         bilinear_rank: int | None = None,
         sparsity: HypergraphSparsity = "dense",
+        incidence_mode: HypergraphIncidenceMode = "zhou_symmetric",
         orbit_partition: Sequence[Sequence[int]] | None = None,
         auto_orbits: bool = False,
         orbit_method: OrbitMethod = "auto",
@@ -107,10 +143,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             Initialization for ``K_self``. ``K_hedge`` starts at zero for
             ``identity`` / ``identity_noise`` (plus optional noise on the
             hyperedge term for ``identity_noise`` / ``xavier``).
+            ``K_bwd`` (dual mode) initializes at exactly zero.
         init_scale : float, optional
             Noise scale for ``identity_noise`` / hyperedge jitter.
         parameterization : Parameterization, optional
-            Shared parameterization for both ``d×d`` factors.
+            Shared parameterization for the ``d×d`` factors.
         max_spectral_radius : float, optional
             Spectral bound for soft/structural modes.
         control_dim : int, optional
@@ -125,6 +162,10 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             approximate per-node inverse. ``"distributed"`` is accepted for
             construction / checkpoints (matrix-free inverse / spectrum are
             wired for discrete graph and hetero in 0.10).
+        incidence_mode : HypergraphIncidenceMode, optional
+            Incidence normalization (``zhou_symmetric`` /
+            ``forward_random_walk`` / ``dual_random_walk``). Default
+            ``"zhou_symmetric"`` preserves historical undirected behavior.
         orbit_partition : sequence of sequence of int or None, optional
             Explicit node-orbit partition tying ``K_self`` across orbit mates.
         auto_orbits : bool, optional
@@ -136,13 +177,21 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Raises
         ------
         ValueError
-            If ``sparsity`` is unsupported or construction args are invalid.
+            If ``sparsity`` / ``incidence_mode`` is unsupported or construction
+            args are invalid.
         """
         super().__init__()
         if sparsity not in {"dense", "block_diagonal", "distributed"}:
             msg = (
                 "HypergraphKoopmanOperator sparsity must be 'dense', "
                 f"'block_diagonal', or 'distributed', got {sparsity!r}"
+            )
+            raise ValueError(msg)
+        if incidence_mode not in HYPERGRAPH_INCIDENCE_MODES:
+            accepted = ", ".join(sorted(HYPERGRAPH_INCIDENCE_MODES))
+            msg = (
+                "HypergraphKoopmanOperator incidence_mode must be one of "
+                f"{{{accepted}}}, got {incidence_mode!r}"
             )
             raise ValueError(msg)
 
@@ -155,6 +204,7 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         self.control_mode = control_mode
         self.bilinear_rank = bilinear_rank
         self.sparsity = sparsity
+        self.incidence_mode: HypergraphIncidenceMode = incidence_mode
 
         # Self-term owns the optional control matrix B (and bilinear factors).
         self._self = KoopmanOperator(
@@ -175,6 +225,18 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             max_spectral_radius=max_spectral_radius,
             control_dim=0,
         )
+        self._bwd: KoopmanOperator | None
+        if incidence_mode == "dual_random_walk":
+            self._bwd = KoopmanOperator(
+                latent_dim,
+                init_mode="identity",
+                init_scale=init_scale,
+                parameterization=parameterization,
+                max_spectral_radius=max_spectral_radius,
+                control_dim=0,
+            )
+        else:
+            self._bwd = None
         self._reset_hyperedge_parameters()
         self._init_orbit_config(
             orbit_partition=orbit_partition,
@@ -182,32 +244,49 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             orbit_method=orbit_method,
         )
 
+    def _reset_factor_parameters(
+        self,
+        module: KoopmanOperator,
+        *,
+        allow_noise: bool,
+    ) -> None:
+        """Zero a hyperedge factor, optionally adding ``init_scale`` noise.
+
+        Parameters
+        ----------
+        module
+            See signature.
+        allow_noise
+            See signature."""
+        if self.parameterization == "dense":
+            dense_k = module.K
+            with torch.no_grad():
+                dense_k.zero_()
+                if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
+                    dense_k.add_(torch.randn_like(dense_k) * self.init_scale)
+            return
+        with torch.no_grad():
+            for parameter in module.parameters():
+                parameter.zero_()
+            if allow_noise and self.init_mode in {"identity_noise", "xavier"}:
+                for parameter in module.parameters():
+                    parameter.add_(torch.randn_like(parameter) * self.init_scale)
+
     def _reset_hyperedge_parameters(self) -> None:
-        """Initialize ``K_hedge`` near zero so the operator starts per-node-like.
+        """Initialize hyperedge factors for a per-node-like starting point.
 
         Notes
         -----
-        Dense mode zeros the stored ``K`` factor; factorized modes zero raw
-        parameters, optionally adding ``init_scale`` noise.
+        ``K_hedge`` may receive ``init_scale`` noise. ``K_bwd`` (dual mode)
+        is always exactly zero so ``dual_random_walk`` begins equivalent to
+        ``forward_random_walk``.
         """
-        if self.parameterization == "dense":
-            dense_k = self._hedge.K
-            with torch.no_grad():
-                dense_k.zero_()
-                if self.init_mode in {"identity_noise", "xavier"}:
-                    dense_k.add_(torch.randn_like(dense_k) * self.init_scale)
-            return
-
-        # Factorized modes: drive assembled K_hedge toward zero via raw params.
-        with torch.no_grad():
-            for parameter in self._hedge.parameters():
-                parameter.zero_()
-            if self.init_mode in {"identity_noise", "xavier"}:
-                for parameter in self._hedge.parameters():
-                    parameter.add_(torch.randn_like(parameter) * self.init_scale)
+        self._reset_factor_parameters(self._hedge, allow_noise=True)
+        if self._bwd is not None:
+            self._reset_factor_parameters(self._bwd, allow_noise=False)
 
     def reset_parameters(self) -> None:
-        """Reinitialize ``K_self`` / ``K_hedge`` (and control ``B`` when present).
+        """Reinitialize ``K_self`` / hyperedge factors (and control ``B``).
 
         Notes
         -----
@@ -216,6 +295,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         """
         self.reset_orbit_selves()
         self._hedge.reset_parameters()
+        if self._bwd is not None:
+            self._bwd.reset_parameters()
         self._reset_hyperedge_parameters()
 
     def clear_hyperedge_cache(self) -> None:
@@ -254,9 +335,28 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Returns
         -------
         Tensor
-            Assembled ``K_hedge``.
+            Assembled ``K_hedge`` (forward factor under random-walk modes).
         """
         return self._hedge.K
+
+    @property
+    def K_bwd(self) -> Tensor:
+        """Backward random-walk coupling (``dual_random_walk`` only).
+
+        Returns
+        -------
+        Tensor
+            Assembled ``K_bwd``.
+
+        Raises
+        ------
+        RuntimeError
+            If ``incidence_mode`` is not ``"dual_random_walk"``.
+        """
+        if self._bwd is None:
+            msg = "K_bwd is only available when incidence_mode='dual_random_walk'"
+            raise RuntimeError(msg)
+        return self._bwd.K
 
     @property
     def matrix(self) -> Tensor:
@@ -289,22 +389,29 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         k_self: Tensor,
         k_hedge: Tensor,
         *,
+        k_bwd: Tensor | None = None,
         control_matrix: Tensor | None = None,
         bilinear_matrices: Tensor | None = None,
     ) -> None:
-        """Write dense ``K_self`` / ``K_hedge`` (and optional control factors).
+        """Write dense ``K_self`` / ``K_hedge`` (and optional dual / control).
 
         Parameters
         ----------
         k_self : Tensor
             Dense self matrix ``(latent_dim, latent_dim)``.
         k_hedge : Tensor
-            Dense hyperedge matrix ``(latent_dim, latent_dim)``.
+            Dense hyperedge / forward matrix ``(latent_dim, latent_dim)``.
+        k_bwd : Tensor or None, optional
+            Dense backward matrix when ``incidence_mode="dual_random_walk"``.
+            Must be omitted otherwise.
         control_matrix : Tensor or None, optional
             Control matrix ``B`` when ``control_dim > 0``.
         bilinear_matrices : Tensor or None, optional
             Full-rank bilinear stack when ``control_mode="bilinear"``.
         """
+        if k_bwd is not None and self._bwd is None:
+            msg = "k_bwd is only valid when incidence_mode='dual_random_walk'"
+            raise ValueError(msg)
         if self._orbit_selves is None:
             self._self.set_dense_matrix(
                 k_self,
@@ -319,9 +426,12 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     bilinear_matrices=bilinear_matrices if orbit_id == 0 else None,
                 )
         self._hedge.set_dense_matrix(k_hedge, control_matrix=None)
+        if k_bwd is not None:
+            assert self._bwd is not None
+            self._bwd.set_dense_matrix(k_bwd, control_matrix=None)
 
     def bound_metric(self) -> Tensor:
-        """Return ``max(bound(K_self), bound(K_hedge))`` for factor monitoring.
+        """Return ``max`` of self / hyperedge factor bounds for monitoring.
 
         This is a **factor-level** soft/structural surrogate used by
         structural eigenvalue regularization. It is **not** the spectral
@@ -336,7 +446,10 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Tensor
             Scalar factor bound metric.
         """
-        return torch.maximum(self._self.bound_metric(), self._hedge.bound_metric())
+        metric = torch.maximum(self._self.bound_metric(), self._hedge.bound_metric())
+        if self._bwd is not None:
+            metric = torch.maximum(metric, self._bwd.bound_metric())
+        return metric
 
     def spectral_radius(self) -> Tensor:
         """Return ``max(|λ|)`` of ``K_self`` (not the full ``N·d`` operator).
@@ -358,25 +471,158 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         """
         return self._self.stability_certificate()
 
-    def effective_matrix(
+    def _require_directed_incidence(
         self,
-        hyperedge_index: Tensor,
-        num_nodes: int,
-        hyperedge_weight: Tensor | None = None,
         *,
-        k_self: Tensor | None = None,
-        k_self_blocks: Tensor | None = None,
-    ) -> Tensor:
-        """Assemble the dense effective operator ``I⊗K_self + Ĥ⊗K_hedge``.
+        tail_index: Tensor | None,
+        head_index: Tensor | None,
+    ) -> tuple[Tensor, Tensor]:
+        """Validate directed incidence for random-walk modes.
 
         Parameters
         ----------
-        hyperedge_index : Tensor
-            Bipartite incidence ``(2, nnz)``.
-        num_nodes : int
-            Number of nodes ``N``.
+        tail_index
+            See signature.
+        head_index
+            See signature.
+
+        Returns
+        -------
+            See signature."""
+        if tail_index is None or head_index is None:
+            msg = (
+                f"incidence_mode={self.incidence_mode!r} requires "
+                "tail_index and head_index"
+            )
+            raise ValueError(msg)
+        return tail_index, head_index
+
+    def _orbit_incidence_for_binding(
+        self,
+        *,
+        hyperedge_index: Tensor | None,
+        tail_index: Tensor | None,
+        head_index: Tensor | None,
+    ) -> Tensor | None:
+        """Choose bipartite incidence for orbit 2-section binding.
+
+        Parameters
+        ----------
+        hyperedge_index
+            See signature.
+        tail_index
+            See signature.
+        head_index
+            See signature.
+
+        Returns
+        -------
+            See signature."""
+        if self.incidence_mode == "zhou_symmetric":
+            return hyperedge_index
+        if tail_index is None or head_index is None:
+            return hyperedge_index
+        parts = [part for part in (tail_index, head_index) if part.numel() > 0]
+        if not parts:
+            device = tail_index.device
+            return torch.zeros(2, 0, dtype=torch.long, device=device)
+        return torch.cat(parts, dim=1)
+
+    def _dense_coupling_adjacency(
+        self,
+        *,
+        num_nodes: int,
+        dtype: torch.dtype,
+        hyperedge_index: Tensor | None,
+        hyperedge_weight: Tensor | None,
+        tail_index: Tensor | None,
+        head_index: Tensor | None,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Return ``(A_fwd, A_bwd|None)`` dense incidence operators.
+
+        Parameters
+        ----------
+        num_nodes
+            See signature.
+        dtype
+            See signature.
+        hyperedge_index
+            See signature.
+        hyperedge_weight
+            See signature.
+        tail_index
+            See signature.
+        head_index
+            See signature.
+
+        Returns
+        -------
+            See signature."""
+        from koopman_graph.graph_utils.topology import (
+            dense_hyperedge_dual_random_walk_factors,
+            dense_hyperedge_forward_random_walk_adjacency,
+            dense_hyperedge_normalized_adjacency,
+        )
+
+        if self.incidence_mode == "zhou_symmetric":
+            if hyperedge_index is None:
+                msg = "hyperedge_index is required when incidence_mode='zhou_symmetric'"
+                raise ValueError(msg)
+            hat = dense_hyperedge_normalized_adjacency(
+                hyperedge_index,
+                num_nodes=num_nodes,
+                hyperedge_weight=hyperedge_weight,
+                dtype=dtype,
+            )
+            return hat, None
+        tail, head = self._require_directed_incidence(
+            tail_index=tail_index,
+            head_index=head_index,
+        )
+        if self.incidence_mode == "forward_random_walk":
+            forward = dense_hyperedge_forward_random_walk_adjacency(
+                tail,
+                head,
+                num_nodes=num_nodes,
+                hyperedge_weight=hyperedge_weight,
+                dtype=dtype,
+            )
+            return forward, None
+        forward, backward = dense_hyperedge_dual_random_walk_factors(
+            tail,
+            head,
+            num_nodes=num_nodes,
+            hyperedge_weight=hyperedge_weight,
+            dtype=dtype,
+        )
+        return forward, backward
+
+    def effective_matrix(
+        self,
+        hyperedge_index: Tensor | None = None,
+        num_nodes: int | None = None,
+        hyperedge_weight: Tensor | None = None,
+        *,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
+        k_self: Tensor | None = None,
+        k_self_blocks: Tensor | None = None,
+    ) -> Tensor:
+        """Assemble the dense effective topology-coupled operator.
+
+        Zhou mode builds ``I⊗K_self + Ĥ⊗K_hedge``. Random-walk modes use
+        ``P_fwd`` / ``P_bwd`` with ``K_hedge`` / ``K_bwd``.
+
+        Parameters
+        ----------
+        hyperedge_index : Tensor or None, optional
+            Undirected bipartite incidence (Zhou mode).
+        num_nodes : int or None, optional
+            Number of nodes ``N``. Required.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights ``(M,)``.
+        tail_index, head_index : Tensor or None, optional
+            Directed incidence (random-walk modes).
         k_self : Tensor or None, optional
             Optional override for a **shared** self-coupling matrix (used when
             folding a global bilinear term into ``K_self`` for inversion).
@@ -396,28 +642,36 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             If both ``k_self`` and ``k_self_blocks`` are set, or if
             ``k_self_blocks`` has the wrong shape.
         """
-        from koopman_graph.graph_utils.topology import (
-            dense_hyperedge_normalized_adjacency,
-        )
-
+        if num_nodes is None:
+            msg = "num_nodes is required for effective_matrix"
+            raise ValueError(msg)
         if k_self is not None and k_self_blocks is not None:
             msg = "Pass at most one of k_self and k_self_blocks"
             raise ValueError(msg)
 
-        self.ensure_orbit_binding(num_nodes, hyperedge_index=hyperedge_index)
+        orbit_incidence = self._orbit_incidence_for_binding(
+            hyperedge_index=hyperedge_index,
+            tail_index=tail_index,
+            head_index=head_index,
+        )
+        self.ensure_orbit_binding(num_nodes, hyperedge_index=orbit_incidence)
         if k_self_blocks is None and k_self is None:
             k_self_blocks = self.tied_self_blocks(num_nodes)
         self_matrix = self.K_self if k_self is None else k_self
-        hat = dense_hyperedge_normalized_adjacency(
-            hyperedge_index,
+        a_fwd, a_bwd = self._dense_coupling_adjacency(
             num_nodes=num_nodes,
-            hyperedge_weight=hyperedge_weight,
             dtype=self_matrix.dtype,
+            hyperedge_index=hyperedge_index,
+            hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
         )
-        hedge = torch.kron(hat, self.K_hedge)
+        coupling = torch.kron(a_fwd, self.K_hedge)
+        if a_bwd is not None:
+            coupling = coupling + torch.kron(a_bwd, self.K_bwd)
         if k_self_blocks is None:
-            identity = torch.eye(num_nodes, dtype=hat.dtype, device=hat.device)
-            return torch.kron(identity, self_matrix) + hedge
+            identity = torch.eye(num_nodes, dtype=a_fwd.dtype, device=a_fwd.device)
+            return torch.kron(identity, self_matrix) + coupling
 
         expected = (num_nodes, self.latent_dim, self.latent_dim)
         if k_self_blocks.shape != expected:
@@ -427,14 +681,16 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             )
             raise ValueError(msg)
         self_blocks = torch.block_diag(*k_self_blocks.unbind(0))
-        return self_blocks + hedge
+        return self_blocks + coupling
 
     def dense_effective_inverse(
         self,
-        hyperedge_index: Tensor,
-        num_nodes: int,
+        hyperedge_index: Tensor | None = None,
+        num_nodes: int | None = None,
         *,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
         k_self: Tensor | None = None,
         k_self_blocks: Tensor | None = None,
     ) -> Tensor:
@@ -446,12 +702,14 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
 
         Parameters
         ----------
-        hyperedge_index : Tensor
-            Bipartite incidence ``(2, nnz)``.
-        num_nodes : int
+        hyperedge_index : Tensor or None, optional
+            Undirected bipartite incidence (Zhou mode).
+        num_nodes : int or None, optional
             Number of nodes ``N``.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights ``(M,)``.
+        tail_index, head_index : Tensor or None, optional
+            Directed incidence (random-walk modes).
         k_self : Tensor or None, optional
             Optional shared self-coupling override (see
             :meth:`effective_matrix`).
@@ -475,6 +733,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             hyperedge_index,
             num_nodes,
             hyperedge_weight=hyperedge_weight,
+            tail_index=tail_index,
+            head_index=head_index,
             k_self=k_self,
             k_self_blocks=k_self_blocks,
         )
@@ -482,22 +742,26 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
 
     def spectrum(
         self,
-        hyperedge_index: Tensor,
-        num_nodes: int,
+        hyperedge_index: Tensor | None = None,
+        num_nodes: int | None = None,
         *,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
         time_step: float = 1.0,
     ) -> KoopmanSpectrum:
         """Eigendecomposition of the effective ``N·d`` hyperedge-coupled operator.
 
         Parameters
         ----------
-        hyperedge_index : Tensor
-            Incidence used to build ``Ĥ``.
-        num_nodes : int
+        hyperedge_index : Tensor or None, optional
+            Undirected incidence (Zhou mode).
+        num_nodes : int or None, optional
             Node count ``N``.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        tail_index, head_index : Tensor or None, optional
+            Directed incidence (random-walk modes).
         time_step : float, optional
             Discrete sampling interval for growth rates / frequencies.
 
@@ -511,6 +775,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 hyperedge_index,
                 num_nodes,
                 hyperedge_weight=hyperedge_weight,
+                tail_index=tail_index,
+                head_index=head_index,
             ),
             time_step,
         )
@@ -518,9 +784,12 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     def forward(
         self,
         z: Tensor,
-        hyperedge_index: Tensor,
+        hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
         control: Tensor | None = None,
+        *,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
     ) -> Tensor:
         """Advance latents with hyperedge-coupled linear message passing.
 
@@ -528,12 +797,14 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         ----------
         z : Tensor
             Latent node states with shape ``(num_nodes, latent_dim)``.
-        hyperedge_index : Tensor
-            Bipartite incidence ``(2, nnz)`` used to build ``Ĥ``.
+        hyperedge_index : Tensor or None, optional
+            Undirected bipartite incidence (Zhou mode).
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
         control : Tensor or None, optional
             Exogenous control when ``control_dim > 0``.
+        tail_index, head_index : Tensor or None, optional
+            Directed incidence (random-walk modes).
 
         Returns
         -------
@@ -554,17 +825,50 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             raise ValueError(msg)
 
         from koopman_graph.graph_utils.topology import (
+            hyperedge_forward_random_walk_matvec,
             hyperedge_normalized_adjacency_matvec,
         )
 
-        self.ensure_orbit_binding(z.shape[0], hyperedge_index=hyperedge_index)
-        coupled = hyperedge_normalized_adjacency_matvec(
-            hyperedge_index,
-            z,
-            hyperedge_weight=hyperedge_weight,
-            num_nodes=z.shape[0],
+        orbit_incidence = self._orbit_incidence_for_binding(
+            hyperedge_index=hyperedge_index,
+            tail_index=tail_index,
+            head_index=head_index,
         )
-        z_next = self.apply_tied_self(z) + coupled @ self.K_hedge.T
+        self.ensure_orbit_binding(z.shape[0], hyperedge_index=orbit_incidence)
+
+        if self.incidence_mode == "zhou_symmetric":
+            if hyperedge_index is None:
+                msg = "hyperedge_index is required when incidence_mode='zhou_symmetric'"
+                raise ValueError(msg)
+            coupled = hyperedge_normalized_adjacency_matvec(
+                hyperedge_index,
+                z,
+                hyperedge_weight=hyperedge_weight,
+                num_nodes=z.shape[0],
+            )
+            z_next = self.apply_tied_self(z) + coupled @ self.K_hedge.T
+        else:
+            tail, head = self._require_directed_incidence(
+                tail_index=tail_index,
+                head_index=head_index,
+            )
+            coupled_fwd = hyperedge_forward_random_walk_matvec(
+                tail,
+                head,
+                z,
+                hyperedge_weight=hyperedge_weight,
+                num_nodes=z.shape[0],
+            )
+            z_next = self.apply_tied_self(z) + coupled_fwd @ self.K_hedge.T
+            if self.incidence_mode == "dual_random_walk":
+                coupled_bwd = hyperedge_forward_random_walk_matvec(
+                    head,
+                    tail,
+                    z,
+                    hyperedge_weight=hyperedge_weight,
+                    num_nodes=z.shape[0],
+                )
+                z_next = z_next + coupled_bwd @ self.K_bwd.T
 
         if self.control_dim == 0:
             if control is not None:
@@ -596,8 +900,10 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
     ) -> Tensor:
-        """Contract advance; requires ``hyperedge_index`` for hyperedge coupling.
+        """Contract advance with mode-dependent incidence requirements.
 
         Pairwise ``edge_index`` / ``edge_weight`` are accepted for call-site
         symmetry with graph operators but are ignored.
@@ -613,9 +919,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         edge_index, edge_weight : Tensor or None, optional
             Ignored pairwise topology (API symmetry).
         hyperedge_index : Tensor or None, optional
-            Required bipartite incidence for this step.
+            Required for ``incidence_mode="zhou_symmetric"``.
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        tail_index, head_index : Tensor or None, optional
+            Required for random-walk incidence modes.
 
         Returns
         -------
@@ -623,14 +931,13 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             Advanced latent states.
         """
         _ = delta_t, edge_index, edge_weight
-        if hyperedge_index is None:
-            msg = "hyperedge_index is required for HypergraphKoopmanOperator.advance"
-            raise ValueError(msg)
         return self.forward(
             z,
             hyperedge_index,
             hyperedge_weight,
             control=control,
+            tail_index=tail_index,
+            head_index=head_index,
         )
 
     def inverse_advance(
@@ -644,18 +951,20 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         edge_weight: Tensor | None = None,
         hyperedge_index: Tensor | None = None,
         hyperedge_weight: Tensor | None = None,
+        tail_index: Tensor | None = None,
+        head_index: Tensor | None = None,
     ) -> Tensor:
         """Recover previous latents from a hyperedge-coupled forward step.
 
         ``sparsity="dense"`` inverts the effective ``N·d`` map (exact;
         suitable for modest ``N``). ``sparsity="block_diagonal"`` uses a
-        one-step Jacobi / per-node ``d×d`` approximate inverse (exact when
-        ``K_hedge = 0`` or there are no hyperedges). ``inverse_matrix`` is
-        supported only for ``sparsity="dense"``.
+        one-step Jacobi / per-node ``d×d`` approximate inverse (Zhou mode
+        only; exact when ``K_hedge = 0`` or there are no hyperedges).
+        ``inverse_matrix`` is supported only for ``sparsity="dense"``.
 
         For ``control_mode="bilinear"``, global controls fold into a shared
         ``K_self`` override; per-node controls use node-specific bilinear self
-        blocks plus the same ``Ĥ ⊗ K_hedge`` coupling as forward advance.
+        blocks plus the same coupling as forward advance.
         Singular dense maps fall back to a pseudoinverse.
 
         Parameters
@@ -672,9 +981,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         edge_index, edge_weight : Tensor or None, optional
             Ignored pairwise topology (API symmetry).
         hyperedge_index : Tensor or None, optional
-            Required bipartite incidence.
+            Undirected bipartite incidence (Zhou mode).
         hyperedge_weight : Tensor or None, optional
             Optional hyperedge weights.
+        tail_index, head_index : Tensor or None, optional
+            Directed incidence (random-walk modes).
 
         Returns
         -------
@@ -692,12 +1003,6 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         )
 
         _ = delta_t, edge_index, edge_weight
-        if hyperedge_index is None:
-            msg = (
-                "hyperedge_index is required for "
-                "HypergraphKoopmanOperator.inverse_advance"
-            )
-            raise ValueError(msg)
         if z.ndim != 2 or z.shape[-1] != self.latent_dim:
             msg = (
                 "HypergraphKoopmanOperator.inverse_advance expects z with shape "
@@ -764,6 +1069,19 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             raise ValueError(msg)
 
         if self.sparsity == "block_diagonal":
+            if self.incidence_mode != "zhou_symmetric":
+                msg = (
+                    "block_diagonal inverse_advance supports only "
+                    "incidence_mode='zhou_symmetric'; use sparsity='dense' "
+                    f"for {self.incidence_mode!r}"
+                )
+                raise ValueError(msg)
+            if hyperedge_index is None:
+                msg = (
+                    "hyperedge_index is required for "
+                    "HypergraphKoopmanOperator.inverse_advance"
+                )
+                raise ValueError(msg)
             if inverse_matrix is not None:
                 msg = (
                     "inverse_matrix is only supported for "
@@ -803,6 +1121,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     hyperedge_index,
                     num_nodes,
                     hyperedge_weight=hyperedge_weight,
+                    tail_index=tail_index,
+                    head_index=head_index,
                     k_self=k_self_override,
                     k_self_blocks=k_self_blocks,
                 )
@@ -812,6 +1132,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     hyperedge_index,
                     num_nodes,
                     hyperedge_weight=hyperedge_weight,
+                    tail_index=tail_index,
+                    head_index=head_index,
                     k_self=k_self_override,
                     k_self_blocks=k_self_blocks,
                 )

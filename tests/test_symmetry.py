@@ -199,6 +199,7 @@ def test_symmetry_config_round_trip(tmp_path: Path) -> None:
     assert config["symmetry"]["auto_orbits"] is True
     assert config["symmetry"]["orbit_partition"] == [[0, 1, 2, 3]]
     assert config["symmetry"]["method"] == "auto"
+    assert config["symmetry"]["symmetry"] == "orbit"
 
     path = tmp_path / "sym.pt"
     save_checkpoint(model, path)
@@ -325,7 +326,9 @@ def test_node_orbit_partition_uses_mock_pynauty() -> None:
     )
     mock_pynauty = MagicMock()
     mock_pynauty.Graph.return_value = MagicMock()
-    mock_pynauty.autgroup.return_value = ([], 0, 0, [0, 0, 1, 1], 2)
+    # Source prefers ``autgrp`` (real pynauty API) over legacy ``autgroup``.
+    mock_pynauty.autgrp.return_value = ([], 0, 0, [0, 0, 1, 1], 2)
+    del mock_pynauty.autgroup
 
     with patch.dict(sys.modules, {"pynauty": mock_pynauty}):
         auto_partition = node_orbit_partition(edge_index, 4, method="auto")
@@ -333,7 +336,7 @@ def test_node_orbit_partition_uses_mock_pynauty() -> None:
 
     assert validate_orbit_partition(auto_partition, 4) == auto_partition
     assert validate_orbit_partition(exact_partition, 4) == exact_partition
-    assert mock_pynauty.autgroup.call_count == 2
+    assert mock_pynauty.autgrp.call_count == 2
 
 
 def test_node_orbit_partition_ignores_self_loops_and_empty_edges() -> None:

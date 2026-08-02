@@ -23,7 +23,8 @@ Topology-aware learning
   masked attention on edges — typically denser compute than GCN/GAT/DiffConv
   per edge × heads)
 * ``HypergraphEncoder`` / ``HypergraphDecoder`` with incidence
-  ``hyperedge_index`` (``koopman="hypergraph"``)
+  ``hyperedge_index`` (``koopman="hypergraph"``); directed incidence via
+  ``tail_index`` / ``head_index`` when using non-Zhou ``incidence_mode``
 * Heterogeneous / multiplex RelGraph peers
   (``RelGraphEncoder`` / ``RelGraphDecoder``) with
   ``koopman="hetero_graph"`` on ``HeteroGraphSnapshotSequence`` /
@@ -40,7 +41,19 @@ Topology-aware learning
 * Combinatorial simplicial-1 / Hodge lifts via
   ``SimplicialEncoder`` / ``SimplicialDecoder``
   (:mod:`koopman_graph.nn.simplicial`; oriented ``edge_index``, optional
-  ``face_index``) — not sheaf / full cell-complex TDL
+  ``face_index``)
+* Sheaf MVP peers
+  (:class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
+  :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`; factory
+  ``encoder="sheaf"``) — diagonal restriction maps by default; opt-in
+  dense maps under a documented channel ceiling. **Not** full TopologicX
+  parity (see :doc:`limitations`)
+* Cell-complex MVP peers
+  (:class:`~koopman_graph.nn.cell_complex.CellComplex`,
+  :class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
+  :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`; factory
+  ``encoder="cell_complex"``; ``Data.face_index`` required) — Hodge
+  :math:`L_0` mix with the same linear Koopman head
 * ``InvariantGeometryEncoder``
   (:mod:`koopman_graph.nn.equivariant`) — Tier A invariant distance /
   angle features from ``Data.pos`` lifted by a GCN; invariant features
@@ -53,11 +66,20 @@ Topology-aware learning
   observability
 * Per-snapshot ``edge_index`` (dynamic topology) and end-to-end
   ``edge_weight`` support
+* Opt-in fixed-union node churn: ``allow_node_churn=True`` with
+  :math:`N_{\max}` capacity and ``presence_masks`` ``(T, N_{\max})``
+  (losses ignore inactive nodes; matvecs stay at capacity — see
+  :doc:`limitations`)
 * Optional self-adaptive pairwise topology
   (``learn_topology="self_adaptive"``; ``koopman_graph.nn.AdaptiveAdjacency``)
 * Optional symmetry-adapted orbit-tied ``K_self``
   (``koopman_auto_orbits`` / ``koopman_orbit_partition``; requires
   ``pip install "koopman-graph[symmetry]"`` for auto orbits)
+* Opt-in isotypic self-block ties
+  (``koopman_symmetry="isotypic"``; exact automorphism groups;
+  :func:`~koopman_graph.graph_utils.compute_isotypic_decomposition`;
+  ``examples/45_isotypic_symmetry.ipynb``) — neighbor-factor isotypic
+  tying is not shipped; not a guaranteed sample-efficiency win
 
 Dynamics
 ~~~~~~~~
@@ -74,9 +96,13 @@ Dynamics
   ``"symmetric"`` (default), ``"random_walk"``
   (:math:`D_{\mathrm{out}}^{-1}A`), and ``"dual_random_walk"`` (forward plus
   reverse); factory keyword ``koopman_adjacency``; format-1
-  ``config.adjacency``. Hypergraph operators stay Zhou-symmetric and do not
-  expose ``adjacency``
+  ``config.adjacency``. Hypergraph operators do not expose ``adjacency``;
+  use ``incidence_mode`` instead
 * Hypergraph ``HypergraphKoopmanOperator`` (``koopman="hypergraph"``)
+  with ``incidence_mode``
+  ``"zhou_symmetric"`` (default), ``"forward_random_walk"``, or
+  ``"dual_random_walk"`` (factory ``koopman_hypergraph_incidence_mode``;
+  dual exposes ``K_hedge`` / ``K_bwd``)
 * Relational multiplex / typed
   ``HeteroGraphKoopmanOperator`` (``koopman="hetero_graph"``):
   :math:`K_{\mathrm{eff}} = I\otimes K_{\mathrm{self}} + \sum_r
@@ -120,6 +146,11 @@ Forecasting and training
   windowed mini-batching
 * Temporal train/val/test splits and per-horizon MAE, RMSE, and MAPE via
   ``koopman_graph.metrics.evaluate_forecast``
+* Measured cross-topology transfer via
+  :func:`~koopman_graph.analysis.evaluate_topology_transfer`
+  (structured report; mandatory ``pernode`` control; negative advantage
+  allowed — see :doc:`limitations` and
+  ``examples/37_cross_topology_transfer.ipynb``)
 
 Training performance
 ~~~~~~~~~~~~~~~~~~~~
@@ -179,13 +210,20 @@ inverse / spectrum; see :doc:`faq` and :doc:`limitations`).
 * Rank-aware window sampling
   (:class:`~koopman_graph.distributed.DistributedWindowSampler`) and
   trajectory sharding helpers (including hetero)
+* Optional Ray Train *model* DDP via
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop`
+  (requires ``pip install "koopman-graph[ray]"`` or ``[distributed]``;
+  wraps Ray Train ``TorchTrainer`` around the same scientific fit loop).
+  Prefer native DDP / Fabric unless you already standardize on Ray Train.
+  Multi-node Ray Train is outside the CI contract — see
+  :doc:`limitations`
 * Optional Ray parallel ensemble member fits via
   :func:`~koopman_graph.distributed.fit_ensemble_with_ray` or
   ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
-  member_factory=...)`` (requires ``pip install "koopman-graph[ray]"``).
-  Sequential ensemble fit remains the default. This does **not** change
-  UQ coverage guarantees — members stay independent fits. Prefer native
-  DDP / Fabric for multi-GPU *model* training (Ray Train is out of scope)
+  member_factory=...)`` (same ``[ray]`` extra). Sequential ensemble fit
+  remains the default. This does **not** change UQ coverage guarantees —
+  members stay independent fits. Do **not** confuse ensemble Ray with
+  :func:`~koopman_graph.distributed.run_ray_train_fit_loop`
 * Example script (outside ``nbmake`` CI)::
 
     torchrun --standalone --nproc_per_node=2 \\
@@ -202,9 +240,9 @@ script; the library does not expose a Tune / AutoML API). Optional
 :mod:`koopman_graph.distributed.dask_prep` helpers
 (``materialize_sequences``, ``materialize_window_index_list``) for offline
 prep. The library does **not** import Dask on the training path; trainers
-remain native DDP / Fabric / Ray ensemble (see :doc:`faq`). Distributed
-data-parallel training does **not** reduce dense :math:`N\cdot d`
-operator ceilings — see :doc:`limitations` (Scale).
+remain native DDP / Fabric / Ray Train / Ray ensemble (see :doc:`faq`).
+Distributed data-parallel training does **not** reduce dense
+:math:`N\cdot d` operator ceilings — see :doc:`limitations` (Scale).
 
 Analysis
 ~~~~~~~~
@@ -302,10 +340,17 @@ Research tooling
   ``selected_rank`` is recorded
 * Topology-blind VAMP-2 precursor helpers
   (``vamp2_score`` / ``vamp2_loss``; optional ``[msm]`` for deeptime
-  oracle tests) — not GraphVAMPnets
-* Lightweight STGCN / DCRNN / Graph WaveNet references in
-  ``koopman_graph.baselines.gnn`` (teaching baselines, not dedicated-library
-  SOTA)
+  oracle tests)
+* Contact-graph GraphVAMP teaching baseline
+  (:class:`~koopman_graph.baselines.GraphVAMPBaseline`) with synthetic
+  molecular oracles under :mod:`koopman_graph.datasets.molecular` and
+  optional deeptime interop (:mod:`koopman_graph.interop`; ``[msm]`` /
+  ``[md]``) — teaching / diagnostic, not GraphVAMPnets production or a
+  PyEMMA replacement (see :doc:`limitations`)
+* Lightweight STGCN / DCRNN / Graph WaveNet references plus teaching
+  AGCRN / MTGNN / STGODE / GraphCast ports in
+  ``koopman_graph.baselines.gnn`` (``ForecasterProtocol`` deviation
+  tables; not dedicated-library SOTA or leaderboard-matched protocols)
 * Benchmark datasets and Jupyter tutorials under ``examples/``
 * Model ``save`` / ``load`` checkpoints; ≥90% coverage enforced in CI
 

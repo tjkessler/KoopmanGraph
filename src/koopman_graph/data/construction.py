@@ -38,6 +38,8 @@ class ConstructedSnapshots:
         Coerced timestamp tensor, or ``None``.
     observation_masks : Tensor or None
         Coerced boolean observation mask, or ``None``.
+    presence_masks : Tensor or None
+        Coerced boolean presence mask, or ``None``.
     allow_dynamic_topology : bool
         Whether the container should permit per-snapshot topology.
     """
@@ -46,6 +48,7 @@ class ConstructedSnapshots:
     control_inputs: Tensor | None = None
     timestamps: Tensor | None = None
     observation_masks: Tensor | None = None
+    presence_masks: Tensor | None = None
     allow_dynamic_topology: bool = False
 
 
@@ -59,6 +62,7 @@ def build_snapshots_from_arrays(
     control_inputs: ArrayLike | None = None,
     timestamps: ArrayLike | None = None,
     observation_masks: ArrayLike | None = None,
+    presence_masks: ArrayLike | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> ConstructedSnapshots:
     """Build static-topology snapshots from node feature arrays.
@@ -87,6 +91,9 @@ def build_snapshots_from_arrays(
     observation_masks : array-like, optional
         Per-timestep node observation mask with shape
         ``(num_timesteps, num_nodes)``.
+    presence_masks : array-like, optional
+        Per-timestep entity presence mask with shape
+        ``(num_timesteps, num_nodes)``.
     dtype : torch.dtype, optional
         Floating dtype used when converting numpy inputs to torch tensors.
         Default is ``torch.float32``.
@@ -114,6 +121,9 @@ def build_snapshots_from_arrays(
         None
         if observation_masks is None
         else as_tensor(observation_masks, dtype=torch.bool)
+    )
+    presence = (
+        None if presence_masks is None else as_tensor(presence_masks, dtype=torch.bool)
     )
 
     if features.ndim != 3:
@@ -172,6 +182,7 @@ def build_snapshots_from_arrays(
         control_inputs=controls,
         timestamps=times,
         observation_masks=masks,
+        presence_masks=presence,
         allow_dynamic_topology=False,
     )
 
@@ -184,6 +195,7 @@ def build_snapshots_from_dynamic_arrays(
     control_inputs: ArrayLike | None = None,
     timestamps: ArrayLike | None = None,
     observation_masks: ArrayLike | None = None,
+    presence_masks: ArrayLike | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> ConstructedSnapshots:
     """Build dynamic-topology snapshots from per-timestep edge indices.
@@ -206,6 +218,9 @@ def build_snapshots_from_dynamic_arrays(
         ``(num_timesteps,)``.
     observation_masks : array-like, optional
         Per-timestep node observation mask with shape
+        ``(num_timesteps, num_nodes)``.
+    presence_masks : array-like, optional
+        Per-timestep entity presence mask with shape
         ``(num_timesteps, num_nodes)``.
     dtype : torch.dtype, optional
         Floating dtype used when converting numpy inputs to torch tensors.
@@ -291,11 +306,15 @@ def build_snapshots_from_dynamic_arrays(
         if observation_masks is None
         else as_tensor(observation_masks, dtype=torch.bool)
     )
+    presence = (
+        None if presence_masks is None else as_tensor(presence_masks, dtype=torch.bool)
+    )
     return ConstructedSnapshots(
         snapshots=snapshots,
         control_inputs=controls,
         timestamps=times,
         observation_masks=masks,
+        presence_masks=presence,
         allow_dynamic_topology=True,
     )
 
@@ -386,10 +405,15 @@ def build_windowed_snapshots(
     if sequence.observation_masks is not None:
         observation_masks = sequence.observation_masks[ends]
 
+    presence_masks = None
+    if sequence.presence_masks is not None:
+        presence_masks = sequence.presence_masks[ends]
+
     return ConstructedSnapshots(
         snapshots=stacked_snapshots,
         control_inputs=control_inputs,
         timestamps=timestamps,
         observation_masks=observation_masks,
+        presence_masks=presence_masks,
         allow_dynamic_topology=sequence.allow_dynamic_topology,
     )

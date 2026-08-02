@@ -26,13 +26,170 @@ from koopman_graph.spectrum_types import (
 # without importing this analysis package. Re-export for the public
 # ``koopman_graph.analysis`` surface.
 __all__ = [
+    "ImpliedTimescales",
     "ModeEnergyAttribution",
     "attribute_mode_energy",
     "compute_generator_spectrum",
     "compute_spectrum",
     "decode_mode_shapes",
     "discrete_spectrum_at_delta_t",
+    "implied_timescales",
 ]
+
+
+@dataclass(frozen=True)
+class ImpliedTimescales:
+    """Discrete-time implied timescales from Koopman eigenvalues.
+
+    For each eigenvalue ``λ`` of a discrete-time lag-``τ`` operator,
+
+    .. math::
+
+        t = -\\tau / \\ln|\\lambda|
+
+    when ``ε < |λ| < 1 - ε``. Entries with ``|λ| ≥ 1 - ε`` (including the
+    stationary eigenvalue near 1) or ``|λ| ≤ ε`` are **invalid**: the
+    corresponding timescale is ``+∞`` and :attr:`valid` is ``False``. This
+    is never a silent ``NaN``.
+
+    Timescales inherit the unit of ``τ``. With ``lag_steps`` alone,
+    ``τ = lag_steps`` and :attr:`unit` is ``\"steps\"``. With an optional
+    positive ``timestep``, ``τ = lag_steps × timestep`` and :attr:`unit` is
+    the caller-supplied ``timestep_unit`` (for example ``\"ps\"``).
+
+    Honesty contract
+    ----------------
+    Implied timescales depend on the chosen lag and assume a discrete-time
+    Markov / Koopman spectrum at that lag. They are a diagnostic, not a
+    guarantee of continuous-time rates or MSM convergence.
+
+    Attributes
+    ----------
+    timescales : Tensor
+        Real timescales with the same leading shape as the input
+        eigenvalues; invalid entries are ``+∞``.
+    valid : Tensor
+        Boolean mask aligned with ``timescales`` (``True`` when the
+        timescale is finite and meaningful).
+    magnitudes : Tensor
+        ``|λ|`` used in the formula (real, non-negative).
+    lag_steps : int
+        Integer lag in snapshot / frame steps.
+    tau : float
+        Lag ``τ`` used in the formula (in :attr:`unit`).
+    unit : str
+        Unit of ``tau`` and ``timescales`` (``\"steps\"`` or a physical
+        unit name).
+    timestep : float or None
+        Optional physical duration of one snapshot step.
+    magnitude_atol : float
+        Absolute tolerance ``ε`` used for the validity window.
+    """
+
+    timescales: Tensor
+    valid: Tensor
+    magnitudes: Tensor
+    lag_steps: int
+    tau: float
+    unit: str
+    timestep: float | None
+    magnitude_atol: float
+
+
+def implied_timescales(
+    eigenvalues: Tensor,
+    *,
+    lag_steps: int,
+    timestep: float | None = None,
+    timestep_unit: str | None = None,
+    magnitude_atol: float = 1e-8,
+) -> ImpliedTimescales:
+    """Compute discrete-time implied timescales from eigenvalues.
+
+    Uses :math:`t_i = -\\tau / \\ln|\\lambda_i|` with
+    :math:`\\tau =` ``lag_steps`` (unit ``\"steps\"``) or
+    ``lag_steps * timestep`` when ``timestep`` is provided.
+
+    Parameters
+    ----------
+    eigenvalues : Tensor
+        Discrete-time Koopman / transfer eigenvalues (real or complex).
+    lag_steps : int
+        Positive lag in **snapshot steps** (frames).
+    timestep : float or None, optional
+        Positive physical duration of one snapshot step. When set,
+        timescales are reported in ``timestep_unit``. Default is ``None``
+        (timescales in snapshot steps).
+    timestep_unit : str or None, optional
+        Unit name for ``timestep`` (required when ``timestep`` is set),
+        for example ``\"ps\"`` or ``\"ns\"``.
+    magnitude_atol : float, optional
+        Absolute tolerance ``ε`` for the validity window
+        ``ε < |λ| < 1 - ε``. Default is ``1e-8``.
+
+    Returns
+    -------
+    ImpliedTimescales
+        Timescales, validity mask, magnitudes, and unit metadata.
+
+    Raises
+    ------
+    ValueError
+        If lag / timestep / unit arguments are inconsistent or invalid.
+    """
+    if lag_steps < 1:
+        msg = f"lag_steps must be >= 1, got {lag_steps}"
+        raise ValueError(msg)
+    if magnitude_atol <= 0.0:
+        msg = f"magnitude_atol must be > 0, got {magnitude_atol}"
+        raise ValueError(msg)
+    if magnitude_atol >= 0.5:
+        msg = (
+            f"magnitude_atol must be < 0.5 so the validity window is "
+            f"non-empty, got {magnitude_atol}"
+        )
+        raise ValueError(msg)
+
+    if timestep is None:
+        if timestep_unit is not None:
+            msg = "timestep_unit must be None when timestep is None"
+            raise ValueError(msg)
+        tau = float(lag_steps)
+        unit = "steps"
+    else:
+        if not (timestep > 0.0) or timestep != timestep:
+            msg = f"timestep must be a finite value > 0, got {timestep}"
+            raise ValueError(msg)
+        if timestep_unit is None or not str(timestep_unit).strip():
+            msg = "timestep_unit is required when timestep is provided"
+            raise ValueError(msg)
+        tau = float(lag_steps) * float(timestep)
+        unit = str(timestep_unit).strip()
+
+    magnitudes = eigenvalues.detach().abs().real.to(dtype=torch.float64)
+    lower = float(magnitude_atol)
+    upper = 1.0 - lower
+    valid = (magnitudes > lower) & (magnitudes < upper)
+    # Avoid log(0) / log(1) by evaluating only on the valid window.
+    log_mag = torch.empty_like(magnitudes)
+    log_mag = torch.where(
+        valid,
+        magnitudes.clamp(min=lower, max=upper).log(),
+        torch.ones_like(magnitudes),
+    )
+    timescales = torch.full_like(magnitudes, float("inf"))
+    timescales = torch.where(valid, -tau / log_mag, timescales)
+
+    return ImpliedTimescales(
+        timescales=timescales,
+        valid=valid,
+        magnitudes=magnitudes,
+        lag_steps=int(lag_steps),
+        tau=tau,
+        unit=unit,
+        timestep=None if timestep is None else float(timestep),
+        magnitude_atol=float(magnitude_atol),
+    )
 
 
 @dataclass(frozen=True)

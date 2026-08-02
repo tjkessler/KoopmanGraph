@@ -381,6 +381,59 @@ def validate_hetero_observation_masks(
     return validated
 
 
+def validate_hetero_presence_masks(
+    presence_masks: Mapping[str, Tensor],
+    *,
+    num_timesteps: int,
+    num_nodes: Mapping[str, int],
+) -> dict[str, Tensor]:
+    """Validate per-type entity presence masks for a hetero sequence.
+
+    Presence marks whether an entity **exists** in each type's fixed union
+    (``N_τ``). Distinct from :func:`validate_hetero_observation_masks`
+    (measured vs present).
+
+    Parameters
+    ----------
+    presence_masks : mapping of str to Tensor
+        Masks keyed by node type; each value has shape ``(T, N_τ)``.
+    num_timesteps : int
+        Expected number of snapshots.
+    num_nodes : mapping of str to int
+        Expected node count per type.
+
+    Returns
+    -------
+    dict of str to Tensor
+        Boolean masks for every node type in ``num_nodes``.
+
+    Raises
+    ------
+    ValueError
+        If keys, shapes, or present-entity constraints fail.
+    """
+    expected_types = set(num_nodes)
+    mask_types = set(presence_masks)
+    if mask_types != expected_types:
+        msg = (
+            "presence_masks keys must match node types exactly; "
+            f"got {sorted(mask_types)!r}, expected {sorted(expected_types)!r}"
+        )
+        raise ValueError(msg)
+    validated: dict[str, Tensor] = {}
+    for node_type, mask in presence_masks.items():
+        try:
+            validated[node_type] = validate_presence_masks(
+                mask,
+                num_timesteps=num_timesteps,
+                num_nodes=int(num_nodes[node_type]),
+            )
+        except ValueError as exc:
+            msg = f"presence_masks[{node_type!r}]: {exc}"
+            raise ValueError(msg) from exc
+    return validated
+
+
 def validate_hetero_control_inputs(
     control_inputs: Tensor | Mapping[str, Tensor],
     *,
@@ -781,6 +834,193 @@ def validate_observation_masks(
         )
         raise ValueError(msg)
     return mask
+
+
+def validate_presence_masks(
+    presence_masks: Tensor,
+    *,
+    num_timesteps: int,
+    num_nodes: int,
+) -> Tensor:
+    """Validate optional per-snapshot entity presence masks.
+
+    Presence marks whether an entity **exists** in the fixed union universe
+    at a timestep (shape ``(T, N_max)``). This is distinct from
+    :func:`validate_observation_masks`, which marks whether an existing
+    entity was **measured**. Inactive entities may carry padded zero feature
+    rows; enforcing that padding is a separate churn-contract concern.
+
+    Parameters
+    ----------
+    presence_masks : Tensor
+        Boolean or 0/1 mask with shape ``(num_timesteps, num_nodes)``.
+        ``True`` (or ``1``) means the entity is present at that timestep.
+    num_timesteps : int
+        Expected number of snapshots.
+    num_nodes : int
+        Expected union universe size ``N_max``.
+
+    Returns
+    -------
+    Tensor
+        Boolean mask with shape ``(num_timesteps, num_nodes)``.
+
+    Raises
+    ------
+    ValueError
+        If ``presence_masks`` has invalid shape, dtype, or no present entities
+        at any timestep.
+    """
+    if presence_masks.ndim != 2:
+        msg = (
+            "presence_masks must have shape (num_timesteps, num_nodes), "
+            f"got {tuple(presence_masks.shape)}"
+        )
+        raise ValueError(msg)
+    if presence_masks.shape != (num_timesteps, num_nodes):
+        msg = (
+            "presence_masks shape "
+            f"{tuple(presence_masks.shape)} does not match "
+            f"(num_timesteps={num_timesteps}, num_nodes={num_nodes})"
+        )
+        raise ValueError(msg)
+    if presence_masks.dtype not in (torch.bool, torch.float, torch.int, torch.long):
+        msg = (
+            "presence_masks must be boolean or numeric 0/1, "
+            f"got dtype {presence_masks.dtype}"
+        )
+        raise ValueError(msg)
+
+    if presence_masks.dtype != torch.bool:
+        unique = torch.unique(presence_masks)
+        if not torch.all((unique == 0) | (unique == 1)):
+            msg = "numeric presence_masks must contain only 0 and 1"
+            raise ValueError(msg)
+
+    mask = presence_masks.bool()
+    empty_timesteps = torch.where(~mask.any(dim=1))[0]
+    if empty_timesteps.numel() > 0:
+        msg = (
+            "presence_masks must have at least one present entity per timestep; "
+            f"timesteps with no present entities: {empty_timesteps.tolist()}"
+        )
+        raise ValueError(msg)
+    return mask
+
+
+def validate_entity_ids(
+    entity_ids: Sequence[object],
+    *,
+    num_nodes: int,
+) -> tuple[str | int, ...]:
+    """Validate optional stable entity keys for a fixed union universe.
+
+    Parameters
+    ----------
+    entity_ids : sequence
+        One key per row of the fixed universe (``N_max``). Keys must be
+        ``str`` or ``int`` and unique.
+    num_nodes : int
+        Expected universe size ``N_max``.
+
+    Returns
+    -------
+    tuple of str or int
+        Frozen unique entity keys in row order.
+
+    Raises
+    ------
+    ValueError
+        If length mismatches ``num_nodes``, keys are not ``str``/``int``, or
+        duplicates appear.
+    """
+    ids = tuple(entity_ids)
+    if len(ids) != num_nodes:
+        msg = (
+            f"entity_ids length {len(ids)} does not match "
+            f"num_nodes={num_nodes} (fixed union N_max)"
+        )
+        raise ValueError(msg)
+    typed_ids: list[str | int] = []
+    for index, key in enumerate(ids):
+        if not isinstance(key, (str, int)) or isinstance(key, bool):
+            msg = (
+                "entity_ids entries must be str or int; "
+                f"got {type(key).__name__} at index {index}"
+            )
+            raise ValueError(msg)
+        typed_ids.append(key)
+    if len(set(typed_ids)) != len(typed_ids):
+        seen: set[str | int] = set()
+        duplicates: list[str | int] = []
+        for key in typed_ids:
+            if key in seen and key not in duplicates:
+                duplicates.append(key)
+            seen.add(key)
+        msg = f"entity_ids must be unique; duplicates: {duplicates}"
+        raise ValueError(msg)
+    return tuple(typed_ids)
+
+
+def validate_node_churn_policy(
+    *,
+    allow_node_churn: bool,
+    presence_masks: Tensor | Mapping[str, Tensor] | None,
+) -> None:
+    """Enforce the fixed-union presence / ``allow_node_churn`` contract.
+
+    Default ``allow_node_churn=False`` rejects any presence drop (a ``False``
+    entry). Churn mode requires presence masks; when enabled, inactive feature
+    rows may be padded zeros (zeros are conventional, not required here).
+    Homogeneous sequences pass a ``(T, N_max)`` tensor; hetero sequences pass
+    a per-type mapping of ``(T, N_τ)`` masks.
+
+    Parameters
+    ----------
+    allow_node_churn : bool
+        Whether entity drop-in/out via presence masks is permitted.
+    presence_masks : Tensor, mapping of str to Tensor, or None
+        Validated boolean presence masks, or ``None``.
+
+    Raises
+    ------
+    ValueError
+        If churn is enabled without presence masks, or if churn is disabled
+        but presence masks drop any entity.
+    """
+    if allow_node_churn and presence_masks is None:
+        msg = (
+            "allow_node_churn=True requires presence_masks; "
+            "churn without a presence contract is undefined"
+        )
+        raise ValueError(msg)
+    if presence_masks is None:
+        return
+    if isinstance(presence_masks, Mapping):
+        if allow_node_churn:
+            return
+        for node_type, mask in presence_masks.items():
+            if not bool(mask.all()):
+                inactive = torch.nonzero(~mask, as_tuple=False)
+                sample = inactive[:5].tolist()
+                msg = (
+                    f"presence_masks[{node_type!r}] drop one or more entities but "
+                    "allow_node_churn=False; set allow_node_churn=True for "
+                    "fixed-union churn, or keep all entities present. Sample "
+                    f"inactive (timestep, node) pairs: {sample}"
+                )
+                raise ValueError(msg)
+        return
+    if not allow_node_churn and not bool(presence_masks.all()):
+        inactive = torch.nonzero(~presence_masks, as_tuple=False)
+        # Report a short sample of (t, n) pairs for debugging.
+        sample = inactive[:5].tolist()
+        msg = (
+            "presence_masks drop one or more entities but allow_node_churn=False; "
+            "set allow_node_churn=True for fixed-union churn, or keep all "
+            f"entities present. Sample inactive (timestep, node) pairs: {sample}"
+        )
+        raise ValueError(msg)
 
 
 def validate_control_inputs(

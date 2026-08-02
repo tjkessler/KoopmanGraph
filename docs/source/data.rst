@@ -138,9 +138,72 @@ Dataset card: PEMS08
 Loader: :class:`~koopman_graph.datasets.PemsTrafficBenchmark` with
 ``variant="08"``.
 
+Dataset card: synthetic two-state molecular oracle
+--------------------------------------------------
+
+* **Scope:** Seeded two-state Markov teaching trajectory on a fixed
+  four-atom contact graph for GraphVAMP / implied-timescale CI oracles
+* **Size:** 4 nodes, 2 feature channels; default ``256`` snapshot steps
+  (procedural — no large binary in git)
+* **Format:** :class:`~koopman_graph.data.GraphSnapshotSequence` of PyG
+  ``Data`` (``float32`` node features, ``long`` contact ``edge_index``);
+  oracle constants in package resource
+  ``koopman_graph/datasets/molecular/data/synthetic_two_state_v1.json``
+* **Source / provenance:** In-repo generator
+  :func:`~koopman_graph.datasets.molecular.generate_synthetic_two_state`
+  (:mod:`koopman_graph.datasets.molecular.synthetic`); not experimental
+  molecular dynamics. Contact topology from fixed positions via
+  :func:`~koopman_graph.datasets.molecular.contact_edge_index` (cutoff
+  ``0.5`` nm)
+* **Citation:** No external publication — package teaching fixture
+  (``synthetic_two_state_v1``)
+* **License:** Apache-2.0 (same as the package)
+* **Units:** Positions and contact cutoff in **nm**; teaching timestep
+  ``1.0`` **ps** per snapshot; oracle slow timescale in **snapshot steps**
+  at lag ``1`` (closed form :math:`-1 / \ln(1 - 2p)` with default
+  ``p = 0.05`` → :math:`\lambda = 0.9`, timescale approximately ``9.49``
+  steps)
+* **Limitations:** Toy two-state switching with additive Gaussian feature
+  noise; not a biomolecule; not Folding@home-scale MD; not a PyEMMA
+  replacement. Optional ``[md]`` / ``load_md_trajectory`` stubs do **not**
+  ship a public alanine-dipeptide or other experimental MD loader
+* **Version:** ``synthetic_two_state_v1``
+
+Loader: :func:`~koopman_graph.datasets.molecular.generate_synthetic_two_state`
+(metadata:
+:func:`~koopman_graph.datasets.molecular.load_synthetic_two_state_metadata`).
+See ``examples/44_graphvamp_md.ipynb`` and :doc:`tutorials`.
+
+Presence masks vs observation masks
+-----------------------------------
+
+Sequences may carry two independent boolean mask stacks. Do not conflate
+them:
+
+* **Observation masks** (``observation_masks``, shape ``(T, N)`` or typed
+  hetero equivalent) mark which nodes are **measured** at each timestep
+  (``True`` = observed). They support partial observability and imputation
+  workflows (e.g. notebook 17 / 25). A node may be present in the universe
+  but unobserved.
+* **Presence masks** (``presence_masks``, shape :math:`(T, N_{\max})`) mark
+  which entities are **active in the fixed union** at each timestep
+  (``True`` = present). Drops require ``allow_node_churn=True`` on
+  :class:`~koopman_graph.data.GraphSnapshotSequence` (or the typed hetero
+  peer). Inactive rows stay at capacity :math:`N_{\max}` (padded zeros is
+  conventional); losses ignore inactive nodes; operator matvecs still run
+  at full capacity. This is **not** unbounded open-world graph growth
+  (see :doc:`limitations`).
+
+Default sequences have neither stack (fully present and fully observed).
+Observation masks alone do **not** model entity drop-in/out; presence masks
+alone do **not** mark measurement gaps. See
+``examples/41_node_churn_presence_masks.ipynb``.
+
 Related pages
 -------------
 
 * :doc:`capabilities` — benchmark inventory table
+* :doc:`limitations` — churn / MD honesty boundaries
+* :doc:`tutorials` — notebook gallery (including molecular / churn demos)
 * :doc:`api` — dataset module reference
 * :doc:`architecture` — simulated vs real-telemetry factory idioms

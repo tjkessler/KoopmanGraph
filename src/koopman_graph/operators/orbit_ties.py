@@ -1,4 +1,10 @@
-"""Shared orbit-tied ``K_self`` bank helpers for networked operators."""
+"""Shared orbit-tied ``K_self`` bank helpers for networked operators.
+
+Also hosts the MVP ``isotypic`` symmetry path: exact-automorphism orbits for
+``K_self`` ties (representation-theoretic ``Aut(G)``, not WL), with the
+isotypic decomposition retained for diagnostics and later neighbor-factor
+work.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,10 @@ from collections.abc import Sequence
 
 from torch import Tensor, nn
 
+from koopman_graph.graph_utils.representation import (
+    IsotypicDecomposition,
+    compute_isotypic_decomposition,
+)
 from koopman_graph.graph_utils.symmetry import (
     OrbitMethod,
     OrbitPartition,
@@ -99,6 +109,8 @@ class OrbitTiedSelfMixin:
     auto_orbits: bool
     orbit_method: OrbitMethod
     orbit_partition: OrbitPartition | None
+    isotypic_symmetry: bool
+    isotypic_decomposition: IsotypicDecomposition | None
     _orbit_selves: nn.ModuleList | None
     _node_orbit: Tensor | None
 
@@ -108,37 +120,51 @@ class OrbitTiedSelfMixin:
         orbit_partition: Sequence[Sequence[int]] | None,
         auto_orbits: bool,
         orbit_method: OrbitMethod,
+        isotypic_symmetry: bool = False,
     ) -> None:
         """Store symmetry config; allocate immediately when partition is given.
 
         Parameters
         ----------
-
         orbit_partition : Sequence[Sequence[int]] | None
-            See the function signature / summary for ``orbit_partition``.
+            Explicit orbit partition (wins over auto / isotypic binding).
         auto_orbits : bool
-            See the function signature / summary for ``auto_orbits``.
+            Bind orbits from topology on first use.
         orbit_method : OrbitMethod
-            See the function signature / summary for ``orbit_method``.
-
-        Returns
-        -------
-
-        None
-            See summary line.
+            Orbit backend for ``auto_orbits``.
+        isotypic_symmetry : bool, optional
+            When ``True``, pending bind uses exact ``Aut(G)`` orbits for
+            ``K_self`` ties and stores
+            :func:`~koopman_graph.graph_utils.compute_isotypic_decomposition`
+            (mutually exclusive with an explicit partition or plain
+            ``auto_orbits``).
 
         Raises
         ------
-
         ValueError
-            Raised when inputs are invalid."""
+            If symmetry flags conflict or ``orbit_method`` is invalid.
+        """
         if orbit_method not in {"auto", "exact"}:
             msg = f"orbit_method must be 'auto' or 'exact', got {orbit_method!r}"
             raise ValueError(msg)
+        if isotypic_symmetry and orbit_partition is not None:
+            msg = (
+                "isotypic_symmetry is mutually exclusive with an explicit "
+                "orbit_partition"
+            )
+            raise ValueError(msg)
+        if isotypic_symmetry and auto_orbits:
+            msg = (
+                "isotypic_symmetry is mutually exclusive with auto_orbits; "
+                "use koopman_symmetry='isotypic' alone"
+            )
+            raise ValueError(msg)
         # Explicit partition always wins for binding; auto_orbits may remain
         # True in checkpoints that recorded a resolved partition from auto.
-        self.auto_orbits = bool(auto_orbits)
-        self.orbit_method = orbit_method
+        self.isotypic_symmetry = bool(isotypic_symmetry)
+        self.isotypic_decomposition = None
+        self.auto_orbits = bool(auto_orbits) or self.isotypic_symmetry
+        self.orbit_method = "exact" if self.isotypic_symmetry else orbit_method
         self.orbit_partition = None
         self._orbit_selves = None
         self._node_orbit = None
@@ -226,8 +252,8 @@ class OrbitTiedSelfMixin:
             Raised when inputs are invalid.
         ValueError
             Raised when inputs are invalid."""
-        if not self.auto_orbits:
-            msg = "bind_auto_orbits requires auto_orbits=True"
+        if not self.auto_orbits and not self.isotypic_symmetry:
+            msg = "bind_auto_orbits requires auto_orbits=True or isotypic_symmetry"
             raise RuntimeError(msg)
         if self.orbit_partition is not None:
             return
@@ -237,11 +263,25 @@ class OrbitTiedSelfMixin:
         if edge_index is None:
             assert hyperedge_index is not None
             edge_index = hyperedge_two_section(hyperedge_index, num_nodes)
-        partition = node_orbit_partition(
-            edge_index,
-            num_nodes,
-            method=self.orbit_method,
-        )
+        if self.isotypic_symmetry:
+            # Exact Aut(G) path: store isotypic projectors, then tie K_self on
+            # the exact automorphism orbits (equivariant diagonal self maps).
+            self.isotypic_decomposition = compute_isotypic_decomposition(
+                edge_index,
+                num_nodes,
+                method="automorphism",
+            )
+            partition = node_orbit_partition(
+                edge_index,
+                num_nodes,
+                method="exact",
+            )
+        else:
+            partition = node_orbit_partition(
+                edge_index,
+                num_nodes,
+                method=self.orbit_method,
+            )
         self.set_orbit_partition(partition, num_nodes=num_nodes)
 
     def ensure_orbit_binding(
@@ -274,7 +314,10 @@ class OrbitTiedSelfMixin:
 
         ValueError
             Raised when inputs are invalid."""
-        if self.auto_orbits and self.orbit_partition is None:
+        pending = (self.auto_orbits or self.isotypic_symmetry) and (
+            self.orbit_partition is None
+        )
+        if pending:
             self.bind_auto_orbits(
                 num_nodes=num_nodes,
                 edge_index=edge_index,
@@ -287,6 +330,42 @@ class OrbitTiedSelfMixin:
                 f"{self._node_orbit.numel()} nodes, got num_nodes={num_nodes}"
             )
             raise ValueError(msg)
+        # Same-N topology change must not silently reuse Aut(G) / isotypic state.
+        if (
+            self.isotypic_symmetry
+            and self.orbit_partition is not None
+            and edge_index is not None
+        ):
+            fresh = node_orbit_partition(
+                edge_index,
+                num_nodes,
+                method="exact",
+            )
+            if fresh != self.orbit_partition:
+                msg = (
+                    "isotypic orbit partition does not match the current "
+                    "topology; rebind with a fresh model or clear the bound "
+                    "partition before reuse"
+                )
+                raise ValueError(msg)
+        # Same-N topology change must not silently reuse Aut(G) / isotypic state.
+        if (
+            self.isotypic_symmetry
+            and self.orbit_partition is not None
+            and edge_index is not None
+        ):
+            fresh = node_orbit_partition(
+                edge_index,
+                num_nodes,
+                method="exact",
+            )
+            if fresh != self.orbit_partition:
+                msg = (
+                    "isotypic orbit partition does not match the current "
+                    "topology; rebind with a fresh model or clear the bound "
+                    "partition before reuse"
+                )
+                raise ValueError(msg)
 
     def orbit_self_matrices(self) -> list[Tensor]:
         """Return assembled ``K_self`` matrices for each orbit.
@@ -369,15 +448,30 @@ class OrbitTiedSelfMixin:
         -------
         dict[str, object] | None
             See summary line."""
-        if not self.auto_orbits and self.orbit_partition is None:
+        if (
+            not self.auto_orbits
+            and not self.isotypic_symmetry
+            and self.orbit_partition is None
+        ):
             return None
         partition = (
             [list(orbit) for orbit in self.orbit_partition]
             if self.orbit_partition is not None
             else None
         )
-        return {
-            "auto_orbits": self.auto_orbits,
+        config: dict[str, object] = {
+            "auto_orbits": self.auto_orbits and not self.isotypic_symmetry,
             "orbit_partition": partition,
             "method": self.orbit_method,
         }
+        if self.isotypic_symmetry:
+            config["symmetry"] = "isotypic"
+            if self.isotypic_decomposition is not None:
+                config["isotypic_dimensions"] = list(
+                    self.isotypic_decomposition.dimensions
+                )
+                config["group_order"] = self.isotypic_decomposition.group_order
+        else:
+            # Additive format-1 label for orbit ties (absent on older saves).
+            config["symmetry"] = "orbit"
+        return config

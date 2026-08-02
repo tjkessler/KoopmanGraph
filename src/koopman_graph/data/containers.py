@@ -19,10 +19,14 @@ from koopman_graph.data.validation import (
     hetero_snapshots_have_dynamic_topology,
     snapshots_have_dynamic_topology,
     validate_control_inputs,
+    validate_entity_ids,
     validate_hetero_control_inputs,
     validate_hetero_observation_masks,
+    validate_hetero_presence_masks,
     validate_hetero_snapshot_metadata,
+    validate_node_churn_policy,
     validate_observation_masks,
+    validate_presence_masks,
     validate_shared_hetero_topology,
     validate_shared_topology,
     validate_snapshot_metadata,
@@ -53,13 +57,24 @@ class GraphSnapshotSequence:
     :class:`~koopman_graph.env.GraphKoopmanEnv` and
     :class:`~koopman_graph.baselines.DMDcBaseline` are global-only (see
     architecture control layout capability matrix). Optional
-    :attr:`observation_masks` mark which nodes are measured at each timestep
-    (``True`` = observed). When masks are present, training and evaluation
-    losses average only over observed nodes; reconstruction at pair
-    ``(t, t+1)`` uses ``mask[t+1]``, and consistency terms use
-    ``mask[t] & mask[t+1]``. Downstream training APIs should
-    require at least two snapshots; construction here allows a single snapshot
-    for inspection or prediction-only workflows.
+    :attr:`observation_masks` mark which nodes are **measured** at each
+    timestep (``True`` = observed). Optional :attr:`presence_masks` mark
+    which entities **exist** in a fixed union universe of size ``N_max`` at
+    each timestep (``True`` = present). Do not conflate the two: an entity can
+    be present but unobserved, and observation masks alone do not model
+    entity drop-in/out. Training losses use :meth:`loss_mask_at` /
+    :meth:`pair_loss_mask`: a row contributes only when it is present (if
+    presence masks exist) and observed (if observation masks exist).
+    Reconstruction at pair ``(t, t+1)`` uses the composed target mask at
+    ``t+1``; consistency uses the composed pair mask. Reductions normalize by
+    contributing-row count, not ``N_max``. Optional :attr:`entity_ids` name the
+    fixed union rows; :attr:`allow_node_churn` must be ``True`` before presence
+    masks may drop entities. This is a **fixed-union** ``N_max`` MVP: unbounded
+    open-world growth and index remapping across unrelated universes are out of
+    scope. Inactive (presence ``False``) rows may be padded zeros (conventional,
+    not enforced here). Downstream training APIs should require at least two
+    snapshots; construction here allows a single snapshot for inspection or
+    prediction-only workflows.
 
     The snapshot **collection** is logically immutable after construction:
     :attr:`snapshots` returns a ``tuple`` that cannot be appended to or
@@ -75,10 +90,13 @@ class GraphSnapshotSequence:
     :attr:`hyperedge_weight`, :attr:`has_hyperedges`,
     :attr:`is_dynamic_topology`, :attr:`control_inputs`, :attr:`has_controls`,
     :attr:`control_dim`, :attr:`timestamps`, :attr:`has_timestamps`,
-    :attr:`observation_masks`, :attr:`has_observation_masks`, and
-    :attr:`num_nodes`. :attr:`edge_index` and :attr:`edge_weight` properties
-    are only defined for static-topology sequences; use
-    ``sequence[t].edge_index`` when :attr:`is_dynamic_topology` is ``True``.
+    :attr:`observation_masks`, :attr:`has_observation_masks`,
+    :attr:`presence_masks`, :attr:`has_presence_masks`,
+    :attr:`entity_ids`, :attr:`has_entity_ids`, :attr:`allow_node_churn`,
+    :meth:`loss_mask_at`, :meth:`pair_loss_mask`, and :attr:`num_nodes`.
+    :attr:`edge_index` and :attr:`edge_weight` properties are only defined for
+    static-topology sequences; use ``sequence[t].edge_index`` when
+    :attr:`is_dynamic_topology` is ``True``.
     """
 
     def __init__(
@@ -89,6 +107,9 @@ class GraphSnapshotSequence:
         control_inputs: Tensor | None = None,
         timestamps: Tensor | None = None,
         observation_masks: Tensor | None = None,
+        presence_masks: Tensor | None = None,
+        entity_ids: Sequence[str | int] | None = None,
+        allow_node_churn: bool = False,
     ) -> None:
         """Initialize from a sequence of graph snapshots.
 
@@ -114,6 +135,20 @@ class GraphSnapshotSequence:
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``. ``True`` (or ``1``) marks an
             observed node measurement at that snapshot.
+        presence_masks : Tensor or None, optional
+            Per-timestep entity presence mask with shape
+            ``(num_timesteps, num_nodes)`` for a fixed union universe
+            ``N_max``. ``True`` (or ``1``) marks that the entity exists at
+            that snapshot. Distinct from :attr:`observation_masks` (measured
+            vs present). Drops require ``allow_node_churn=True``.
+        entity_ids : sequence of str or int, optional
+            Stable key per universe row (length ``N_max``, unique). Absent
+            keys are unnamed row indices ``0 … N_max - 1``.
+        allow_node_churn : bool, optional
+            When ``False`` (default), presence masks that drop any entity
+            raise. When ``True``, presence masks are required and inactive
+            rows may be padded zeros (conventional, not enforced). Fixed-union
+            MVP only — not unbounded growth.
         """
         snapshot_list = list(snapshots)
         if allow_dynamic_topology:
@@ -121,29 +156,48 @@ class GraphSnapshotSequence:
         else:
             validate_shared_topology(snapshot_list)
         validate_static_hyperedges(snapshot_list)
+        num_nodes = int(snapshot_list[0].num_nodes)
+        num_timesteps = len(snapshot_list)
         if control_inputs is not None:
             validate_control_inputs(
                 control_inputs,
-                num_timesteps=len(snapshot_list),
-                num_nodes=int(snapshot_list[0].num_nodes),
+                num_timesteps=num_timesteps,
+                num_nodes=num_nodes,
             )
         if timestamps is not None:
             validate_timestamps(
                 timestamps,
-                num_timesteps=len(snapshot_list),
+                num_timesteps=num_timesteps,
             )
         validated_masks = None
         if observation_masks is not None:
             validated_masks = validate_observation_masks(
                 observation_masks,
-                num_timesteps=len(snapshot_list),
-                num_nodes=int(snapshot_list[0].num_nodes),
+                num_timesteps=num_timesteps,
+                num_nodes=num_nodes,
             )
+        validated_presence = None
+        if presence_masks is not None:
+            validated_presence = validate_presence_masks(
+                presence_masks,
+                num_timesteps=num_timesteps,
+                num_nodes=num_nodes,
+            )
+        validate_node_churn_policy(
+            allow_node_churn=allow_node_churn,
+            presence_masks=validated_presence,
+        )
+        validated_ids = None
+        if entity_ids is not None:
+            validated_ids = validate_entity_ids(entity_ids, num_nodes=num_nodes)
         # Tuple freezes collection length/order; Data elements remain borrowed.
         self._snapshots = tuple(snapshot_list)
         self._control_inputs = control_inputs
         self._timestamps = timestamps
         self._observation_masks = validated_masks
+        self._presence_masks = validated_presence
+        self._entity_ids = validated_ids
+        self._allow_node_churn = allow_node_churn
         self._allow_dynamic_topology = allow_dynamic_topology
         self._is_dynamic_topology = (
             allow_dynamic_topology and snapshots_have_dynamic_topology(snapshot_list)
@@ -161,6 +215,9 @@ class GraphSnapshotSequence:
         control_inputs: ArrayLike | None = None,
         timestamps: ArrayLike | None = None,
         observation_masks: ArrayLike | None = None,
+        presence_masks: ArrayLike | None = None,
+        entity_ids: Sequence[str | int] | None = None,
+        allow_node_churn: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
         """Build a sequence from node feature arrays and a shared topology.
@@ -189,6 +246,13 @@ class GraphSnapshotSequence:
         observation_masks : array-like, optional
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``.
+        presence_masks : array-like, optional
+            Per-timestep entity presence mask with shape
+            ``(num_timesteps, num_nodes)`` (exists vs measured; see class docs).
+        entity_ids : sequence of str or int, optional
+            Stable key per universe row (length ``N_max``, unique).
+        allow_node_churn : bool, optional
+            Permit presence drops when ``True``. Default ``False``.
         dtype : torch.dtype, optional
             Floating dtype used when converting numpy inputs to torch tensors.
             Default is ``torch.float32``.
@@ -213,6 +277,7 @@ class GraphSnapshotSequence:
             control_inputs=control_inputs,
             timestamps=timestamps,
             observation_masks=observation_masks,
+            presence_masks=presence_masks,
             dtype=dtype,
         )
         return cls(
@@ -220,6 +285,9 @@ class GraphSnapshotSequence:
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
             observation_masks=built.observation_masks,
+            presence_masks=built.presence_masks,
+            entity_ids=entity_ids,
+            allow_node_churn=allow_node_churn,
         )
 
     @classmethod
@@ -232,6 +300,9 @@ class GraphSnapshotSequence:
         control_inputs: ArrayLike | None = None,
         timestamps: ArrayLike | None = None,
         observation_masks: ArrayLike | None = None,
+        presence_masks: ArrayLike | None = None,
+        entity_ids: Sequence[str | int] | None = None,
+        allow_node_churn: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> GraphSnapshotSequence:
         """Build a dynamic-topology sequence from per-timestep edge indices.
@@ -255,6 +326,13 @@ class GraphSnapshotSequence:
         observation_masks : array-like, optional
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``.
+        presence_masks : array-like, optional
+            Per-timestep entity presence mask with shape
+            ``(num_timesteps, num_nodes)`` (exists vs measured; see class docs).
+        entity_ids : sequence of str or int, optional
+            Stable key per universe row (length ``N_max``, unique).
+        allow_node_churn : bool, optional
+            Permit presence drops when ``True``. Default ``False``.
         dtype : torch.dtype, optional
             Floating dtype used when converting numpy inputs to torch tensors.
             Default is ``torch.float32``.
@@ -277,6 +355,7 @@ class GraphSnapshotSequence:
             control_inputs=control_inputs,
             timestamps=timestamps,
             observation_masks=observation_masks,
+            presence_masks=presence_masks,
             dtype=dtype,
         )
         return cls(
@@ -285,6 +364,9 @@ class GraphSnapshotSequence:
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
             observation_masks=built.observation_masks,
+            presence_masks=built.presence_masks,
+            entity_ids=entity_ids,
+            allow_node_churn=allow_node_churn,
         )
 
     @property
@@ -453,6 +535,95 @@ class GraphSnapshotSequence:
             raise ValueError(msg)
         return self._observation_masks[index]
 
+    @property
+    def presence_masks(self) -> Tensor | None:
+        """Return per-timestep entity presence masks when present.
+
+        Presence marks whether an entity **exists** at a timestep in the fixed
+        union universe (``N_max`` rows). Distinct from
+        :attr:`observation_masks`, which mark whether an existing entity was
+        **measured**.
+
+        Returns
+        -------
+        Tensor or None
+            Boolean mask with shape ``(num_timesteps, num_nodes)``.
+        """
+        return self._presence_masks
+
+    @property
+    def has_presence_masks(self) -> bool:
+        """Return whether the sequence carries presence masks.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`presence_masks` is not ``None``.
+        """
+        return self._presence_masks is not None
+
+    def presence_mask_at(self, index: int) -> Tensor:
+        """Return the presence mask for snapshot ``index``.
+
+        Parameters
+        ----------
+        index : int
+            Timestep index in ``[0, num_timesteps - 1]``.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask with shape ``(num_nodes,)``.
+
+        Raises
+        ------
+        ValueError
+            If masks are absent or ``index`` is out of range.
+        """
+        if self._presence_masks is None:
+            msg = "sequence does not contain presence_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps:
+            msg = (
+                f"presence mask index {index} is out of range for "
+                f"{self.num_timesteps} timesteps"
+            )
+            raise ValueError(msg)
+        return self._presence_masks[index]
+
+    @property
+    def entity_ids(self) -> tuple[str | int, ...] | None:
+        """Return stable entity keys for the fixed union universe.
+
+        Returns
+        -------
+        tuple of str or int, or None
+            One key per ``N_max`` row when provided at construction.
+        """
+        return self._entity_ids
+
+    @property
+    def has_entity_ids(self) -> bool:
+        """Return whether the sequence carries entity ids.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`entity_ids` is not ``None``.
+        """
+        return self._entity_ids is not None
+
+    @property
+    def allow_node_churn(self) -> bool:
+        """Return whether presence-mask entity drop-in/out is permitted.
+
+        Returns
+        -------
+        bool
+            ``True`` when fixed-union churn was enabled at construction.
+        """
+        return self._allow_node_churn
+
     def pair_observation_mask(self, index: int) -> Tensor:
         """Return ``mask[index] & mask[index + 1]`` for transition pairs.
 
@@ -481,6 +652,97 @@ class GraphSnapshotSequence:
             )
             raise ValueError(msg)
         return self._observation_masks[index] & self._observation_masks[index + 1]
+
+    def pair_presence_mask(self, index: int) -> Tensor:
+        """Return ``presence[index] & presence[index + 1]`` for transition pairs.
+
+        Parameters
+        ----------
+        index : int
+            Source snapshot index for the transition pair.
+
+        Returns
+        -------
+        Tensor
+            Boolean mask with shape ``(num_nodes,)``.
+
+        Raises
+        ------
+        ValueError
+            If presence masks are absent or ``index`` is out of range for a pair.
+        """
+        if self._presence_masks is None:
+            msg = "sequence does not contain presence_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps - 1:
+            msg = (
+                f"pair presence mask index {index} is out of range for "
+                f"{self.num_timesteps} timesteps"
+            )
+            raise ValueError(msg)
+        return self._presence_masks[index] & self._presence_masks[index + 1]
+
+    def loss_mask_at(self, index: int) -> Tensor | None:
+        """Return the contributing-node mask for loss reductions at ``index``.
+
+        A row contributes only when it is **present** (if
+        :attr:`presence_masks` exist) and **observed** (if
+        :attr:`observation_masks` exist). When neither mask family is
+        attached, returns ``None`` so callers use unmasked MSE (bit-identical
+        to the fixed-cardinality 0.10 path). Masked reductions should
+        normalize by the count of contributing rows, not by ``N_max``.
+
+        Parameters
+        ----------
+        index : int
+            Timestep index in ``[0, num_timesteps - 1]``.
+
+        Returns
+        -------
+        Tensor or None
+            Boolean mask with shape ``(num_nodes,)``, or ``None`` when neither
+            presence nor observation masks are attached.
+        """
+        presence = self.presence_mask_at(index) if self.has_presence_masks else None
+        observation = (
+            self.observation_mask_at(index) if self.has_observation_masks else None
+        )
+        if presence is None and observation is None:
+            return None
+        if presence is None:
+            return observation
+        if observation is None:
+            return presence
+        return presence & observation
+
+    def pair_loss_mask(self, index: int) -> Tensor | None:
+        """Return the contributing-node mask for pair objectives at ``index``.
+
+        Composes :meth:`pair_presence_mask` and :meth:`pair_observation_mask`
+        with the same present-and-observed rule as :meth:`loss_mask_at`.
+        Returns ``None`` when neither mask family is attached.
+
+        Parameters
+        ----------
+        index : int
+            Source snapshot index for the transition pair ``(index, index + 1)``.
+
+        Returns
+        -------
+        Tensor or None
+            Boolean mask with shape ``(num_nodes,)``, or ``None``.
+        """
+        presence = self.pair_presence_mask(index) if self.has_presence_masks else None
+        observation = (
+            self.pair_observation_mask(index) if self.has_observation_masks else None
+        )
+        if presence is None and observation is None:
+            return None
+        if presence is None:
+            return observation
+        if observation is None:
+            return presence
+        return presence & observation
 
     def control_at(self, index: int) -> Tensor:
         """Return the control input driving transition from snapshot ``index``.
@@ -745,6 +1007,11 @@ class GraphSnapshotSequence:
                 if self.observation_masks is None
                 else self.observation_masks[start:stop]
             ),
+            presence_masks=(
+                None if self.presence_masks is None else self.presence_masks[start:stop]
+            ),
+            entity_ids=self.entity_ids,
+            allow_node_churn=self.allow_node_churn,
         )
 
     def windowed(
@@ -760,9 +1027,9 @@ class GraphSnapshotSequence:
         Each output snapshot at position ``i`` stores node features
         ``(num_nodes, n_delays * F)`` built from the source window ending at
         source index ``start + i * stride`` (with optional left zero-padding).
-        Topology, controls, timestamps, and observation masks are taken from
-        the **end** of each window. Topology changes inside a window raise
-        unless :attr:`allow_dynamic_topology` is ``True``.
+        Topology, controls, timestamps, observation masks, and presence masks
+        are taken from the **end** of each window. Topology changes inside a
+        window raise unless :attr:`allow_dynamic_topology` is ``True``.
 
         Parameters
         ----------
@@ -803,6 +1070,9 @@ class GraphSnapshotSequence:
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
             observation_masks=built.observation_masks,
+            presence_masks=built.presence_masks,
+            entity_ids=self.entity_ids,
+            allow_node_churn=self.allow_node_churn,
         )
 
     def __iter__(self) -> Iterator[Data]:
@@ -828,6 +1098,12 @@ class HeteroGraphSnapshotSequence:
     ``|R| >= 1`` edge types. Multiple node types are validated here for the
     typed path; encode/advance consumers land in later tasks.
 
+    Optional per-type :attr:`observation_masks` mark whether a node was
+    **measured**; optional :attr:`presence_masks` mark whether it **exists**
+    in each type's fixed union. Losses use :meth:`loss_mask_at` /
+    :meth:`pair_loss_mask` (present ∧ observed). Presence drops require
+    ``allow_node_churn=True``.
+
     There is **no** homogeneous :attr:`edge_index` property. Use
     :attr:`edge_index_dict` (static topology) or ``sequence[t][edge_type]``.
 
@@ -847,7 +1123,14 @@ class HeteroGraphSnapshotSequence:
     timestamps : Tensor or None, optional
         Strictly increasing timestamps with shape ``(T,)``.
     observation_masks : mapping of str to Tensor or None, optional
-        Per-type masks with shape ``(T, N_τ)`` for every node type.
+        Per-type masks with shape ``(T, N_τ)`` for every node type
+        (``True`` = measured). Distinct from :attr:`presence_masks`.
+    presence_masks : mapping of str to Tensor or None, optional
+        Per-type entity-existence masks with shape ``(T, N_τ)``. Drops require
+        ``allow_node_churn=True``.
+    allow_node_churn : bool, optional
+        When ``True``, permit presence-driven drop-in/out per type. Default
+        ``False`` rejects any presence ``False``.
     """
 
     def __init__(
@@ -858,6 +1141,8 @@ class HeteroGraphSnapshotSequence:
         control_inputs: Tensor | Mapping[str, Tensor] | None = None,
         timestamps: Tensor | None = None,
         observation_masks: Mapping[str, Tensor] | None = None,
+        presence_masks: Mapping[str, Tensor] | None = None,
+        allow_node_churn: bool = False,
     ) -> None:
         """Initialize from a sequence of heterogeneous graph snapshots.
 
@@ -877,6 +1162,10 @@ class HeteroGraphSnapshotSequence:
             Strictly increasing timestamps with shape ``(T,)``.
         observation_masks : mapping of str to Tensor or None, optional
             Per-type masks with shape ``(T, N_τ)`` for every node type.
+        presence_masks : mapping of str to Tensor or None, optional
+            Per-type entity-existence masks with shape ``(T, N_τ)``.
+        allow_node_churn : bool, optional
+            Permit presence drops when ``True``. Default ``False``.
         """
         snapshot_list = list(snapshots)
         for idx, snapshot in enumerate(snapshot_list):
@@ -914,6 +1203,17 @@ class HeteroGraphSnapshotSequence:
                 num_timesteps=len(snapshot_list),
                 num_nodes=num_nodes,
             )
+        validated_presence = None
+        if presence_masks is not None:
+            validated_presence = validate_hetero_presence_masks(
+                presence_masks,
+                num_timesteps=len(snapshot_list),
+                num_nodes=num_nodes,
+            )
+        validate_node_churn_policy(
+            allow_node_churn=allow_node_churn,
+            presence_masks=validated_presence,
+        )
 
         self._snapshots = tuple(snapshot_list)
         self._node_feature_dims = dict(node_feature_dims)
@@ -927,6 +1227,8 @@ class HeteroGraphSnapshotSequence:
             self._control_inputs = control_inputs
         self._timestamps = timestamps
         self._observation_masks = validated_masks
+        self._presence_masks = validated_presence
+        self._allow_node_churn = allow_node_churn
         self._allow_dynamic_topology = allow_dynamic_topology
         self._is_dynamic_topology = (
             allow_dynamic_topology
@@ -1264,6 +1566,177 @@ class HeteroGraphSnapshotSequence:
         }
 
     @property
+    def presence_masks(self) -> dict[str, Tensor] | None:
+        """Return per-type entity presence masks when present.
+
+        Presence marks whether an entity **exists** at a timestep in each
+        type's fixed union (``N_τ`` rows). Distinct from
+        :attr:`observation_masks`, which mark whether an existing entity was
+        **measured**.
+
+        Returns
+        -------
+        dict of str to Tensor or None
+            Boolean masks with shape ``(T, N_τ)`` per node type.
+        """
+        if self._presence_masks is None:
+            return None
+        return dict(self._presence_masks)
+
+    @property
+    def has_presence_masks(self) -> bool:
+        """Return whether the sequence carries presence masks.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`presence_masks` is not ``None``.
+        """
+        return self._presence_masks is not None
+
+    def presence_mask_at(self, index: int) -> dict[str, Tensor]:
+        """Return per-type presence masks at ``index``.
+
+        Parameters
+        ----------
+        index : int
+            Timestep index.
+
+        Returns
+        -------
+        dict of str to Tensor
+            Boolean masks with shape ``(N_τ,)`` per node type.
+
+        Raises
+        ------
+        ValueError
+            If the sequence has no presence masks.
+        IndexError
+            If ``index`` is out of range.
+        """
+        if self._presence_masks is None:
+            msg = "sequence does not contain presence_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps:
+            msg = f"index must satisfy 0 <= index < {self.num_timesteps}, got {index}"
+            raise IndexError(msg)
+        return {
+            node_type: mask[index] for node_type, mask in self._presence_masks.items()
+        }
+
+    def pair_presence_mask(self, index: int) -> dict[str, Tensor]:
+        """Return per-type masks present at both ``index`` and ``index + 1``.
+
+        Parameters
+        ----------
+        index : int
+            Index of the first snapshot in the consecutive pair.
+
+        Returns
+        -------
+        dict of str to Tensor
+            Element-wise ``AND`` of consecutive presence masks per node type.
+
+        Raises
+        ------
+        ValueError
+            If the sequence has no presence masks.
+        IndexError
+            If ``index`` is not a valid pair start.
+        """
+        if self._presence_masks is None:
+            msg = "sequence does not contain presence_masks"
+            raise ValueError(msg)
+        if index < 0 or index >= self.num_timesteps - 1:
+            msg = (
+                f"index must satisfy 0 <= index < {self.num_timesteps - 1}, got {index}"
+            )
+            raise IndexError(msg)
+        return {
+            node_type: mask[index] & mask[index + 1]
+            for node_type, mask in self._presence_masks.items()
+        }
+
+    @property
+    def allow_node_churn(self) -> bool:
+        """Return whether presence-mask entity drop-in/out is permitted.
+
+        Returns
+        -------
+        bool
+            ``True`` when fixed-union churn was enabled at construction.
+        """
+        return self._allow_node_churn
+
+    def loss_mask_at(self, index: int) -> dict[str, Tensor] | None:
+        """Return per-type contributing-node masks for losses at ``index``.
+
+        A row contributes only when it is **present** (if
+        :attr:`presence_masks` exist) and **observed** (if
+        :attr:`observation_masks` exist). When neither mask family is
+        attached, returns ``None`` so callers use unmasked MSE (bit-identical
+        to the fixed-cardinality 0.10 path).
+
+        Parameters
+        ----------
+        index : int
+            Timestep index.
+
+        Returns
+        -------
+        dict of str to Tensor or None
+            Boolean masks with shape ``(N_τ,)`` per node type, or ``None``.
+        """
+        presence = self.presence_mask_at(index) if self.has_presence_masks else None
+        observation = (
+            self.observation_mask_at(index) if self.has_observation_masks else None
+        )
+        if presence is None and observation is None:
+            return None
+        if presence is None:
+            assert observation is not None
+            return observation
+        if observation is None:
+            return presence
+        return {
+            node_type: presence[node_type] & observation[node_type]
+            for node_type in presence
+        }
+
+    def pair_loss_mask(self, index: int) -> dict[str, Tensor] | None:
+        """Return per-type contributing masks for pair objectives at ``index``.
+
+        Composes :meth:`pair_presence_mask` and :meth:`pair_observation_mask`
+        with the same present-and-observed rule as :meth:`loss_mask_at`.
+        Returns ``None`` when neither mask family is attached.
+
+        Parameters
+        ----------
+        index : int
+            Source snapshot index for the transition pair ``(index, index + 1)``.
+
+        Returns
+        -------
+        dict of str to Tensor or None
+            Boolean masks with shape ``(N_τ,)`` per node type, or ``None``.
+        """
+        presence = self.pair_presence_mask(index) if self.has_presence_masks else None
+        observation = (
+            self.pair_observation_mask(index) if self.has_observation_masks else None
+        )
+        if presence is None and observation is None:
+            return None
+        if presence is None:
+            assert observation is not None
+            return observation
+        if observation is None:
+            return presence
+        return {
+            node_type: presence[node_type] & observation[node_type]
+            for node_type in presence
+        }
+
+    @property
     def snapshots(self) -> tuple[HeteroData, ...]:
         """Return the immutable sequence of heterogeneous snapshots.
 
@@ -1365,6 +1838,12 @@ class HeteroGraphSnapshotSequence:
                 node_type: mask[start:stop]
                 for node_type, mask in self._observation_masks.items()
             }
+        presence = None
+        if self._presence_masks is not None:
+            presence = {
+                node_type: mask[start:stop]
+                for node_type, mask in self._presence_masks.items()
+            }
 
         return HeteroGraphSnapshotSequence(
             self._snapshots[start:stop],
@@ -1374,4 +1853,6 @@ class HeteroGraphSnapshotSequence:
                 None if self._timestamps is None else self._timestamps[start:stop]
             ),
             observation_masks=masks,
+            presence_masks=presence,
+            allow_node_churn=self.allow_node_churn,
         )

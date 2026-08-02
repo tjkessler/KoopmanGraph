@@ -40,11 +40,21 @@ Capability layout
     (:func:`~koopman_graph.baselines.vamp2.vamp2_score`,
     :func:`~koopman_graph.baselines.vamp2.vamp2_loss`). Not a ForecastModel;
     not GraphVAMPnets / MD.
+``graph_vamp``
+    Graph-aware VAMP-2 teaching baseline
+    (:class:`~koopman_graph.baselines.GraphVAMPBaseline`); contact-graph +
+    thin GCN encode → mean-pool, scoring via
+    :func:`~koopman_graph.baselines.vamp2.vamp2_score` (no deeptime required
+    for the in-repo path). Off root package ``__all__``.
 ``gnn``
     Spatiotemporal GNN forecaster baselines
     (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
     :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
-    :class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`).
+    :class:`~koopman_graph.baselines.gnn.GraphWaveNetBaseline`,
+    :class:`~koopman_graph.baselines.gnn.AGCRNBaseline`,
+    :class:`~koopman_graph.baselines.gnn.MTGNNBaseline`,
+    :class:`~koopman_graph.baselines.gnn.STGODEBaseline`,
+    :class:`~koopman_graph.baselines.gnn.GraphCastBaseline`).
 
 Classical DMD-family baselines share :class:`ClassicalBaseline` scaffolding and
 structurally implement :class:`~koopman_graph.protocols.ForecastModel`
@@ -73,10 +83,15 @@ from koopman_graph.baselines.dmdc import DMDcBaseline
 from koopman_graph.baselines.edmd import EDMDBaseline
 from koopman_graph.baselines.fbdmd import FBDMDBaseline
 from koopman_graph.baselines.gnn import (
+    AGCRNBaseline,
     DCRNNBaseline,
+    GraphCastBaseline,
     GraphWaveNetBaseline,
+    MTGNNBaseline,
     STGCNBaseline,
+    STGODEBaseline,
 )
+from koopman_graph.baselines.graph_vamp import GraphVAMPBaseline
 from koopman_graph.baselines.mrdmd import MRDMDBaseline
 from koopman_graph.baselines.optdmd import OptDMDBaseline
 from koopman_graph.baselines.streaming_dmd import StreamingDMDBaseline
@@ -85,16 +100,21 @@ from koopman_graph.baselines.transfer_operator import UlamTransferOperatorBaseli
 from koopman_graph.baselines.vamp2 import vamp2_loss, vamp2_score
 
 __all__ = [
+    "AGCRNBaseline",
     "ClassicalBaseline",
     "DCRNNBaseline",
     "DMDBaseline",
     "DMDcBaseline",
     "EDMDBaseline",
     "FBDMDBaseline",
+    "GraphCastBaseline",
+    "GraphVAMPBaseline",
     "GraphWaveNetBaseline",
     "MRDMDBaseline",
+    "MTGNNBaseline",
     "OptDMDBaseline",
     "STGCNBaseline",
+    "STGODEBaseline",
     "StreamingDMDBaseline",
     "TLSDMDBaseline",
     "UlamTransferOperatorBaseline",

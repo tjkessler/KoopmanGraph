@@ -13,13 +13,13 @@ authors:
 repository-code: "https://github.com/tjkessler/KoopmanGraph"
 url: "https://koopmangraph.readthedocs.io/"
 license: Apache-2.0
-version: 0.10.0
-date-released: 2026-08-01
+version: 0.11.0
+date-released: 2026-08-02
 doi: 10.5281/zenodo.21752937
 identifiers:
   - type: doi
     value: 10.5281/zenodo.21752937
-    description: "Archived software (version DOI)"
+    description: "Archived software (version DOI; update after Zenodo mints 0.11.0)"
 keywords:
   - koopman-operator
   - graph-neural-networks

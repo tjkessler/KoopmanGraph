@@ -7,16 +7,17 @@ space, a learned linear operator advances those states, and a matching decoder
 reconstructs physical node features for multi-step forecasting and spectral
 analysis.
 
-Version **0.10.0** extends the library with continuous heterogeneous /
-multiplex operators (opt-in per-type latent widths), finite-dictionary
-ResDMD and resolvent-grid analysis, classical DMD-family peers and a
-topology-blind VAMP-2 precursor, simplicial-1 encode/decode, Tier A
-invariant geometry from ``Data.pos``, Bayesian Laplace UQ over operator
-factors, and ``dask_prep`` materialize helpers — on top of the 0.9 hetero
-RelGraph stack, 0.8 distributed trainers, and earlier hypergraph /
-stability / conformal / MPC surfaces. See :doc:`capabilities` for the
-full inventory, :doc:`limitations` for scope boundaries and the 0.11
-roadmap, and :doc:`architecture` for the public vs power-user API contract.
+Version **0.11.0** adds measured cross-topology transfer evaluation, directed
+hypergraph incidence modes, Ray Train model-DDP fitting, fixed-union
+presence-mask node churn, teaching traffic forecaster ports (AGCRN / MTGNN /
+STGODE / GraphCast), in-repo sheaf and cell-complex encode/decode MVPs, a
+GraphVAMP + synthetic molecular teaching path, and exact-automorphism
+isotypic self-block ties — on top of the 0.10 hetero / ResDMD / VAMP-2 stack
+and earlier distributed, hypergraph, stability, conformal, and MPC surfaces.
+Homogeneous scientific defaults and the linear latent operator contract are
+unchanged. See :doc:`capabilities` for the full inventory,
+:doc:`limitations` for current scope boundaries, and :doc:`architecture`
+for the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2

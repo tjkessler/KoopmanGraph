@@ -90,6 +90,17 @@ class SnapshotSequenceLike(Protocol):
         """
         ...
 
+    @property
+    def presence_masks(self) -> Tensor | None:
+        """Optional boolean presence masks ``(T, N_max)``.
+
+        Returns
+        -------
+        Tensor or None
+            Presence mask stack, or ``None`` when the universe is fully present.
+        """
+        ...
+
     def __getitem__(self, index: int) -> Data:
         """Return the snapshot at ``index``.
 

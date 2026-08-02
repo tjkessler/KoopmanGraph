@@ -1,8 +1,14 @@
-"""Cross-topology / cross-N transfer validation (TASK-1409).
+"""Cross-topology / cross-N transfer validation (TASK-1409 / TASK-1904).
 
 Measures zero-shot rollout of ``koopman="graph"`` trained on a path graph
 with ``N1`` nodes and evaluated on a path with ``N2 != N1``, against an
-in-distribution holdout and a ``koopman="pernode"`` control.
+in-distribution holdout and a ``koopman="pernode"`` control, via the public
+:func:`~koopman_graph.analysis.evaluate_topology_transfer` API.
+
+The strict Appendix B / example-37 control-comparison oracle (anchored MSE
+and ``transfer_advantage is False``) lives in
+``tests/test_topology_transfer.py`` (TASK-1903). This module keeps looser
+behavioral checks so coverage remains if one file is skipped.
 
 Naming note
 -----------
@@ -32,6 +38,7 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
+from koopman_graph.analysis import TopologyTransferReport, evaluate_topology_transfer
 from koopman_graph.datasets.synthetic import SyntheticDynamicGraphBenchmark
 
 _N1 = 4
@@ -75,23 +82,9 @@ def _make_model(
     )
 
 
-def _rollout_mse(model: GraphKoopmanModel, sequence, *, steps: int = _STEPS) -> float:
-    preds = model.predict(sequence[0], steps)
-    errors = []
-    for horizon in range(steps):
-        target = sequence[horizon + 1].x
-        pred = preds[horizon].x
-        assert pred is not None and target is not None
-        errors.append(torch.mean((pred - target) ** 2))
-    return float(torch.stack(errors).mean().item())
-
-
-def test_graph_operator_zero_shot_transfer_across_node_counts() -> None:
-    """Train on N1; predict on N2 without shape errors; transfer ≈ in-dist.
-
-    Assertions encode the measured outcome (comparable transfer error), not
-    an aspirational claim that graph transfer beats per-node.
-    """
+@pytest.fixture(scope="module")
+def example37_transfer_report() -> TopologyTransferReport:
+    """Shared example-37 protocol report (one dual-control train for MSE tests)."""
     params = _diffusion_params()
     train = SyntheticDynamicGraphBenchmark.generate(
         num_nodes=_N1, num_timesteps=50, seed=0, **params
@@ -102,18 +95,33 @@ def test_graph_operator_zero_shot_transfer_across_node_counts() -> None:
     hold_n2 = SyntheticDynamicGraphBenchmark.generate(
         num_nodes=_N2, num_timesteps=20, seed=2, **params
     )
+    return evaluate_topology_transfer(
+        _make_model("graph"),
+        train,
+        hold_n1,
+        hold_n2,
+        steps=_STEPS,
+        controls=("graph", "pernode"),
+        seed=0,
+        epochs=_EPOCHS,
+        lr=_LR,
+        device="cpu",
+    )
 
-    torch.manual_seed(0)
-    graph_model = _make_model("graph")
-    graph_model.fit(train, epochs=_EPOCHS, lr=_LR, device="cpu")
 
-    preds = graph_model.predict(hold_n2[0], steps=_STEPS)
-    assert len(preds) == _STEPS
-    assert preds[-1].x is not None
-    assert preds[-1].x.shape == (_N2, _FEATURES)
+def test_graph_operator_zero_shot_transfer_across_node_counts(
+    example37_transfer_report: TopologyTransferReport,
+) -> None:
+    """Public API: transfer ≈ in-dist for graph on the seeded path surrogate.
 
-    in_dist = _rollout_mse(graph_model, hold_n1)
-    transfer = _rollout_mse(graph_model, hold_n2)
+    Assertions encode the measured outcome (comparable transfer error), not
+    an aspirational claim that graph transfer beats per-node. Shape/topology
+    smoke for N2 predict lives in
+    ``test_cross_topology_predict_preserves_eval_edge_index``.
+    """
+    report = example37_transfer_report
+    in_dist = report.in_dist_mse["graph"]
+    transfer = report.transfer_mse["graph"]
     assert in_dist < _MSE_UPPER
     assert transfer < _MSE_UPPER
     # Measured: transfer ≈ in-distribution on this seeded diffusion surrogate.
@@ -124,39 +132,23 @@ def test_graph_operator_zero_shot_transfer_across_node_counts() -> None:
     )
 
 
-def test_transfer_compared_to_pernode_control_and_in_distribution() -> None:
-    """Compare graph transfer to per-node control; record measured ordering."""
-    params = _diffusion_params()
-    train = SyntheticDynamicGraphBenchmark.generate(
-        num_nodes=_N1, num_timesteps=50, seed=0, **params
-    )
-    hold_n1 = SyntheticDynamicGraphBenchmark.generate(
-        num_nodes=_N1, num_timesteps=20, seed=1, **params
-    )
-    hold_n2 = SyntheticDynamicGraphBenchmark.generate(
-        num_nodes=_N2, num_timesteps=20, seed=2, **params
-    )
-
-    metrics: dict[str, dict[str, float]] = {}
-    for kind in ("graph", "pernode"):
-        torch.manual_seed(0)
-        model = _make_model(kind)
-        model.fit(train, epochs=_EPOCHS, lr=_LR, device="cpu")
-        metrics[kind] = {
-            "in_dist": _rollout_mse(model, hold_n1),
-            "transfer": _rollout_mse(model, hold_n2),
-        }
-
-    graph_xfer = metrics["graph"]["transfer"]
-    pernode_xfer = metrics["pernode"]["transfer"]
+def test_transfer_compared_to_pernode_control_and_in_distribution(
+    example37_transfer_report: TopologyTransferReport,
+) -> None:
+    """Public API: per-node remains competitive; transfer_advantage is False."""
+    report = example37_transfer_report
+    graph_xfer = report.transfer_mse["graph"]
+    pernode_xfer = report.transfer_mse["pernode"]
     # Measured: per-node is competitive; do not require graph to win.
     assert graph_xfer < _MSE_UPPER
     assert pernode_xfer < _MSE_UPPER
     # Documented observed ordering on this seed: per-node ≤ graph × 1.25.
     assert pernode_xfer <= graph_xfer * 1.25 + 1e-6, (
         f"unexpected control ordering: graph_xfer={graph_xfer:.4f}, "
-        f"pernode_xfer={pernode_xfer:.4f}; metrics={metrics}"
+        f"pernode_xfer={pernode_xfer:.4f}; "
+        f"in_dist={dict(report.in_dist_mse)}, transfer={dict(report.transfer_mse)}"
     )
+    assert report.transfer_advantage is False
 
 
 def test_self_adaptive_topology_raises_on_node_count_change() -> None:

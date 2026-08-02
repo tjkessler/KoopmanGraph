@@ -219,17 +219,12 @@ def compute_pde_residual_loss(
             )
         else:
             prediction = predictions[timestep]
-        mask = (
-            sequence.observation_mask_at(timestep + 1)
-            if sequence.has_observation_masks
-            else None
-        )
         losses.append(
             _PDE_RESIDUAL_LOSS(
                 prediction,
                 target,
                 pde_fn=residual_fn,
-                mask=mask,
+                mask=sequence.loss_mask_at(timestep + 1),
             )
         )
     return torch.stack(losses).mean()
@@ -285,11 +280,7 @@ def _worst_case_pair(
     Tensor
         Scalar max-over-nodes mean-squared error for the pair.
     """
-    target_mask = (
-        sequence.observation_mask_at(timestep + 1)
-        if sequence.has_observation_masks
-        else None
-    )
+    target_mask = sequence.loss_mask_at(timestep + 1)
     if prediction is None:
         prediction = model(
             sequence[timestep],

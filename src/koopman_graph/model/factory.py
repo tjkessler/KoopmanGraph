@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from torch import nn
 
 from koopman_graph.graph_utils.symmetry import OrbitMethod
 from koopman_graph.graph_utils.topology import synthesize_reverse_edge_types
 from koopman_graph.nn import (
+    CellComplexGNNDecoder,
+    CellComplexGNNEncoder,
     DelayEmbeddingEncoder,
     DiffConvDecoder,
     DiffConvEncoder,
@@ -29,10 +32,13 @@ from koopman_graph.nn import (
     RelGraphEncoder,
     SAGEDecoder,
     SAGEEncoder,
+    SheafGNNDecoder,
+    SheafGNNEncoder,
     SimplicialDecoder,
     SimplicialEncoder,
 )
 from koopman_graph.nn.delay import resolve_delay_encoder
+from koopman_graph.nn.gnn import ActivationName
 from koopman_graph.observables import (
     PhysicsLiftingFn,
     PhysicsPosition,
@@ -75,6 +81,8 @@ Encoder = (
     | DiffConvEncoder
     | HypergraphEncoder
     | SimplicialEncoder
+    | SheafGNNEncoder
+    | CellComplexGNNEncoder
     | InvariantGeometryEncoder
     | RelGraphEncoder
     | DelayEmbeddingEncoder
@@ -86,8 +94,12 @@ Decoder = (
     | DiffConvDecoder
     | HypergraphDecoder
     | SimplicialDecoder
+    | SheafGNNDecoder
+    | CellComplexGNNDecoder
     | RelGraphDecoder
 )
+
+EncoderKind = Literal["sheaf", "cell_complex"]
 KoopmanModule = (
     KoopmanOperator
     | ContinuousKoopmanOperator
@@ -118,11 +130,91 @@ DEFAULT_BILINEAR_RANK: int | None = None
 DEFAULT_KOOPMAN_ORBIT_PARTITION: Sequence[Sequence[int]] | None = None
 DEFAULT_KOOPMAN_AUTO_ORBITS = False
 DEFAULT_KOOPMAN_ORBIT_METHOD: OrbitMethod = "auto"
+DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE = "zhou_symmetric"
+_HYPERGRAPH_INCIDENCE_MODES = frozenset(
+    {"zhou_symmetric", "forward_random_walk", "dual_random_walk"}
+)
+DEFAULT_KOOPMAN_SYMMETRY: str | None = None
+DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE = "zhou_symmetric"
+_HYPERGRAPH_INCIDENCE_MODES = frozenset(
+    {"zhou_symmetric", "forward_random_walk", "dual_random_walk"}
+)
+DEFAULT_KOOPMAN_SYMMETRY: str | None = None
 DEFAULT_KOOPMAN_ADJACENCY: GraphAdjacency = "symmetric"
 _NETWORKED_ADJACENCY_KINDS: frozenset[str] = frozenset({"graph", "continuous_graph"})
 _GRAPH_ADJACENCY_MODES: frozenset[str] = frozenset(
     {"symmetric", "random_walk", "dual_random_walk"}
 )
+
+
+def _resolve_isotypic_symmetry(
+    koopman_symmetry: str | None,
+    *,
+    kind: str,
+    dynamics_mode: DynamicsMode,
+    koopman_orbit_partition: Sequence[Sequence[int]] | None,
+    koopman_auto_orbits: bool,
+    koopman_orbit_method: OrbitMethod,
+    koopman_latent_dims: Mapping[str, int] | None,
+) -> bool:
+    """Validate ``koopman_symmetry`` and return whether isotypic mode is on.
+
+    Parameters
+    ----------
+    koopman_symmetry
+        See signature.
+    kind
+        See signature.
+    dynamics_mode
+        See signature.
+    koopman_orbit_partition
+        See signature.
+    koopman_auto_orbits
+        See signature.
+    koopman_orbit_method
+        See signature.
+    koopman_latent_dims
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    if koopman_symmetry is None:
+        return False
+    if koopman_symmetry != "isotypic":
+        msg = f"koopman_symmetry must be None or 'isotypic', got {koopman_symmetry!r}"
+        raise ValueError(msg)
+    if koopman_orbit_partition is not None or koopman_auto_orbits:
+        msg = (
+            "koopman_symmetry='isotypic' is mutually exclusive with "
+            "koopman_orbit_partition / koopman_auto_orbits"
+        )
+        raise ValueError(msg)
+    if koopman_orbit_method != DEFAULT_KOOPMAN_ORBIT_METHOD:
+        msg = (
+            "koopman_symmetry='isotypic' forces exact automorphism orbits; "
+            "omit koopman_orbit_method (or leave the default)"
+        )
+        raise ValueError(msg)
+    if kind != "graph":
+        msg = (
+            "koopman_symmetry='isotypic' requires koopman='graph' "
+            f"(K_self MVP); got koopman={kind!r}"
+        )
+        raise ValueError(msg)
+    if dynamics_mode != "discrete":
+        msg = (
+            "koopman_symmetry='isotypic' is unsupported for "
+            f"dynamics_mode={dynamics_mode!r}"
+        )
+        raise ValueError(msg)
+    if koopman_latent_dims is not None:
+        msg = (
+            "koopman_symmetry='isotypic' is unsupported with rectangular "
+            "koopman_latent_dims (d_τ)"
+        )
+        raise ValueError(msg)
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +492,9 @@ def resolve_model_components(
     koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
     koopman_sparsity: str = "dense",
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_hypergraph_incidence_mode: str = (
+        DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
+    ),
     koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
     koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
     koopman_local_hidden_dims: Sequence[int] | None = None,
@@ -408,6 +503,7 @@ def resolve_model_components(
     ),
     koopman_auto_orbits: bool = DEFAULT_KOOPMAN_AUTO_ORBITS,
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
+    koopman_symmetry: str | None = DEFAULT_KOOPMAN_SYMMETRY,
     control_dim: int = 0,
     control_mode: ControlMode = DEFAULT_CONTROL_MODE,
     bilinear_rank: int | None = DEFAULT_BILINEAR_RANK,
@@ -458,10 +554,18 @@ def resolve_model_components(
     koopman_adjacency : {"symmetric", "random_walk", "dual_random_walk"}
         Neighbor-coupling normalization for ``koopman="graph"`` /
         ``"continuous_graph"``. Default ``"symmetric"``.
+    koopman_hypergraph_incidence_mode : str
+        Incidence normalization for ``koopman="hypergraph"``
+        (``zhou_symmetric`` / ``forward_random_walk`` / ``dual_random_walk``).
+        Default ``"zhou_symmetric"``.
     koopman_local_window, koopman_local_rank, koopman_local_hidden_dims
         Global/local operator hyperparameters.
     koopman_orbit_partition, koopman_auto_orbits, koopman_orbit_method
         Symmetry / orbit-tying configuration.
+    koopman_symmetry : {None, "isotypic"}, optional
+        Representation-theoretic symmetry mode. ``"isotypic"`` ties
+        ``K_self`` via exact ``Aut(G)`` orbits on ``koopman="graph"``
+        (mutually exclusive with orbit kwargs). Default ``None``.
     control_dim : int
         Control input dimension (``0`` for uncontrolled).
     control_mode : ControlMode
@@ -715,12 +819,14 @@ def resolve_model_components(
         koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
         koopman_sparsity=koopman_sparsity,
         koopman_adjacency=koopman_adjacency,
+        koopman_hypergraph_incidence_mode=koopman_hypergraph_incidence_mode,
         koopman_local_window=koopman_local_window,
         koopman_local_rank=koopman_local_rank,
         koopman_local_hidden_dims=koopman_local_hidden_dims,
         koopman_orbit_partition=koopman_orbit_partition,
         koopman_auto_orbits=koopman_auto_orbits,
         koopman_orbit_method=koopman_orbit_method,
+        koopman_symmetry=koopman_symmetry,
         num_relations=num_relations,
         relation_normalization=relation_normalization,
         node_types=koopman_node_types,
@@ -872,7 +978,11 @@ def resolve_injected_koopman(
     ),
     koopman_auto_orbits: bool = DEFAULT_KOOPMAN_AUTO_ORBITS,
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
+    koopman_symmetry: str | None = DEFAULT_KOOPMAN_SYMMETRY,
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_hypergraph_incidence_mode: str = (
+        DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
+    ),
 ) -> KoopmanOperatorContract:
     """Validate and return an injected Koopman operator module.
 
@@ -915,7 +1025,11 @@ def resolve_injected_koopman(
         See the function signature / summary for ``koopman_orbit_method``.
     koopman_adjacency : GraphAdjacency
         Factory adjacency mode (must be default when injecting).
+    koopman_symmetry
+        See signature.
 
+    koopman_hypergraph_incidence_mode
+        See signature.
     Returns
     -------
 
@@ -966,8 +1080,12 @@ def resolve_injected_koopman(
         conflicting.append("koopman_auto_orbits")
     if koopman_orbit_method != DEFAULT_KOOPMAN_ORBIT_METHOD:
         conflicting.append("koopman_orbit_method")
+    if koopman_symmetry != DEFAULT_KOOPMAN_SYMMETRY:
+        conflicting.append("koopman_symmetry")
     if koopman_adjacency != DEFAULT_KOOPMAN_ADJACENCY:
         conflicting.append("koopman_adjacency")
+    if koopman_hypergraph_incidence_mode != DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE:
+        conflicting.append("koopman_hypergraph_incidence_mode")
     if conflicting:
         names = ", ".join(conflicting)
         msg = (
@@ -1202,6 +1320,101 @@ def _reject_local_kwargs_unless_global_local(
         raise ValueError(msg)
 
 
+def build_encoder_peers(
+    encoder: EncoderKind,
+    *,
+    in_channels: int,
+    hidden_channels: int,
+    latent_dim: int,
+    out_channels: int,
+    num_layers: int = 2,
+    activation: ActivationName = "relu",
+    residual: bool = False,
+    restriction_maps: Literal["diagonal", "general"] = "diagonal",
+) -> tuple[Encoder, Decoder]:
+    """Build a matched encoder / decoder peer pair by kind string.
+
+    Parameters
+    ----------
+    encoder : {"sheaf", "cell_complex"}
+        Encoder family. ``\"sheaf\"`` builds sheaf peers; ``\"cell_complex\"``
+        builds Hodge-``L_0`` cell-complex peers
+        (:class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
+        :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`).
+    in_channels : int
+        Physical input feature width.
+    hidden_channels : int
+        Hidden channel width for both peers.
+    latent_dim : int
+        Per-node latent width (must match ``GraphKoopmanModel.latent_dim``
+        when physics lifting is off).
+    out_channels : int
+        Physical output feature width for the decoder.
+    num_layers : int, optional
+        Stack depth for both peers. Default is ``2``.
+    activation : str, optional
+        Hidden activation name. Default is ``\"relu\"``.
+    residual : bool, optional
+        Residual skips when widths match. Default is ``False``.
+    restriction_maps : {"diagonal", "general"}, optional
+        Sheaf restriction-map parameterization (sheaf peers only). Default
+        is ``\"diagonal\"``. ``\"general\"`` is opt-in and refused above the
+        documented channel ceiling.
+
+    Returns
+    -------
+    tuple of Encoder, Decoder
+        Matched peer pair ready for :class:`~koopman_graph.model.GraphKoopmanModel`.
+
+    Raises
+    ------
+    ValueError
+        If ``encoder`` is not a registered kind.
+    """
+    if encoder == "sheaf":
+        return (
+            SheafGNNEncoder(
+                in_channels,
+                hidden_channels,
+                latent_dim,
+                num_layers=num_layers,
+                activation=activation,
+                residual=residual,
+                restriction_maps=restriction_maps,
+            ),
+            SheafGNNDecoder(
+                latent_dim,
+                hidden_channels,
+                out_channels,
+                num_layers=num_layers,
+                activation=activation,
+                residual=residual,
+                restriction_maps=restriction_maps,
+            ),
+        )
+    if encoder == "cell_complex":
+        return (
+            CellComplexGNNEncoder(
+                in_channels,
+                hidden_channels,
+                latent_dim,
+                num_layers=num_layers,
+                activation=activation,
+                residual=residual,
+            ),
+            CellComplexGNNDecoder(
+                latent_dim,
+                hidden_channels,
+                out_channels,
+                num_layers=num_layers,
+                activation=activation,
+                residual=residual,
+            ),
+        )
+    msg = f"Unknown encoder={encoder!r}; supported kinds: 'sheaf', 'cell_complex'"
+    raise ValueError(msg)
+
+
 def build_koopman(
     *,
     koopman: KoopmanArg,
@@ -1217,6 +1430,9 @@ def build_koopman(
     koopman_auxiliary_hidden_dims: Sequence[int] | None,
     koopman_sparsity: str = "dense",
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_hypergraph_incidence_mode: str = (
+        DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
+    ),
     koopman_local_window: int = DEFAULT_KOOPMAN_LOCAL_WINDOW,
     koopman_local_rank: int = DEFAULT_KOOPMAN_LOCAL_RANK,
     koopman_local_hidden_dims: Sequence[int] | None = None,
@@ -1225,6 +1441,7 @@ def build_koopman(
     ),
     koopman_auto_orbits: bool = DEFAULT_KOOPMAN_AUTO_ORBITS,
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
+    koopman_symmetry: str | None = DEFAULT_KOOPMAN_SYMMETRY,
     num_relations: int | None = None,
     relation_normalization: str | None = None,
     node_types: Sequence[str] | None = None,
@@ -1292,7 +1509,11 @@ def build_koopman(
     latent_dims : mapping of str to int or None, optional
         Opt-in per-type widths for discrete or continuous
         ``koopman="hetero_graph"``.
+    koopman_hypergraph_incidence_mode
+        See signature.
 
+    koopman_symmetry
+        See signature.
     Returns
     -------
 
@@ -1334,6 +1555,13 @@ def build_koopman(
             f"{{{accepted}}}, got {koopman_adjacency!r}"
         )
         raise ValueError(msg)
+    if koopman_hypergraph_incidence_mode not in _HYPERGRAPH_INCIDENCE_MODES:
+        accepted = ", ".join(sorted(_HYPERGRAPH_INCIDENCE_MODES))
+        msg = (
+            "koopman_hypergraph_incidence_mode must be one of "
+            f"{{{accepted}}}, got {koopman_hypergraph_incidence_mode!r}"
+        )
+        raise ValueError(msg)
     # Injection uses kind="pernode" as a placeholder; non-default adjacency is
     # rejected later as a conflicting factory kwarg.
     if (
@@ -1347,13 +1575,43 @@ def build_koopman(
             f"koopman={kind!r}"
         )
         raise ValueError(msg)
+    if (
+        injected is None
+        and kind != "hypergraph"
+        and koopman_hypergraph_incidence_mode
+        != DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
+    ):
+        msg = (
+            "koopman_hypergraph_incidence_mode is only meaningful for "
+            f"koopman='hypergraph'; got "
+            f"incidence_mode={koopman_hypergraph_incidence_mode!r} with "
+            f"koopman={kind!r}"
+        )
+        raise ValueError(msg)
 
-    symmetry_requested = koopman_orbit_partition is not None or koopman_auto_orbits
+    # Injection conflicts for koopman_symmetry are checked in
+    # resolve_injected_koopman; skip kind-specific isotypic validation here.
+    isotypic_symmetry = (
+        False
+        if injected is not None
+        else _resolve_isotypic_symmetry(
+            koopman_symmetry,
+            kind=kind,
+            dynamics_mode=dynamics_mode,
+            koopman_orbit_partition=koopman_orbit_partition,
+            koopman_auto_orbits=koopman_auto_orbits,
+            koopman_orbit_method=koopman_orbit_method,
+            koopman_latent_dims=latent_dims,
+        )
+    )
+    symmetry_requested = (
+        koopman_orbit_partition is not None or koopman_auto_orbits or isotypic_symmetry
+    )
     if symmetry_requested and kind not in {"graph", "hypergraph", "hetero_graph"}:
         msg = (
-            "koopman_orbit_partition / koopman_auto_orbits require "
-            "koopman='graph', 'hypergraph', or multiplex 'hetero_graph', "
-            f"got koopman={kind!r}"
+            "koopman_orbit_partition / koopman_auto_orbits / "
+            "koopman_symmetry require koopman='graph', 'hypergraph', or "
+            f"multiplex 'hetero_graph', got koopman={kind!r}"
         )
         raise ValueError(msg)
     if symmetry_requested and kind == "hetero_graph" and dynamics_mode == "continuous":
@@ -1412,7 +1670,9 @@ def build_koopman(
             koopman_orbit_partition=koopman_orbit_partition,
             koopman_auto_orbits=koopman_auto_orbits,
             koopman_orbit_method=koopman_orbit_method,
+            koopman_symmetry=koopman_symmetry,
             koopman_adjacency=koopman_adjacency,
+            koopman_hypergraph_incidence_mode=koopman_hypergraph_incidence_mode,
         )
         if isinstance(operator, ContinuousGraphKoopmanOperator):
             resolved_kind: KoopmanKind = "continuous_graph"
@@ -1564,6 +1824,7 @@ def build_koopman(
                 orbit_partition=koopman_orbit_partition,
                 auto_orbits=koopman_auto_orbits,
                 orbit_method=koopman_orbit_method,
+                isotypic_symmetry=isotypic_symmetry,
             ),
             "graph",
             dynamics_mode=dynamics_mode,
@@ -1589,6 +1850,7 @@ def build_koopman(
                 control_mode=control_mode,
                 bilinear_rank=bilinear_rank,
                 sparsity=koopman_sparsity,  # type: ignore[arg-type]
+                incidence_mode=koopman_hypergraph_incidence_mode,  # type: ignore[arg-type]
                 orbit_partition=koopman_orbit_partition,
                 auto_orbits=koopman_auto_orbits,
                 orbit_method=koopman_orbit_method,

@@ -105,6 +105,10 @@ def sequence_to_device(
             observation_masks=_tensor_or_mapping_to_device(
                 sequence.observation_masks, device
             ),
+            presence_masks=_tensor_or_mapping_to_device(
+                sequence.presence_masks, device
+            ),
+            allow_node_churn=sequence.allow_node_churn,
         )
     return GraphSnapshotSequence(
         moved_snapshots,  # type: ignore[arg-type]
@@ -122,4 +126,11 @@ def sequence_to_device(
             if sequence.observation_masks is None
             else sequence.observation_masks.to(device)
         ),
+        presence_masks=(
+            None
+            if sequence.presence_masks is None
+            else sequence.presence_masks.to(device)
+        ),
+        entity_ids=sequence.entity_ids,
+        allow_node_churn=sequence.allow_node_churn,
     )

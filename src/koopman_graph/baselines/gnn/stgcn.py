@@ -7,6 +7,7 @@ from torch import Tensor, nn
 from torch_geometric.nn import GCNConv
 
 from koopman_graph.baselines.gnn.base import GNNForecasterBaseline
+from koopman_graph.baselines.gnn.protocol import ForecasterProtocol
 
 
 class _TemporalGatedConv(nn.Module):
@@ -212,6 +213,25 @@ class STGCNBaseline(GNNForecasterBaseline):
             channels = hidden_channels
         self.blocks = nn.ModuleList(blocks)
         self.readout = nn.Conv2d(hidden_channels, out_channels, kernel_size=1)
+
+    def protocol(self) -> ForecasterProtocol:
+        """Return the STGCN teaching protocol (non-empty deviations).
+
+        Returns
+        -------
+        ForecasterProtocol
+            Lookback, claimed evaluation horizon, split ratios, and deviations
+            versus Yu et al. / LibCity-style STGCN scripts.
+        """
+        return self._teaching_protocol(
+            name="stgcn",
+            deviations=(
+                "architecture: teaching-scale ST-Conv block count and channel "
+                "widths; not Yu et al. METR-LA / PEMS-BAY capacity",
+                "architecture: no multi-horizon direct or scheduled decoding at "
+                "the claimed evaluation horizon (next-frame fit only)",
+            ),
+        )
 
     def predict_next(
         self,

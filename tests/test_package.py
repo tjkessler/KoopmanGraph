@@ -16,6 +16,8 @@ _VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
 
 _RETAINED_ROOT = frozenset(
     {
+        "CellComplexGNNDecoder",
+        "CellComplexGNNEncoder",
         "ContinuousGraphKoopmanOperator",
         "ContinuousKoopmanOperator",
         "DelayEmbeddingEncoder",
@@ -43,6 +45,8 @@ _RETAINED_ROOT = frozenset(
         "RelGraphEncoder",
         "SAGEDecoder",
         "SAGEEncoder",
+        "SheafGNNDecoder",
+        "SheafGNNEncoder",
         "SimplicialDecoder",
         "SimplicialEncoder",
         "__version__",
