@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from koopman_graph.graph_utils import (
     dense_symmetric_normalized_adjacency,
     propagate_latent,
 )
+from koopman_graph.spectrum_types import compute_spectrum
+
+_HAS_PYNAUTY = importlib.util.find_spec("pynauty") is not None
 
 
 def _path_edge_index(num_nodes: int) -> torch.Tensor:
@@ -29,6 +33,43 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
     for node in range(num_nodes - 1):
         edges.extend([[node, node + 1], [node + 1, node]])
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _ring_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build an undirected ring graph edge index."""
+    edges: list[list[int]] = []
+    for node in range(num_nodes):
+        nxt = (node + 1) % num_nodes
+        edges.extend([[node, nxt], [nxt, node]])
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _star_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build an undirected star with center 0 and leaves 1..N-1."""
+    edges: list[list[int]] = []
+    for leaf in range(1, num_nodes):
+        edges.extend([[0, leaf], [leaf, 0]])
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _eigvals_match(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    *,
+    rtol: float,
+    atol: float,
+) -> bool:
+    """Greedy multiset match of complex eigenvalues (order-invariant)."""
+    if left.shape != right.shape:
+        return False
+    remaining = right.detach().clone()
+    for value in left.detach():
+        diffs = (remaining - value).abs()
+        index = int(torch.argmin(diffs))
+        if not torch.isclose(value, remaining[index], rtol=rtol, atol=atol):
+            return False
+        remaining[index] = complex(float("inf"), float("inf"))
+    return True
 
 
 def test_k_nbr_zero_matches_pernode_operator() -> None:
@@ -103,6 +144,218 @@ def test_spectrum_smoke_matches_effective_eigvals() -> None:
         eigvals.abs().sort().values,
         atol=1e-5,
     )
+
+
+def test_spectrum_eligible_default_uses_kronecker_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default shared-self symmetric spectrum routes through Kronecker helper."""
+    from koopman_graph.operators import graph as graph_mod
+
+    calls: list[dict[str, object]] = []
+    original = graph_mod.spectrum_k_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    edge_index = _path_edge_index(3)
+    op = GraphKoopmanOperator(2, init_mode="identity")
+    spectrum = op.spectrum(edge_index, 3, time_step=0.25)
+    assert len(calls) == 1
+    assert spectrum.eigenvalues.shape == (6,)
+    assert spectrum.eigenvectors.shape == (6, 6)
+
+
+def test_spectrum_ineligible_paths_skip_kronecker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dual, orbit banks, and distributed do not call the Kronecker helper."""
+    from koopman_graph.operators import graph as graph_mod
+
+    def _boom(**_kwargs: object):
+        msg = "kronecker helper should not run on ineligible spectrum paths"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _boom)
+    edge_index = _path_edge_index(3)
+    time_step = 0.1
+
+    dual = GraphKoopmanOperator(2, init_mode="identity", adjacency="dual_random_walk")
+    dual_spec = dual.spectrum(edge_index, 3, time_step=time_step)
+    dual_oracle = compute_spectrum(
+        dual.effective_matrix(edge_index, 3),
+        time_step,
+    )
+    assert dual_spec.eigenvalues.shape == (6,)
+    assert _eigvals_match(
+        dual_spec.eigenvalues,
+        dual_oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    orbit = GraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        orbit_partition=((0, 1), (2,)),
+    )
+    orbit_spec = orbit.spectrum(edge_index, 3, time_step=time_step)
+    orbit_oracle = compute_spectrum(
+        orbit.effective_matrix(edge_index, 3),
+        time_step,
+    )
+    assert orbit_spec.eigenvalues.shape == (6,)
+    assert _eigvals_match(
+        orbit_spec.eigenvalues,
+        orbit_oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    distributed = GraphKoopmanOperator(2, init_mode="identity", sparsity="distributed")
+    distributed.set_dense_matrices(
+        torch.tensor([[0.45, 0.20], [0.05, 0.35]]),
+        torch.tensor([[0.25, 0.10], [0.15, 0.05]]),
+    )
+    dist_spec = distributed.spectrum(edge_index, 3, num_modes=2)
+    assert dist_spec.eigenvalues.shape == (2,)
+    assert dist_spec.eigenvectors.shape == (2, 2)
+
+
+@pytest.mark.skipif(not _HAS_PYNAUTY, reason="pynauty not installed")
+def test_spectrum_isotypic_skips_kronecker_and_matches_dense(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isotypic self banks dense-route (shared_self False) and match oracle."""
+    from koopman_graph.operators import graph as graph_mod
+
+    def _boom(**_kwargs: object):
+        msg = "kronecker helper should not run for isotypic self banks"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _boom)
+    star = _star_edge_index(5)
+    time_step = 0.1
+    op = GraphKoopmanOperator(2, init_mode="identity", isotypic_symmetry=True)
+    got = op.spectrum(star, 5, time_step=time_step)
+    oracle = compute_spectrum(op.effective_matrix(star, 5), time_step)
+    assert op.uses_orbit_selves
+    assert got.eigenvalues.shape == (10,)
+    assert _eigvals_match(
+        got.eigenvalues,
+        oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+@pytest.mark.parametrize("topology", ["path", "ring"])
+@pytest.mark.parametrize("adjacency", ["symmetric", "random_walk"])
+@pytest.mark.parametrize(("num_nodes", "latent_dim"), [(4, 2), (6, 3)])
+def test_operator_spectrum_parity_vs_dense_oracle(
+    topology: str,
+    adjacency: str,
+    num_nodes: int,
+    latent_dim: int,
+) -> None:
+    """GraphKoopmanOperator.spectrum matches dense compute_spectrum (small N).
+
+    Tolerance rtol=atol=1e-5 justified by float32 eig accumulation on N·d ≤ 18
+    (same contract as helper-level Kronecker parity).
+    """
+    torch.manual_seed(3)
+    time_step = 0.1
+    edge_index = (
+        _path_edge_index(num_nodes)
+        if topology == "path"
+        else _ring_edge_index(num_nodes)
+    )
+    op = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity_noise",
+        init_scale=0.05,
+        adjacency=adjacency,  # type: ignore[arg-type]
+    )
+    got = op.spectrum(edge_index, num_nodes, time_step=time_step)
+    oracle = compute_spectrum(
+        op.effective_matrix(edge_index, num_nodes),
+        time_step,
+    )
+    ambient = num_nodes * latent_dim
+    assert got.eigenvalues.shape == (ambient,)
+    assert got.eigenvectors.shape == (ambient, ambient)
+    assert got.time_step == time_step
+    assert _eigvals_match(
+        got.eigenvalues,
+        oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_operator_spectrum_block_diagonal_uses_kronecker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eligible block_diagonal sparsity still routes through Kronecker."""
+    from koopman_graph.operators import graph as graph_mod
+
+    calls: list[int] = []
+    original = graph_mod.spectrum_k_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    edge_index = _path_edge_index(4)
+    op = GraphKoopmanOperator(2, init_mode="identity", sparsity="block_diagonal")
+    spectrum = op.spectrum(edge_index, 4, time_step=0.1)
+    assert len(calls) == 1
+    oracle = compute_spectrum(op.effective_matrix(edge_index, 4), 0.1)
+    assert _eigvals_match(
+        spectrum.eigenvalues,
+        oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_operator_spectrum_moderate_n_kronecker_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moderate-N eligible spectrum finishes via Kronecker (no tight dense oracle).
+
+    N=100, d=2 → ambient 200. R7: assert finite shapes only; skip dense eigvals.
+    """
+    from koopman_graph.operators import graph as graph_mod
+
+    calls: list[int] = []
+    original = graph_mod.spectrum_k_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    num_nodes = 100
+    latent_dim = 2
+    ambient = num_nodes * latent_dim
+    edge_index = _path_edge_index(num_nodes)
+    op = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity_noise",
+        init_scale=0.05,
+        adjacency="symmetric",
+    )
+    spectrum = op.spectrum(edge_index, num_nodes, time_step=1.0)
+    assert len(calls) == 1
+    assert spectrum.eigenvalues.shape == (ambient,)
+    assert spectrum.eigenvectors.shape == (ambient, ambient)
+    assert bool(torch.isfinite(spectrum.eigenvalues).all())
+    assert bool(torch.isfinite(spectrum.eigenvectors).all())
+    assert bool(torch.isfinite(spectrum.magnitudes).all())
 
 
 def test_graph_requires_edge_index_on_advance() -> None:

@@ -201,8 +201,8 @@ version with the tag you intend; see PyPI and ``CHANGELOG.md``):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.11.0
-   # or: uv pip install koopman-graph==0.11.0
+   pip install koopman-graph==0.12.0
+   # or: uv pip install koopman-graph==0.12.0
 
 Releases are published automatically when a maintainer creates a GitHub Release
 (see ``CONTRIBUTING.md`` in the repository). For the latest in-tree development

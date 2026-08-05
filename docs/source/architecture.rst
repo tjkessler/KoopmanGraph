@@ -401,13 +401,17 @@ power-user losses stay package imports outside root ``__all__``.
 * ``graph_inverse`` — block-diagonal / Jacobi approximate inverse helpers for
   ``GraphKoopmanOperator`` / ``HypergraphKoopmanOperator`` with
   ``sparsity="block_diagonal"`` (no ``operators/graph/`` subtree)
+* ``kronecker_spectrum`` — exact Kronecker-sum spectrum helpers for eligible
+  discrete / continuous graph operators (power-user; not in package
+  ``__all__``; auto-routed from ``.spectrum`` — see spectrum routing below)
 * ``continuous_graph`` —
   :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
   (continuous networked generator ``I⊗L_self + Â⊗L_nbr``; select via
   ``koopman="graph"`` + ``dynamics_mode="continuous"`` or
   ``koopman="continuous_graph"``). Dense advance uses an ``N·d`` matrix
   exponential; ``sparsity="block_diagonal"`` is the self-dominated
-  approximate path
+  approximate path. ``.spectrum`` may Kronecker-route when eligible (see
+  spectrum routing below); that does not shrink the matrix-exp ceiling
 * ``hypergraph`` —
   :class:`~koopman_graph.operators.hypergraph.HypergraphKoopmanOperator`
   (discrete hyperedge-coupled advance; select via ``koopman="hypergraph"``;
@@ -1140,7 +1144,10 @@ Topology capability matrix
 
 Dynamic topology is first-class in the data container and neural model path,
 but not every consumer supports it. Callers must not assume silent freeze/flatten
-behavior. Optional static hyperedge incidence (``hyperedge_index`` /
+behavior. Mid-horizon rewiring is **mechanical** support for changing
+``edge_index`` schedules; it is not criticality-aware forecasting or
+spectral-degeneracy analysis (see :ref:`limitations-topology-criticality`).
+Optional static hyperedge incidence (``hyperedge_index`` /
 ``hyperedge_weight`` on each ``Data`` snapshot; PyG bipartite format) is
 accepted by :class:`~koopman_graph.data.GraphSnapshotSequence`. Hypergraph
 encoder/decoder peers and ``koopman="hypergraph"`` consume the incidence;
@@ -1300,8 +1307,9 @@ spectral analysis uses the explicit helpers ``effective_matrix`` /
   ``dual_random_walk``); advance applies ``exp(L_eff Δt)``. Dense realization
   forms an ``N·d`` matrix exponential (prefer modest ``N`` or
   ``sparsity="block_diagonal"`` for the self-dominated approximation, which
-  ignores neighbor coupling). Checkpoint kind is always ``continuous_graph``
-  (including when selected via ``koopman="graph"`` +
+  ignores neighbor coupling). ``.spectrum`` follows the graph /
+  continuous-graph spectrum routing below. Checkpoint kind is always
+  ``continuous_graph`` (including when selected via ``koopman="graph"`` +
   ``dynamics_mode="continuous"``).
 * Hypergraph — assemble ``I_N ⊗ K_self + Ĥ ⊗ K_hedge`` on a supplied
   ``hyperedge_index`` / ``hyperedge_weight`` (Zhou ``Ĥ`` semantics as advance).
@@ -1342,8 +1350,9 @@ always the sparse message-passing matvec (pairwise ``Â`` or Zhou ``Ĥ``).
      - Notes
    * - ``"dense"`` (default)
      - Exact dense ``N·d`` inverse (pseudoinverse fallback)
-     - Suitable for modest ``N``; ``effective_matrix`` / ``spectrum`` still
-       assemble the dense map
+     - Suitable for modest ``N``; ``effective_matrix`` still assembles the
+       dense map. Graph / continuous-graph ``.spectrum`` may Kronecker-route
+       when eligible (see below)
    * - ``"block_diagonal"``
      - Approximate per-node ``d×d`` Jacobi inverse
        (exact when the coupling factor is zero or the topology is empty —
@@ -1352,17 +1361,45 @@ always the sparse message-passing matvec (pairwise ``Â`` or Zhou ``Ĥ``).
      - For backward-consistency / imputation at scale; **not** an exact
        whole-network inverse. ``inverse_matrix=`` is rejected. Shared by
        :class:`~koopman_graph.operators.GraphKoopmanOperator` and
-       :class:`~koopman_graph.operators.HypergraphKoopmanOperator`
+       :class:`~koopman_graph.operators.HypergraphKoopmanOperator`.
+       Eligible graph / continuous-graph ``.spectrum`` may still use
+       Kronecker reduction of the full coupled factors
    * - ``"distributed"``
      - Matrix-free Richardson inverse and Arnoldi leading-modulus
        spectrum (discrete graph / multiplex hetero); forward stays the
        sparse matvec. Hypergraph / continuous peers may still assemble
+       for inverse; continuous spectrum has no Arnoldi path
      - Operator math only — **not** trainer DDP /
-       ``[distributed]`` extras
+       ``[distributed]`` extras and **not** Kronecker exact spectrum
 
 The stored checkpoint field is ``config.sparsity`` (format 1). Continuous-graph
 ``block_diagonal`` remains the self-dominated advance / inverse shortcut
 documented under that peer (not the Jacobi path above).
+
+**Graph / continuous-graph spectrum routing.** Discrete
+:meth:`~koopman_graph.operators.graph.GraphKoopmanOperator.spectrum` and
+continuous
+:meth:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator.spectrum`
+auto-route (no path-selection kwarg):
+
+1. ``sparsity="distributed"`` — discrete graph / multiplex hetero use
+   matrix-free Arnoldi leading-modulus Ritz values; continuous graph falls
+   through to dense :math:`L_{\mathrm{eff}}` eigendecomposition (no Arnoldi
+   spectrum path).
+2. Else if Kronecker-sum eligible — shared self factor,
+   ``adjacency`` in ``{"symmetric", "random_walk"}``,
+   ``sparsity`` in ``{"dense", "block_diagonal"}`` — exact reduction via
+   :mod:`koopman_graph.operators.kronecker_spectrum`
+   (:math:`I\otimes M_{\mathrm{self}} + \widehat{A}\otimes M_{\mathrm{nbr}}`
+   for discrete :math:`K` or continuous generator :math:`L`).
+3. Else — dense assembled eigendecomposition
+   (``dual_random_walk``, discrete orbit / isotypic self banks, helper
+   fall-back, hetero / hypergraph as applicable).
+
+This routing covers **spectrum only**. Exact inverse, continuous
+:math:`\Phi=\exp(\Delta t\, L_{\mathrm{eff}})`, and eigenvalue-regularization
+hinges keep their dense :math:`(N\cdot d)` ceilings where documented.
+Ceilings and eligibility details: :doc:`limitations` (Scale).
 
 **Graph / continuous-graph adjacency (``adjacency``).** Neighbor-coupling
 normalization for pairwise networked operators:

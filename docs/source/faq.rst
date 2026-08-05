@@ -170,13 +170,17 @@ Several training paths still assemble or multiply dense structures whose
 size grows with :math:`N` (or :math:`N\cdot d`), even when latents and
 supports are cached within an evaluation:
 
-* Exact spectrum / inverse and continuous dense
+* Exact **inverse** and continuous dense
   :math:`\Phi=\exp(\Delta t\, L_{\mathrm{eff}})` on
   :math:`(N\cdot d)\times(N\cdot d)` matrices
+* Exact **spectrum** when the Kronecker path does not apply (dense
+  :math:`(N\cdot d)` eigendecomposition, or discrete distributed Arnoldi
+  surrogate); eligible graph / continuous-graph spectrum uses Kronecker-sum
+  reduction instead — see below and :doc:`limitations` (Scale)
 * DiffConv diffusion supports and hypergraph Zhou :math:`\hat{H}` as dense
   :math:`N\times N` tensors
 * Eigenvalue hinge on dense / ODO networked operators
-  (:math:`O((N\cdot d)^3)` eigendecomposition)
+  (:math:`O((N\cdot d)^3)` eigendecomposition of the assembled map)
 * Self-adaptive topology materializing full :math:`N^2` COO
 
 Shared pair latents, inverse / support / :math:`\hat{H}` / :math:`\Phi`
@@ -184,14 +188,38 @@ reuse, and PDE/worst-case prediction sharing reduce repeated work; they
 do not change those representation sizes. See :doc:`limitations` (Scale)
 and :doc:`capabilities` (Training performance).
 
+Does spectrum still assemble :math:`N\cdot d`?
+----------------------------------------------
+
+Not always for discrete ``GraphKoopmanOperator`` /
+``ContinuousGraphKoopmanOperator``. ``.spectrum`` auto-routes:
+
+* ``sparsity="distributed"`` — Arnoldi leading-modulus surrogate on discrete
+  graph / multiplex hetero; continuous graph has no Arnoldi spectrum path
+  and uses dense :math:`L_{\mathrm{eff}}`
+* Else if eligible (shared self; ``adjacency`` in
+  ``{"symmetric", "random_walk"}``; ``sparsity`` in
+  ``{"dense", "block_diagonal"}``) — Kronecker-sum exact spectrum
+  (order :math:`O(N^3 + N d^3)` via dense :math:`N\times N`
+  :math:`\widehat{A}` plus :math:`N` blocks of size :math:`d\times d`)
+* Else — dense :math:`(N\cdot d)` eigendecomposition
+  (``dual_random_walk``, discrete orbit / isotypic self banks, hetero /
+  hypergraph, helper fall-back)
+
+Exact inverse and eigenvalue-regularization hinges are unchanged (still
+dense assembled ceilings where documented). Details:
+:doc:`limitations` (Scale) and :doc:`architecture` (spectrum routing).
+
 When should I use ``sparsity="block_diagonal"``?
 ------------------------------------------------
 
 Use ``sparsity="block_diagonal"`` on graph / hypergraph / continuous-graph
 operators when the dense :math:`N\cdot d` path dominates wall time and a
 self-dominated (Jacobi-style) approximation is acceptable for your
-advance / inverse / spectrum use case. Prefer ``sparsity="dense"`` when you
-need the full coupled effective map. Tutorial:
+advance / inverse use case. Prefer ``sparsity="dense"`` when you need the
+full coupled effective map for advance / inverse. Eligible graph /
+continuous-graph ``.spectrum`` may still Kronecker-route the full coupled
+factors under ``block_diagonal``. Tutorial:
 ``examples/29_large_graph_block_diagonal.ipynb``.
 
 How do I enable automatic mixed precision (AMP)?

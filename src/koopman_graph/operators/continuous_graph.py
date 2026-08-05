@@ -39,6 +39,10 @@ from koopman_graph.operators.control import (
     per_node_effective_bilinear_matrices,
 )
 from koopman_graph.operators.graph_types import GRAPH_ADJACENCY_MODES, GraphAdjacency
+from koopman_graph.operators.kronecker_spectrum import (
+    kronecker_sum_spectrum_eligible,
+    spectrum_l_eff_kronecker_sum,
+)
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_generator_spectrum
 
 ContinuousGraphSparsity = Literal["dense", "block_diagonal", "distributed"]
@@ -750,7 +754,26 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         """Eigendecomposition of the effective ``N·d`` networked generator.
 
         Directed / dual modes may yield complex spectra; growth rates and
-        frequencies come from the complex eigendecomposition.
+        frequencies come from the complex eigendecomposition (generator
+        conventions: real-part growth rates).
+
+        Routing (auto; no path-selection kwarg):
+
+        1. If Kronecker-sum eligible (shared ``L_self``,
+           ``adjacency`` in ``{"symmetric", "random_walk"}``,
+           ``sparsity`` in ``{"dense", "block_diagonal"}``) — exact
+           reduction via
+           :func:`~koopman_graph.operators.kronecker_spectrum.spectrum_l_eff_kronecker_sum`
+           when the helper succeeds.
+        2. Else — dense
+           :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`
+           on :meth:`effective_generator` (``dual_random_walk``,
+           ``sparsity="distributed"`` — continuous has no Arnoldi spectrum
+           path — or Kronecker helper fall-back).
+
+        This routing covers **spectrum only**. ``transition_matrix`` /
+        :math:`\\exp(\\Delta t\\, L_{\\mathrm{eff}})` caching and inverse
+        ceilings are unchanged.
 
         Parameters
         ----------
@@ -766,6 +789,22 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         KoopmanSpectrum
             Magnitude-sorted spectrum of ``L_eff``.
         """
+        if kronecker_sum_spectrum_eligible(
+            adjacency=self.adjacency,
+            sparsity=self.sparsity,
+            shared_self=True,
+        ):
+            kronecker = spectrum_l_eff_kronecker_sum(
+                l_self=self.L_self,
+                l_nbr=self.L_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+            )
+            if kronecker is not None:
+                return kronecker
+
         return compute_generator_spectrum(
             self.effective_generator(edge_index, num_nodes, edge_weight=edge_weight)
         )

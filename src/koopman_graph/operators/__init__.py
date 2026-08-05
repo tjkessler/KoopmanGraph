@@ -61,6 +61,16 @@ Capability layout
     for networked effective operators (primitives for
     ``sparsity="distributed"``; **not** trainer DDP / ``[distributed]``
     extras; does **not** enable multi-GPU training).
+``kronecker_spectrum``
+    Exact Kronecker-sum spectrum reduction for eligible networked
+    operators (``I⊗M_self + Â⊗M_nbr`` for discrete ``K`` or continuous
+    generator ``L``). Auto-routed from
+    :meth:`~koopman_graph.operators.graph.GraphKoopmanOperator.spectrum`
+    and
+    :meth:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator.spectrum`
+    when eligible; also available as a power-user import from
+    ``koopman_graph.operators.kronecker_spectrum`` (not in package
+    ``__all__``). Distinct from Arnoldi ``matrix_free`` surrogates.
 ``global_local``
     :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
     (discrete global backbone + low-rank local window correction).
