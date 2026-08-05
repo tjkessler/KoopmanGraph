@@ -157,4 +157,4 @@ __all__ = [
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.11.0"
+__version__ = "0.12.0"

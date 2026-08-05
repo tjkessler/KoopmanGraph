@@ -159,6 +159,25 @@ Operator and theory
   invariant scalar latents for linear :math:`K` — not an equivariant
   operator.
 
+.. _limitations-topology-criticality:
+
+Topology criticality (non-goal)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Dynamic topology is mechanical, not criticality-aware.** Mid-horizon
+  rewiring (``allow_dynamic_topology`` / per-snapshot ``edge_index``) is
+  supported in the networked linear step so forecasts can consume changing
+  graphs. The library does **not** analyze or mitigate spectral degeneracy,
+  spectral-gap closure, defective spectra, or forecast-horizon collapse near
+  graph-topology criticality (connectivity / load / epidemic-threshold-style
+  regimes discussed for infrastructure Koopman forecasting by Ghosh,
+  *Intelligent Systems with Applications*, 2025; ``Ghosh2025``). Held-out
+  ``spectral_residuals`` and finite-dictionary ResDMD remain diagnostics,
+  not certificates (see Spectral analysis). Continuous matrix-log /
+  Van Loan helpers do not handle non-diagonalizable (Jordan) generators
+  (:mod:`koopman_graph.operators.continuous_van_loan`). No early-warning
+  score or spectral-gap monitor is shipped.
+
 Spectral analysis
 -----------------
 
@@ -190,21 +209,51 @@ Scale
 
 Training reuses shared latents and several ephemeral operator / support
 caches (see :doc:`capabilities` and :doc:`architecture`), but those
-optimizations do **not** remove the dense representation ceilings below.
+optimizations do **not** remove the representation ceilings below.
 For large :math:`N`, prefer ``sparsity="block_diagonal"`` where applicable,
 modest latent width, and optional CUDA automatic mixed precision
 (``use_amp=True`` on ``fit`` / ``run_fit_loop``); see :doc:`faq`.
 
-* **Exact spectrum and exact inverse** of networked operators (including
-  relational ``hetero_graph``) assemble an effective dense matrix of size
+* **Exact spectrum (graph / continuous-graph).** Discrete
+  ``GraphKoopmanOperator.spectrum`` and continuous
+  ``ContinuousGraphKoopmanOperator.spectrum`` auto-route (no path-selection
+  kwarg):
+
+  1. ``sparsity="distributed"`` — on discrete graph and multiplex hetero,
+     matrix-free Arnoldi returns leading-modulus Ritz values (placeholder
+     eigenvectors of size ``num_modes``). Continuous graph has **no**
+     Arnoldi spectrum path and falls through to dense
+     :math:`L_{\mathrm{eff}}` eigendecomposition.
+  2. Else if Kronecker-sum eligible — shared self factor,
+     ``adjacency`` in ``{"symmetric", "random_walk"}``, and
+     ``sparsity`` in ``{"dense", "block_diagonal"}`` — exact reduction of
+     :math:`I\otimes M_{\mathrm{self}} + \widehat{A}\otimes M_{\mathrm{nbr}}`
+     (discrete :math:`K` or continuous generator :math:`L`). Cost is
+     dominated by a dense :math:`N\times N` eigendecomposition of
+     :math:`\widehat{A}` plus :math:`N` blocks of size :math:`d\times d`
+     (order :math:`O(N^3 + N d^3)`), not a full ambient
+     :math:`O((N\cdot d)^3)` factorization when the helper succeeds.
+  3. Else — dense :math:`(N\cdot d)\times(N\cdot d)` eigendecomposition
+     of the assembled effective map (``dual_random_walk``, discrete
+     orbit / isotypic self banks, helper fall-back, and other ineligible
+     cases).
+
+  Hetero / hypergraph spectrum remains under the dense assembled
+  :math:`(N\cdot d)` (or stacked typed) ceiling. Kronecker spectrum does
+  **not** imply a Kronecker inverse or cheaper eig-regularization.
+
+* **Exact inverse** of networked operators (including relational
+  ``hetero_graph``) still assembles an effective dense matrix of size
   :math:`(N \cdot d) \times (N \cdot d)` (typed / rectangular:
-  stacked :math:`\sum_\tau N_\tau d_\tau`). Prefer modest :math:`N` or
+  stacked :math:`\sum_\tau N_\tau d_\tau`), unless an approximate
+  Jacobi / Richardson / Neumann path applies. Prefer modest :math:`N` or
   ``sparsity="block_diagonal"`` (approximate Jacobi / self-dominated path)
   when that cost dominates. Static topology may reuse a precomputed dense
   inverse within a training-loss evaluation; the assembly size is unchanged.
   Multi-GPU *trainer* orchestration (DDP / Fabric / Lightning / Ray Train)
   shards data and synchronizes gradients; it does **not** shrink this dense
-  ceiling. Presence-mask churn still matvecs at :math:`N_{\max}` capacity.
+  inverse ceiling. Presence-mask churn still matvecs at :math:`N_{\max}`
+  capacity.
 * **Hetero × trainers.** Multiplex / typed models compose with native DDP
   (``strategy="ddp"``), Lightning Fabric, optional Lightning ``Trainer``,
   and Ray helpers under :mod:`koopman_graph.distributed`.
@@ -212,21 +261,24 @@ modest latent width, and optional CUDA automatic mixed precision
   Single-process windowed ``run_fit_loop`` accepts windowed hetero sequences
   (parity with world-size-1 DDP window sampling). Do not confuse trainer
   orchestration with the operator flag ``sparsity="distributed"``
-  (matrix-free inverse / spectrum; see below).
+  (matrix-free inverse / Arnoldi spectrum on discrete graph and multiplex
+  hetero; see below).
 * **Eigenvalue regularization** with a non-zero
   ``LossWeights.eigenvalue`` on dense or ODO networked operators runs an
-  :math:`O((N \cdot d)^3)` eigendecomposition of the effective map unless
-  ``sparsity="distributed"`` (Arnoldi surrogate on discrete graph /
+  :math:`O((N \cdot d)^3)` eigendecomposition of the assembled effective map
+  unless ``sparsity="distributed"`` (Arnoldi surrogate on discrete graph /
   multiplex hetero; zero hinge on hypergraph / continuous distributed).
-  Prefer structural parameterizations (``schur`` / ``lyapunov`` /
+  The Kronecker spectrum path does **not** change this training-hinge
+  ceiling. Prefer structural parameterizations (``schur`` / ``lyapunov`` /
   ``dissipative``) or modest :math:`N` when the assembled term is enabled.
 * **``sparsity="distributed"``** is the *operator* matrix-free path
   (Richardson / Neumann inverse and Arnoldi spectrum for discrete graph and
-  multiplex hetero; hypergraph / continuous kinds may still assemble). It is
-  **not** multi-GPU training. Optional *trainer* orchestration under
-  :mod:`koopman_graph.distributed` shards data and synchronizes gradients;
-  it does **not** shrink the dense :math:`N\cdot d` representation ceilings
-  above.
+  multiplex hetero; hypergraph / continuous kinds may still assemble for
+  inverse and for continuous spectrum). It is **not** multi-GPU training
+  and is **not** the Kronecker exact-spectrum reduction. Optional
+  *trainer* orchestration under :mod:`koopman_graph.distributed` shards
+  data and synchronizes gradients; it does **not** shrink the dense
+  :math:`N\cdot d` representation ceilings above.
 * **Trainer taxonomy (DDP / Fabric / Ray).** Native DDP and Lightning Fabric
   remain the **recommended** multi-GPU *model* paths.
   :func:`~koopman_graph.distributed.run_ray_train_fit_loop` (optional

@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-05
+
+Scale-and-honesty release on the 0.11 stack: Kronecker-sum exact spectrum
+for eligible networked graph operators, and docs-only topology-criticality
+honesty. Homogeneous scientific defaults and the linear latent operator
+contract are unchanged.
+
+### Added
+
+- Exact Kronecker-sum spectrum path for eligible discrete and continuous
+  graph operators (`koopman_graph.operators.kronecker_spectrum`;
+  `GraphKoopmanOperator.spectrum` /
+  `ContinuousGraphKoopmanOperator.spectrum`). Eligibility requires a
+  shared self factor, `diffusion` in `{"symmetric", "random_walk"}`, and
+  `sparsity` in `{"dense", "block_diagonal"}`. Eigenvalues and ambient
+  eigenvectors match the dense assembly oracle within float tolerance on
+  path/ring fixtures.
+- Three-path spectrum contract: distributed leading-modulus Arnoldi
+  (discrete / multiplex hetero), Kronecker-sum exact reduction when
+  eligible, otherwise dense assembly. Continuous `distributed` has no
+  Arnoldi spectrum path and uses dense `L_eff`.
+- Sphinx Scale / architecture / FAQ prose distinguishing the three
+  spectrum paths and residual dense ceilings for exact inverse, Jacobi /
+  Richardson, and eig-regularization hinges. Tutorial
+  `examples/29_large_graph_block_diagonal.ipynb` records a dense vs
+  Kronecker spectrum timing probe at the existing probe \(N\).
+- Topology-criticality honesty in limitations (cross-linked from
+  architecture / capabilities), with `paper.bib` entry `Ghosh2025`.
+  Tutorial `examples/18_networked_koopman_dynamic_topology.ipynb` notes
+  that dynamic topology remains mechanical (no spectral-degeneracy /
+  early-warning diagnostic API).
+
+### Notes
+
+- Kronecker reduction applies to **spectrum only**. Exact inverse /
+  Jacobi / Richardson and eig-regularization hinges remain dense
+  \((N\cdot d)\) ceilings.
+- No Kronecker-style spectrum for hetero / hypergraph ambient operators
+  in this release.
+- Homogeneous training defaults are unchanged relative to 0.11.0.
+
 ## [0.11.0] - 2026-08-02
 
 Domain-and-structure release on the 0.10 stack: measured topology transfer,

@@ -65,7 +65,9 @@ Topology-aware learning
 * ``DelayEmbeddingEncoder`` / ``n_delays`` for Hankel-style partial
   observability
 * Per-snapshot ``edge_index`` (dynamic topology) and end-to-end
-  ``edge_weight`` support
+  ``edge_weight`` support — mechanical rewiring only; not
+  criticality / spectral-degeneracy analysis (see
+  :ref:`limitations-topology-criticality`)
 * Opt-in fixed-union node churn: ``allow_node_churn=True`` with
   :math:`N_{\max}` capacity and ``presence_masks`` ``(T, N_{\max})``
   (losses ignore inactive nodes; matvecs stay at capacity — see
@@ -91,7 +93,10 @@ Dynamics
   :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
   (factorized blocks inspired by compositional / networked Koopman
   constructions; cross-topology transfer is measured, not assumed — see
-  :doc:`limitations` and ``examples/37_cross_topology_transfer.ipynb``)
+  :doc:`limitations` and ``examples/37_cross_topology_transfer.ipynb``).
+  ``.spectrum`` auto-routes Kronecker-sum reduction when eligible (shared
+  self; ``symmetric`` / ``random_walk``); see :doc:`limitations` (Scale)
+  for distributed Arnoldi, dense fall-backs, and inverse ceilings
 * Pairwise ``adjacency`` modes on graph / continuous-graph operators:
   ``"symmetric"`` (default), ``"random_walk"``
   (:math:`D_{\mathrm{out}}^{-1}A`), and ``"dual_random_walk"`` (forward plus
@@ -117,8 +122,11 @@ Dynamics
 * Continuous networked generator ``ContinuousGraphKoopmanOperator``
   (``koopman="graph"`` + ``dynamics_mode="continuous"`` or
   ``koopman="continuous_graph"``; ``adjacency`` modes match discrete
-  ``GraphKoopmanOperator``; dense ``N·d`` matrix-exp cost caveat —
-  prefer modest ``N`` or ``sparsity="block_diagonal"`` self-only shortcut)
+  ``GraphKoopmanOperator``). ``.spectrum`` uses the same Kronecker
+  eligibility as discrete graph when applicable; dense ``N·d``
+  matrix-exp (:math:`\Phi=\exp(\Delta t\, L_{\mathrm{eff}})`) remains a
+  separate ceiling — prefer modest ``N`` or ``sparsity="block_diagonal"``
+  self-only shortcut for advances (see :doc:`limitations`)
 * Continuous hetero generators on ``koopman="hetero_graph"`` +
   ``dynamics_mode="continuous"`` (dense stacked :math:`\Phi` cost; see
   :doc:`limitations`)
@@ -248,6 +256,10 @@ Analysis
 ~~~~~~~~
 
 * ``KoopmanSpectrum`` / ``compute_spectrum`` with mode decoding helpers
+* Networked graph / continuous-graph ``.spectrum`` paths: distributed
+  Arnoldi (discrete / multiplex hetero), Kronecker-sum exact reduction
+  when eligible, or dense assembled eigendecomposition — see
+  :doc:`limitations` (Scale); continuous graph has no Arnoldi spectrum path
 * ``attribute_mode_energy`` / ``ModeEnergyAttribution`` — interpretive
   type / relation energy fractions on assembled ``K_eff`` (not causal;
   not a ResDMD residual on relation-attributed modes)

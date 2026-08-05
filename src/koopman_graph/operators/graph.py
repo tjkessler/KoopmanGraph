@@ -31,6 +31,10 @@ from koopman_graph.operators.graph_types import (
     GraphAdjacency,
     GraphSparsity,
 )
+from koopman_graph.operators.kronecker_spectrum import (
+    kronecker_sum_spectrum_eligible,
+    spectrum_k_eff_kronecker_sum,
+)
 from koopman_graph.operators.matrix_free import (
     DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
     flatten_node_latents,
@@ -874,11 +878,26 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         frequencies are taken from the complex eigendecomposition (no
         real-dtype assumption on the eigenvalues).
 
-        When ``sparsity="distributed"``, returns the ``num_modes``
-        largest-modulus Ritz values from matrix-free Arnoldi (eigenvectors
-        are a placeholder identity of size ``num_modes``, not ambient Ritz
-        vectors). Dense / ``block_diagonal`` still assemble
-        :meth:`effective_matrix` (``num_modes`` ignored).
+        Routing (auto; no path-selection kwarg):
+
+        1. ``sparsity="distributed"`` — matrix-free Arnoldi
+           (:func:`~koopman_graph.operators.matrix_free.spectrum_k_eff_graph`):
+           ``num_modes`` largest-modulus Ritz values; eigenvectors are a
+           placeholder identity of size ``num_modes``, not ambient Ritz
+           vectors.
+        2. Else if Kronecker-sum eligible (shared ``K_self``,
+           ``adjacency`` in ``{"symmetric", "random_walk"}``,
+           ``sparsity`` in ``{"dense", "block_diagonal"}``) —
+           exact reduction via
+           :func:`~koopman_graph.operators.kronecker_spectrum.spectrum_k_eff_kronecker_sum`
+           when the helper succeeds.
+        3. Else — dense
+           :func:`~koopman_graph.spectrum_types.compute_spectrum` on
+           :meth:`effective_matrix` (``dual_random_walk``, orbit / isotypic
+           self banks, Kronecker helper fall-back, ``num_modes`` ignored).
+
+        This routing covers **spectrum only**. Exact Kronecker inverse and
+        eig-regularization assembly ceilings are unchanged.
 
         Parameters
         ----------
@@ -897,7 +916,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         Returns
         -------
         KoopmanSpectrum
-            Full dense spectrum, or distributed leading-modulus surrogate.
+            Full ambient spectrum, or distributed leading-modulus surrogate.
         """
         if self.sparsity == "distributed":
             result = spectrum_k_eff_graph(
@@ -911,6 +930,25 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 k_bwd=None if self._bwd is None else self.K_bwd,
             )
             return _koopman_spectrum_from_eigenvalues(result.eigenvalues, time_step)
+
+        self.ensure_orbit_binding(num_nodes, edge_index=edge_index)
+        if kronecker_sum_spectrum_eligible(
+            adjacency=self.adjacency,
+            sparsity=self.sparsity,
+            shared_self=not self.uses_orbit_selves,
+        ):
+            kronecker = spectrum_k_eff_kronecker_sum(
+                k_self=self.K_self,
+                k_nbr=self.K_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+                time_step=time_step,
+            )
+            if kronecker is not None:
+                return kronecker
+
         return compute_spectrum(
             self.effective_matrix(edge_index, num_nodes, edge_weight=edge_weight),
             time_step,

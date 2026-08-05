@@ -136,10 +136,10 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.11.0: measured topology transfer, directed hypergraph
-  incidence, Ray Train model DDP, presence-mask churn, teaching traffic /
-  GraphCast ports, sheaf / cell-complex MVPs, GraphVAMP + synthetic molecular
-  path, and isotypic self-block ties — see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.12.0: Kronecker-sum exact spectrum for eligible discrete
+  and continuous graph operators (three-path spectrum contract), Scale /
+  architecture honesty for residual dense inverse and eig-reg ceilings, and
+  docs-only topology-criticality honesty — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -164,7 +164,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21763908},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.11.0},
+  version      = {0.12.0},
 }
 ```
 

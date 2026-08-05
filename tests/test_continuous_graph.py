@@ -16,7 +16,10 @@ from koopman_graph import (
     GraphKoopmanOperator,
     HypergraphKoopmanOperator,
 )
-from koopman_graph.spectrum_types import discrete_spectrum_at_delta_t
+from koopman_graph.spectrum_types import (
+    compute_generator_spectrum,
+    discrete_spectrum_at_delta_t,
+)
 
 
 def _path_edge_index(num_nodes: int) -> torch.Tensor:
@@ -25,6 +28,47 @@ def _path_edge_index(num_nodes: int) -> torch.Tensor:
     for node in range(num_nodes - 1):
         edges.extend([[node, node + 1], [node + 1, node]])
     return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _ring_edge_index(num_nodes: int) -> torch.Tensor:
+    """Build an undirected ring graph edge index."""
+    edges: list[list[int]] = []
+    for node in range(num_nodes):
+        nxt = (node + 1) % num_nodes
+        edges.extend([[node, nxt], [nxt, node]])
+    return torch.tensor(edges, dtype=torch.long).t().contiguous()
+
+
+def _eigvals_match(
+    left: torch.Tensor,
+    right: torch.Tensor,
+    *,
+    rtol: float,
+    atol: float,
+) -> bool:
+    """Greedy multiset match of complex eigenvalues (order-invariant)."""
+    if left.shape != right.shape:
+        return False
+    remaining = right.detach().clone()
+    for value in left.detach():
+        diffs = (remaining - value).abs()
+        index = int(torch.argmin(diffs))
+        if not torch.isclose(value, remaining[index], rtol=rtol, atol=atol):
+            return False
+        remaining[index] = complex(float("inf"), float("inf"))
+    return True
+
+
+def _stable_continuous_factors(latent_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a mildly dissipative self factor and small neighbor coupling."""
+    if latent_dim == 2:
+        l_self = torch.tensor([[-0.4, 0.1], [-0.05, -0.5]])
+    else:
+        torch.manual_seed(11 + latent_dim)
+        l_self = -0.5 * torch.eye(latent_dim) + 0.05 * torch.randn(
+            latent_dim, latent_dim
+        )
+    return l_self, 0.12 * torch.eye(latent_dim)
 
 
 def _tiny_continuous_graph_model(
@@ -318,6 +362,196 @@ def test_adjacency_modes_advance_match_expm_and_generator_spectrum() -> None:
         assert torch.isfinite(spectrum.eigenvalues.real).all()
         assert torch.isfinite(spectrum.eigenvalues.imag).all()
         assert torch.isfinite(spectrum.magnitudes).all()
+
+
+def test_continuous_spectrum_eligible_uses_kronecker_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default eligible continuous spectrum routes through Kronecker helper."""
+    from koopman_graph.operators import continuous_graph as cont_mod
+
+    calls: list[int] = []
+    original = cont_mod.spectrum_l_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(cont_mod, "spectrum_l_eff_kronecker_sum", _spy)
+    edge_index = _path_edge_index(3)
+    op = ContinuousGraphKoopmanOperator(2, init_mode="identity")
+    op.set_dense_matrices(*_stable_continuous_factors(2))
+    spectrum = op.spectrum(edge_index, 3)
+    assert len(calls) == 1
+    assert spectrum.eigenvalues.shape == (6,)
+    assert spectrum.eigenvectors.shape == (6, 6)
+    assert torch.allclose(spectrum.growth_rates, spectrum.eigenvalues.real, atol=0.0)
+
+
+@pytest.mark.parametrize("topology", ["path", "ring"])
+@pytest.mark.parametrize("adjacency", ["symmetric", "random_walk"])
+@pytest.mark.parametrize(("num_nodes", "latent_dim"), [(4, 2), (6, 3)])
+def test_continuous_operator_spectrum_parity_vs_dense_oracle(
+    topology: str,
+    adjacency: str,
+    num_nodes: int,
+    latent_dim: int,
+) -> None:
+    """ContinuousGraphKoopmanOperator.spectrum matches dense generator oracle.
+
+    Tolerance rtol=atol=1e-5 justified by float32 eig accumulation on N·d ≤ 18.
+    Orbit / isotypic self banks are N/A on continuous graph.
+    """
+    edge_index = (
+        _path_edge_index(num_nodes)
+        if topology == "path"
+        else _ring_edge_index(num_nodes)
+    )
+    op = ContinuousGraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        adjacency=adjacency,  # type: ignore[arg-type]
+    )
+    op.set_dense_matrices(*_stable_continuous_factors(latent_dim))
+    got = op.spectrum(edge_index, num_nodes)
+    oracle = compute_generator_spectrum(op.effective_generator(edge_index, num_nodes))
+    ambient = num_nodes * latent_dim
+    assert got.eigenvalues.shape == (ambient,)
+    assert got.eigenvectors.shape == (ambient, ambient)
+    assert got.time_step == 1.0
+    assert _eigvals_match(
+        got.eigenvalues,
+        oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    assert torch.allclose(got.growth_rates, got.eigenvalues.real, atol=0.0)
+    assert torch.allclose(
+        got.frequencies,
+        got.eigenvalues.imag / (2 * torch.pi),
+        atol=1e-6,
+    )
+
+
+def test_continuous_spectrum_block_diagonal_uses_kronecker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eligible block_diagonal continuous spectrum still routes through Kronecker."""
+    from koopman_graph.operators import continuous_graph as cont_mod
+
+    calls: list[int] = []
+    original = cont_mod.spectrum_l_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(cont_mod, "spectrum_l_eff_kronecker_sum", _spy)
+    edge_index = _path_edge_index(4)
+    op = ContinuousGraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        sparsity="block_diagonal",
+    )
+    op.set_dense_matrices(*_stable_continuous_factors(2))
+    spectrum = op.spectrum(edge_index, 4)
+    assert len(calls) == 1
+    oracle = compute_generator_spectrum(op.effective_generator(edge_index, 4))
+    assert _eigvals_match(
+        spectrum.eigenvalues,
+        oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_continuous_spectrum_ineligible_skips_kronecker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dual and distributed continuous spectrum dense-route (no Arnoldi).
+
+    Orbit / isotypic banks are N/A on continuous graph; distributed has no
+    continuous Arnoldi spectrum path and falls back to dense L_eff eigendecomp.
+    """
+    from koopman_graph.operators import continuous_graph as cont_mod
+
+    def _boom(**_kwargs: object):
+        msg = "kronecker helper should not run on ineligible continuous spectrum"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(cont_mod, "spectrum_l_eff_kronecker_sum", _boom)
+    edge_index = _path_edge_index(3)
+    l_self, l_nbr = _stable_continuous_factors(2)
+
+    dual = ContinuousGraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        adjacency="dual_random_walk",
+    )
+    dual.set_dense_matrices(l_self, l_nbr, l_bwd=0.08 * torch.eye(2))
+    dual_spec = dual.spectrum(edge_index, 3)
+    dual_oracle = compute_generator_spectrum(dual.effective_generator(edge_index, 3))
+    assert dual_spec.eigenvalues.shape == (6,)
+    assert _eigvals_match(
+        dual_spec.eigenvalues,
+        dual_oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    distributed = ContinuousGraphKoopmanOperator(
+        2,
+        init_mode="identity",
+        sparsity="distributed",
+    )
+    distributed.set_dense_matrices(l_self, l_nbr)
+    dist_spec = distributed.spectrum(edge_index, 3)
+    dist_oracle = compute_generator_spectrum(
+        distributed.effective_generator(edge_index, 3)
+    )
+    assert dist_spec.eigenvalues.shape == (6,)
+    assert _eigvals_match(
+        dist_spec.eigenvalues,
+        dist_oracle.eigenvalues,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_continuous_spectrum_moderate_n_kronecker_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moderate-N eligible continuous spectrum finishes via Kronecker (R7).
+
+    N=100, d=2 → ambient 200. Assert finite shapes only; skip dense eigvals.
+    """
+    from koopman_graph.operators import continuous_graph as cont_mod
+
+    calls: list[int] = []
+    original = cont_mod.spectrum_l_eff_kronecker_sum
+
+    def _spy(**kwargs: object):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(cont_mod, "spectrum_l_eff_kronecker_sum", _spy)
+    num_nodes = 100
+    latent_dim = 2
+    ambient = num_nodes * latent_dim
+    edge_index = _path_edge_index(num_nodes)
+    op = ContinuousGraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        adjacency="symmetric",
+    )
+    op.set_dense_matrices(*_stable_continuous_factors(latent_dim))
+    spectrum = op.spectrum(edge_index, num_nodes)
+    assert len(calls) == 1
+    assert spectrum.eigenvalues.shape == (ambient,)
+    assert spectrum.eigenvectors.shape == (ambient, ambient)
+    assert bool(torch.isfinite(spectrum.eigenvalues).all())
+    assert bool(torch.isfinite(spectrum.eigenvectors).all())
+    assert bool(torch.isfinite(spectrum.growth_rates).all())
 
 
 def test_directed_discrete_spectrum_matches_transition_eigvals() -> None:
