@@ -20,7 +20,7 @@ contract are unchanged.
   graph operators (`koopman_graph.operators.kronecker_spectrum`;
   `GraphKoopmanOperator.spectrum` /
   `ContinuousGraphKoopmanOperator.spectrum`). Eligibility requires a
-  shared self factor, `diffusion` in `{"symmetric", "random_walk"}`, and
+  shared self factor, `adjacency` in `{"symmetric", "random_walk"}`, and
   `sparsity` in `{"dense", "block_diagonal"}`. Eigenvalues and ambient
   eigenvectors match the dense assembly oracle within float tolerance on
   path/ring fixtures.
