@@ -241,9 +241,12 @@ inverse / spectrum; see :doc:`faq` and :doc:`limitations`).
   opt-in (``KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1``); default PR CI does not
   require multi-node hardware.
 
-Ray Tune is **examples-only**: see
-``examples/scripts/ray_tune_koopman_example.py`` (search space stays in the
-script; the library does not expose a Tune / AutoML API). Optional
+Ray Tune HPO is supported via power-user helpers under
+:mod:`koopman_graph.tuning` (``fit_history_metrics``, ``run_ray_tune``,
+optional ``example_*`` smoke scaffolds) and the examples-only script
+``examples/scripts/ray_tune_koopman_example.py``. Search spaces remain
+**user-defined / script-owned**; the library is not an AutoML product.
+Optuna is **examples-only** (no library Optuna API). Optional
 ``pip install "koopman-graph[dask]"`` activates
 :mod:`koopman_graph.distributed.dask_prep` helpers
 (``materialize_sequences``, ``materialize_window_index_list``) for offline
@@ -263,6 +266,16 @@ Analysis
 * ``attribute_mode_energy`` / ``ModeEnergyAttribution`` — interpretive
   type / relation energy fractions on assembled ``K_eff`` (not causal;
   not a ResDMD residual on relation-attributed modes)
+* ``explain_representation`` / ``RepresentationExplanation`` —
+  representation-level node / edge / feature masks on a homogeneous
+  snapshot for targets ``latent``, ``one_step_forecast``, or
+  ``reconstruction``. Default algorithm ``gnn_explainer`` uses PyG
+  GNNExplainer (``Ying2019GNNExplainer``); optional
+  ``algorithm="integrated_gradients"`` uses Captum via the ``[explain]``
+  extra (``Sundararajan2017IntegratedGradients``). Masks are
+  **interpretive** and **non-causal**; they are **not**
+  ``ModeEnergyAttribution`` and **not** ResDMD residuals. Homogeneous MVP
+  only — see :doc:`limitations`
 * ``spectral_residuals`` / ``SpectralResidualReport`` — held-out data-driven
   residuals and ``trustworthy_mask()``; optional
   ``plot_spectrum(..., annotate_untrustworthy=True)``. Diagnostic in the
@@ -364,7 +377,51 @@ Research tooling
   ``koopman_graph.baselines.gnn`` (``ForecasterProtocol`` deviation
   tables; not dedicated-library SOTA or leaderboard-matched protocols)
 * Benchmark datasets and Jupyter tutorials under ``examples/``
-* Model ``save`` / ``load`` checkpoints; ≥90% coverage enforced in CI
+* Model ``save`` / ``load`` checkpoints (default ``safetensors_v1``
+  directory or ``.kgckpt`` / ``.zip`` bundle; ``legacy_pt`` pickle escape
+  hatch); ≥90% coverage enforced in CI. See the repository
+  ``SECURITY.md`` for load trust boundaries.
+
+Experiment tracking (fit callbacks)
+-----------------------------------
+
+Observe-only hooks on the functional fit path (single-process
+``GraphKoopmanModel.fit`` / :func:`~koopman_graph.training.run_fit_loop`):
+
+* :class:`~koopman_graph.FitCallback` protocol and
+  :class:`~koopman_graph.NoOpFitCallback` (root-exported)
+* In-tree adapters under :mod:`koopman_graph.tracking` (power-user; not on
+  root ``__all__``): :class:`~koopman_graph.tracking.CsvFitLogger` (stdlib
+  CSV) and :class:`~koopman_graph.tracking.TensorBoardFitLogger` (requires
+  peer ``pip install tensorboard``)
+* Callbacks must not mutate model parameters; default ``callbacks=None``
+  preserves prior ``FitHistory`` behavior
+* ``fit(..., strategy="ddp")`` does not accept ``callbacks`` yet — use
+  single-process fit or Lightning loggers for distributed runs
+* Lightning ``Trainer`` users should attach Lightning loggers to
+  :class:`~koopman_graph.distributed.KoopmanLightningModule`; this release
+  does not add a second FitCallback stack on Trainer
+* Weights & Biases / MLflow are intentionally not core dependencies —
+  see :doc:`faq` and ``examples/tracking/wandb_mlflow_callback.py``
+
+Hyperparameter search helpers
+-----------------------------
+
+Power-user package :mod:`koopman_graph.tuning` (not on root ``__all__``):
+
+* :func:`~koopman_graph.tuning.fit_history_metrics` — flatten a
+  :class:`~koopman_graph.training.FitHistory` into scalar floats for
+  Tune / Optuna reporters
+* :func:`~koopman_graph.tuning.run_ray_tune` — thin Ray Tune façade
+  (lazy import; requires ``pip install "koopman-graph[ray]"``)
+* :func:`~koopman_graph.tuning.example_lr_loguniform_space` /
+  :func:`~koopman_graph.tuning.example_lr_latent_dim_space` — *example*
+  smoke scaffolds only (not scientific defaults)
+
+This is **not** an AutoML product. Searchable hyperparameters and ranges
+remain caller-owned. Optuna is **examples-only** (no library Optuna API).
+See ``examples/scripts/ray_tune_koopman_example.py`` and
+``examples/scripts/README.md``.
 
 Stability mode selection
 ------------------------

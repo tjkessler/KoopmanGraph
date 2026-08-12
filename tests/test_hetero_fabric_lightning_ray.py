@@ -196,6 +196,7 @@ def test_koopman_lightning_module_hetero_parity_vs_run_fit_loop() -> None:
         assert torch.allclose(param_a, param_b, rtol=0, atol=1e-5), name_a
 
 
+@pytest.mark.ray
 def test_fit_ensemble_with_ray_hetero_two_members() -> None:
     """Ray ensemble members accept multiplex inputs once single-process fit does."""
     ray = pytest.importorskip("ray")

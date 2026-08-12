@@ -34,8 +34,13 @@ Capability layout
     ``resolve_training_sequences`` / ``resolve_validation_sequences``.
 ``loop``
     ``run_fit_loop`` plus early-stopping / LR-scheduler helpers.
+``callbacks``
+    Observe-only :class:`FitCallback` protocol and :class:`NoOpFitCallback`
+    (fit-loop wiring is separate; optional trackers live under
+    ``koopman_graph.tracking`` when added).
 """
 
+from koopman_graph.training.callbacks import FitCallback, NoOpFitCallback
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
     eval_one_epoch,
@@ -81,10 +86,12 @@ from koopman_graph.training.schedules import (
 __all__ = [
     "EarlyStoppingMonitor",
     "ExtraLosses",
+    "FitCallback",
     "FitHistory",
     "LRSchedulerFactory",
     "LossWeightSchedule",
     "LossWeights",
+    "NoOpFitCallback",
     "TrainingInput",
     "ValidationInput",
     "compute_backward_consistency_sequence_loss",

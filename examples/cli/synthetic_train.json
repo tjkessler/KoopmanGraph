@@ -1,0 +1,26 @@
+{
+  "model": {
+    "encoder": "gcn",
+    "in_channels": 3,
+    "hidden_channels": 16,
+    "latent_dim": 8,
+    "num_layers": 2,
+    "dynamics_mode": "discrete",
+    "time_step": 0.1
+  },
+  "data": {
+    "kind": "synthetic_path",
+    "num_nodes": 8,
+    "num_timesteps": 20,
+    "seed": 0,
+    "feature_dim": 3
+  },
+  "fit": {
+    "epochs": 3,
+    "lr": 0.01,
+    "device": "cpu"
+  },
+  "checkpoint": {
+    "path": "model.kgckpt"
+  }
+}

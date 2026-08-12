@@ -33,9 +33,16 @@ classifiers = [
 dependencies = [
     "torch>=2.8.0",
     "torch-geometric>=2.6.1",
+    "safetensors>=0.4",
 ]
 
 [project.optional-dependencies]
+cli = [
+    "pyyaml>=6",
+]
+explain = [
+    "captum>=0.7",
+]
 dev = [
     "build>=1.2.0",
     "pytest>=8.4.0",
@@ -106,6 +113,9 @@ distributed = [
     "dask[distributed]>=2024.1.0",
 ]
 
+[project.scripts]
+koopman-graph = "koopman_graph.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/tjkessler/KoopmanGraph"
 Documentation = "https://koopmangraph.readthedocs.io/"
@@ -129,6 +139,8 @@ filterwarnings = [
 ]
 markers = [
     "distributed: multi-process gloo/DDP smoke (opt-in via KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1)",
+    "ray: starts a local Ray / Ray Train runtime (exclude on macOS smoke)",
+    "slow: long-running CPU tests reserved for full Ubuntu matrix (exclude on macOS smoke)",
 ]
 
 [tool.coverage.run]

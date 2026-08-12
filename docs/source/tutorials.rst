@@ -88,6 +88,8 @@ Analysis and stability
      - Koopman eigenvalue analysis + held-out ``spectral_residuals`` / spurious-mode filter
    * - `40_resdmd_pseudospectra.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
      - Finite-dictionary ResDMD MVP + resolvent-norm grid (≠ ``spectral_residuals``; not infinite-dim certificates)
+   * - `46_representation_explain.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/46_representation_explain.ipynb>`_
+     - Homogeneous ``explain_representation`` masks (GNNExplainer; optional Captum IG) — interpretive / non-causal; ≠ ResDMD / ``ModeEnergyAttribution``
    * - `08_loss_stability.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/08_loss_stability.ipynb>`_
      - Loss weighting and soft stability regularization
    * - `26_sparse_interpretable_operator.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/26_sparse_interpretable_operator.ipynb>`_
@@ -176,8 +178,12 @@ the script)::
 
    python examples/scripts/ray_tune_koopman_example.py --epochs 1 --num-samples 2
 
+For fit-callback tracking sketches (CSV / TensorBoard in-tree; optional
+W&B / MLflow DIY without library SDK pins), see
+``examples/tracking/wandb_mlflow_callback.py`` and :doc:`faq`.
+
 See ``examples/scripts/README.md`` and :doc:`capabilities` (Distributed
-training).
+training; Experiment tracking).
 
 Heterogeneous (multi-relational) graphs
 ---------------------------------------

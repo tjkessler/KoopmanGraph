@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,10 @@ from koopman_graph import (
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.serialization import (
     FORMAT_VERSION,
+    SAFE_CONFIG_FILENAME,
+    SAFE_CONTAINER,
+    SAFE_META_FILENAME,
+    SAFE_WEIGHTS_FILENAME,
     build_checkpoint,
     build_model_config,
     load_checkpoint,
@@ -292,6 +297,177 @@ def test_save_checkpoint_uses_current_format_version(
     }
 
 
+def test_save_checkpoint_safetensors_v1_directory_layout(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify safetensors_v1 writes meta/config/weights as a directory."""
+    assert FORMAT_VERSION == 1
+    destination = tmp_path / "safe_ckpt"
+    save_checkpoint(graph_koopman_model, destination, format="safetensors_v1")
+
+    meta_path = destination / SAFE_META_FILENAME
+    config_path = destination / SAFE_CONFIG_FILENAME
+    weights_path = destination / SAFE_WEIGHTS_FILENAME
+    assert meta_path.is_file()
+    assert config_path.is_file()
+    assert weights_path.is_file()
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["container"] == SAFE_CONTAINER
+    assert meta["format_version"] == FORMAT_VERSION
+    assert isinstance(meta["package_version"], str)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config == json.loads(json.dumps(config))
+    assert config["latent_dim"] == graph_koopman_model.latent_dim
+    assert config["encoder"]["type"] == "gcn"
+    assert config["decoder"]["type"] == "gcn"
+
+
+def test_save_checkpoint_safetensors_v1_rejects_existing_file(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify safetensors_v1 refuses to treat an existing file as a directory."""
+    file_path = tmp_path / "not_a_dir.pt"
+    file_path.write_bytes(b"not-a-checkpoint")
+    with pytest.raises(ValueError, match="must be a directory"):
+        save_checkpoint(graph_koopman_model, file_path, format="safetensors_v1")
+
+
+def test_save_checkpoint_default_is_safetensors_v1(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify default save_checkpoint writes a safetensors_v1 directory."""
+    destination = tmp_path / "default_safe"
+    save_checkpoint(graph_koopman_model, destination)
+    assert destination.is_dir()
+    assert (destination / SAFE_META_FILENAME).is_file()
+    assert (destination / SAFE_CONFIG_FILENAME).is_file()
+    assert (destination / SAFE_WEIGHTS_FILENAME).is_file()
+    loaded = load_checkpoint(destination)
+    assert not loaded.training
+
+
+def test_save_checkpoint_legacy_pt_escape_hatch(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify format='legacy_pt' still writes a pickle .pt file."""
+    checkpoint = tmp_path / "legacy.pt"
+    save_checkpoint(graph_koopman_model, checkpoint, format="legacy_pt")
+    assert checkpoint.is_file()
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert payload["format_version"] == FORMAT_VERSION
+    assert isinstance(payload["config"], dict)
+    assert isinstance(payload["state_dict"], dict)
+
+
+def test_model_save_default_is_safetensors_v1(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify GraphKoopmanModel.save defaults to safetensors_v1."""
+    destination = tmp_path / "model_safe"
+    graph_koopman_model.save(destination)
+    assert destination.is_dir()
+    assert (destination / SAFE_META_FILENAME).is_file()
+    loaded = GraphKoopmanModel.load(destination)
+    assert isinstance(loaded, GraphKoopmanModel)
+    assert not loaded.training
+
+
+def test_model_save_legacy_pt_escape_and_load(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify Model.save(..., format='legacy_pt') round-trips via load."""
+    checkpoint = tmp_path / "model_legacy.pt"
+    graph_koopman_model.save(checkpoint, format="legacy_pt")
+    assert checkpoint.is_file()
+    loaded = GraphKoopmanModel.load(checkpoint)
+    assert isinstance(loaded, GraphKoopmanModel)
+
+
+def test_load_checkpoint_safetensors_v1_round_trip(
+    trained_gcn_model: GraphKoopmanModel,
+    scaling_sequence: GraphSnapshotSequence,
+    tmp_path: Path,
+) -> None:
+    """Verify safetensors_v1 save → load preserves weights and predictions."""
+    destination = tmp_path / "safe_ckpt"
+    save_checkpoint(trained_gcn_model, destination, format="safetensors_v1")
+    loaded = load_checkpoint(destination)
+    assert not loaded.training
+
+    original = trained_gcn_model.state_dict()
+    restored = loaded.state_dict()
+    assert set(original) == set(restored)
+    for key in original:
+        torch.testing.assert_close(restored[key], original[key])
+
+    initial_graph = scaling_sequence[0]
+    for original_pred, loaded_pred in zip(
+        _predictions(trained_gcn_model, initial_graph),
+        _predictions(loaded, initial_graph),
+        strict=True,
+    ):
+        torch.testing.assert_close(original_pred, loaded_pred)
+
+
+def test_load_checkpoint_safetensors_v1_missing_meta_raises(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify directories without meta.json are rejected."""
+    destination = tmp_path / "broken"
+    save_checkpoint(graph_koopman_model, destination, format="safetensors_v1")
+    (destination / SAFE_META_FILENAME).unlink()
+    with pytest.raises(ValueError, match="missing meta.json"):
+        load_checkpoint(destination)
+
+
+def test_load_checkpoint_safetensors_v1_missing_weights_raises(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify directories without model.safetensors are rejected."""
+    destination = tmp_path / "broken_weights"
+    save_checkpoint(graph_koopman_model, destination, format="safetensors_v1")
+    (destination / SAFE_WEIGHTS_FILENAME).unlink()
+    with pytest.raises(ValueError, match="missing model.safetensors"):
+        load_checkpoint(destination)
+
+
+def test_load_checkpoint_safetensors_v1_bad_container_raises(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify unsupported container markers are rejected."""
+    destination = tmp_path / "bad_container"
+    save_checkpoint(graph_koopman_model, destination, format="safetensors_v1")
+    meta_path = destination / SAFE_META_FILENAME
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["container"] = "not_a_real_container"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported safetensors container"):
+        load_checkpoint(destination)
+
+
+def test_load_checkpoint_safetensors_v1_invalid_config_raises(
+    graph_koopman_model: GraphKoopmanModel,
+    tmp_path: Path,
+) -> None:
+    """Verify truncated config.json raises an actionable ValueError."""
+    destination = tmp_path / "bad_config"
+    save_checkpoint(graph_koopman_model, destination, format="safetensors_v1")
+    (destination / SAFE_CONFIG_FILENAME).write_text("{not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid config.json"):
+        load_checkpoint(destination)
+
+
 def test_load_retired_format2_checkpoint_rejected(
     graph_koopman_model: GraphKoopmanModel,
     tmp_path: Path,
@@ -353,7 +529,7 @@ def test_load_sparse_historical_format1_checkpoint_rejected(
 
 def test_load_checkpoint_missing_file_raises(tmp_path: Path) -> None:
     """Verify missing checkpoint paths raise FileNotFoundError."""
-    with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
+    with pytest.raises(FileNotFoundError, match="Checkpoint path not found"):
         load_checkpoint(tmp_path / "missing.pt")
 
 
@@ -537,9 +713,10 @@ def test_save_checkpoint_creates_parent_directories(
     tmp_path: Path,
 ) -> None:
     """Verify save creates nested parent directories."""
-    path = tmp_path / "nested" / "dir" / "model.pt"
+    path = tmp_path / "nested" / "dir" / "model_ckpt"
     save_checkpoint(graph_koopman_model, path)
-    assert path.is_file()
+    assert path.is_dir()
+    assert (path / SAFE_WEIGHTS_FILENAME).is_file()
 
 
 def test_odo_model_round_trip_preserves_predictions(

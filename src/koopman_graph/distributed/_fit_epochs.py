@@ -355,7 +355,8 @@ def fit_epochs_distributed(
         core.load_state_dict(best_state_dict)
         broadcast_state_fn(core)
         if checkpoint_path is not None and is_main_fn():
-            save_checkpoint(cast(Any, core), checkpoint_path)
+            # File-path best-epoch checkpoints stay legacy .pt (not directories).
+            save_checkpoint(cast(Any, core), checkpoint_path, format="legacy_pt")
         if not restore_best_weights and last_state_dict is not None:
             core.load_state_dict(last_state_dict)
             broadcast_state_fn(core)

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Examples-only Ray Tune HPO pattern for KoopmanGraph.
 
-Search space stays in this script — KoopmanGraph does **not** ship a Tune
-search-space DSL or AutoML API. Requires ``pip install "koopman-graph[ray]"``.
+This script owns the search configuration. It may call *example-only*
+library scaffolds such as ``example_lr_loguniform_space``; those are smoke
+ranges, not scientific defaults. KoopmanGraph is **not** an AutoML product.
+Requires ``pip install "koopman-graph[ray]"``.
 
 Smoke run (two learning-rate trials on a tiny decay trajectory)::
 
     python examples/scripts/ray_tune_koopman_example.py --epochs 1 --num-samples 2
 
-Use native DDP / Fabric for multi-GPU *model* training; use Ray for trial /
-ensemble-member parallelism. This script is intentionally outside ``nbmake`` CI.
+Uses :func:`~koopman_graph.tuning.fit_history_metrics` and
+:func:`~koopman_graph.tuning.run_ray_tune`. Prefer native DDP / Fabric for
+multi-GPU *model* training; use Ray for trial / ensemble-member parallelism.
+This script is intentionally outside ``nbmake`` CI.
 """
 
 from __future__ import annotations
@@ -23,6 +27,11 @@ from torch_geometric.data import Data
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
 from koopman_graph.data import GraphSnapshotSequence
+from koopman_graph.tuning import (
+    example_lr_loguniform_space,
+    fit_history_metrics,
+    run_ray_tune,
+)
 
 _RAY_INSTALL_HINT = 'pip install "koopman-graph[ray]"'
 
@@ -54,7 +63,7 @@ def _build_model() -> GraphKoopmanModel:
 
 
 def _train_koopman(config: dict[str, Any]) -> None:
-    """Tune trainable: fit one model and report the final training loss."""
+    """Tune trainable: fit one model and report metrics from FitHistory."""
     from ray import tune
 
     torch.manual_seed(int(config["seed"]))
@@ -66,8 +75,11 @@ def _train_koopman(config: dict[str, Any]) -> None:
         lr=float(config["lr"]),
         device="cpu",
     )
-    final_loss = float(history.loss[-1]) if history.loss else float("nan")
-    tune.report({"loss": final_loss, "epochs": int(history.epochs)})
+    metrics = fit_history_metrics(history)
+    # Ensure a finite loss key for Tune's metric="loss" even on empty history.
+    if "loss" not in metrics:
+        metrics["loss"] = float("nan")
+    tune.report(metrics)
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Examples-only Ray Tune HPO for a tiny GraphKoopmanModel. "
-            "Search space lives in this script (not in the library)."
+            "Search configuration is owned by this script (not an AutoML API)."
         ),
     )
     parser.add_argument(
@@ -113,44 +125,31 @@ def main() -> None:
     if args.num_samples < 1:
         raise SystemExit(f"--num-samples must be >= 1; got {args.num_samples}")
 
+    # Script-owned search config: example_* scaffold is smoke-only, not science.
+    # Search space is owned by this script (not an AutoML API).
     try:
-        import ray
-        from ray import tune
-        from ray.train import RunConfig
-        from ray.tune import Tuner
+        param_space = example_lr_loguniform_space(
+            epochs=args.epochs,
+            seed=args.seed,
+        )
+        results = run_ray_tune(
+            _train_koopman,
+            param_space,
+            num_samples=args.num_samples,
+            metric="loss",
+            mode="min",
+            storage_path=args.storage_path,
+            run_name="koopman_graph_tune_example",
+            ray_init_kwargs={
+                "num_cpus": min(2, args.num_samples),
+                "ignore_reinit_error": True,
+            },
+        )
     except ImportError as exc:
         raise SystemExit(
             f"Ray Tune is required for this example; install with: {_RAY_INSTALL_HINT}"
         ) from exc
 
-    if not ray.is_initialized():
-        ray.init(num_cpus=min(2, args.num_samples), ignore_reinit_error=True)
-
-    # Search space is owned by this script (not by koopman_graph).
-    param_space = {
-        "lr": tune.loguniform(1e-3, 1e-1),
-        "epochs": args.epochs,
-        "seed": args.seed,
-    }
-    tune_config = tune.TuneConfig(
-        num_samples=args.num_samples,
-        metric="loss",
-        mode="min",
-    )
-    run_config: RunConfig | None = None
-    if args.storage_path is not None:
-        run_config = RunConfig(
-            name="koopman_graph_tune_example",
-            storage_path=str(args.storage_path.resolve()),
-        )
-
-    tuner = Tuner(
-        _train_koopman,
-        param_space=param_space,
-        tune_config=tune_config,
-        run_config=run_config,
-    )
-    results = tuner.fit()
     best = results.get_best_result(metric="loss", mode="min")
     best_loss = best.metrics.get("loss") if best.metrics else None
     print(

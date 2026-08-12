@@ -62,6 +62,36 @@ Beta policy
     multi-version checkpoint tracking begins at 1.0. Loaders accept only
     ``{1}``; ``format_version`` 2 and other lineages remain unsupported.
 
+On-disk containers
+    ``safetensors_v1`` (default; prefer for sharing)
+        Same three members — ``meta.json`` (container marker +
+        ``format_version`` + ``package_version``), ``config.json`` (JSON
+        architecture config from :func:`build_model_config`), and
+        ``model.safetensors`` (weight tensors) — as either a **directory**
+        or a **zip bundle** (``.kgckpt`` / ``.zip``). Logical architecture
+        schema remains format-1; the container only changes how bytes are
+        stored. Default :func:`save_checkpoint` /
+        :meth:`GraphKoopmanModel.save` writes a directory unless ``path``
+        ends in ``.kgckpt`` or ``.zip``, in which case it writes a zip with
+        those members only (no pickle). Weights load via safetensors rather
+        than pickle; see repository ``SECURITY.md`` for trust boundaries.
+    ``legacy_pt``
+        Single ``torch.save`` pickle file (``.pt`` / ``.pth``) holding
+        ``format_version``, ``package_version``, ``config``, and
+        ``state_dict``. Loading executes pickle and remains a trusted-source
+        trust boundary (see ``SECURITY.md``). Pass ``format="legacy_pt"``
+        for the pickle escape hatch. Training ``checkpoint_path`` writers
+        keep ``legacy_pt`` explicitly so file-path best-epoch checkpoints
+        remain single ``.pt`` files.
+
+Load detection
+    1. Directory with ``meta.json`` → ``safetensors_v1`` directory.
+    2. File that is a zip containing root members ``meta.json``,
+       ``config.json``, and ``model.safetensors`` → ``safetensors_v1`` zip
+       (``.kgckpt`` / ``.zip``; also matched when those markers are present
+       so pickle is not used when safe markers exist).
+    3. Other files → legacy ``torch.load`` pickle path.
+
 Custom injected operators (anything other than the built-in serializable
 operator classes registered in this module) are **not** round-trippable:
 :func:`build_model_config` / :meth:`GraphKoopmanModel.save` raise rather than
@@ -70,13 +100,19 @@ silently writing incomplete factory metadata.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+import zipfile
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, Literal
 
 import torch
+from safetensors.torch import load_file as safetensors_load_file
+from safetensors.torch import save as safetensors_save_bytes
+from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
 from koopman_graph.data.hetero_layout import validate_latent_dims
@@ -126,6 +162,20 @@ from koopman_graph.protocols import ModeShapeModel
 
 FORMAT_VERSION = 1
 SUPPORTED_FORMAT_VERSIONS = frozenset({1})
+
+CheckpointFormat = Literal["safetensors_v1", "legacy_pt"]
+SAFE_CONTAINER = "safetensors_v1"
+SAFE_META_FILENAME = "meta.json"
+SAFE_CONFIG_FILENAME = "config.json"
+SAFE_WEIGHTS_FILENAME = "model.safetensors"
+SAFE_BUNDLE_SUFFIXES = frozenset({".kgckpt", ".zip"})
+SAFE_ZIP_MEMBER_NAMES = frozenset(
+    {
+        SAFE_META_FILENAME,
+        SAFE_CONFIG_FILENAME,
+        SAFE_WEIGHTS_FILENAME,
+    }
+)
 
 # Keys always written by :func:`build_model_config` for the current format-1
 # baseline. Sparse historical payloads that omit these are rejected on load.
@@ -1496,7 +1546,172 @@ def build_checkpoint(model: ModeShapeModel) -> dict[str, Any]:
     }
 
 
-def save_checkpoint(model: ModeShapeModel, path: str | Path) -> None:
+def _json_ready(value: Any) -> Any:
+    """Convert nested configs to JSON-serializable values.
+
+    Parameters
+    ----------
+    value : Any
+        Config fragment that may contain tuples.
+
+    Returns
+    -------
+    Any
+        Structure with tuples replaced by lists.
+    """
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _state_dict_for_safetensors(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    """Detach, clone, and contiguous-ize tensors for safetensors I/O.
+
+    Parameters
+    ----------
+    state_dict : mapping of str to Tensor
+        Model ``state_dict``.
+
+    Returns
+    -------
+    dict of str to Tensor
+        CPU contiguous copies suitable for :func:`safetensors.torch.save_file`.
+    """
+    return {
+        key: tensor.detach().cpu().contiguous().clone()
+        for key, tensor in state_dict.items()
+    }
+
+
+def _safetensors_v1_member_payload(
+    model: ModeShapeModel,
+) -> tuple[str, str, dict[str, torch.Tensor]]:
+    """Build ``meta.json`` / ``config.json`` text and CPU weight tensors.
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Model whose config and ``state_dict`` are serialized.
+
+    Returns
+    -------
+    meta_text, config_text, weights
+        JSON text for ``meta.json`` and ``config.json``, plus a CPU
+        contiguous weight mapping for safetensors.
+    """
+    config = _json_ready(build_model_config(model))
+    meta = {
+        "container": SAFE_CONTAINER,
+        "format_version": FORMAT_VERSION,
+        "package_version": _package_version(),
+    }
+    meta_text = json.dumps(meta, indent=2, sort_keys=True) + "\n"
+    config_text = json.dumps(config, indent=2, sort_keys=True) + "\n"
+    weights = _state_dict_for_safetensors(model.state_dict())
+    return meta_text, config_text, weights
+
+
+def _save_safetensors_v1_directory(model: ModeShapeModel, path: Path) -> None:
+    """Write a ``safetensors_v1`` directory checkpoint.
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Model to serialize.
+    path : Path
+        Destination directory (created if missing). Must not be an existing
+        regular file.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` exists as a file.
+    """
+    if path.exists() and path.is_file():
+        msg = (
+            f"safetensors_v1 checkpoint path must be a directory; "
+            f"got existing file {path}"
+        )
+        raise ValueError(msg)
+
+    path.mkdir(parents=True, exist_ok=True)
+    meta_text, config_text, weights = _safetensors_v1_member_payload(model)
+    (path / SAFE_META_FILENAME).write_text(meta_text, encoding="utf-8")
+    (path / SAFE_CONFIG_FILENAME).write_text(config_text, encoding="utf-8")
+    safetensors_save_file(weights, path / SAFE_WEIGHTS_FILENAME)
+
+
+def _save_safetensors_v1_zip(model: ModeShapeModel, path: Path) -> None:
+    """Write a ``safetensors_v1`` zip / ``.kgckpt`` checkpoint.
+
+    Parameters
+    ----------
+    model : ModeShapeModel
+        Model to serialize.
+    path : Path
+        Destination ``.kgckpt`` or ``.zip`` file path. Must not be an
+        existing directory.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` exists as a directory.
+    """
+    if path.exists() and path.is_dir():
+        msg = (
+            f"safetensors_v1 zip checkpoint path must be a file; "
+            f"got existing directory {path}"
+        )
+        raise ValueError(msg)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta_text, config_text, weights = _safetensors_v1_member_payload(model)
+    weight_bytes = safetensors_save_bytes(weights)
+    with zipfile.ZipFile(path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(SAFE_META_FILENAME, meta_text)
+        archive.writestr(SAFE_CONFIG_FILENAME, config_text)
+        archive.writestr(SAFE_WEIGHTS_FILENAME, weight_bytes)
+
+
+def _is_safetensors_v1_zip(path: Path) -> bool:
+    """Return True when ``path`` is a zip with root ``safetensors_v1`` members.
+
+    PyTorch ``.pt`` archives are often zip files themselves; this probe
+    requires the safe-container member names so legacy pickle archives are
+    not mistaken for ``safetensors_v1``.
+
+    Parameters
+    ----------
+    path : Path
+        Candidate file path.
+
+    Returns
+    -------
+    bool
+        ``True`` when the zip root contains the safe-container member set.
+    """
+    if not path.is_file() or not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path, mode="r") as archive:
+            names = set(archive.namelist())
+    except zipfile.BadZipFile:
+        return False
+    return SAFE_ZIP_MEMBER_NAMES.issubset(names)
+
+
+def save_checkpoint(
+    model: ModeShapeModel,
+    path: str | Path,
+    *,
+    format: CheckpointFormat = "safetensors_v1",
+) -> None:
     """Persist a trained model checkpoint to disk.
 
     Parameters
@@ -1504,11 +1719,33 @@ def save_checkpoint(model: ModeShapeModel, path: str | Path) -> None:
     model : ModeShapeModel
         Model to serialize.
     path : str or Path
-        Destination ``.pt`` file path.
+        When ``format="safetensors_v1"`` (default): destination **directory**,
+        or a ``.kgckpt`` / ``.zip`` file for the zip bundle of the same three
+        members. When ``format="legacy_pt"``: destination ``.pt`` file path.
+    format : {"safetensors_v1", "legacy_pt"}, optional
+        On-disk container. Default ``safetensors_v1`` writes JSON config +
+        safetensors weights; pass ``legacy_pt`` for the pickle ``.pt`` escape
+        hatch (still used by ``fit(..., checkpoint_path=...)`` writers).
+
+    Raises
+    ------
+    ValueError
+        If ``format`` is unknown, or ``safetensors_v1`` path type conflicts
+        with an existing file/directory.
     """
     destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(build_checkpoint(model), destination)
+    if format == "legacy_pt":
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(build_checkpoint(model), destination)
+        return
+    if format == "safetensors_v1":
+        if destination.suffix.lower() in SAFE_BUNDLE_SUFFIXES:
+            _save_safetensors_v1_zip(model, destination)
+        else:
+            _save_safetensors_v1_directory(model, destination)
+        return
+    msg = f"Unsupported checkpoint format {format!r}"
+    raise ValueError(msg)
 
 
 def _allocate_adaptive_topology_from_state(
@@ -1545,42 +1782,193 @@ def _allocate_adaptive_topology_from_state(
     adaptive.set_num_nodes(int(source.shape[0]), device=source.device)
 
 
-def load_checkpoint(
-    path: str | Path,
-    *,
-    map_location: str | torch.device | None = None,
-    physics_lifting_fn: PhysicsLiftingFn | None = None,
-) -> ModeShapeModel:
-    """Load a trained model from a checkpoint file.
+def _resolve_safetensors_device(
+    map_location: str | torch.device | None,
+) -> str:
+    """Normalize ``map_location`` for :func:`safetensors.torch.load_file`.
 
     Parameters
     ----------
-    path : str or Path
-        Checkpoint ``.pt`` file produced by :func:`save_checkpoint`.
-    map_location : str, torch.device, or None, optional
-        Device mapping forwarded to :func:`torch.load`.
-    physics_lifting_fn : callable or None, optional
-        Custom physics lifting function for hybrid checkpoints without a stored
-        preset.
+    map_location : str, torch.device, or None
+        Device mapping from :func:`load_checkpoint`. Callables are not
+        supported on the safetensors path.
 
     Returns
     -------
-    GraphKoopmanModel
-        Reconstructed model with restored weights in evaluation mode.
+    str
+        Device string (``"cpu"`` when ``map_location`` is ``None``).
+    """
+    if map_location is None:
+        return "cpu"
+    return str(map_location)
+
+
+def _load_safetensors_v1_directory(
+    path: Path,
+    *,
+    map_location: str | torch.device | None,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor], int]:
+    """Load config and weights from a ``safetensors_v1`` directory.
+
+    Parameters
+    ----------
+    path : Path
+        Checkpoint directory containing ``meta.json``, ``config.json``, and
+        ``model.safetensors``.
+    map_location : str, torch.device, or None
+        Device for weight tensors.
+
+    Returns
+    -------
+    config : dict
+        Architecture configuration.
+    state_dict : dict of str to Tensor
+        Model weights.
+    format_version : int
+        Logical checkpoint schema version from ``meta.json``.
 
     Raises
     ------
     ValueError
-        If the checkpoint format version is unsupported or the payload is invalid.
-    FileNotFoundError
-        If ``path`` does not exist.
+        If metadata, config, or weights are missing or invalid.
     """
-    destination = Path(path)
-    if not destination.is_file():
-        msg = f"Checkpoint file not found: {destination}"
-        raise FileNotFoundError(msg)
+    meta_path = path / SAFE_META_FILENAME
+    config_path = path / SAFE_CONFIG_FILENAME
+    weights_path = path / SAFE_WEIGHTS_FILENAME
+    if not meta_path.is_file():
+        msg = f"safetensors_v1 checkpoint missing {SAFE_META_FILENAME}: {path}"
+        raise ValueError(msg)
+    if not config_path.is_file():
+        msg = f"safetensors_v1 checkpoint missing {SAFE_CONFIG_FILENAME}: {path}"
+        raise ValueError(msg)
+    if not weights_path.is_file():
+        msg = f"safetensors_v1 checkpoint missing {SAFE_WEIGHTS_FILENAME}: {path}"
+        raise ValueError(msg)
 
-    payload = torch.load(destination, map_location=map_location, weights_only=False)
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid {SAFE_META_FILENAME} in safetensors_v1 checkpoint: {path}"
+        raise ValueError(msg) from exc
+    if not isinstance(meta, dict):
+        msg = f"{SAFE_META_FILENAME} must be a JSON object: {path}"
+        raise ValueError(msg)
+    container = meta.get("container")
+    if container != SAFE_CONTAINER:
+        msg = (
+            f"Unsupported safetensors container {container!r} in {meta_path}; "
+            f"expected {SAFE_CONTAINER!r}"
+        )
+        raise ValueError(msg)
+    format_version = meta.get("format_version", FORMAT_VERSION)
+    if format_version not in SUPPORTED_FORMAT_VERSIONS:
+        supported = ", ".join(
+            str(version) for version in sorted(SUPPORTED_FORMAT_VERSIONS)
+        )
+        msg = (
+            f"Unsupported checkpoint format_version {format_version!r}; "
+            f"supported versions: {supported}"
+        )
+        raise ValueError(msg)
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid {SAFE_CONFIG_FILENAME} in safetensors_v1 checkpoint: {path}"
+        raise ValueError(msg) from exc
+    if not isinstance(config, dict):
+        msg = f"{SAFE_CONFIG_FILENAME} must be a JSON object: {path}"
+        raise ValueError(msg)
+
+    state_dict = safetensors_load_file(
+        weights_path,
+        device=_resolve_safetensors_device(map_location),
+    )
+    return config, state_dict, int(format_version)
+
+
+def _load_safetensors_v1_zip(
+    path: Path,
+    *,
+    map_location: str | torch.device | None,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor], int]:
+    """Load config and weights from a ``safetensors_v1`` zip / ``.kgckpt``.
+
+    Extracts the three root members into a temporary directory and reuses the
+    directory loader validation path. Only exact member names are extracted
+    (no nested paths).
+
+    Parameters
+    ----------
+    path : Path
+        Zip archive containing ``meta.json``, ``config.json``, and
+        ``model.safetensors`` at the archive root.
+    map_location : str, torch.device, or None
+        Device for weight tensors.
+
+    Returns
+    -------
+    config : dict
+        Architecture configuration.
+    state_dict : dict of str to Tensor
+        Model weights.
+    format_version : int
+        Logical checkpoint schema version from ``meta.json``.
+
+    Raises
+    ------
+    ValueError
+        If members are missing or the archive is not a valid zip.
+    """
+    try:
+        with zipfile.ZipFile(path, mode="r") as archive:
+            names = set(archive.namelist())
+            missing = sorted(SAFE_ZIP_MEMBER_NAMES - names)
+            if missing:
+                msg = f"safetensors_v1 zip missing members {missing} in {path}"
+                raise ValueError(msg)
+            with TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                for member in SAFE_ZIP_MEMBER_NAMES:
+                    archive.extract(member, path=tmp_path)
+                return _load_safetensors_v1_directory(
+                    tmp_path,
+                    map_location=map_location,
+                )
+    except zipfile.BadZipFile as exc:
+        msg = f"Invalid safetensors_v1 zip checkpoint: {path}"
+        raise ValueError(msg) from exc
+
+
+def _load_legacy_pt_file(
+    path: Path,
+    *,
+    map_location: str | torch.device | None,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor], int]:
+    """Load config and weights from a legacy pickle ``.pt`` checkpoint.
+
+    Parameters
+    ----------
+    path : Path
+        Checkpoint file path.
+    map_location : str, torch.device, or None
+        Device mapping forwarded to :func:`torch.load`.
+
+    Returns
+    -------
+    config : dict
+        Architecture configuration.
+    state_dict : dict of str to Tensor
+        Model weights.
+    format_version : int
+        Logical checkpoint schema version.
+
+    Raises
+    ------
+    ValueError
+        If the payload shape or format version is invalid.
+    """
+    payload = torch.load(path, map_location=map_location, weights_only=False)
     if not isinstance(payload, dict):
         msg = "Checkpoint must be a dictionary payload"
         raise ValueError(msg)
@@ -1601,8 +1989,35 @@ def load_checkpoint(
     if not isinstance(config, dict) or not isinstance(state_dict, dict):
         msg = "Checkpoint must contain 'config' and 'state_dict' dictionaries"
         raise ValueError(msg)
+    return config, state_dict, int(format_version)
 
-    migrated_config = _migrate_config(config, format_version=int(format_version))
+
+def _assemble_model_from_checkpoint(
+    config: dict[str, Any],
+    state_dict: dict[str, torch.Tensor],
+    *,
+    format_version: int,
+    physics_lifting_fn: PhysicsLiftingFn | None,
+) -> ModeShapeModel:
+    """Reconstruct a model and load weights from parsed checkpoint pieces.
+
+    Parameters
+    ----------
+    config : dict
+        Checkpoint config mapping (possibly pre-migration).
+    state_dict : dict of str to Tensor
+        Weight tensors to load.
+    format_version : int
+        On-disk format version used for config migration.
+    physics_lifting_fn : callable or None
+        Optional custom physics lifting for hybrid reconstructions.
+
+    Returns
+    -------
+    ModeShapeModel
+        Reconstructed model in evaluation mode with loaded weights.
+    """
+    migrated_config = _migrate_config(config, format_version=format_version)
     if migrated_config.get("koopman_kind") == "hetero_graph":
         _validate_hetero_latent_dims_vs_state(migrated_config, state_dict)
     model = reconstruct_model(migrated_config, physics_lifting_fn=physics_lifting_fn)
@@ -1612,6 +2027,91 @@ def load_checkpoint(
     model.load_state_dict(state_dict)
     model.eval()
     return model
+
+
+def load_checkpoint(
+    path: str | Path,
+    *,
+    map_location: str | torch.device | None = None,
+    physics_lifting_fn: PhysicsLiftingFn | None = None,
+) -> ModeShapeModel:
+    """Load a trained model from a checkpoint file or directory.
+
+    Auto-detects on-disk containers:
+
+    1. **Directory** with ``meta.json`` → ``safetensors_v1`` directory
+       (JSON config + safetensors weights; no pickle).
+    2. **Zip** whose root members include ``meta.json``, ``config.json``,
+       and ``model.safetensors`` → ``safetensors_v1`` zip / ``.kgckpt``
+       (same three files; no pickle). Matched by member names so safe
+       markers win over legacy pickle even when the file is a zip archive.
+    3. **Other files** (typically ``.pt`` / ``.pth``) → legacy
+       ``torch.load`` pickle payload (trusted-source trust boundary; see
+       ``SECURITY.md``).
+
+    Parameters
+    ----------
+    path : str or Path
+        Checkpoint ``.pt`` file, ``safetensors_v1`` directory, or
+        ``.kgckpt`` / ``.zip`` bundle produced by :func:`save_checkpoint`.
+    map_location : str, torch.device, or None, optional
+        Device mapping. For legacy ``.pt`` files, forwarded to
+        :func:`torch.load`. For ``safetensors_v1``, normalized to a device
+        string (``None`` → ``"cpu"``); callable ``map_location`` values are
+        not supported on that path.
+    physics_lifting_fn : callable or None, optional
+        Custom physics lifting function for hybrid checkpoints without a stored
+        preset.
+
+    Returns
+    -------
+    GraphKoopmanModel
+        Reconstructed model with restored weights in evaluation mode.
+
+    Raises
+    ------
+    ValueError
+        If the checkpoint layout, container, format version, or payload is
+        invalid.
+    FileNotFoundError
+        If ``path`` does not exist.
+    """
+    destination = Path(path)
+    if not destination.exists():
+        msg = f"Checkpoint path not found: {destination}"
+        raise FileNotFoundError(msg)
+
+    if destination.is_dir():
+        config, state_dict, format_version = _load_safetensors_v1_directory(
+            destination,
+            map_location=map_location,
+        )
+    elif _is_safetensors_v1_zip(destination):
+        config, state_dict, format_version = _load_safetensors_v1_zip(
+            destination,
+            map_location=map_location,
+        )
+    elif destination.is_file():
+        if destination.suffix.lower() in SAFE_BUNDLE_SUFFIXES:
+            msg = (
+                f"Path {destination} has a safetensors_v1 bundle suffix but "
+                f"is not a zip with {sorted(SAFE_ZIP_MEMBER_NAMES)}"
+            )
+            raise ValueError(msg)
+        config, state_dict, format_version = _load_legacy_pt_file(
+            destination,
+            map_location=map_location,
+        )
+    else:
+        msg = f"Unsupported checkpoint path type: {destination}"
+        raise ValueError(msg)
+
+    return _assemble_model_from_checkpoint(
+        config,
+        state_dict,
+        format_version=format_version,
+        physics_lifting_fn=physics_lifting_fn,
+    )
 
 
 def snapshot_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:

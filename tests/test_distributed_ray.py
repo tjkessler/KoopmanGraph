@@ -217,6 +217,7 @@ def test_fit_ensemble_with_ray_default_seeds_and_init(
     assert len(histories) == 1
 
 
+@pytest.mark.ray
 def test_fit_ensemble_with_ray_two_members_finite_histories() -> None:
     """Ray path fits two members with finite losses under a local runtime."""
     ray = pytest.importorskip("ray")

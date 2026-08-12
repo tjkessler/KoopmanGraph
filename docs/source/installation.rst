@@ -26,6 +26,19 @@ With uv you can also pin an interpreter for the project:
 
    uv python pin 3.12
 
+Supported platforms / CI
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Continuous integration verifies:
+
+* **Ubuntu** — full pytest matrix on Python **3.10**, **3.11**, and **3.12**
+  (coverage gate on 3.12).
+* **macOS** — core smoke on Python **3.12**
+  (``-m "not slow and not distributed and not ray"``).
+
+**Windows** is best-effort community support and is **not** in the CI matrix.
+Package classifiers list Python 3.10–3.12 to match the tested interpreters.
+
 PyTorch
 ~~~~~~~
 
@@ -95,6 +108,20 @@ Optional extras for symmetry-adapted operators (node-orbit partitions via
 
    pip install -e ".[symmetry]"
 
+Optional extras for the config-driven ``koopman-graph`` CLI when using YAML
+configs (JSON configs need no extra; PyYAML only):
+
+.. code-block:: bash
+
+   pip install -e ".[cli]"
+
+Optional extras for Captum-backed representation attribution
+(``algorithm="integrated_gradients"``; GNNExplainer needs no extra):
+
+.. code-block:: bash
+
+   pip install -e ".[explain]"
+
 Optional extras for Koopman model-predictive control (OSQP QP solver):
 
 .. code-block:: bash
@@ -146,7 +173,12 @@ encode to invariant latents; latent :math:`K` remains non-equivariant).
 ``[baselines-graphcast]`` is a reserved no-op — the GraphCast teaching
 path is pure PyTorch. Exact-automorphism isotypic mode
 (``koopman_symmetry="isotypic"``) needs optional ``pynauty`` separately
-from ``[symmetry]`` (``networkx`` approximate orbits).
+from ``[symmetry]`` (``networkx`` approximate orbits). The ``[cli]`` extra
+pins PyYAML so ``koopman-graph train --config *.yaml`` can load; the
+console script itself ships with the core package (see below). The
+``[explain]`` extra pins Captum for
+``explain_representation(..., algorithm="integrated_gradients")``; the
+PyG GNNExplainer path needs no extra.
 
 uv (project sync)
 ~~~~~~~~~~~~~~~~~
@@ -165,13 +197,14 @@ need a non-default accelerator; otherwise sync is enough for CPU development:
 
 Documentation and optional capability extras (``uv.lock`` includes ``mpc`` /
 ``symmetry`` for frozen sync; add ``lightning`` / ``distributed`` when you
-need Fabric locally):
+need Fabric locally, or ``cli`` for YAML configs):
 
 .. code-block:: bash
 
    uv sync --extra docs
    uv sync --extra mpc --extra symmetry
    uv sync --extra lightning
+   uv sync --extra cli
    cd docs && make html
 
 pip-compatible uv installs (after creating a venv) mirror the pip commands:
@@ -201,12 +234,37 @@ version with the tag you intend; see PyPI and ``CHANGELOG.md``):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.12.0
-   # or: uv pip install koopman-graph==0.12.0
+   pip install koopman-graph==0.13.0
+   # or: uv pip install koopman-graph==0.13.0
+
+YAML CLI configs from PyPI:
+
+.. code-block:: bash
+
+   pip install "koopman-graph[cli]"
+   # or: uv pip install "koopman-graph[cli]"
 
 Releases are published automatically when a maintainer creates a GitHub Release
 (see ``CONTRIBUTING.md`` in the repository). For the latest in-tree development
 checkout, use the editable install from source above.
+
+Console script
+--------------
+
+A normal install registers the ``koopman-graph`` console script (packaging
+metadata: ``[project.scripts]`` → ``koopman_graph.cli:main``). After
+``pip install`` / ``pip install -e .`` / ``uv sync``, the entry point should be
+on your ``PATH``:
+
+.. code-block:: bash
+
+   koopman-graph --version
+   koopman-graph train --help
+   koopman-graph predict --help
+
+JSON train configs work with the core install. YAML requires
+``pip install "koopman-graph[cli]"`` (or ``-e ".[cli]"``). See :doc:`cli` for
+subcommands and schema, and ``examples/cli/`` for a synthetic smoke config.
 
 Verify
 ------
@@ -217,6 +275,13 @@ Confirm the package imports:
 
    python -c "import koopman_graph; print(koopman_graph.__version__)"
    # or: uv run python -c "import koopman_graph; print(koopman_graph.__version__)"
+
+Confirm the console script:
+
+.. code-block:: bash
+
+   koopman-graph --version
+   # or: uv run koopman-graph --version
 
 For a full development check after ``pip install -e ".[dev]"`` or
 ``uv sync --extra dev``:
@@ -229,4 +294,5 @@ For a full development check after ``pip install -e ".[dev]"`` or
 Next steps
 ----------
 
-See :doc:`quickstart` for a minimal train-and-predict workflow.
+See :doc:`quickstart` for a minimal Python train-and-predict workflow, and
+:doc:`cli` for the config-driven console script.

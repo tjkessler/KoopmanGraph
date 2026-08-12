@@ -135,11 +135,14 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html) — when not to use; measured boundaries
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
-- [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies and install paths
-- What’s new in 0.12.0: Kronecker-sum exact spectrum for eligible discrete
-  and continuous graph operators (three-path spectrum contract), Scale /
-  architecture honesty for residual dense inverse and eig-reg ceilings, and
-  docs-only topology-criticality honesty — see [CHANGELOG.md](CHANGELOG.md).
+- [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies, install paths, and CI platforms
+- [CLI](https://koopmangraph.readthedocs.io/en/latest/cli.html) — `koopman-graph train` / `predict` config workflow
+- [SECURITY.md](SECURITY.md) — supported versions and checkpoint trust boundaries
+- What’s new in 0.13.0: default `safetensors_v1` checkpoints (legacy pickle via
+  `format="legacy_pt"`), fit callbacks / CSV–TensorBoard tracking, config-driven
+  CLI, thin Ray Tune helpers, homogeneous `explain_representation` MVP, and
+  Ubuntu 3.10–3.12 plus macOS core-smoke CI — see [CHANGELOG.md](CHANGELOG.md).
+  Portable TorchScript / ONNX export is not shipped in this release.
 
 ## Related software
 
@@ -164,7 +167,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21811756},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.12.0},
+  version      = {0.13.0},
 }
 ```
 

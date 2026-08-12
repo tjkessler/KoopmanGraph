@@ -28,6 +28,7 @@ from koopman_graph.data.hetero_layout import (
 from koopman_graph.graph_utils import snapshot_hyperedge_index
 from koopman_graph.nn.heterogeneous import resolve_multiplex_relation_inputs
 from koopman_graph.protocols import TrainableKoopmanModel
+from koopman_graph.training.callbacks import FitCallback
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
     eval_one_epoch,
@@ -44,6 +45,107 @@ from koopman_graph.training.history import (
     LRSchedulerFactory,
 )
 from koopman_graph.training.schedules import resolve_loss_weights_for_epoch
+
+
+def _build_fit_history(
+    *,
+    losses: list[float],
+    reconstruction_losses: list[float],
+    forward_losses: list[float],
+    backward_losses: list[float],
+    rollout_losses: list[float],
+    eigenvalue_losses: list[float],
+    lie_losses: list[float],
+    pde_losses: list[float],
+    sparsity_losses: list[float],
+    worst_case_losses: list[float],
+    vamp2_losses: list[float],
+    val_losses: list[float] | None,
+    val_reconstruction_losses: list[float] | None,
+    val_forward_losses: list[float] | None,
+    val_backward_losses: list[float] | None,
+    val_rollout_losses: list[float] | None,
+    val_eigenvalue_losses: list[float] | None,
+    val_lie_losses: list[float] | None,
+    val_pde_losses: list[float] | None,
+    val_sparsity_losses: list[float] | None,
+    val_worst_case_losses: list[float] | None,
+    val_vamp2_losses: list[float] | None,
+    stopped_early: bool,
+    best_epoch: int | None,
+    best_loss: float | None,
+) -> FitHistory:
+    """Build an immutable :class:`FitHistory` from in-progress epoch lists.
+
+    Parameters
+    ----------
+    losses, reconstruction_losses, forward_losses, backward_losses,
+    rollout_losses, eigenvalue_losses, lie_losses, pde_losses,
+    sparsity_losses, worst_case_losses, vamp2_losses : list of float
+        Per-epoch training loss series (same length as ``losses``).
+    val_losses, val_reconstruction_losses, val_forward_losses,
+    val_backward_losses, val_rollout_losses, val_eigenvalue_losses,
+    val_lie_losses, val_pde_losses, val_sparsity_losses,
+    val_worst_case_losses, val_vamp2_losses : list of float or None
+        Optional per-epoch validation series; ``None`` when validation
+        was not run.
+    stopped_early : bool
+        Whether early stopping terminated training.
+    best_epoch : int or None
+        Best epoch index when tracked.
+    best_loss : float or None
+        Best monitored loss when tracked.
+
+    Returns
+    -------
+    FitHistory
+        Frozen history with tuple series.
+    """
+    return FitHistory(
+        loss=tuple(losses),
+        epochs=len(losses),
+        reconstruction_loss=tuple(reconstruction_losses),
+        forward_loss=tuple(forward_losses),
+        backward_loss=tuple(backward_losses),
+        rollout_loss=tuple(rollout_losses),
+        eigenvalue_loss=tuple(eigenvalue_losses),
+        lie_loss=tuple(lie_losses),
+        pde_loss=tuple(pde_losses),
+        sparsity_loss=tuple(sparsity_losses),
+        worst_case_loss=tuple(worst_case_losses),
+        vamp2_loss=tuple(vamp2_losses),
+        val_loss=None if val_losses is None else tuple(val_losses),
+        val_reconstruction_loss=(
+            None
+            if val_reconstruction_losses is None
+            else tuple(val_reconstruction_losses)
+        ),
+        val_forward_loss=(
+            None if val_forward_losses is None else tuple(val_forward_losses)
+        ),
+        val_backward_loss=(
+            None if val_backward_losses is None else tuple(val_backward_losses)
+        ),
+        val_rollout_loss=(
+            None if val_rollout_losses is None else tuple(val_rollout_losses)
+        ),
+        val_eigenvalue_loss=(
+            None if val_eigenvalue_losses is None else tuple(val_eigenvalue_losses)
+        ),
+        val_lie_loss=None if val_lie_losses is None else tuple(val_lie_losses),
+        val_pde_loss=None if val_pde_losses is None else tuple(val_pde_losses),
+        val_sparsity_loss=(
+            None if val_sparsity_losses is None else tuple(val_sparsity_losses)
+        ),
+        val_worst_case_loss=(
+            None if val_worst_case_losses is None else tuple(val_worst_case_losses)
+        ),
+        val_vamp2_loss=(None if val_vamp2_losses is None else tuple(val_vamp2_losses)),
+        stopped_early=stopped_early,
+        best_epoch=best_epoch,
+        best_loss=best_loss,
+    )
+
 
 __all__ = [
     "bind_pending_orbit_ties",
@@ -278,6 +380,7 @@ def run_fit_loop(
     val_sequences: Sequence[SnapshotSequence] | None = None,
     restore_best_weights: bool = False,
     checkpoint_path: str | Path | None = None,
+    callbacks: Sequence[FitCallback] | None = None,
     **optimizer_kwargs: Any,
 ) -> FitHistory:
     """Run the multi-epoch training loop for a trainable Koopman model.
@@ -287,6 +390,20 @@ def run_fit_loop(
     length, multi-trajectory layout) and for resolving
     ``early_stopping_monitor`` via :func:`resolve_early_stopping_monitor`
     before calling this helper (``"auto"`` is not accepted here).
+
+    Callback hooks
+    --------------
+    When ``callbacks`` is set, each :class:`~koopman_graph.training.FitCallback`
+    is invoked in list order as:
+
+    * ``on_fit_start`` once after device / optimizer setup and before epoch 0
+    * ``on_epoch_end`` after each epoch's train (and optional val) losses are
+      recorded and best-epoch tracking is updated, before early-stop ``break``
+    * ``on_fit_end`` once with the final :class:`FitHistory`, after optional
+      best-weight restore / checkpoint write
+
+    Callbacks are observe-only: do not mutate model parameters or optimizer
+    state. Default ``None`` preserves prior behavior.
 
     Parameters
     ----------
@@ -357,6 +474,8 @@ def run_fit_loop(
         Reload in-memory weights from the lowest-loss epoch when ``True``.
     checkpoint_path : str, Path, or None, optional
         Write a checkpoint at the lowest-loss epoch when set.
+    callbacks : sequence of FitCallback or None, optional
+        Observe-only fit hooks. Default ``None`` skips all hook calls.
     **optimizer_kwargs
         Extra keyword arguments for the optimizer constructor.
 
@@ -470,6 +589,28 @@ def run_fit_loop(
     track_best = restore_best_weights or checkpoint_path is not None
     epochs_without_improvement = 0
     stopped_early = False
+    active_callbacks: Sequence[FitCallback] = () if callbacks is None else callbacks
+    fit_kwargs: dict[str, Any] = {
+        "epochs": epochs,
+        "lr": lr,
+        "device": train_device,
+        "loss_weights": loss_weights,
+        "loss_weight_schedule": loss_weight_schedule,
+        "extra_losses": extra_losses,
+        "rollout_horizon": rollout_horizon,
+        "window_length": window_length,
+        "batch_size": batch_size,
+        "max_grad_norm": max_grad_norm,
+        "use_amp": use_amp,
+        "early_stopping_patience": early_stopping_patience,
+        "early_stopping_min_delta": early_stopping_min_delta,
+        "early_stopping_monitor": early_stopping_monitor,
+        "restore_best_weights": restore_best_weights,
+        "checkpoint_path": checkpoint_path,
+        "has_val_sequences": val_sequences is not None,
+    }
+    for callback in active_callbacks:
+        callback.on_fit_start(model=model, fit_kwargs=fit_kwargs)
 
     for epoch in range(epochs):
         epoch_weights = resolve_loss_weights_for_epoch(
@@ -535,8 +676,9 @@ def run_fit_loop(
         vamp2_losses.append(term_values["vamp2"])
 
         monitored_loss = term_values["total"]
+        epoch_val_breakdown = None
         if val_sequences is not None:
-            val_breakdown = eval_one_epoch(
+            epoch_val_breakdown = eval_one_epoch(
                 model,
                 val_sequences,
                 epoch_weights,
@@ -544,7 +686,7 @@ def run_fit_loop(
                 rollout_horizon=rollout_horizon,
                 rollout_start_indices=epoch_rollout_starts,
             )
-            val_terms = val_breakdown.to_floats()
+            val_terms = epoch_val_breakdown.to_floats()
             assert val_losses is not None
             assert val_reconstruction_losses is not None
             assert val_forward_losses is not None
@@ -575,6 +717,42 @@ def run_fit_loop(
             best_epoch = epoch
             best_state_dict = snapshot_state_dict(module)
 
+        if active_callbacks:
+            history_so_far = _build_fit_history(
+                losses=losses,
+                reconstruction_losses=reconstruction_losses,
+                forward_losses=forward_losses,
+                backward_losses=backward_losses,
+                rollout_losses=rollout_losses,
+                eigenvalue_losses=eigenvalue_losses,
+                lie_losses=lie_losses,
+                pde_losses=pde_losses,
+                sparsity_losses=sparsity_losses,
+                worst_case_losses=worst_case_losses,
+                vamp2_losses=vamp2_losses,
+                val_losses=val_losses,
+                val_reconstruction_losses=val_reconstruction_losses,
+                val_forward_losses=val_forward_losses,
+                val_backward_losses=val_backward_losses,
+                val_rollout_losses=val_rollout_losses,
+                val_eigenvalue_losses=val_eigenvalue_losses,
+                val_lie_losses=val_lie_losses,
+                val_pde_losses=val_pde_losses,
+                val_sparsity_losses=val_sparsity_losses,
+                val_worst_case_losses=val_worst_case_losses,
+                val_vamp2_losses=val_vamp2_losses,
+                stopped_early=False,
+                best_epoch=best_epoch,
+                best_loss=best_loss,
+            )
+            for callback in active_callbacks:
+                callback.on_epoch_end(
+                    epoch=epoch,
+                    train_breakdown=breakdown,
+                    val_breakdown=epoch_val_breakdown,
+                    history_so_far=history_so_far,
+                )
+
         if early_stopping_patience is not None:
             stop, best_loss_for_stop, epochs_without_improvement = should_stop_early(
                 epoch_loss=monitored_loss,
@@ -593,51 +771,42 @@ def run_fit_loop(
             last_state_dict = snapshot_state_dict(module)
         module.load_state_dict(best_state_dict)
         if checkpoint_path is not None:
-            save_checkpoint(model, checkpoint_path)  # type: ignore[arg-type]
+            # File-path best-epoch checkpoints stay legacy .pt (not directories).
+            save_checkpoint(
+                model,  # type: ignore[arg-type]
+                checkpoint_path,
+                format="legacy_pt",
+            )
         if not restore_best_weights and last_state_dict is not None:
             module.load_state_dict(last_state_dict)
 
-    return FitHistory(
-        loss=tuple(losses),
-        epochs=len(losses),
-        reconstruction_loss=tuple(reconstruction_losses),
-        forward_loss=tuple(forward_losses),
-        backward_loss=tuple(backward_losses),
-        rollout_loss=tuple(rollout_losses),
-        eigenvalue_loss=tuple(eigenvalue_losses),
-        lie_loss=tuple(lie_losses),
-        pde_loss=tuple(pde_losses),
-        sparsity_loss=tuple(sparsity_losses),
-        worst_case_loss=tuple(worst_case_losses),
-        vamp2_loss=tuple(vamp2_losses),
-        val_loss=None if val_losses is None else tuple(val_losses),
-        val_reconstruction_loss=(
-            None
-            if val_reconstruction_losses is None
-            else tuple(val_reconstruction_losses)
-        ),
-        val_forward_loss=(
-            None if val_forward_losses is None else tuple(val_forward_losses)
-        ),
-        val_backward_loss=(
-            None if val_backward_losses is None else tuple(val_backward_losses)
-        ),
-        val_rollout_loss=(
-            None if val_rollout_losses is None else tuple(val_rollout_losses)
-        ),
-        val_eigenvalue_loss=(
-            None if val_eigenvalue_losses is None else tuple(val_eigenvalue_losses)
-        ),
-        val_lie_loss=None if val_lie_losses is None else tuple(val_lie_losses),
-        val_pde_loss=None if val_pde_losses is None else tuple(val_pde_losses),
-        val_sparsity_loss=(
-            None if val_sparsity_losses is None else tuple(val_sparsity_losses)
-        ),
-        val_worst_case_loss=(
-            None if val_worst_case_losses is None else tuple(val_worst_case_losses)
-        ),
-        val_vamp2_loss=(None if val_vamp2_losses is None else tuple(val_vamp2_losses)),
+    history = _build_fit_history(
+        losses=losses,
+        reconstruction_losses=reconstruction_losses,
+        forward_losses=forward_losses,
+        backward_losses=backward_losses,
+        rollout_losses=rollout_losses,
+        eigenvalue_losses=eigenvalue_losses,
+        lie_losses=lie_losses,
+        pde_losses=pde_losses,
+        sparsity_losses=sparsity_losses,
+        worst_case_losses=worst_case_losses,
+        vamp2_losses=vamp2_losses,
+        val_losses=val_losses,
+        val_reconstruction_losses=val_reconstruction_losses,
+        val_forward_losses=val_forward_losses,
+        val_backward_losses=val_backward_losses,
+        val_rollout_losses=val_rollout_losses,
+        val_eigenvalue_losses=val_eigenvalue_losses,
+        val_lie_losses=val_lie_losses,
+        val_pde_losses=val_pde_losses,
+        val_sparsity_losses=val_sparsity_losses,
+        val_worst_case_losses=val_worst_case_losses,
+        val_vamp2_losses=val_vamp2_losses,
         stopped_early=stopped_early,
         best_epoch=best_epoch,
         best_loss=best_loss,
     )
+    for callback in active_callbacks:
+        callback.on_fit_end(history=history)
+    return history

@@ -74,6 +74,14 @@ Capability layout
     :data:`~koopman_graph.analysis.TRANSFER_ADVANTAGE_EPSILON`). Measures
     zero-shot transfer against a mandatory ``pernode`` control; does **not**
     promise a transfer advantage (negative advantage is reportable).
+``explain``
+    Representation-level node / edge / feature masks
+    (:class:`~koopman_graph.analysis.RepresentationExplanation`,
+    :func:`~koopman_graph.analysis.explain_representation`).
+    Interpretive attributions under a chosen algorithm — **non-causal**,
+    **not** ResDMD, **not**
+    :class:`~koopman_graph.analysis.ModeEnergyAttribution`. Homogeneous
+    GNNExplainer MVP first.
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` and the spectrum
 assembly helpers stay in the neutral top-level
@@ -91,6 +99,10 @@ from koopman_graph.analysis.anomaly import (
 from koopman_graph.analysis.clustering import (
     ClusteringResult,
     koopman_spectral_clustering,
+)
+from koopman_graph.analysis.explain import (
+    RepresentationExplanation,
+    explain_representation,
 )
 from koopman_graph.analysis.joint_stability import (
     MAX_JOINT_LYAPUNOV_SIZE,
@@ -157,6 +169,7 @@ __all__ = [
     "MAX_JOINT_SCHUR_SIZE",
     "ModeEnergyAttribution",
     "ResDMDReport",
+    "RepresentationExplanation",
     "ResolventNormGrid",
     "SINDyReport",
     "SpectralResidualReport",
@@ -177,6 +190,7 @@ __all__ = [
     "empirical_spectral_measure",
     "estimate_coupling_from_snapshots",
     "evaluate_topology_transfer",
+    "explain_representation",
     "gershgorin_radius_bound",
     "identify_sparse_dynamics",
     "implied_timescales",

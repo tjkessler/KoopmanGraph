@@ -24,6 +24,13 @@ that the installed ``torch`` version and CUDA tag match the PyG wheel index you
 used. With uv, ``uv pip install torch --torch-backend=auto`` (or a specific
 backend) helps pick a matching PyTorch index; see :doc:`installation`.
 
+Which platforms does CI cover?
+------------------------------
+
+CI runs the full Ubuntu test matrix on Python 3.10–3.12 and a macOS core smoke
+job on Python 3.12. Windows is best-effort community support (not in CI). See
+:doc:`installation` (Supported platforms / CI).
+
 CUDA vs CPU mismatches
 ----------------------
 
@@ -273,9 +280,11 @@ Use the power-user :mod:`koopman_graph.distributed` helpers (not root
   Prefer a picklable (ideally module-level) factory. This does **not**
   change UQ coverage guarantees and does **not** shard one model across
   GPUs — that is Ray Train / DDP / Fabric.
-* **Ray Tune HPO** (examples-only) —
-  ``examples/scripts/ray_tune_koopman_example.py``. The search space stays
-  in the script; KoopmanGraph does not expose a Tune / AutoML API.
+* **Ray Tune HPO** — power-user helpers in :mod:`koopman_graph.tuning`
+  (``fit_history_metrics``, ``run_ray_tune``, optional ``example_*``
+  smoke scaffolds) plus ``examples/scripts/ray_tune_koopman_example.py``.
+  The search configuration stays script-/caller-owned; KoopmanGraph is
+  not an AutoML product. Optuna is examples-only (no library Optuna API).
 
 Default ``fit`` / ``run_fit_loop`` remain single-process when
 ``strategy`` is unset. Distributed training does **not** reduce dense
@@ -354,6 +363,38 @@ Typical pattern::
 
 Do **not** replace :func:`~koopman_graph.training.run_fit_loop` /
 DDP / Fabric with a Dask-worker training loop.
+
+How do I log fits to CSV, TensorBoard, W&B, or MLflow?
+-------------------------------------------------------
+
+Use observe-only :class:`~koopman_graph.FitCallback` hooks on
+single-process ``fit`` / :func:`~koopman_graph.training.run_fit_loop`:
+
+* **CSV / TensorBoard (in-tree)** —
+  :class:`~koopman_graph.tracking.CsvFitLogger` and
+  :class:`~koopman_graph.tracking.TensorBoardFitLogger`::
+
+      from koopman_graph.tracking import CsvFitLogger, TensorBoardFitLogger
+
+      model.fit(
+          sequence,
+          epochs=20,
+          callbacks=[
+              CsvFitLogger("runs/fit.csv"),
+              TensorBoardFitLogger("runs/tb"),  # needs: pip install tensorboard
+          ],
+      )
+
+* **W&B / MLflow (DIY, no library pin)** — implement ``FitCallback`` and call
+  ``wandb.log`` / ``mlflow.log_metrics`` from ``on_epoch_end`` using
+  ``train_breakdown.to_floats()``. Sketch classes live in
+  ``examples/tracking/wandb_mlflow_callback.py``. Install those SDKs
+  yourself; KoopmanGraph does not declare them as dependencies.
+* **Lightning Trainer** — attach Lightning loggers to
+  :class:`~koopman_graph.distributed.KoopmanLightningModule` /
+  ``Trainer``; do not expect ``fit(..., callbacks=)`` on the Lightning
+  path. Native ``strategy="ddp"`` rejects non-None ``callbacks`` until
+  that path is wired.
 
 What is the difference between ``spectral_residuals`` and ResDMD?
 -----------------------------------------------------------------

@@ -25,6 +25,7 @@ for the public vs power-user API contract.
 
    installation
    quickstart
+   cli
    faq
    capabilities
    limitations

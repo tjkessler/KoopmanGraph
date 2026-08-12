@@ -81,6 +81,28 @@ Roll out from the first snapshot in the sequence:
    print(f"Predicted {len(future_graphs)} future snapshots")
    print(f"First prediction shape: {future_graphs[0].x.shape}")
 
+CLI path (same workflow)
+------------------------
+
+The console script runs the same library ``fit`` / ``predict`` / checkpoint
+path from a JSON config. After installing the package (see
+:doc:`installation`), a tiny CPU smoke looks like:
+
+.. code-block:: bash
+
+   koopman-graph train \
+     --config examples/cli/synthetic_train.json \
+     --out /tmp/kg-cli
+
+   koopman-graph predict \
+     --checkpoint /tmp/kg-cli/model.kgckpt \
+     --data examples/cli/synthetic_train.json \
+     --steps 5 \
+     --out /tmp/kg-cli/forecast.pt
+
+YAML configs require the optional ``[cli]`` extra. Subcommands, exit codes,
+and the MVP config schema are documented in :doc:`cli`.
+
 Inspect the spectrum
 --------------------
 

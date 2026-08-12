@@ -195,6 +195,19 @@ Spectral analysis
   (Colbrook & Townsend, *Commun. Pure Appl. Math.*, 2023/2024;
   ``ColbrookTownsend2023ResDMD``). See
   ``examples/40_resdmd_pseudospectra.ipynb``.
+* **Representation explain masks are interpretive, not causal.**
+  :func:`~koopman_graph.analysis.explain_representation` returns
+  :class:`~koopman_graph.analysis.RepresentationExplanation` node / edge /
+  feature masks under GNNExplainer (``Ying2019GNNExplainer``) or optional
+  Captum integrated gradients (``Sundararajan2017IntegratedGradients``;
+  ``[explain]`` extra). Masks are **non-causal**: they are not
+  interventional topology recovery, not a ResDMD residual bound, and not
+  complementary operator-level
+  :class:`~koopman_graph.analysis.ModeEnergyAttribution` on assembled
+  ``K_eff``. The MVP is **homogeneous** ``Data`` only and rejects
+  ``HeteroData``, RelGraph / ``hetero_graph``, hypergraph encoders /
+  operators, adaptive / learned pairwise topology, ``n_delays != 1``, and
+  ``control_dim > 0``.
 * **Largest Lyapunov exponent (Rosenstein) is available but sensitive.**
   ``koopman_graph.statistics.largest_lyapunov_exponent`` implements the
   Rosenstein et al. (1993) small-data-set method
@@ -433,6 +446,10 @@ When to use something else
   ResDMD / spectral-measure packages when you need residual-based
   certificates beyond the finite-dictionary MVP and held-out
   ``spectral_residuals`` diagnostics.
+* **Portable inference export (TorchScript / ONNX).** 0.13.0 does **not**
+  ship a TorchScript / ``torch.export`` / ONNX inference-export API.
+  Share weights with the default ``safetensors_v1`` checkpoint path (or
+  explicit ``legacy_pt`` when required). ONNX remains deferred.
 * **Flat-vector deep Koopman without graph structure.** Packages such as
   PyKoopman and DLKoopman remain appropriate when the state is naturally a
   vector and edge-based coupling is not part of the model.

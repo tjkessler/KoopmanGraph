@@ -161,7 +161,7 @@ def test_incomplete_latent_dims_rejected(tmp_path: Path) -> None:
     """Missing type keys in latent_dims raise a clear re-save error."""
     model = _rectangular_model()
     path = tmp_path / "rect.pt"
-    model.save(path)
+    model.save(path, format="legacy_pt")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload["config"]["latent_dims"] = {"a": 2}
     broken = tmp_path / "incomplete.pt"
@@ -176,7 +176,7 @@ def test_stripped_latent_dims_with_rectangular_weights_rejected(
     """Rectangular weights without config.latent_dims are rejected."""
     model = _rectangular_model()
     path = tmp_path / "rect.pt"
-    model.save(path)
+    model.save(path, format="legacy_pt")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     del payload["config"]["latent_dims"]
     broken = tmp_path / "broken.pt"
@@ -189,7 +189,7 @@ def test_mismatched_self_factor_shape_rejected(tmp_path: Path) -> None:
     """latent_dims that disagree with self-factor shapes raise clearly."""
     model = _rectangular_model()
     path = tmp_path / "rect.pt"
-    model.save(path)
+    model.save(path, format="legacy_pt")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload["config"]["latent_dims"] = {"a": 3, "b": 3}
     broken = tmp_path / "shape_mismatch.pt"
