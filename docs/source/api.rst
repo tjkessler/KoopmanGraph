@@ -239,14 +239,19 @@ the root façade. Specialized helpers (``compute_generator_spectrum``,
 ``koopman_spectral_clustering``, ``ClusteringResult``,
 ``estimate_coupling_from_snapshots``, ``CouplingEstimate``,
 ``attribute_mode_energy``, ``ModeEnergyAttribution``,
-``evaluate_topology_transfer``, ``TopologyTransferReport``) are imported
+``evaluate_topology_transfer``, ``TopologyTransferReport``,
+``explain_representation``, ``RepresentationExplanation``) are imported
 from :mod:`koopman_graph.analysis` only. The helpers live in the
 ``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` /
-``sindy`` / ``clustering`` / ``topology_estimation`` / ``transfer``
-submodules.
+``sindy`` / ``clustering`` / ``topology_estimation`` / ``transfer`` /
+``explain`` submodules.
 ``attribute_mode_energy`` is an interpretive diagnostic on assembled
 :math:`K_{\mathrm{eff}}` (not a causal claim; not a ResDMD residual).
-Finite-dictionary ResDMD
+:func:`~koopman_graph.analysis.explain_representation` /
+:class:`~koopman_graph.analysis.RepresentationExplanation` provide
+homogeneous MVP node / edge / feature masks (GNNExplainer or optional
+Captum integrated gradients) — **interpretive** / **non-causal**; not
+``ModeEnergyAttribution`` and not ResDMD. Finite-dictionary ResDMD
 (:func:`~koopman_graph.analysis.resdmd`,
 :class:`~koopman_graph.analysis.ResDMDReport`) and the finite-matrix
 resolvent-norm grid
@@ -265,7 +270,7 @@ advantage allowed) — see :doc:`limitations`.
 
 .. automodule:: koopman_graph.analysis
    :members:
-   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid, TopologyTransferReport, evaluate_topology_transfer
+   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid, TopologyTransferReport, evaluate_topology_transfer, RepresentationExplanation, explain_representation
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.residuals
@@ -281,6 +286,10 @@ advantage allowed) — see :doc:`limitations`.
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.transfer
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.explain
    :members:
    :show-inheritance:
 
@@ -485,6 +494,38 @@ export.
 .. automodule:: koopman_graph.training
    :members:
    :exclude-members: GraphSnapshotSequence
+   :show-inheritance:
+
+Experiment tracking adapters (power-user)
+-----------------------------------------
+
+Optional :class:`~koopman_graph.FitCallback` adapters live under
+:mod:`koopman_graph.tracking` (not on root ``__all__``). Prefer
+``from koopman_graph.tracking import CsvFitLogger, TensorBoardFitLogger``.
+``TensorBoardFitLogger`` needs a peer ``tensorboard`` install. Cloud SDKs
+(W&B, MLflow) are not pinned; see :doc:`faq` and
+``examples/tracking/wandb_mlflow_callback.py``.
+
+.. automodule:: koopman_graph.tracking
+   :members:
+   :imported-members:
+   :show-inheritance:
+
+Hyperparameter search helpers (power-user)
+------------------------------------------
+
+Optional HPO helpers live under :mod:`koopman_graph.tuning` (not on root
+``__all__``). Prefer ``from koopman_graph.tuning import fit_history_metrics,
+run_ray_tune``. This package is **not** an AutoML product: search spaces
+remain caller-owned; ``example_*`` scaffolds are smoke-only.
+``run_ray_tune`` and the example spaces require
+``pip install "koopman-graph[ray]"`` (lazy import). Optuna is
+examples-only (no library Optuna API). See
+``examples/scripts/ray_tune_koopman_example.py``.
+
+.. automodule:: koopman_graph.tuning
+   :members:
+   :imported-members:
    :show-inheritance:
 
 Distributed trainers and Dask prep (power-user)

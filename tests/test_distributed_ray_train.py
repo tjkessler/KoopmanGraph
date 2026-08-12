@@ -135,6 +135,7 @@ def test_run_ray_train_fit_loop_rejects_bad_num_workers() -> None:
         )
 
 
+@pytest.mark.ray
 def test_run_ray_train_fit_loop_world_size_one_smoke() -> None:
     """World-size-1 TorchTrainer smoke reuses ``_fit_epochs`` successfully."""
     try:
@@ -176,6 +177,7 @@ def test_unwrapped_state_dict_strips_ddp_module_prefix() -> None:
     assert not any(key.startswith("module.") for key in state)
 
 
+@pytest.mark.ray
 def test_ray_train_checkpoint_path_matches_single_process_keys(
     tmp_path: Path,
 ) -> None:
@@ -190,7 +192,7 @@ def test_ray_train_checkpoint_path_matches_single_process_keys(
     sequence = _tiny_sequence()
     single = _tiny_model(seed=0)
     single_path = tmp_path / "single.pt"
-    save_checkpoint(single, single_path)
+    save_checkpoint(single, single_path, format="legacy_pt")
     single_keys = set(
         torch.load(single_path, map_location="cpu", weights_only=False)["state_dict"]
     )
@@ -215,6 +217,7 @@ def test_ray_train_checkpoint_path_matches_single_process_keys(
     assert ray_keys == single_keys
 
 
+@pytest.mark.ray
 def test_world_size_one_ray_train_matches_native_ddp_loss() -> None:
     """Seeded world-size-1 Ray Train loss matches ``run_ddp_fit_loop``.
 
@@ -263,6 +266,7 @@ def test_world_size_one_ray_train_matches_native_ddp_loss() -> None:
         )
 
 
+@pytest.mark.ray
 def test_ray_train_result_payload_has_no_module_prefix(tmp_path: Path) -> None:
     """Train result ``state_dict`` restored onto the driver has bare keys."""
     try:
@@ -283,13 +287,13 @@ def test_ray_train_result_payload_has_no_module_prefix(tmp_path: Path) -> None:
         seed=2,
     )
     out = tmp_path / "after_ray.pt"
-    save_checkpoint(model, out)
+    save_checkpoint(model, out, format="legacy_pt")
     keys = set(torch.load(out, map_location="cpu", weights_only=False)["state_dict"])
     assert not any(key.startswith("module.") for key in keys)
     # Same key set as a never-wrapped peer architecture.
     peer = _tiny_model(seed=9)
     peer_path = tmp_path / "peer.pt"
-    save_checkpoint(peer, peer_path)
+    save_checkpoint(peer, peer_path, format="legacy_pt")
     peer_keys = set(
         torch.load(peer_path, map_location="cpu", weights_only=False)["state_dict"]
     )

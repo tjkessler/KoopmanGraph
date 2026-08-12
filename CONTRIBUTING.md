@@ -153,6 +153,9 @@ ruff format --check src/ tests/
 
 # Tests with coverage gate (matches the CI 3.12 job; use -n auto for speed)
 pytest tests/ -n auto --cov=koopman_graph --cov-report=term-missing --cov-fail-under=90
+
+# Optional: same marker expression planned for macOS smoke (TASK-2142)
+# pytest tests/ -n auto -m "not slow and not distributed and not ray"
 ```
 
 With uv after `uv sync --extra dev`:
@@ -238,15 +241,25 @@ Branch protection on `main` is configured through a GitHub ruleset
 Mark the aggregator check from [`ci.yml`](.github/workflows/ci.yml) as
 **required** before merge:
 
-- `ci` — succeeds when path-selected jobs (`lint`, `test`, `notebooks`,
-  `docs`) succeed or are intentionally skipped; fails if any selected job fails
+- `ci` — succeeds when path-selected jobs (`lint`, `test`, `test-macos`,
+  `notebooks`, `docs`) succeed or are intentionally skipped; fails if any
+  selected job fails
 
 Individual jobs still appear on the workflow run for diagnosis:
 
 - `lint` — Ruff via `uvx` (no full torch install)
-- `test (3.10)`, `test (3.12)` — pytest with `pytest-xdist`; coverage gate on 3.12 only
+- `test (3.10)`, `test (3.11)`, `test (3.12)` — pytest with `pytest-xdist`;
+  coverage gate on 3.12 only. Ubuntu runs the full default suite (including
+  `@pytest.mark.ray` when `[ray]` / `[distributed]` extras are installed).
+  Opt-in multi-process DDP uses `@pytest.mark.distributed` plus
+  `KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1`.
+- `test (macos-3.12)` — macOS core smoke on `macos-latest` with
+  `-m "not slow and not distributed and not ray"` (hard-fail; no Ray/Dask
+  extras). Shares the same path filter as Ubuntu `test` (not the notebooks
+  filter). Windows is not in CI (best-effort community).
 - `notebooks (smoke)` on pull requests — 10 representative tutorials; on pushes
-  to `main`, `notebooks (01-13)` / `notebooks (14-26)` run the full suite
+  to `main`, `notebooks (01-13)` / `notebooks (14-26)` / `notebooks (27-46)`
+  run the full suite on **Ubuntu only** (macOS does not run nbmake)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))

@@ -63,18 +63,23 @@ Public API
 Training customization, evaluation utilities, baselines, adaptation, and
 control live in capability modules: :mod:`koopman_graph.losses` (consistency /
 eigenvalue / physics residuals), :mod:`koopman_graph.training`
-(``FitHistory``, ``LossWeights``), :mod:`koopman_graph.baselines`,
+(``FitHistory``, ``LossWeights``, ``FitCallback``), :mod:`koopman_graph.baselines`,
 :mod:`koopman_graph.adaptation` (``RecursiveKoopmanAdapter`` and observers),
 :mod:`koopman_graph.env` (``GraphKoopmanEnv``), and :mod:`koopman_graph.metrics`
 (``evaluate_forecast``, ``EvaluationResult``, and low-level metrics).
+``FitCallback`` / ``NoOpFitCallback`` are also re-exported at the package
+root for ``fit(..., callbacks=)``.
 
 Physics-informed helpers such as ``graph_laplacian_features`` live in
 :mod:`koopman_graph.observables`. Power-user modules such as
 :mod:`koopman_graph.graph_utils`, :mod:`koopman_graph.nn`,
-:mod:`koopman_graph.protocols`, :mod:`koopman_graph.spectrum_types`, and
+:mod:`koopman_graph.protocols`, :mod:`koopman_graph.spectrum_types`,
 :mod:`koopman_graph.uq` (deep ensembles / optional ``predict_interval``),
 :mod:`koopman_graph.hierarchical` (TopK / SAG pool → coarse Koopman → unpool),
-and :mod:`koopman_graph.mpc` (receding-horizon Koopman-MPC; ``[mpc]`` extra)
+:mod:`koopman_graph.mpc` (receding-horizon Koopman-MPC; ``[mpc]`` extra),
+:mod:`koopman_graph.tracking` (CSV / TensorBoard fit adapters),
+:mod:`koopman_graph.cli` (``koopman-graph`` console script), and
+:mod:`koopman_graph.tuning` (HPO metric helpers; not AutoML)
 are importable but intentionally omitted from ``__all__`` (encoder/decoder/delay
 and operator *classes*, including ``DelayEmbeddingEncoder`` and
 ``GraphKoopmanOperator``, remain root-stable). See the architecture docs for
@@ -117,6 +122,7 @@ from koopman_graph.operators import (
     HypergraphKoopmanOperator,
     KoopmanOperator,
 )
+from koopman_graph.training import FitCallback, NoOpFitCallback
 
 __all__ = [
     "CellComplexGNNDecoder",
@@ -127,6 +133,7 @@ __all__ = [
     "DiffConvDecoder",
     "DiffConvEncoder",
     "E3EquivariantEncoder",
+    "FitCallback",
     "GATDecoder",
     "GATEncoder",
     "GNNDecoder",
@@ -144,12 +151,11 @@ __all__ = [
     "KoopmanOperator",
     "KoopmanSpectrum",
     "MultiTrajectory",
+    "NoOpFitCallback",
     "RelGraphDecoder",
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
-    "CellComplexGNNDecoder",
-    "CellComplexGNNEncoder",
     "SheafGNNDecoder",
     "SheafGNNEncoder",
     "SimplicialDecoder",
@@ -157,4 +163,4 @@ __all__ = [
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.12.0"
+__version__ = "0.13.0"

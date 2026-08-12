@@ -34,9 +34,12 @@ or Ray). See `python examples/scripts/ddp_fit_torchrun.py --help` for flags.
 
 ## Ray Tune HPO (examples-only)
 
-Tiny learning-rate search with Ray Tune. The **search space lives in the
-script** — KoopmanGraph does not expose a Tune / AutoML API. Requires the
-`[ray]` extra:
+Tiny learning-rate search with Ray Tune. The script uses
+`koopman_graph.tuning` helpers (`fit_history_metrics`, `run_ray_tune`, and an
+*example-only* `example_lr_loguniform_space` scaffold). The **search
+configuration still lives in the script** — those scaffolds are smoke ranges,
+not scientific defaults, and KoopmanGraph is not an AutoML product. Requires
+the `[ray]` extra:
 
 ```bash
 pip install "koopman-graph[ray]"

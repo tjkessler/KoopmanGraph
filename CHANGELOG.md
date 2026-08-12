@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-12
+
+Ops-and-trust release on the 0.12 stack: default safetensors checkpoints,
+fit callbacks and tracking adapters, a config-driven CLI, thin Ray Tune
+helpers, homogeneous representation-level explainability, and a broader CI
+matrix. Homogeneous scientific defaults and the linear latent operator
+contract are unchanged.
+
+### Added
+
+- Default checkpoint container ``safetensors_v1`` (directory or ``.kgckpt`` /
+  ``.zip`` bundle) with ``meta.json`` / ``config.json`` /
+  ``model.safetensors``. Core dependency ``safetensors>=0.4``. Load
+  auto-detects the safe layout and legacy format-1 ``.pt`` pickles. See
+  ``SECURITY.md`` and Sphinx serialization docs.
+- Optional ``.kgckpt`` zip packaging of the safetensors directory layout.
+- Fit callback protocol (``FitCallback`` / ``NoOpFitCallback``) wired through
+  ``run_fit_loop`` and ``GraphKoopmanModel.fit(..., callbacks=)``. In-tree
+  ``CsvFitLogger`` and optional ``TensorBoardFitLogger``; W&B / MLflow remain
+  examples-only DIY (no cloud SDK pins).
+- Console script ``koopman-graph`` with ``train`` / ``predict`` subcommands,
+  JSON configs in core and optional YAML via ``[cli]`` (PyYAML). Sphinx
+  ``cli`` page and ``examples/cli/`` smoke config.
+- Power-user ``koopman_graph.tuning``: ``fit_history_metrics``, lazy
+  ``run_ray_tune``, and example search-space scaffolds. Ray Tune example
+  script migrated; Optuna stays examples-only.
+- Homogeneous ``explain_representation`` /
+  ``RepresentationExplanation`` (GNNExplainer by default; optional Captum
+  integrated gradients via ``[explain]``). Interpretive / non-causal masks;
+  not ResDMD and not ``ModeEnergyAttribution``. Tutorial
+  ``examples/46_representation_explain.ipynb``. Bib keys
+  ``Ying2019GNNExplainer``, ``Sundararajan2017IntegratedGradients``.
+- CI: Ubuntu pytest on Python 3.10, 3.11, and 3.12 (coverage on 3.12);
+  macOS core smoke on 3.12 with
+  ``-m "not slow and not distributed and not ray"`` (hard-fail). Notebook
+  push shards extended through ``46_*``.
+
+### Changed
+
+- **Behavior change:** ``Model.save`` / the default checkpoint path write
+  ``safetensors_v1`` instead of a pickle-only format-1 ``.pt``. Pass
+  ``format="legacy_pt"`` only when you intentionally need the legacy pickle
+  layout. Prefer loading trusted ``legacy_pt`` files only (see
+  ``SECURITY.md``).
+
+### Notes
+
+- Portable inference export (TorchScript / ``torch.export`` / ONNX) is
+  **not** shipped in 0.13.0 (Phase 83 cut-candidate). Training checkpoints
+  (``safetensors_v1``) remain the supported weight-sharing path; ONNX stays
+  deferred.
+- Windows is best-effort community support and is not in the CI matrix.
+- Representation explain remains a homogeneous MVP (rejects hetero /
+  RelGraph / hypergraph / adaptive topology / delays / controls).
+- Homogeneous training defaults are unchanged relative to 0.12.0.
+
 ## [0.12.0] - 2026-08-05
 
 Scale-and-honesty release on the 0.11 stack: Kronecker-sum exact spectrum

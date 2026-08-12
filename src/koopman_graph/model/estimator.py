@@ -71,6 +71,7 @@ from koopman_graph.spectrum_types import KoopmanSpectrum
 from koopman_graph.training import (
     EarlyStoppingMonitor,
     ExtraLosses,
+    FitCallback,
     FitHistory,
     LossWeights,
     LossWeightSchedule,
@@ -1391,19 +1392,30 @@ class GraphKoopmanModel(nn.Module):
             unfreeze=unfreeze,
         )
 
-    def save(self, path: str | Path) -> None:
+    def save(
+        self,
+        path: str | Path,
+        *,
+        format: Literal["safetensors_v1", "legacy_pt"] = "safetensors_v1",
+    ) -> None:
         """Persist model weights and architecture configuration to disk.
 
         Parameters
         ----------
         path : str or Path
-            Destination checkpoint file (``.pt``). Parent directories are
-            created when missing.
+            Destination **directory** for the default ``safetensors_v1``
+            container, a ``.kgckpt`` / ``.zip`` path for the zip bundle of
+            the same layout, or a ``.pt`` file path when
+            ``format="legacy_pt"``. Parent directories are created when
+            missing.
+        format : {"safetensors_v1", "legacy_pt"}, optional
+            On-disk container. Default ``safetensors_v1``; pass
+            ``legacy_pt`` for the pickle escape hatch.
         """
         import importlib
 
         serialization = importlib.import_module("koopman_graph.serialization")
-        serialization.save_checkpoint(self, path)
+        serialization.save_checkpoint(self, path, format=format)
 
     @classmethod
     def load(
@@ -1413,17 +1425,22 @@ class GraphKoopmanModel(nn.Module):
         map_location: str | torch.device | None = None,
         physics_lifting_fn: PhysicsLiftingFn | None = None,
     ) -> GraphKoopmanModel:
-        """Load a trained model from a checkpoint file.
+        """Load a trained model from a checkpoint file or directory.
 
         Reconstructs encoder, decoder, and Koopman operator architecture from
-        the saved configuration and restores learned weights.
+        the saved configuration and restores learned weights. Auto-detects
+        ``safetensors_v1`` directories and ``.kgckpt`` / ``.zip`` bundles, then
+        legacy ``.pt`` pickle files.
 
         Parameters
         ----------
         path : str or Path
-            Checkpoint file produced by :meth:`save`.
+            Checkpoint file or directory produced by :meth:`save` /
+            :func:`~koopman_graph.serialization.save_checkpoint`.
         map_location : str, torch.device, or None, optional
-            Device mapping forwarded to :func:`torch.load`.
+            Device mapping forwarded to the underlying loader
+            (:func:`torch.load` for ``.pt``; device string for
+            ``safetensors_v1``).
         physics_lifting_fn : callable or None, optional
             Custom physics lifting function required when the checkpoint stores
             hybrid observables without a registered preset.
@@ -2090,6 +2107,7 @@ class GraphKoopmanModel(nn.Module):
         validation_sequence: ValidationInput = None,
         restore_best_weights: bool = False,
         checkpoint_path: str | Path | None = None,
+        callbacks: Sequence[FitCallback] | None = None,
         strategy: Literal["ddp"] | None = None,
         find_unused_parameters: bool | None = None,
         **optimizer_kwargs: Any,
@@ -2223,6 +2241,13 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
         checkpoint_path : str, Path, or None, optional
             When set, write a checkpoint at the lowest-loss epoch using
             :meth:`save`. Default is ``None``.
+        callbacks : sequence of FitCallback or None, optional
+            Observe-only fit hooks forwarded to
+            :func:`~koopman_graph.training.run_fit_loop` when
+            ``strategy=None``. Default ``None`` skips hooks. Not supported
+            with ``strategy="ddp"`` yet (raises ``ValueError``); use
+            single-process fit or Lightning loggers for distributed
+            tracking.
         strategy : {"ddp"} or None, optional
             Training orchestration backend. ``None`` (default) uses
             :func:`~koopman_graph.training.run_fit_loop` (single-process,
@@ -2254,7 +2279,8 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             ``early_stopping_monitor="val"`` without ``validation_sequence``,
             validation list length mismatches training trajectories, fewer
             than two snapshots are provided for training or validation, or
-            ``strategy`` is not ``None`` / ``"ddp"``.
+            ``strategy`` is not ``None`` / ``"ddp"``, or ``callbacks`` is set
+            with ``strategy="ddp"``.
         """
         uses_simplicial_modules(self.encoder, self.decoder)
         uses_sheaf_modules(self.encoder, self.decoder)
@@ -2302,8 +2328,20 @@ of Data, sequence of GraphSnapshotSequence, or None, optional
             **optimizer_kwargs,
         }
         if strategy is None:
-            return run_fit_loop(self, prepared.train_sequences, **loop_kwargs)
+            return run_fit_loop(
+                self,
+                prepared.train_sequences,
+                callbacks=callbacks,
+                **loop_kwargs,
+            )
         if strategy == "ddp":
+            if callbacks is not None:
+                msg = (
+                    "fit(..., callbacks=...) is not supported with "
+                    'strategy="ddp" yet; use strategy=None (single-process) '
+                    "or Lightning loggers for distributed tracking"
+                )
+                raise ValueError(msg)
             from koopman_graph.distributed import run_ddp_fit_loop
 
             return run_ddp_fit_loop(

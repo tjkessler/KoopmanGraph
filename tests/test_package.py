@@ -24,6 +24,7 @@ _RETAINED_ROOT = frozenset(
         "DiffConvDecoder",
         "DiffConvEncoder",
         "E3EquivariantEncoder",
+        "FitCallback",
         "GATDecoder",
         "GATEncoder",
         "GNNDecoder",
@@ -41,6 +42,7 @@ _RETAINED_ROOT = frozenset(
         "KoopmanOperator",
         "KoopmanSpectrum",
         "MultiTrajectory",
+        "NoOpFitCallback",
         "RelGraphDecoder",
         "RelGraphEncoder",
         "SAGEDecoder",
@@ -295,8 +297,10 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         "detect_anomaly",
         "discrete_spectrum_at_delta_t",
         "dynamical_similarity",
+        "explain_representation",
         "koopman_std",
         "plot_spectrum",
+        "RepresentationExplanation",
         "spectral_residuals",
         "SpectralResidualReport",
         "spectrum_distance",
@@ -308,6 +312,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
 
     from koopman_graph.analysis import (
         AnomalyDetectionResult,
+        RepresentationExplanation,
         SpectralResidualReport,
         calibrate_anomaly_threshold,
         compute_generator_spectrum,
@@ -315,6 +320,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         detect_anomaly,
         discrete_spectrum_at_delta_t,
         dynamical_similarity,
+        explain_representation,
         koopman_std,
         plot_spectrum,
         spectral_residuals,
@@ -322,6 +328,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
     )
 
     assert AnomalyDetectionResult is not None
+    assert RepresentationExplanation is not None
     assert SpectralResidualReport is not None
     assert callable(calibrate_anomaly_threshold)
     assert callable(compute_generator_spectrum)
@@ -329,6 +336,7 @@ def test_analysis_secondaries_demoted_from_root() -> None:
     assert callable(detect_anomaly)
     assert callable(discrete_spectrum_at_delta_t)
     assert callable(dynamical_similarity)
+    assert callable(explain_representation)
     assert callable(koopman_std)
     assert callable(plot_spectrum)
     assert callable(spectral_residuals)

@@ -168,6 +168,9 @@ leading-underscore helpers across peer modules.
   optimizer is constructed so orbit ``K_self`` parameters are trained.
   Prefer calling it only via ``run_fit_loop``; it is not a
   :mod:`koopman_graph.training` package ``__all__`` export.
+* ``callbacks`` — ``FitCallback`` protocol and ``NoOpFitCallback`` (also
+  root-exported). Observe-only hooks invoked from ``run_fit_loop``;
+  adapters live in :mod:`koopman_graph.tracking`
 
 Do not invent a ``training/objectives/`` or ``training/loop/`` subtree.
 Prefer ``from koopman_graph.training import …``. Do not import
@@ -547,7 +550,7 @@ Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
 ``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
-plotting / residuals / topology estimation / SINDy / clustering):
+plotting / residuals / topology estimation / SINDy / clustering / explain):
 
 * ``spectrum`` — re-exports neutral-leaf ``compute_spectrum``,
   ``compute_generator_spectrum``, and ``discrete_spectrum_at_delta_t``, plus
@@ -582,6 +585,13 @@ plotting / residuals / topology estimation / SINDy / clustering):
   leading Koopman mode embeddings; sign/ordering canonicalized by
   magnitude-sorted ``|λ|`` and largest-magnitude positive pivot). Cluster
   quality inherits operator / spectrum quality.
+* ``explain`` —
+  :func:`~koopman_graph.analysis.explain_representation` and frozen
+  :class:`~koopman_graph.analysis.RepresentationExplanation`
+  (homogeneous MVP node / edge / feature masks via GNNExplainer or optional
+  Captum integrated gradients; **interpretive** / **non-causal**; distinct
+  from :func:`~koopman_graph.analysis.attribute_mode_energy` and from
+  ResDMD — see :doc:`limitations`)
 * ``resdmd`` —
   :func:`~koopman_graph.analysis.resdmd` and frozen
   :class:`~koopman_graph.analysis.ResDMDReport` (finite-dictionary ResDMD
@@ -805,7 +815,7 @@ code stays valid; capability packages
 alternate import paths. Do not silently demote either without a separately
 versioned breaking migration.
 
-**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 35):
+**Keep in** ``koopman_graph.__all__`` (core workflow; exactly these 37):
 
 * :class:`~koopman_graph.model.GraphKoopmanModel`
 * :class:`~koopman_graph.nn.encoder.GNNEncoder`,
@@ -850,6 +860,8 @@ versioned breaking migration.
 * Primary spectrum entrypoints:
   :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`,
   :func:`~koopman_graph.analysis.compute_spectrum`
+* Fit observe hooks (Q11): :class:`~koopman_graph.training.FitCallback`,
+  :class:`~koopman_graph.training.NoOpFitCallback`
 * ``__version__``
 
 Dataset generators remain via :mod:`koopman_graph.datasets` (not root
@@ -865,6 +877,7 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
   ``KoopmanSparsityLoss``, ``WorstCaseReconstructionLoss``,
   ``LieConsistencyLoss``, ``PDEResidualLoss``
 * :mod:`koopman_graph.training` — ``FitHistory``, ``LossWeights``
+  (``FitCallback`` / ``NoOpFitCallback`` stay on root ``__all__`` as well)
 * :mod:`koopman_graph.adaptation` — ``RecursiveKoopmanAdapter``,
   ``AdaptationStepResult``, ``KoopmanObserver``, ``FilterResult``
 * :mod:`koopman_graph.env` — ``GraphKoopmanEnv``
@@ -878,7 +891,8 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
   ``detect_anomaly``, ``calibrate_anomaly_threshold``,
   ``AnomalyDetectionResult``, ``estimate_coupling_from_snapshots``,
   ``CouplingEstimate``, ``identify_sparse_dynamics``, ``SINDyReport``,
-  ``koopman_spectral_clustering``, ``ClusteringResult``
+  ``koopman_spectral_clustering``, ``ClusteringResult``,
+  ``explain_representation``, ``RepresentationExplanation``
 * :mod:`koopman_graph.observables` — ``graph_laplacian_features``
 * :mod:`koopman_graph.uq` — ``EnsembleGraphKoopmanModel``,
   ``LatentGaussianKoopmanUQ``, ``ConformalKoopmanUQ``
@@ -913,7 +927,21 @@ change.
 Examples:
 
 * :mod:`koopman_graph.training` — loss schedules, ``train_one_epoch``,
-  ``run_fit_loop``, ``resolve_device``, and related helpers
+  ``run_fit_loop``, ``FitCallback`` / ``NoOpFitCallback``,
+  ``resolve_device``, and related helpers (``FitCallback`` /
+  ``NoOpFitCallback`` are also root-exported)
+* :mod:`koopman_graph.tracking` — optional CSV / TensorBoard fit adapters
+  implementing ``FitCallback`` (not on root ``__all__``; may import
+  ``training`` types; ``training`` must not import tracking adapters)
+* :mod:`koopman_graph.tuning` — hyperparameter-search helpers
+  (``fit_history_metrics``, lazy ``run_ray_tune``, example-only search
+  scaffolds). Not an AutoML product; search spaces stay caller-owned.
+  Off root ``__all__``. May import ``training`` types; ``training`` must
+  not import ``tuning``. Importing the package does not import Ray
+* :mod:`koopman_graph.cli` — config-driven ``koopman-graph`` console script
+  (``train`` / ``predict``; JSON in core, YAML via ``[cli]``). Off root
+  ``__all__``. Leaf façade: may import ``model`` / ``serialization`` /
+  ``data``; other library packages must **not** import ``cli``
 * :mod:`koopman_graph.distributed` — optional DDP / Fabric trainer
   adapters, ``KoopmanLightningModule`` Trainer sugar,
   ``run_ray_train_fit_loop``, ``fit_ensemble_with_ray``, rank helpers, and
@@ -924,7 +952,12 @@ Examples:
 * :mod:`koopman_graph.datasets.molecular` — synthetic MD / contact-graph
   teaching oracles and optional ``[md]`` I/O stubs
 * :mod:`koopman_graph.serialization` — checkpoint build/load internals behind
-  ``GraphKoopmanModel.save`` / ``load``
+  ``GraphKoopmanModel.save`` / ``load``. Default on-disk container is the
+  ``safetensors_v1`` layout (``meta.json``, ``config.json``,
+  ``model.safetensors``) as a directory or a ``.kgckpt`` / ``.zip`` bundle;
+  ``format="legacy_pt"`` retains a single pickle ``.pt`` file. Logical
+  schema remains ``FORMAT_VERSION`` 1. Trust boundaries are documented in
+  the repository ``SECURITY.md``.
 * :mod:`koopman_graph.datasets.dynamics` — Laplacian diffusion primitives and
   shared generation validators used by benchmark generators (dense
   ``I - alpha * L_sym`` step operators; shares pseudoinverse-normalized
@@ -1727,8 +1760,27 @@ Façade vs functional training ownership
 * **Functional loop** — :func:`~koopman_graph.training.run_fit_loop` owns
   device placement, optimizer / scheduler setup, epoch iteration
   (``train_one_epoch`` / ``train_windowed_epoch`` / ``eval_one_epoch``), early
-  stopping, best-weight tracking, optional checkpoint writes, and history
-  assembly. Prefer extending that helper over growing the model class.
+  stopping, best-weight tracking, optional checkpoint writes, history
+  assembly, and observe-only ``callbacks`` hooks
+  (``on_fit_start`` / ``on_epoch_end`` / ``on_fit_end``). Prefer extending
+  that helper over growing the model class.
+* **Tracking adapters** — :mod:`koopman_graph.tracking` implements
+  :class:`~koopman_graph.FitCallback` for CSV and TensorBoard. Cloud SDKs
+  (W&B, MLflow, …) stay out of core; DIY callbacks are documented in
+  :doc:`faq` / ``examples/tracking/``. Layer rule: ``tracking`` →
+  ``training`` types only; never ``training`` → tracking adapters.
+* **HPO helpers** — :mod:`koopman_graph.tuning` flattens
+  :class:`~koopman_graph.training.FitHistory` for trial reporters and
+  wraps Ray Tune behind a lazy façade (``[ray]``). It does **not** fork
+  loss mathematics or invent search spaces. Example-only
+  ``example_*`` scaffolds are smoke ranges, not scientific defaults.
+  Optuna remains examples-only (no library Optuna API). Layer rule:
+  ``tuning`` → ``training`` types only; never ``training`` → ``tuning``.
+* **Distributed / Lightning logging** — ``fit(..., callbacks=...)`` is
+  single-process only (``strategy="ddp"`` raises if callbacks are set).
+  For :class:`~koopman_graph.distributed.KoopmanLightningModule`, attach
+  Lightning loggers to ``Trainer``; do not expect a parallel FitCallback
+  stack on the Lightning path in this release.
 * **Neighbor-subgraph training** — pass
   :class:`~koopman_graph.data.NeighborWindowSampler` via ``fit(..., sampler=...)``
   (mutually exclusive with ``window_length``). Training losses (rollout,
@@ -2099,6 +2151,11 @@ only ``{1}``. Incomplete or previously published incompatible format-1
 payloads are **deprecated** and rejected with a clear re-save error (no
 silent migration). Other ``format_version`` values remain unsupported.
 Formal multi-version checkpoint tracking and migration branches begin at 1.0.
+
+On disk, that schema is stored in the default ``safetensors_v1`` container
+(directory or ``.kgckpt`` / ``.zip`` bundle) or an explicit ``legacy_pt``
+pickle file (see :mod:`koopman_graph.serialization` and the repository
+``SECURITY.md``). The container choice does not bump ``FORMAT_VERSION``.
 
 v0.5.0 capability architecture
 ------------------------------
@@ -2650,6 +2707,58 @@ TDL parity, PyEMMA-scale MD, guaranteed sample-efficiency) live in
      - Power-user
      - Exact Aut only; self-block MVP; no sample-efficiency guarantee
 
+v0.13.0 capability architecture
+-------------------------------
+
+Ops-and-trust surfaces preserve the existing façade / package / power-user
+tiers. Do **not** promote ``cli``, ``tracking``, ``tuning``, or explain
+helpers onto root ``__all__`` beyond the curated ``FitCallback`` /
+``NoOpFitCallback`` pair (Q11). Portable TorchScript / ONNX export remains
+cut for this release (see :doc:`limitations`).
+
+**Shipped capability list (0.13 peers)**
+
+* Default ``safetensors_v1`` checkpoint container behind
+  :mod:`koopman_graph.serialization` (``legacy_pt`` escape hatch)
+* :class:`~koopman_graph.FitCallback` / :class:`~koopman_graph.NoOpFitCallback`
+  on the root façade; :mod:`koopman_graph.tracking` CSV / TensorBoard adapters
+* Console script package :mod:`koopman_graph.cli` (leaf; off root ``__all__``)
+* :mod:`koopman_graph.tuning` Ray Tune helpers (off root ``__all__``; Optuna
+  examples-only)
+* :mod:`koopman_graph.analysis.explain` homogeneous
+  ``explain_representation`` MVP (package ``analysis.__all__`` only)
+* CI: Ubuntu 3.10–3.12 + macOS core smoke (not Windows)
+
+**Capability and API-tier map (0.13 peers)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - Capability home
+     - API tier
+     - Contracts to preserve
+   * - :mod:`koopman_graph.serialization` (``safetensors_v1``)
+     - Package (behind ``Model.save`` / ``load``)
+     - Default safe container; ``FORMAT_VERSION`` 1 unchanged; trust
+       boundaries in ``SECURITY.md``
+   * - :mod:`koopman_graph.training.callbacks`
+     - Public root façade (``FitCallback`` / ``NoOpFitCallback``)
+     - Observe-only; single-process ``fit``; no ``training`` → ``tracking``
+   * - :mod:`koopman_graph.tracking`
+     - Power-user
+     - ``tracking`` → ``training`` types only; no cloud SDK pins
+   * - :mod:`koopman_graph.cli`
+     - Power-user / console script
+     - Leaf package; no reverse imports into library cores
+   * - :mod:`koopman_graph.tuning`
+     - Power-user
+     - Lazy Ray; caller-owned search spaces; never ``training`` → ``tuning``
+   * - :mod:`koopman_graph.analysis.explain`
+     - Package (``analysis.__all__``)
+     - Homogeneous MVP; interpretive / non-causal; ≠ ResDMD /
+       ``ModeEnergyAttribution``
+
 Related documentation
 ---------------------
 
@@ -2657,6 +2766,7 @@ Related documentation
 * :doc:`capabilities` — feature inventory
 * :doc:`limitations` — scope boundaries and when not to use
 * :doc:`quickstart` — end-user training and prediction walkthrough
+* :doc:`cli` — config-driven console script
 * :doc:`faq` — install / import / checkpoint troubleshooting and support routing
 * Repository ``CONTRIBUTING.md`` — development setup and contribution workflow
 * Repository ``SECURITY.md`` — supported versions and private vulnerability reporting

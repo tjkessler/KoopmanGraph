@@ -315,7 +315,8 @@ def _build_koopman_lightning_module() -> type[Any]:
             """
             from koopman_graph.serialization import save_checkpoint
 
-            save_checkpoint(self.model, path)
+            # Keep format-1 .pt export as a single pickle file for Trainer hooks.
+            save_checkpoint(self.model, path, format="legacy_pt")
 
     return KoopmanLightningModule
 

@@ -231,7 +231,7 @@ def test_checkpoint_round_trip_preserves_synthesize_flag(tmp_path: Path) -> None
         koopman_synthesize_reverse_relations=True,
     )
     path = tmp_path / "rev.pt"
-    model.save(path)
+    model.save(path, format="legacy_pt")
     loaded = GraphKoopmanModel.load(path)
     assert loaded.synthesize_reverse_relations is True
     assert loaded.koopman.num_relations == 4
