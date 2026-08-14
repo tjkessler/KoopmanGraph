@@ -450,6 +450,8 @@ class E3EquivariantEncoder(nn.Module):
         num_layers: int = 2,
         lmax: int = 1,
         edge_mlp_hidden: int = 16,
+        project_invariants: bool = True,
+        n_vectors: int = 0,
     ) -> None:
         """Initialize the optional e3nn steerable encoder.
 
@@ -468,6 +470,13 @@ class E3EquivariantEncoder(nn.Module):
         edge_mlp_hidden : int, optional
             Hidden width of the edge-length MLP that produces tensor-product
             weights. Default ``16``.
+        project_invariants : bool, optional
+            When ``True`` (default), map to invariant scalars of width
+            ``latent_dim``. When ``False``, keep ``n_vectors`` vector irreps
+            concatenated after the scalars for an equivariant ``K``.
+        n_vectors : int, optional
+            Number of vector channels when ``project_invariants`` is
+            ``False``. Default ``0``.
 
         Raises
         ------
@@ -500,7 +509,16 @@ class E3EquivariantEncoder(nn.Module):
 
         irreps_in = o3.Irreps(f"{in_channels}x0e")
         irreps_hidden = o3.Irreps(f"{hidden_channels}x0e+{hidden_channels}x1o")
-        irreps_out = o3.Irreps(f"{latent_dim}x0e")
+        self.project_invariants = bool(project_invariants)
+        self.n_vectors = int(n_vectors)
+        if self.n_vectors < 0:
+            raise ValueError(f"n_vectors must be >= 0, got {n_vectors}")
+        if self.project_invariants:
+            irreps_out = o3.Irreps(f"{latent_dim}x0e")
+            self.output_dim = latent_dim
+        else:
+            irreps_out = o3.Irreps(f"{latent_dim}x0e+{self.n_vectors}x1o")
+            self.output_dim = latent_dim + 3 * self.n_vectors
         irreps_sh = o3.Irreps.spherical_harmonics(lmax)
 
         layers: list[nn.Module] = []
@@ -593,10 +611,10 @@ class E3EquivariantEncoder(nn.Module):
         for layer in self.layers:
             features = layer(features, pos, data.edge_index)
         latents = self.project(features)
-        if latents.size(-1) != self.latent_dim:
+        if latents.size(-1) != self.output_dim:
             msg = (
                 f"internal latent width {latents.size(-1)} != "
-                f"latent_dim={self.latent_dim}"
+                f"output_dim={self.output_dim}"
             )
             raise RuntimeError(msg)
         return latents

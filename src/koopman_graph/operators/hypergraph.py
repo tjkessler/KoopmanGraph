@@ -23,6 +23,11 @@ from koopman_graph.operators.control import (
 )
 from koopman_graph.operators.discrete import KoopmanOperator
 from koopman_graph.operators.discrete_propagation import dense_inverse_or_pinv
+from koopman_graph.operators.matrix_free import (
+    flatten_node_latents,
+    invert_k_eff_hypergraph,
+    unflatten_node_latents,
+)
 from koopman_graph.operators.orbit_ties import OrbitTiedSelfMixin
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_spectrum
 
@@ -846,7 +851,7 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 hyperedge_weight=hyperedge_weight,
                 num_nodes=z.shape[0],
             )
-            z_next = self.apply_tied_self(z) + coupled @ self.K_hedge.T
+            z_next = self.apply_tied_self(z) + self.apply_tied_neighbor(coupled)
         else:
             tail, head = self._require_directed_incidence(
                 tail_index=tail_index,
@@ -859,7 +864,7 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 hyperedge_weight=hyperedge_weight,
                 num_nodes=z.shape[0],
             )
-            z_next = self.apply_tied_self(z) + coupled_fwd @ self.K_hedge.T
+            z_next = self.apply_tied_self(z) + self.apply_tied_neighbor(coupled_fwd)
             if self.incidence_mode == "dual_random_walk":
                 coupled_bwd = hyperedge_forward_random_walk_matvec(
                     head,
@@ -1114,29 +1119,50 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             if k_self_blocks is None and k_self_override is None:
                 k_self_blocks = self.tied_self_blocks(num_nodes)
             if self.sparsity == "distributed":
-                # Construction / checkpoint flag; assemble for inverse until
-                # hypergraph matrix-free helpers land (discrete graph/hetero
-                # already use invert_k_eff_*).
-                effective = self.effective_matrix(
-                    hyperedge_index,
-                    num_nodes,
+                if k_self_blocks is not None:
+                    msg = (
+                        "HypergraphKoopmanOperator sparsity='distributed' "
+                        "inverse requires a shared K_self (orbit ties / "
+                        "per-node bilinear self blocks are unsupported)"
+                    )
+                    raise ValueError(msg)
+                if self.incidence_mode != "zhou_symmetric":
+                    msg = (
+                        "matrix-free hypergraph inverse supports "
+                        "incidence_mode='zhou_symmetric' only; use "
+                        "sparsity='dense' for directed incidence"
+                    )
+                    raise ValueError(msg)
+                if hyperedge_index is None:
+                    msg = (
+                        "hyperedge_index is required for "
+                        "HypergraphKoopmanOperator sparsity='distributed' inverse"
+                    )
+                    raise ValueError(msg)
+                result = invert_k_eff_hypergraph(
+                    flatten_node_latents(adjusted),
+                    k_self=(
+                        k_self_override if k_self_override is not None else self.K_self
+                    ),
+                    k_hedge=self.K_hedge,
+                    hyperedge_index=hyperedge_index,
+                    num_nodes=num_nodes,
                     hyperedge_weight=hyperedge_weight,
-                    tail_index=tail_index,
-                    head_index=head_index,
-                    k_self=k_self_override,
-                    k_self_blocks=k_self_blocks,
                 )
-                inverse_matrix = dense_inverse_or_pinv(effective)
-            else:
-                inverse_matrix = self.dense_effective_inverse(
-                    hyperedge_index,
-                    num_nodes,
-                    hyperedge_weight=hyperedge_weight,
-                    tail_index=tail_index,
-                    head_index=head_index,
-                    k_self=k_self_override,
-                    k_self_blocks=k_self_blocks,
+                return unflatten_node_latents(
+                    result.solution,
+                    num_nodes=num_nodes,
+                    latent_dim=self.latent_dim,
                 )
+            inverse_matrix = self.dense_effective_inverse(
+                hyperedge_index,
+                num_nodes,
+                hyperedge_weight=hyperedge_weight,
+                tail_index=tail_index,
+                head_index=head_index,
+                k_self=k_self_override,
+                k_self_blocks=k_self_blocks,
+            )
 
         flat = adjusted.reshape(-1)
         recovered = (inverse_matrix @ flat).view_as(adjusted)

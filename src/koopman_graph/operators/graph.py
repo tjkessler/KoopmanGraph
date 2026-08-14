@@ -721,7 +721,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                 edge_weight=edge_weight,
                 num_nodes=z.shape[0],
             )
-            return neighbor @ self.K_nbr.T
+            return self.apply_tied_neighbor(neighbor)
 
         neighbor_fwd = random_walk_normalized_adjacency_matvec(
             edge_index,
@@ -730,7 +730,7 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             num_nodes=z.shape[0],
             direction="forward",
         )
-        term = neighbor_fwd @ self.K_nbr.T
+        term = self.apply_tied_neighbor(neighbor_fwd)
         if self.adjacency == "random_walk":
             return term
         neighbor_bwd = random_walk_normalized_adjacency_matvec(

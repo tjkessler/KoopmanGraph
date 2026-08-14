@@ -284,3 +284,31 @@ def plot_spectrum(
     ax.set_ylim(ymin, ymax)
 
     return scatter
+
+
+def plot_dispersion(relation, ax=None):
+    """Scatter graph-Fourier wavenumber versus temporal growth rate.
+
+    Parameters
+    ----------
+    relation
+        :class:`~koopman_graph.analysis.dispersion.DispersionRelation`.
+    ax : matplotlib axis or None, optional
+        Existing axis.
+
+    Returns
+    -------
+    object
+        Matplotlib axis.
+    """
+    plt = _require_pyplot()
+    if ax is None:
+        _, ax = plt.subplots()
+    ax.scatter(
+        relation.wavenumbers.detach().cpu().numpy(),
+        relation.growth_rates.detach().cpu().numpy(),
+        s=24,
+    )
+    ax.set_xlabel("graph-Fourier wavenumber")
+    ax.set_ylabel("temporal growth rate")
+    return ax

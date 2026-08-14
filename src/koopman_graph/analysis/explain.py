@@ -9,9 +9,11 @@ recovery, **not** certified ResDMD residuals, and **not**
 :class:`~koopman_graph.analysis.ModeEnergyAttribution` (the complementary
 operator-level energy diagnostic on assembled ``K_eff``).
 
-Homogeneous MVP first; hetero / adaptive / delay explanation is rejected
-with actionable errors. ``algorithm="integrated_gradients"`` requires the
-optional ``[explain]`` extra (``pip install "koopman-graph[explain]"``).
+Homogeneous MVP first; hetero / hypergraph / adaptive explanation is
+rejected with actionable errors. Delay embeddings and additive control
+are in the homogeneous surface when the explainer algebra is defined.
+``algorithm="integrated_gradients"`` requires the optional ``[explain]``
+extra (``pip install "koopman-graph[explain]"``).
 """
 
 from __future__ import annotations
@@ -157,19 +159,8 @@ def _reject_unsupported_model(model: GraphKoopmanModel) -> None:
     Raises
     ------
     ValueError
-        If delays, controls, hetero / hypergraph, or adaptive topology
-        modes are outside the MVP.
+        If hetero / hypergraph or adaptive topology modes are outside the MVP.
     """
-    if getattr(model, "n_delays", 1) != 1:
-        msg = (
-            "explain_representation supports n_delays=1 only "
-            f"(got n_delays={model.n_delays})"
-        )
-        raise ValueError(msg)
-    if int(getattr(model, "control_dim", 0) or 0) > 0:
-        raise ValueError(
-            "explain_representation does not support control_dim > 0 in the MVP"
-        )
     if model.uses_hetero_koopman or model._uses_relgraph_encode():
         raise ValueError(
             "explain_representation homogeneous MVP does not support "

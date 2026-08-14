@@ -23,6 +23,7 @@ from koopman_graph.losses.consistency import (
     ForwardConsistencyLoss,
     LieConsistencyLoss,
 )
+from koopman_graph.losses.persistence import PersistenceRegularizer
 from koopman_graph.losses.physics import PDEResidualLoss
 from koopman_graph.losses.reconstruction import (
     WorstCaseReconstructionLoss,
@@ -46,6 +47,7 @@ __all__ = [
     "LieConsistencyLoss",
     "MAX_ASSEMBLED_EIGREG_SIZE",
     "PDEResidualLoss",
+    "PersistenceRegularizer",
     "WorstCaseReconstructionLoss",
     "masked_mse_loss",
     "rollout_multi_start_loss",

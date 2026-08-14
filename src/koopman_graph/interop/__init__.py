@@ -22,8 +22,10 @@ from koopman_graph.interop.deeptime import (
     trajectory_features_from_deeptime,
     trajectory_features_to_deeptime,
 )
+from koopman_graph.interop.topologicx import incidence_tensors_from_arrays
 
 __all__ = [
+    "incidence_tensors_from_arrays",
     "require_deeptime",
     "trajectory_features_from_deeptime",
     "trajectory_features_to_deeptime",

@@ -210,3 +210,4 @@ Related pages
 * :doc:`capabilities` — feature and dataset inventory
 * :doc:`quickstart` — minimal train/predict script
 * :doc:`api` — API reference
+* :doc:`graphon` — graphon sampling for transfer at multiple :math:`N`

@@ -379,8 +379,9 @@ def diagonal_sheaf_laplacian_matvec(
     Uses the same oriented-edge convention as
     :func:`simplicial_one_laplacian_matvec` / ``B_1``: one column per undirected
     edge. With identity diagonals this reduces to combinatorial
-    ``L_1 = B_1 B_1^T``. General (non-diagonal) restriction maps are out of
-    scope for the teaching MVP.
+    ``L_1 = B_1 B_1^T``. General (non-diagonal) restriction maps are
+    available via :func:`general_sheaf_laplacian_matvec` (channel ceiling
+    documented on the sheaf encoder).
 
     Coboundary on edge ``e = (s → t)``::
 

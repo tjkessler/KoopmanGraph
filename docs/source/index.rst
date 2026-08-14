@@ -7,17 +7,15 @@ space, a learned linear operator advances those states, and a matching decoder
 reconstructs physical node features for multi-step forecasting and spectral
 analysis.
 
-Version **0.11.0** adds measured cross-topology transfer evaluation, directed
-hypergraph incidence modes, Ray Train model-DDP fitting, fixed-union
-presence-mask node churn, teaching traffic forecaster ports (AGCRN / MTGNN /
-STGODE / GraphCast), in-repo sheaf and cell-complex encode/decode MVPs, a
-GraphVAMP + synthetic molecular teaching path, and exact-automorphism
-isotypic self-block ties — on top of the 0.10 hetero / ResDMD / VAMP-2 stack
-and earlier distributed, hypergraph, stability, conformal, and MPC surfaces.
-Homogeneous scientific defaults and the linear latent operator contract are
-unchanged. See :doc:`capabilities` for the full inventory,
-:doc:`limitations` for current scope boundaries, and :doc:`architecture`
-for the public vs power-user API contract.
+Version **0.14.0** is a remaining-limits close-out: opt-in structure-preserving
+operators, switched / mixture maps, equivariant and Hodge-structured
+:math:`K`, protocol-matched leaderboard adapters, restricted portable
+export, and analysis extras (wired finite ResDMD, dispersion, TDA).
+Homogeneous scientific defaults and the linear latent operator contract
+are unchanged relative to 0.13.0 (factory ``koopman=None`` still selects
+``"pernode"``; ``sparsity="dense"``; AMP off). See :doc:`capabilities`
+for the full inventory, :doc:`limitations` for the new honesty ceilings,
+and :doc:`architecture` for the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2
@@ -32,6 +30,7 @@ for the public vs power-user API contract.
    data
    tutorials
    architecture
+   graphon
    api
 
 Indices and tables

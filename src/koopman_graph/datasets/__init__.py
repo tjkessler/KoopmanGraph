@@ -66,11 +66,19 @@ ContactEpidemicBenchmark
     SocioPatterns primary-school face-to-face contacts with cached
     intensity snapshots (``load_topology`` / ``load_sequence``; fetch-script
     + SHA256; CC-BY-NC-SA — do not bundle).
+ERA5SliceCard / generate_tiny_era5_mesh
+    Documented ERA5 teaching-slice card and a tiny generated mesh
+    (not production GraphCast / ERA5 training).
 """
 
 from koopman_graph.datasets.contact_epidemic import ContactEpidemicBenchmark
 from koopman_graph.datasets.cylinder_wake import CylinderWakeBenchmark
 from koopman_graph.datasets.epidemic import EpidemicNetworkBenchmark
+from koopman_graph.datasets.era5 import (
+    ERA5SliceCard,
+    era5_slice_card,
+    generate_tiny_era5_mesh,
+)
 from koopman_graph.datasets.grid import (
     AnisotropicAdvectionGridBenchmark,
     GridDynamicGraphBenchmark,
@@ -90,6 +98,7 @@ __all__ = [
     "AnisotropicAdvectionGridBenchmark",
     "ContactEpidemicBenchmark",
     "CylinderWakeBenchmark",
+    "ERA5SliceCard",
     "EpidemicNetworkBenchmark",
     "GridDynamicGraphBenchmark",
     "IEEE118DynamicBenchmark",
@@ -101,4 +110,6 @@ __all__ = [
     "SyntheticDynamicGraphBenchmark",
     "TopologyPayload",
     "TypedIEEE118Topology",
+    "era5_slice_card",
+    "generate_tiny_era5_mesh",
 ]

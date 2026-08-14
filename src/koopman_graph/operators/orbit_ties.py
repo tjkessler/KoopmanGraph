@@ -112,6 +112,7 @@ class OrbitTiedSelfMixin:
     isotypic_symmetry: bool
     isotypic_decomposition: IsotypicDecomposition | None
     _orbit_selves: nn.ModuleList | None
+    _orbit_nbrs: nn.ModuleList | None
     _node_orbit: Tensor | None
 
     def _init_orbit_config(
@@ -167,6 +168,7 @@ class OrbitTiedSelfMixin:
         self.orbit_method = "exact" if self.isotypic_symmetry else orbit_method
         self.orbit_partition = None
         self._orbit_selves = None
+        self._orbit_nbrs = None
         self._node_orbit = None
         if orbit_partition is not None:
             num_nodes = max(max(orbit) for orbit in orbit_partition) + 1
@@ -216,6 +218,17 @@ class OrbitTiedSelfMixin:
             control_dim=self.control_dim,
             control_mode=self.control_mode,
             bilinear_rank=self.bilinear_rank,
+        )
+        self._orbit_nbrs = build_orbit_self_bank(
+            num_orbits=len(validated),
+            latent_dim=self.latent_dim,
+            init_mode="identity",
+            init_scale=self.init_scale,
+            parameterization=self.parameterization,
+            max_spectral_radius=self.max_spectral_radius,
+            control_dim=0,
+            control_mode=self.control_mode,
+            bilinear_rank=None,
         )
         # Representative self factor for control / certificates.
         self._self = self._orbit_selves[0]
@@ -402,6 +415,41 @@ class OrbitTiedSelfMixin:
             return z @ self._self.K.T
         return apply_orbit_self(z, self.orbit_self_matrices(), self._node_orbit)
 
+    def orbit_nbr_matrices(self) -> list[Tensor]:
+        """Return assembled neighbor-factor matrices for each orbit.
+
+        Returns
+        -------
+        list of Tensor
+            Per-orbit ``K_nbr`` (or hyperedge) factors.
+        """
+        if self._orbit_nbrs is None:
+            msg = "orbit neighbor bank is not allocated"
+            raise RuntimeError(msg)
+        return [module.K for module in self._orbit_nbrs]
+
+    def apply_tied_neighbor(self, neighbor: Tensor) -> Tensor:
+        """Apply shared or orbit-tied neighbor map after an adjacency matvec.
+
+        Parameters
+        ----------
+        neighbor : Tensor
+            Mixed neighbor states ``(N, d)``.
+
+        Returns
+        -------
+        Tensor
+            Neighbor contribution after the shared or orbit-tied ``K_nbr``.
+        """
+        if self._orbit_nbrs is None or self._node_orbit is None:
+            hedge = getattr(self, "_hedge", None)
+            factor = getattr(self, "_nbr", hedge)
+            if factor is None:
+                msg = "no neighbor factor is allocated"
+                raise RuntimeError(msg)
+            return neighbor @ factor.K.T
+        return apply_orbit_self(neighbor, self.orbit_nbr_matrices(), self._node_orbit)
+
     def tied_self_blocks(self, num_nodes: int) -> Tensor | None:
         """Return ``(N, d, d)`` self blocks when orbit-tied, else ``None``.
 
@@ -440,6 +488,9 @@ class OrbitTiedSelfMixin:
             module.reset_parameters()
             if orbit_id == 0 and self.control_dim > 0:
                 module.reset_control_parameters()
+        if self._orbit_nbrs is not None:
+            for module in self._orbit_nbrs:
+                module.reset_parameters()
 
     def symmetry_config(self) -> dict[str, object] | None:
         """Return a JSON-friendly symmetry config block for checkpoints.

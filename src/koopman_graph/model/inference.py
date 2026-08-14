@@ -559,6 +559,7 @@ def evaluate_sequence(
     *,
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
+    include_resdmd: bool = False,
 ) -> EvaluationResult:
     """Evaluate multi-horizon forecast accuracy on a snapshot sequence.
 
@@ -573,6 +574,8 @@ def evaluate_sequence(
         Forecast horizons to report. Default is ``(3, 6, 12)``.
     start_indices : sequence of int or None, optional
         Forecast-origin indices. When ``None``, uses every valid origin.
+    include_resdmd : bool, optional
+        Forwarded to :func:`~koopman_graph.metrics.evaluate_forecast`.
 
     Returns
     -------
@@ -584,4 +587,5 @@ def evaluate_sequence(
         sequence,
         horizons=horizons,
         start_indices=start_indices,
+        include_resdmd=include_resdmd,
     )

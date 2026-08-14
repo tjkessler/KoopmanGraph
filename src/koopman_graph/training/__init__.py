@@ -40,7 +40,11 @@ Capability layout
     ``koopman_graph.tracking`` when added).
 """
 
-from koopman_graph.training.callbacks import FitCallback, NoOpFitCallback
+from koopman_graph.training.callbacks import (
+    FitCallback,
+    NoOpFitCallback,
+    ResDMDFitCallback,
+)
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
     eval_one_epoch,
@@ -92,6 +96,7 @@ __all__ = [
     "LossWeightSchedule",
     "LossWeights",
     "NoOpFitCallback",
+    "ResDMDFitCallback",
     "TrainingInput",
     "ValidationInput",
     "compute_backward_consistency_sequence_loss",

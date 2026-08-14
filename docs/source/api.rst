@@ -159,10 +159,23 @@ Tier A :class:`~koopman_graph.nn.InvariantGeometryEncoder` and optional
 Tier B :class:`~koopman_graph.nn.E3EquivariantEncoder` (``e3nn``,
 ``[equivariance]``) are root-stable ``__all__`` members. Prefer
 ``from koopman_graph import InvariantGeometryEncoder`` /
-``E3EquivariantEncoder``. Steerable or invariant *encode* paths do
-**not** make latent :math:`K` E(n)/SE(3) equivariant.
+``E3EquivariantEncoder``. Default encode still projects to invariant
+scalars. Pass ``project_invariants=False`` with
+:class:`~koopman_graph.operators.EquivariantKoopmanOperator` for a block
+:math:`K` (vector channels are multiples of :math:`I_3`).
 
 .. automodule:: koopman_graph.nn.equivariant
+   :members:
+   :show-inheritance:
+
+Predicted topology and neural-operator lifts
+--------------------------------------------
+
+.. automodule:: koopman_graph.nn.predicted_topology
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.nn.neural_operator
    :members:
    :show-inheritance:
 
@@ -208,7 +221,8 @@ Built-in operators live in :mod:`koopman_graph.operators` (``contract``,
 ``discrete_propagation``, ``continuous``, ``continuous_van_loan``,
 ``continuous_parameterizations``, ``continuous_propagation``,
 ``auxiliary_spectral``, ``graph``, ``hypergraph``, ``heterogeneous``,
-``global_local``, ``continuous_graph``). Prefer
+``global_local``, ``continuous_graph``, ``switched``, ``mixture``,
+``hodge``, ``equivariant``, ``graphon``). Prefer
 ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
 ContinuousGraphKoopmanOperator`` (root-stable ``__all__`` members) or
@@ -245,6 +259,11 @@ from :mod:`koopman_graph.analysis` only. The helpers live in the
 ``spectrum`` / ``similarity`` / ``anomaly`` / ``plotting`` / ``residuals`` /
 ``sindy`` / ``clustering`` / ``topology_estimation`` / ``transfer`` /
 ``explain`` submodules.
+:func:`~koopman_graph.analysis.graph_dispersion`,
+:func:`~koopman_graph.analysis.granger_latent_influence`,
+:func:`~koopman_graph.analysis.persistence_diagram_0d`, and
+:func:`~koopman_graph.analysis.discrete_lyapunov_lmi` are additional
+package helpers (finite ResDMD may attach to ``evaluate``).
 ``attribute_mode_energy`` is an interpretive diagnostic on assembled
 :math:`K_{\mathrm{eff}}` (not a causal claim; not a ResDMD residual).
 :func:`~koopman_graph.analysis.explain_representation` /
@@ -270,7 +289,7 @@ advantage allowed) — see :doc:`limitations`.
 
 .. automodule:: koopman_graph.analysis
    :members:
-   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid, TopologyTransferReport, evaluate_topology_transfer, RepresentationExplanation, explain_representation
+   :exclude-members: KoopmanSpectrum, SpectralResidualReport, spectral_residuals, ResDMDReport, resdmd, ResolventNormGrid, resolvent_norm_grid, TopologyTransferReport, evaluate_topology_transfer, RepresentationExplanation, explain_representation, PersistenceDiagram, persistence_diagram_0d, betti_curve, DispersionRelation, graph_dispersion, CausalInfluenceReport, granger_latent_influence, LyapunovLMIResult, discrete_lyapunov_lmi
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.residuals
@@ -290,6 +309,22 @@ advantage allowed) — see :doc:`limitations`.
    :show-inheritance:
 
 .. automodule:: koopman_graph.analysis.explain
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.tda
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.dispersion
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.causal
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.analysis.lmi
    :members:
    :show-inheritance:
 
@@ -644,8 +679,9 @@ Koopman-MPC
 
 ``KoopmanMPC`` is imported from :mod:`koopman_graph.mpc` (not on the root
 façade). OSQP is an optional ``[mpc]`` extra imported at solve time with
-install guidance when missing. Additive discrete control only in 0.6.0.
-Optional ``constraint_tightening=`` accepts a calibrated
+install guidance when missing. Additive discrete control solves one QP;
+bilinear control uses sequential linearization (iterated QP). Optional
+``constraint_tightening=`` accepts a calibrated
 ``ConformalKoopmanUQ`` to shrink output boxes by per-horizon half-widths.
 
 .. automodule:: koopman_graph.mpc
@@ -656,6 +692,28 @@ Serialization
 -------------
 
 .. automodule:: koopman_graph.serialization
+   :members:
+   :show-inheritance:
+
+Export, federated averaging, robustness, probabilistic
+------------------------------------------------------
+
+Power-user modules, off root ``__all__``. Export is a fixed-topology
+discrete homogeneous MVP. Federated averaging is not DP-SGD.
+
+.. automodule:: koopman_graph.export
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.federated
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.robustness
+   :members:
+   :show-inheritance:
+
+.. automodule:: koopman_graph.probabilistic
    :members:
    :show-inheritance:
 
@@ -726,6 +784,10 @@ Datasets
    :members:
    :show-inheritance:
 
+.. automodule:: koopman_graph.datasets.era5
+   :members:
+   :show-inheritance:
+
 External toolchain interop (power-user)
 ---------------------------------------
 
@@ -733,6 +795,8 @@ Optional deeptime trajectory-feature bridges under
 :mod:`koopman_graph.interop` (lazy ``[msm]``). Off root ``__all__``.
 Other ``koopman_graph`` modules must **not** import ``interop`` (acyclic
 layer boundary). Teaching / diagnostic — not a PyEMMA replacement.
+:mod:`koopman_graph.interop.topologicx` is the optional ``[tdl]``
+incidence-tensor bridge (not TopologicX feature parity).
 
 .. automodule:: koopman_graph.interop
    :members:

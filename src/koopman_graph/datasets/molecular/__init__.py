@@ -21,7 +21,12 @@ from koopman_graph.datasets.molecular.contact_graph import (
     ContactGranularity,
     contact_edge_index,
 )
-from koopman_graph.datasets.molecular.md_io import load_md_trajectory, require_mdtraj
+from koopman_graph.datasets.molecular.md_io import (
+    MDTrajectory,
+    alanine_dipeptide_card,
+    load_md_trajectory,
+    require_mdtraj,
+)
 from koopman_graph.datasets.molecular.synthetic import (
     SyntheticTwoStateTrajectory,
     generate_synthetic_two_state,
@@ -33,6 +38,8 @@ from koopman_graph.datasets.molecular.synthetic import (
 __all__ = [
     "ContactGranularity",
     "SyntheticTwoStateTrajectory",
+    "MDTrajectory",
+    "alanine_dipeptide_card",
     "contact_edge_index",
     "generate_synthetic_two_state",
     "load_md_trajectory",

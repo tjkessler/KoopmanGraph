@@ -43,6 +43,13 @@ from koopman_graph.operators.kronecker_spectrum import (
     kronecker_sum_spectrum_eligible,
     spectrum_l_eff_kronecker_sum,
 )
+from koopman_graph.operators.matrix_free import (
+    DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES,
+    flatten_node_latents,
+    invert_k_eff_graph,
+    spectrum_k_eff_graph,
+    unflatten_node_latents,
+)
 from koopman_graph.spectrum_types import KoopmanSpectrum, compute_generator_spectrum
 
 ContinuousGraphSparsity = Literal["dense", "block_diagonal", "distributed"]
@@ -84,9 +91,9 @@ class ContinuousGraphKoopmanOperator(nn.Module):
     sparsity : {"dense", "block_diagonal", "distributed"}
         Realization mode. ``"dense"`` uses the full ``N·d`` exponential;
         ``"block_diagonal"`` advances with ``L_self`` only; ``"distributed"``
-        is accepted for construction / checkpoints (not trainer DDP or
-        multi-GPU training; matrix-free inverse / spectrum are wired for
-        discrete graph and hetero in 0.10).
+        uses matrix-free Arnoldi spectrum on generator factors and
+        uncontrolled implicit-Euler inverse (not trainer DDP or multi-GPU
+        training).
     max_real_eigenvalue : float
         Stability bound forwarded to the continuous factor modules.
     """
@@ -759,21 +766,25 @@ class ContinuousGraphKoopmanOperator(nn.Module):
 
         Routing (auto; no path-selection kwarg):
 
-        1. If Kronecker-sum eligible (shared ``L_self``,
+        1. ``sparsity="distributed"`` — matrix-free Arnoldi surrogate on
+           the generator factors (leading-modulus Ritz values;
+           placeholder eigenvectors). Not a certified continuous
+           spectrum.
+        2. Else if Kronecker-sum eligible (shared ``L_self``,
            ``adjacency`` in ``{"symmetric", "random_walk"}``,
            ``sparsity`` in ``{"dense", "block_diagonal"}``) — exact
            reduction via
            :func:`~koopman_graph.operators.kronecker_spectrum.spectrum_l_eff_kronecker_sum`
            when the helper succeeds.
-        2. Else — dense
+        3. Else — dense
            :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`
-           on :meth:`effective_generator` (``dual_random_walk``,
-           ``sparsity="distributed"`` — continuous has no Arnoldi spectrum
-           path — or Kronecker helper fall-back).
+           on :meth:`effective_generator` (``dual_random_walk`` or
+           Kronecker helper fall-back).
 
-        This routing covers **spectrum only**. ``transition_matrix`` /
-        :math:`\\exp(\\Delta t\\, L_{\\mathrm{eff}})` caching and inverse
-        ceilings are unchanged.
+        ``transition_matrix`` /
+        :math:`\\exp(\\Delta t\\, L_{\\mathrm{eff}})` caching remains
+        separate. Distributed inverse is uncontrolled implicit Euler on
+        :math:`I - \\Delta t L_{\\mathrm{eff}}`.
 
         Parameters
         ----------
@@ -789,6 +800,36 @@ class ContinuousGraphKoopmanOperator(nn.Module):
         KoopmanSpectrum
             Magnitude-sorted spectrum of ``L_eff``.
         """
+        if self.sparsity == "distributed":
+            ambient = int(num_nodes) * int(self.latent_dim)
+            n_modes = min(DEFAULT_DISTRIBUTED_SPECTRUM_NUM_MODES, ambient)
+            result = spectrum_k_eff_graph(
+                k_self=self.L_self,
+                k_nbr=self.L_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                num_modes=n_modes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+                k_bwd=None if self._bwd is None else self.L_bwd,
+            )
+            eigenvalues = result.eigenvalues
+            magnitudes = eigenvalues.abs()
+            num_modes = int(eigenvalues.numel())
+            return KoopmanSpectrum(
+                eigenvalues=eigenvalues,
+                eigenvectors=torch.eye(
+                    num_modes,
+                    dtype=eigenvalues.dtype,
+                    device=eigenvalues.device,
+                ),
+                magnitudes=magnitudes,
+                growth_rates=eigenvalues.real,
+                frequencies=eigenvalues.imag / (2.0 * torch.pi),
+                time_step=1.0,
+                residuals=result.residual_norms,
+            )
+
         if kronecker_sum_spectrum_eligible(
             adjacency=self.adjacency,
             sparsity=self.sparsity,
@@ -1222,6 +1263,37 @@ class ContinuousGraphKoopmanOperator(nn.Module):
 
         num_nodes = z.shape[0]
         delta = torch.as_tensor(delta_t, dtype=z.dtype, device=z.device)
+
+        if self.sparsity == "distributed":
+            if inverse_matrix is not None:
+                msg = (
+                    "inverse_matrix is only supported for "
+                    "ContinuousGraphKoopmanOperator sparsity='dense'"
+                )
+                raise ValueError(msg)
+            if self.control_dim != 0:
+                msg = (
+                    "distributed continuous-graph inverse is uncontrolled "
+                    "only (implicit Euler on I - Δt L_eff)"
+                )
+                raise ValueError(msg)
+            eye = torch.eye(self.latent_dim, dtype=z.dtype, device=z.device)
+            result = invert_k_eff_graph(
+                flatten_node_latents(z),
+                k_self=eye - delta * self.L_self,
+                k_nbr=(-delta) * self.L_nbr,
+                edge_index=edge_index,
+                num_nodes=num_nodes,
+                adjacency=self.adjacency,
+                edge_weight=edge_weight,
+                k_bwd=None if self._bwd is None else ((-delta) * self.L_bwd),
+            )
+            return unflatten_node_latents(
+                result.solution,
+                num_nodes=num_nodes,
+                latent_dim=self.latent_dim,
+            )
+
         generator = self.effective_generator(
             edge_index, num_nodes, edge_weight=edge_weight
         )

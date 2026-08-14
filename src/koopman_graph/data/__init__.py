@@ -59,6 +59,12 @@ from koopman_graph.data.hetero_layout import (
     unstack_typed_features,
     validate_latent_dims,
 )
+from koopman_graph.data.partition import (
+    cluster_node_partition,
+    induced_cluster_subgraph,
+    iter_cluster_subgraphs,
+)
+from koopman_graph.data.remap import remap_node_features
 from koopman_graph.data.rollout import (
     RolloutStartIndices,
     resolve_rollout_start_indices,
@@ -94,6 +100,10 @@ __all__ = [
     "WindowSampler",
     "as_multi_trajectory",
     "build_window_index_list",
+    "cluster_node_partition",
+    "induced_cluster_subgraph",
+    "iter_cluster_subgraphs",
+    "remap_node_features",
     "global_relation_edge_indices",
     "latent_type_slices",
     "latent_type_slices_from_dims",

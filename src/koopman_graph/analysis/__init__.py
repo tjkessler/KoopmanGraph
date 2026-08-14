@@ -82,6 +82,24 @@ Capability layout
     **not** ResDMD, **not**
     :class:`~koopman_graph.analysis.ModeEnergyAttribution`. Homogeneous
     GNNExplainer MVP first.
+``tda``
+    0-dimensional persistence diagrams and Betti curves
+    (:func:`~koopman_graph.analysis.persistence_diagram_0d`,
+    :func:`~koopman_graph.analysis.betti_curve`). Core union-find MVP;
+    not a TDA library.
+``dispersion``
+    Graph-Fourier index versus temporal growth
+    (:func:`~koopman_graph.analysis.graph_dispersion`,
+    :class:`~koopman_graph.analysis.DispersionRelation`) from Kronecker
+    eigenpairs when eligible.
+``causal``
+    Granger-style influence on mode amplitudes
+    (:func:`~koopman_graph.analysis.granger_latent_influence`).
+    Assumption-laden; not interventional.
+``lmi``
+    Small-system discrete Lyapunov SDP helper
+    (:func:`~koopman_graph.analysis.discrete_lyapunov_lmi`). Optional
+    ``[control-lmi]``; large graphs keep Gershgorin.
 
 :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` and the spectrum
 assembly helpers stay in the neutral top-level
@@ -96,10 +114,15 @@ from koopman_graph.analysis.anomaly import (
     calibrate_anomaly_threshold,
     detect_anomaly,
 )
+from koopman_graph.analysis.causal import (
+    CausalInfluenceReport,
+    granger_latent_influence,
+)
 from koopman_graph.analysis.clustering import (
     ClusteringResult,
     koopman_spectral_clustering,
 )
+from koopman_graph.analysis.dispersion import DispersionRelation, graph_dispersion
 from koopman_graph.analysis.explain import (
     RepresentationExplanation,
     explain_representation,
@@ -113,7 +136,12 @@ from koopman_graph.analysis.joint_stability import (
     lyapunov_joint_bound,
     schur_radius_bound,
 )
-from koopman_graph.analysis.plotting import SpectrumLimits, plot_spectrum
+from koopman_graph.analysis.lmi import LyapunovLMIResult, discrete_lyapunov_lmi
+from koopman_graph.analysis.plotting import (
+    SpectrumLimits,
+    plot_dispersion,
+    plot_spectrum,
+)
 from koopman_graph.analysis.pseudospectra import (
     EmpiricalSpectralMeasure,
     ResolventNormGrid,
@@ -144,6 +172,11 @@ from koopman_graph.analysis.spectrum import (
     discrete_spectrum_at_delta_t,
     implied_timescales,
 )
+from koopman_graph.analysis.tda import (
+    PersistenceDiagram,
+    betti_curve,
+    persistence_diagram_0d,
+)
 from koopman_graph.analysis.topology_estimation import (
     CouplingEstimate,
     estimate_coupling_from_snapshots,
@@ -158,16 +191,19 @@ from koopman_graph.spectrum_types import KoopmanSpectrum
 __all__ = [
     "AnomalyDetectionResult",
     "AnomalyThresholdMethod",
+    "CausalInfluenceReport",
     "ClusteringResult",
     "CouplingEstimate",
+    "DispersionRelation",
     "EmpiricalSpectralMeasure",
-    "ImpliedTimescales",
     "ImpliedTimescales",
     "JointStabilityCertificate",
     "KoopmanSpectrum",
+    "LyapunovLMIResult",
     "MAX_JOINT_LYAPUNOV_SIZE",
     "MAX_JOINT_SCHUR_SIZE",
     "ModeEnergyAttribution",
+    "PersistenceDiagram",
     "ResDMDReport",
     "RepresentationExplanation",
     "ResolventNormGrid",
@@ -179,12 +215,14 @@ __all__ = [
     "TRANSFER_ADVANTAGE_EPSILON",
     "TopologyTransferReport",
     "attribute_mode_energy",
+    "betti_curve",
     "build_joint_stability_certificate",
     "calibrate_anomaly_threshold",
     "compute_generator_spectrum",
     "compute_spectrum",
     "decode_mode_shapes",
     "detect_anomaly",
+    "discrete_lyapunov_lmi",
     "discrete_spectrum_at_delta_t",
     "dynamical_similarity",
     "empirical_spectral_measure",
@@ -192,11 +230,15 @@ __all__ = [
     "evaluate_topology_transfer",
     "explain_representation",
     "gershgorin_radius_bound",
+    "graph_dispersion",
+    "granger_latent_influence",
     "identify_sparse_dynamics",
     "implied_timescales",
     "koopman_spectral_clustering",
     "koopman_std",
     "lyapunov_joint_bound",
+    "persistence_diagram_0d",
+    "plot_dispersion",
     "plot_spectrum",
     "resdmd",
     "resolvent_norm_grid",

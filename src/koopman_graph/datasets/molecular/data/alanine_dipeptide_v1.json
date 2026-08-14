@@ -1,0 +1,7 @@
+{
+  "name": "alanine-dipeptide-teaching",
+  "n_atoms": 22,
+  "source": "public mdtraj/mdshare-style alanine dipeptide fetch",
+  "ceiling": "not Folding@home; not a PyEMMA replacement",
+  "units": "nanometres"
+}

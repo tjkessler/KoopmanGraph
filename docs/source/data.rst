@@ -165,14 +165,31 @@ Dataset card: synthetic two-state molecular oracle
   steps)
 * **Limitations:** Toy two-state switching with additive Gaussian feature
   noise; not a biomolecule; not Folding@home-scale MD; not a PyEMMA
-  replacement. Optional ``[md]`` / ``load_md_trajectory`` stubs do **not**
-  ship a public alanine-dipeptide or other experimental MD loader
+  replacement. Optional ``[md]`` / ``load_md_trajectory`` plus
+  :func:`~koopman_graph.datasets.molecular.alanine_dipeptide_card` document
+  a public teaching fetch; they are not a production MD toolchain
 * **Version:** ``synthetic_two_state_v1``
 
 Loader: :func:`~koopman_graph.datasets.molecular.generate_synthetic_two_state`
 (metadata:
 :func:`~koopman_graph.datasets.molecular.load_synthetic_two_state_metadata`).
 See ``examples/44_graphvamp_md.ipynb`` and :doc:`tutorials`.
+
+Dataset card: alanine dipeptide (teaching fetch)
+------------------------------------------------
+
+* **Scope:** Packaged metadata for a public alanine-dipeptide trajectory
+  fetch consumed by ``[md]`` / :func:`~koopman_graph.datasets.molecular.load_md_trajectory`
+* **Size:** 22 atoms (card ``alanine_dipeptide_v1``)
+* **Format:** JSON card in the package; coordinates loaded via mdtraj
+  when a trajectory file is supplied
+* **Units:** Positions in **nanometres**
+* **Limitations:** Teaching fetch, not Folding@home-scale MD, not a
+  PyEMMA replacement
+* **Version:** ``alanine_dipeptide_v1``
+
+Loader metadata:
+:func:`~koopman_graph.datasets.molecular.alanine_dipeptide_card`.
 
 Presence masks vs observation masks
 -----------------------------------
@@ -191,7 +208,9 @@ them:
   :class:`~koopman_graph.data.GraphSnapshotSequence` (or the typed hetero
   peer). Inactive rows stay at capacity :math:`N_{\max}` (padded zeros is
   conventional); losses ignore inactive nodes; operator matvecs still run
-  at full capacity. This is **not** unbounded open-world graph growth
+  at full capacity. Opt-in
+  :func:`~koopman_graph.data.remap_node_features` grows a larger union
+  from a user-supplied injective map; it is **not** entity resolution
   (see :doc:`limitations`).
 
 Default sequences have neither stack (fully present and fully observed).
