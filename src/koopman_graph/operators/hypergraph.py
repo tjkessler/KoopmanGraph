@@ -172,7 +172,8 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             ``forward_random_walk`` / ``dual_random_walk``). Default
             ``"zhou_symmetric"`` preserves historical undirected behavior.
         orbit_partition : sequence of sequence of int or None, optional
-            Explicit node-orbit partition tying ``K_self`` across orbit mates.
+            Explicit node-orbit partition tying ``K_self`` and ``K_hedge``
+            across orbit mates. Dual ``K_bwd`` stays globally shared.
         auto_orbits : bool, optional
             When ``True``, compute orbits from the hypergraph 2-section on
             first advance.
@@ -286,7 +287,10 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         is always exactly zero so ``dual_random_walk`` begins equivalent to
         ``forward_random_walk``.
         """
-        self._reset_factor_parameters(self._hedge, allow_noise=True)
+        orbit_nbrs = getattr(self, "_orbit_nbrs", None)
+        modules = list(orbit_nbrs) if orbit_nbrs is not None else [self._hedge]
+        for module in modules:
+            self._reset_factor_parameters(module, allow_noise=True)
         if self._bwd is not None:
             self._reset_factor_parameters(self._bwd, allow_noise=False)
 
@@ -336,6 +340,9 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     @property
     def K_hedge(self) -> Tensor:
         """Hyperedge-coupling matrix with shape ``(latent_dim, latent_dim)``.
+
+        When orbit-tied, returns the representative (orbit-0) hyperedge
+        matrix; the per-orbit bank is applied after the incidence matvec.
 
         Returns
         -------
@@ -430,7 +437,11 @@ class HypergraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     control_matrix=control_matrix if orbit_id == 0 else None,
                     bilinear_matrices=bilinear_matrices if orbit_id == 0 else None,
                 )
-        self._hedge.set_dense_matrix(k_hedge, control_matrix=None)
+        if self._orbit_nbrs is None:
+            self._hedge.set_dense_matrix(k_hedge, control_matrix=None)
+        else:
+            for module in self._orbit_nbrs:
+                module.set_dense_matrix(k_hedge, control_matrix=None)
         if k_bwd is not None:
             assert self._bwd is not None
             self._bwd.set_dense_matrix(k_bwd, control_matrix=None)

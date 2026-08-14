@@ -1351,8 +1351,8 @@ def test_random_walk_modes_handle_sink_and_isolated_nodes() -> None:
         assert torch.isfinite(effective).all(), adjacency
 
 
-def test_orbit_ties_do_not_tie_neighbor_factors() -> None:
-    """Orbit partitions tie ``K_self`` only; ``K_fwd`` / ``K_bwd`` stay shared."""
+def test_orbit_ties_keep_shared_backward_and_tie_forward() -> None:
+    """Orbit partitions tie ``K_self`` / ``K_fwd``; ``K_bwd`` stays shared."""
     op = GraphKoopmanOperator(
         2,
         init_mode="identity",
@@ -1362,15 +1362,17 @@ def test_orbit_ties_do_not_tie_neighbor_factors() -> None:
     edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
     op.ensure_orbit_binding(3, edge_index=edge_index)
     assert op._orbit_selves is not None
+    assert op._orbit_nbrs is not None
     assert len(op._orbit_selves) == 2
+    assert len(op._orbit_nbrs) == 2
     assert op._bwd is not None
-    # Distinct orbit self modules; single shared neighbor modules.
     assert op._orbit_selves[0] is not op._orbit_selves[1]
-    assert op._nbr is not op._orbit_selves[0]
+    assert op._nbr is op._orbit_nbrs[0]
+    assert op._nbr is not op._orbit_nbrs[1]
     assert op._bwd is not op._orbit_selves[0]
+    assert op._bwd is not op._orbit_nbrs[0]
     blocks = op.tied_self_blocks(3)
     assert torch.allclose(blocks[0], blocks[1])
-    # Neighbor factors are global properties, not per-orbit banks.
     assert torch.allclose(op.K_fwd, op.K_nbr)
     with pytest.raises(AttributeError, match="K_bwd"):
         _ = GraphKoopmanOperator(2, adjacency="symmetric").K_bwd

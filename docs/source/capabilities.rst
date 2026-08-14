@@ -74,7 +74,9 @@ Topology-aware learning
   :doc:`limitations`)
 * Optional self-adaptive pairwise topology
   (``learn_topology="self_adaptive"``; ``koopman_graph.nn.AdaptiveAdjacency``)
-* Optional symmetry-adapted orbit-tied ``K_self``
+* Optional symmetry-adapted orbit-tied ``K_self`` (and, on discrete
+  graph / hypergraph / Hodge operators, per-orbit ``K_nbr`` /
+  ``K_hedge``)
   (``koopman_auto_orbits`` / ``koopman_orbit_partition``; requires
   ``pip install "koopman-graph[symmetry]"`` for auto orbits)
 * Opt-in isotypic self-block and neighbor-factor ties

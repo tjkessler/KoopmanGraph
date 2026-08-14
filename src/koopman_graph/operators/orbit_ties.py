@@ -1,9 +1,9 @@
 """Shared orbit-tied ``K_self`` bank helpers for networked operators.
 
 Also hosts the MVP ``isotypic`` symmetry path: exact-automorphism orbits for
-``K_self`` ties (representation-theoretic ``Aut(G)``, not WL), with the
-isotypic decomposition retained for diagnostics and later neighbor-factor
-work.
+``K_self`` and (on graph / hypergraph hosts) ``K_nbr`` / ``K_hedge`` ties
+(representation-theoretic ``Aut(G)``, not WL), with the isotypic
+decomposition retained for diagnostics.
 """
 
 from __future__ import annotations
@@ -95,7 +95,8 @@ class OrbitTiedSelfMixin:
     Notes
     -----
     Host must define latent/control construction fields used by
-    :meth:`_allocate_orbit_selves`."""
+    :meth:`set_orbit_partition`. Graph / hypergraph hosts expose ``_nbr``
+    or ``_hedge`` so neighbor banks can alias the representative module."""
 
     latent_dim: int
     init_mode: InitMode
@@ -184,13 +185,52 @@ class OrbitTiedSelfMixin:
             See summary line."""
         return self._orbit_selves is not None
 
+    def _bind_representative_neighbor_bank(self, num_orbits: int) -> None:
+        """Allocate per-orbit neighbor factors when the host has ``_nbr`` / ``_hedge``.
+
+        Discrete graph / hypergraph / Hodge operators copy the current
+        shared neighbor state into each orbit slot, then replace
+        ``_nbr`` / ``_hedge`` with the orbit-0 representative so
+        ``parameters()`` does not count a leftover unused module. Hetero
+        relation factors stay globally shared (no ``_nbr`` / ``_hedge``).
+
+        Parameters
+        ----------
+        num_orbits : int
+            Number of orbits in the bound partition.
+        """
+        neighbor = getattr(self, "_nbr", None)
+        if neighbor is None:
+            neighbor = getattr(self, "_hedge", None)
+        if neighbor is None:
+            self._orbit_nbrs = None
+            return
+        self._orbit_nbrs = build_orbit_self_bank(
+            num_orbits=num_orbits,
+            latent_dim=self.latent_dim,
+            init_mode="identity",
+            init_scale=self.init_scale,
+            parameterization=self.parameterization,
+            max_spectral_radius=self.max_spectral_radius,
+            control_dim=0,
+            control_mode=self.control_mode,
+            bilinear_rank=None,
+        )
+        state = neighbor.state_dict()
+        for module in self._orbit_nbrs:
+            module.load_state_dict(state)
+        if getattr(self, "_nbr", None) is not None:
+            self._nbr = self._orbit_nbrs[0]
+        else:
+            self._hedge = self._orbit_nbrs[0]
+
     def set_orbit_partition(
         self,
         partition: Sequence[Sequence[int]],
         *,
         num_nodes: int,
     ) -> None:
-        """Bind an explicit orbit partition and allocate orbit self factors.
+        """Bind an explicit orbit partition and allocate orbit factor banks.
 
         Parameters
         ----------
@@ -219,19 +259,9 @@ class OrbitTiedSelfMixin:
             control_mode=self.control_mode,
             bilinear_rank=self.bilinear_rank,
         )
-        self._orbit_nbrs = build_orbit_self_bank(
-            num_orbits=len(validated),
-            latent_dim=self.latent_dim,
-            init_mode="identity",
-            init_scale=self.init_scale,
-            parameterization=self.parameterization,
-            max_spectral_radius=self.max_spectral_radius,
-            control_dim=0,
-            control_mode=self.control_mode,
-            bilinear_rank=None,
-        )
         # Representative self factor for control / certificates.
         self._self = self._orbit_selves[0]
+        self._bind_representative_neighbor_bank(len(validated))
 
     def bind_auto_orbits(
         self,

@@ -53,6 +53,9 @@ contract are unchanged (`koopman=None` still selects `"pernode"`).
   leaderboard-not-SOTA, alanine-not-Folding@home).
 - Tests live in subdirectories that follow `src/koopman_graph/` packages.
   Version-named coverage dump files were split into module-named tests.
+- Orbit neighbor-factor tying reuses the representative `K_nbr` /
+  `K_hedge` module so a one-orbit graph matches the shared parameter
+  count. Dual `K_bwd` and hetero `K_r` stay globally shared.
 
 ### Notes
 

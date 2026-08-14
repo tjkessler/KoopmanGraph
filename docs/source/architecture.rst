@@ -1468,22 +1468,25 @@ Checkpoint field ``config.adjacency`` is required for those kinds and is
 migrated). Hypergraph operators stay Zhou-symmetric and do not expose
 ``adjacency``.
 
-**Symmetry-adapted self factors (orbit ties).** Opt-in inductive bias for
-discrete ``koopman="graph"`` / ``"hypergraph"`` / multiplex and shared-d
-typed ``"hetero_graph"``: nodes in the same orbit share a ``K_self``
-factor. Neighbor / hyperedge / relation factors
-(``K_nbr`` / ``K_fwd`` / ``K_bwd`` / ``K_hedge`` / ``K_r``) stay globally
-shared and are **not** orbit-tied. Multiplex hetero orbits use the
+**Symmetry-adapted self and neighbor factors (orbit ties).** Opt-in inductive
+bias for discrete ``koopman="graph"`` / ``"hypergraph"`` / multiplex and
+shared-d typed ``"hetero_graph"``: nodes in the same orbit share a
+``K_self`` factor. Discrete graph / hypergraph / Hodge operators also
+allocate a per-orbit neighbor / hyperedge bank
+(``K_nbr`` / ``K_fwd`` / ``K_hedge``) applied after the adjacency
+matvec. Dual backward ``K_bwd`` and hetero relation factors ``K_r`` stay
+globally shared. Multiplex hetero orbits use the
 **union** of relation banks on the stacked ``N`` nodes; typed hetero
 orbits are computed independently inside each type block from intra-type
 banks (orbits must not mix types). Rectangular hetero orbits are
-unsupported. Isotypic / irrep block-diagonalization is reserved for
-0.11. Continuous hetero rejects orbit kwargs.
+unsupported. Opt-in ``koopman_symmetry="isotypic"`` uses exact
+``Aut(G)`` orbits for the same self / neighbor banks and stores the
+isotypic decomposition. Continuous hetero rejects orbit kwargs.
 Default (symmetry off) keeps today's single shared ``K_self``. Enable via
 factory kwargs ``koopman_orbit_partition=...`` (explicit) or
 ``koopman_auto_orbits=True`` (bind from topology on first advance, and
 again at the start of ``fit`` before the optimizer is built so orbit
-``K_self`` parameters are trained; ``koopman_orbit_method="auto"|"exact"``).
+``K_self`` / ``K_nbr`` parameters are trained; ``koopman_orbit_method="auto"|"exact"``).
 Explicit partitions always win over auto-detection. Hypergraph auto-orbits use the pairwise 2-section of
 ``hyperedge_index``. Orbit finding uses ``networkx`` (Weisfeiler–Lehman
 approximate) or optional ``pynauty`` (exact) behind the ``[symmetry]``
