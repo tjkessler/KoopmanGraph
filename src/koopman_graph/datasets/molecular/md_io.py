@@ -1,4 +1,4 @@
-"""Lazy ``[md]`` boundary for mdtraj trajectory I/O stubs.
+"""Lazy ``[md]`` boundary for mdtraj trajectory I/O.
 
 Importing this module does **not** import mdtraj. Call
 :func:`require_mdtraj` (or :func:`load_md_trajectory`) at use sites so core
@@ -7,8 +7,15 @@ Importing this module does **not** import mdtraj. Call
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+import torch
+from torch import Tensor
 
 _MDTRAJ_INSTALL_HINT = (
     "mdtraj is required for molecular trajectory I/O. "
@@ -23,11 +30,6 @@ def require_mdtraj() -> ModuleType:
     -------
     module
         The ``mdtraj`` package.
-
-    Raises
-    ------
-    ImportError
-        If mdtraj is not installed (``pip install 'koopman-graph[md]'``).
     """
     try:
         import mdtraj
@@ -36,34 +38,54 @@ def require_mdtraj() -> ModuleType:
     return mdtraj
 
 
-def load_md_trajectory(*_args: Any, **_kwargs: Any) -> Any:
-    """Load an MD trajectory via mdtraj into an in-repo representation.
+@dataclass(frozen=True)
+class MDTrajectory:
+    """In-repo MD coordinates after an mdtraj load.
 
-    Stub until molecular loaders ship; signature mirrors the future mdtraj-backed
-    API (positional and keyword arguments forwarded to the loader).
+    Attributes
+    ----------
+    xyz : Tensor
+        Coordinates in nanometres with shape ``(T, n_atoms, 3)``.
+    n_atoms : int
+        Atom count.
+    """
+
+    xyz: Tensor
+    n_atoms: int
+
+
+def load_md_trajectory(path: str | Path, **kwargs: Any) -> MDTrajectory:
+    """Load an MD trajectory via mdtraj into tensors.
 
     Parameters
     ----------
-    *_args
-        Forwarded trajectory path / format arguments (not yet implemented).
-    **_kwargs
-        Forwarded mdtraj loader keyword arguments (not yet implemented).
+    path : str or Path
+        Trajectory file.
+    **kwargs
+        Forwarded to ``mdtraj.load``.
 
     Returns
     -------
-    Any
-        Planned in-repo trajectory container (not implemented).
-
-    Raises
-    ------
-    ImportError
-        If the ``[md]`` extra is not installed.
-    NotImplementedError
-        Always, until contact-graph construction and molecular loaders ship.
+    MDTrajectory
+        Coordinates in nanometres.
     """
-    require_mdtraj()
-    msg = (
-        "load_md_trajectory is not implemented yet; "
-        "install 'koopman-graph[md]' for trajectory I/O when loaders ship"
-    )
-    raise NotImplementedError(msg)
+    mdtraj = require_mdtraj()
+    traj = mdtraj.load(str(path), **kwargs)
+    xyz = torch.from_numpy(traj.xyz.copy()).to(dtype=torch.float32)
+    return MDTrajectory(xyz=xyz, n_atoms=int(xyz.shape[1]))
+
+
+def alanine_dipeptide_card() -> dict[str, Any]:
+    """Return the packaged alanine-dipeptide teaching card.
+
+    CI uses this JSON metadata rather than downloading Folding@home-scale
+    trajectories.
+
+    Returns
+    -------
+    dict of str to object
+        Packaged teaching-card fields.
+    """
+    package = resources.files("koopman_graph.datasets.molecular").joinpath("data")
+    payload = package.joinpath("alanine_dipeptide_v1.json").read_text(encoding="utf-8")
+    return json.loads(payload)

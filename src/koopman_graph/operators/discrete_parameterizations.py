@@ -540,3 +540,178 @@ def reset_lyapunov_matrix(
         cayley=cayley_Q,
     )
     nn.init.zeros_(lyap_p_raw)
+
+
+_SINKHORN_ITERS = 8
+_CAYLEY_DAMP = 1e-6
+
+
+def assemble_row_stochastic_matrix(raw: Tensor) -> Tensor:
+    """Assemble a row-stochastic map via softmax on the last axis.
+
+    Under the library advance ``z ← z Kᵀ``, row-stochastic ``K`` conserves
+    the sum of latent coordinates. This does **not** certify conservation of
+    decoded physical mass after a nonlinear decoder.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Unconstrained logits with shape ``(d, d)``.
+
+    Returns
+    -------
+    Tensor
+        Row-stochastic matrix with the same shape.
+    """
+    return torch.softmax(raw, dim=-1)
+
+
+def assemble_doubly_stochastic_matrix(
+    raw: Tensor,
+    *,
+    iterations: int = _SINKHORN_ITERS,
+) -> Tensor:
+    """Assemble an approximately doubly-stochastic map by Sinkhorn iteration.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Unconstrained logits with shape ``(d, d)``.
+    iterations : int, optional
+        Alternating row/column normalizations. Default is 8.
+
+    Returns
+    -------
+    Tensor
+        Non-negative matrix with approximately unit row and column sums.
+
+    Notes
+    -----
+    Finite Sinkhorn scaling after Cuturi (2013; ``Cuturi2013Sinkhorn``).
+    Iteration count is a teaching default, not an exact doubly-stochastic
+    projection.
+    """
+    matrix = torch.exp(raw)
+    for _ in range(int(iterations)):
+        matrix = matrix / matrix.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        matrix = matrix / matrix.sum(dim=-2, keepdim=True).clamp_min(1e-12)
+    return matrix
+
+
+def _symmetric_from_raw(raw: Tensor) -> Tensor:
+    """Build a symmetric generator from an unconstrained square factor.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Unconstrained square tensor.
+
+    Returns
+    -------
+    Tensor
+        Symmetric part ``(raw + rawᵀ) / 2``.
+    """
+    return 0.5 * (raw + raw.transpose(-1, -2))
+
+
+def assemble_symplectic_matrix(raw: Tensor) -> Tensor:
+    """Assemble a symplectic map by Cayley transform of a Hamiltonian matrix.
+
+    Requires even ``latent_dim``. The Hamiltonian is ``H = J S`` with ``S``
+    symmetric and ``J`` the standard symplectic block matrix.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Unconstrained square factor with shape ``(d, d)`` and even ``d``.
+
+    Returns
+    -------
+    Tensor
+        Approximate symplectic matrix ``(I - H)^{-1} (I + H)``.
+
+    Raises
+    ------
+    ValueError
+        If ``d`` is odd.
+
+    Notes
+    -----
+    Hamiltonian neural-network lineage (Greydanus, Dzamba, and Yosinski,
+    2019; ``Greydanus2019HNN``). The symplectic constraint applies to
+    parameterized ``K``, not decoded ``x``.
+    """
+    dim = int(raw.shape[-1])
+    if dim % 2 != 0:
+        msg = f"symplectic parameterization requires even latent_dim, got {dim}"
+        raise ValueError(msg)
+    half = dim // 2
+    identity_half = torch.eye(half, dtype=raw.dtype, device=raw.device)
+    zeros = torch.zeros_like(identity_half)
+    symplectic_j = torch.cat(
+        [
+            torch.cat([zeros, identity_half], dim=-1),
+            torch.cat([-identity_half, zeros], dim=-1),
+        ],
+        dim=-2,
+    )
+    symmetric = _symmetric_from_raw(raw)
+    hamiltonian = symplectic_j @ symmetric
+    identity = torch.eye(dim, dtype=raw.dtype, device=raw.device)
+    damped = identity - hamiltonian + _CAYLEY_DAMP * identity
+    return torch.linalg.solve(damped, identity + hamiltonian)
+
+
+def reset_logit_matrix(
+    raw: Tensor,
+    *,
+    init_mode: InitMode,
+    init_scale: float,
+) -> None:
+    """Initialize unconstrained logits toward a near-identity stochastic map.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Logit parameter to reset in place.
+    init_mode : InitMode
+        Initialization strategy.
+    init_scale : float
+        Noise scale for ``identity_noise`` / ``xavier``.
+    """
+    with torch.no_grad():
+        raw.fill_(-8.0)
+        raw.fill_diagonal_(8.0)
+        if init_mode == "identity_noise":
+            raw.add_(torch.randn_like(raw) * init_scale)
+        elif init_mode == "xavier":
+            nn.init.xavier_uniform_(raw)
+        elif init_mode != "identity":
+            msg = f"Unknown init_mode: {init_mode!r}"
+            raise ValueError(msg)
+
+
+def reset_symplectic_matrix(
+    raw: Tensor,
+    *,
+    init_mode: InitMode,
+    init_scale: float,
+) -> None:
+    """Initialize the symplectic generator toward a near-identity Cayley map.
+
+    Parameters
+    ----------
+    raw : Tensor
+        Unconstrained Hamiltonian factor.
+    init_mode : InitMode
+        Initialization strategy.
+    init_scale : float
+        Noise scale for noisy modes.
+    """
+    with torch.no_grad():
+        raw.zero_()
+        if init_mode in {"identity_noise", "xavier"}:
+            raw.add_(torch.randn_like(raw) * init_scale)
+        elif init_mode != "identity":
+            msg = f"Unknown init_mode: {init_mode!r}"
+            raise ValueError(msg)

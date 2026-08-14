@@ -47,9 +47,22 @@ Build the model
 
 The constructor factory-builds a discrete :class:`~koopman_graph.operators.KoopmanOperator`
 from string-mode settings (``dynamics_mode``, ``koopman_parameterization``, …).
-Pass ``koopman="graph"`` for a networked
+The default ``koopman=None`` still selects ``"pernode"``. Pass
+``koopman="graph"`` for a networked
 :class:`~koopman_graph.operators.GraphKoopmanOperator` (discrete only) so
-``edge_index`` enters the linear step. For multiplex / typed graphs, use
+``edge_index`` enters the linear step:
+
+.. code-block:: python
+
+   graph_model = GraphKoopmanModel(
+       encoder=encoder,
+       decoder=decoder,
+       latent_dim=latent_dim,
+       time_step=0.1,
+       koopman="graph",
+   )
+
+For multiplex / typed graphs, use
 ``koopman="hetero_graph"`` with
 :class:`~koopman_graph.nn.RelGraphEncoder` /
 :class:`~koopman_graph.nn.RelGraphDecoder` on

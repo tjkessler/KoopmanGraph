@@ -17,7 +17,9 @@ Public API
     equivariant ``K``).
 ``E3EquivariantEncoder``
     Optional Tier B steerable encode via ``e3nn`` (``[equivariance]``);
-    projects to invariant latents for linear ``K`` (not equivariant ``K``).
+    default projects to invariant latents for linear ``K``. Set
+    ``project_invariants=False`` to keep vector channels for an
+    equivariant latent operator.
 ``RelGraphEncoder``
     Multiplex relational encoder (R-GCN-lite; per-relation message banks).
 ``DelayEmbeddingEncoder``
@@ -163,4 +165,4 @@ __all__ = [
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.13.0"
+__version__ = "0.14.0"

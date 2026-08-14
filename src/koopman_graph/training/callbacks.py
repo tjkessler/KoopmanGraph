@@ -125,3 +125,78 @@ class NoOpFitCallback:
         history : FitHistory
             Unused final fit history.
         """
+
+
+class ResDMDFitCallback:
+    """Observe-only callback recording the last mean ResDMD residual.
+
+    Notes
+    -----
+    Does not mutate parameters. Callers set :attr:`last_mean_residual` from
+    an external :func:`~koopman_graph.analysis.resdmd` evaluation.
+    """
+
+    def __init__(self) -> None:
+        """Initialize with no recorded residual.
+
+        Notes
+        -----
+        ``last_mean_residual`` starts as ``None``.
+        """
+        self.last_mean_residual: float | None = None
+
+    def on_fit_start(self, *, model: Any, fit_kwargs: Mapping[str, Any]) -> None:
+        """Reset the recorded residual.
+
+        Parameters
+        ----------
+        model : Any
+            Unused model reference.
+        fit_kwargs : Mapping[str, Any]
+            Unused fit keyword arguments.
+        """
+        del model, fit_kwargs
+        self.last_mean_residual = None
+
+    def on_epoch_end(
+        self,
+        *,
+        epoch: int,
+        train_breakdown: TrainingLossBreakdown,
+        val_breakdown: TrainingLossBreakdown | None,
+        history_so_far: FitHistory | None,
+    ) -> None:
+        """No parameter updates; residual is recorded by the caller.
+
+        Parameters
+        ----------
+        epoch : int
+            Unused epoch index.
+        train_breakdown : TrainingLossBreakdown
+            Unused training loss.
+        val_breakdown : TrainingLossBreakdown or None
+            Unused validation loss.
+        history_so_far : FitHistory or None
+            Unused history.
+        """
+        del epoch, train_breakdown, val_breakdown, history_so_far
+
+    def on_fit_end(self, *, history: FitHistory) -> None:
+        """No-op fit end.
+
+        Parameters
+        ----------
+        history : FitHistory
+            Unused final history.
+        """
+        del history
+
+    def record(self, residual: float) -> None:
+        """Store a scalar residual observation.
+
+        Parameters
+        ----------
+        residual : float
+            Mean finite-dictionary ResDMD residual.
+        """
+        self.last_mean_residual = float(residual)

@@ -77,17 +77,22 @@ Topology-aware learning
 * Optional symmetry-adapted orbit-tied ``K_self``
   (``koopman_auto_orbits`` / ``koopman_orbit_partition``; requires
   ``pip install "koopman-graph[symmetry]"`` for auto orbits)
-* Opt-in isotypic self-block ties
+* Opt-in isotypic self-block and neighbor-factor ties
   (``koopman_symmetry="isotypic"``; exact automorphism groups;
   :func:`~koopman_graph.graph_utils.compute_isotypic_decomposition`;
-  ``examples/45_isotypic_symmetry.ipynb``) — neighbor-factor isotypic
-  tying is not shipped; not a guaranteed sample-efficiency win
+  ``examples/45_isotypic_symmetry.ipynb``) — not a guaranteed
+  sample-efficiency win
+* Predicted next-step topology
+  (:class:`~koopman_graph.nn.PredictedTopologyHead`); AdaptiveAdjacency
+  remains the static Graph WaveNet formula
 
 Dynamics
 ~~~~~~~~
 
-* Discrete ``KoopmanOperator`` with soft modes (``dense``, ``odo``) or
-  structural guarantees (``schur``, ``dissipative``, ``lyapunov``)
+* Discrete ``KoopmanOperator`` with soft modes (``dense``, ``odo``),
+  structural guarantees (``schur``, ``dissipative``, ``lyapunov``), or
+  structure-preserving maps (``row_stochastic``, ``doubly_stochastic``,
+  ``symplectic``; conservation is on parameterized :math:`K`)
 * Networked ``GraphKoopmanOperator`` (``koopman="graph"``) with
   self/neighbor coupling
   :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A} \otimes K_{\mathrm{nbr}}`
@@ -116,6 +121,12 @@ Dynamics
   inverse ceiling unchanged — see :doc:`limitations`
 * Global/local non-stationary discrete operator
   (``GlobalLocalKoopmanOperator``; ``koopman="global_local"``)
+* Switched and mixture discrete maps (``koopman="switched"`` /
+  ``"mixture"``; piecewise-linear or softmax mixture of LTI modes)
+* Hodge / Laplacian-structured networked operator (``koopman="hodge"``)
+* Equivariant block operator
+  (:class:`~koopman_graph.operators.EquivariantKoopmanOperator`; vector
+  channels are multiples of :math:`I_3`)
 * Continuous-time ``ContinuousKoopmanOperator``
   (``dynamics_mode="continuous"``), irregular timestamps, and
   ``predict_at``
@@ -223,8 +234,8 @@ inverse / spectrum; see :doc:`faq` and :doc:`limitations`).
   (requires ``pip install "koopman-graph[ray]"`` or ``[distributed]``;
   wraps Ray Train ``TorchTrainer`` around the same scientific fit loop).
   Prefer native DDP / Fabric unless you already standardize on Ray Train.
-  Multi-node Ray Train is outside the CI contract — see
-  :doc:`limitations`
+  Multi-node Ray Train is opt-in (``KOOPMAN_GRAPH_MULTINODE=1``); default
+  CI stays single-process — see :doc:`limitations`
 * Optional Ray parallel ensemble member fits via
   :func:`~koopman_graph.distributed.fit_ensemble_with_ray` or
   ``EnsembleGraphKoopmanModel.fit(..., parallel_backend="ray",
@@ -260,9 +271,10 @@ Analysis
 
 * ``KoopmanSpectrum`` / ``compute_spectrum`` with mode decoding helpers
 * Networked graph / continuous-graph ``.spectrum`` paths: distributed
-  Arnoldi (discrete / multiplex hetero), Kronecker-sum exact reduction
+  Arnoldi (discrete / multiplex hetero / Zhou-symmetric hypergraph /
+  continuous-graph generator factors), Kronecker-sum exact reduction
   when eligible, or dense assembled eigendecomposition — see
-  :doc:`limitations` (Scale); continuous graph has no Arnoldi spectrum path
+  :doc:`limitations` (Scale)
 * ``attribute_mode_energy`` / ``ModeEnergyAttribution`` — interpretive
   type / relation energy fractions on assembled ``K_eff`` (not causal;
   not a ResDMD residual on relation-attributed modes)
@@ -274,8 +286,9 @@ Analysis
   ``algorithm="integrated_gradients"`` uses Captum via the ``[explain]``
   extra (``Sundararajan2017IntegratedGradients``). Masks are
   **interpretive** and **non-causal**; they are **not**
-  ``ModeEnergyAttribution`` and **not** ResDMD residuals. Homogeneous MVP
-  only — see :doc:`limitations`
+  ``ModeEnergyAttribution`` and **not** ResDMD residuals. Homogeneous
+  graphs including delay embeddings and additive control; hetero /
+  hypergraph / adaptive remain rejected — see :doc:`limitations`
 * ``spectral_residuals`` / ``SpectralResidualReport`` — held-out data-driven
   residuals and ``trustworthy_mask()``; optional
   ``plot_spectrum(..., annotate_untrustworthy=True)``. Diagnostic in the
@@ -283,11 +296,20 @@ Analysis
   (``ColbrookTownsend2023ResDMD``, ``Colbrook2023ResidualDMD``)
 * Finite-dictionary ResDMD MVP
   (:func:`~koopman_graph.analysis.resdmd`,
-  :class:`~koopman_graph.analysis.ResDMDReport`) and finite-matrix
+  :class:`~koopman_graph.analysis.ResDMDReport`) optionally attached to
+  ``evaluate(..., include_resdmd=True)`` and
+  :class:`~koopman_graph.training.ResDMDFitCallback`, plus finite-matrix
   resolvent-norm grid
   (:func:`~koopman_graph.analysis.resolvent_norm_grid`) — **not**
   infinite-dimensional certified pseudospectra; see
   ``examples/40_resdmd_pseudospectra.ipynb``
+* Kronecker dispersion
+  (:func:`~koopman_graph.analysis.graph_dispersion`) and Granger-style
+  causal MVP (:func:`~koopman_graph.analysis.granger_latent_influence`;
+  assumption-laden, not interventional)
+* 0-dimensional persistence
+  (:func:`~koopman_graph.analysis.persistence_diagram_0d`; optional
+  ``[tda]``) — not a TDA library
 * Long-horizon statistics via ``koopman_graph.statistics`` (power-user):
   Welch PSD (``Welch1967``), ``spectral_distance``,
   ``invariant_measure_distance``, Rosenstein
@@ -311,8 +333,9 @@ Control, adaptation, and observation
 * ``koopman_graph.env.GraphKoopmanEnv`` / ``to_latent_env`` for Gymnasium
   closed-loop control
 * ``koopman_graph.mpc.KoopmanMPC`` for additive-control receding-horizon
-  QP control (``[mpc]`` / OSQP; local decoder-linearization guarantees;
-  optional conformal output-constraint tightening)
+  QP and bilinear sequential-linearization (``[mpc]`` / OSQP; local
+  decoder-linearization guarantees; optional conformal output-constraint
+  tightening)
 * Hybrid physics observables: Laplacian, nodewise graph-gradient magnitude,
   graph curvature (:math:`L_{\mathrm{sym}}^2 x`), polynomial dictionaries, or
   custom lifting callables. Residual losses are soft penalties, not
@@ -326,7 +349,9 @@ Uncertainty quantification (power-user)
   ``__all__``)
 * ``koopman_graph.uq.LatentGaussianKoopmanUQ`` — linear-Gaussian latent
   forecast with closed-form covariance propagation and optional Kalman
-  refinement (not DPK; not a full K²VAE)
+  refinement (not DPK)
+* ``koopman_graph.probabilistic`` — variational encoder weights plus
+  linear latent :math:`K` (distinct from Laplace factor UQ)
 * ``koopman_graph.uq.ConformalKoopmanUQ`` — split and adaptive (ACI)
   conformal intervals; marginal coverage under exchangeability (approximate
   under temporal dependence). Scores: ``"aggregate"``, legacy ``"per_node"``
@@ -371,11 +396,21 @@ Research tooling
   molecular oracles under :mod:`koopman_graph.datasets.molecular` and
   optional deeptime interop (:mod:`koopman_graph.interop`; ``[msm]`` /
   ``[md]``) — teaching / diagnostic, not GraphVAMPnets production or a
-  PyEMMA replacement (see :doc:`limitations`)
+  PyEMMA replacement. Packaged alanine-dipeptide teaching card via
+  :func:`~koopman_graph.datasets.molecular.alanine_dipeptide_card`
+  (not Folding@home; see :doc:`limitations`)
 * Lightweight STGCN / DCRNN / Graph WaveNet references plus teaching
-  AGCRN / MTGNN / STGODE / GraphCast ports in
-  ``koopman_graph.baselines.gnn`` (``ForecasterProtocol`` deviation
-  tables; not dedicated-library SOTA or leaderboard-matched protocols)
+  AGCRN / MTGNN / STGODE / GraphCast / STAEformer-class / spatiotemporal
+  SSM ports in ``koopman_graph.baselines.gnn`` (``ForecasterProtocol``
+  deviation tables; not dedicated-library SOTA)
+* Protocol-matched LibCity / BasicTS adapters
+  (:class:`~koopman_graph.baselines.gnn.LeaderboardProtocol`) — not SOTA
+* Restricted portable export (:mod:`koopman_graph.export`; fixed-topology
+  discrete homogeneous MVP) and in-tree FedAvg
+  (:mod:`koopman_graph.federated`; not DP)
+* Graphon-sampled adjacency for transfer experiments
+  (:func:`~koopman_graph.operators.sample_graphon_adjacency`;
+  :doc:`graphon`)
 * Benchmark datasets and Jupyter tutorials under ``examples/``
 * Model ``save`` / ``load`` checkpoints (default ``safetensors_v1``
   directory or ``.kgckpt`` / ``.zip`` bundle; ``legacy_pt`` pickle escape

@@ -91,10 +91,10 @@ def _validate_mpc_model(model: GraphKoopmanModel) -> KoopmanOperator:
     if koopman.control_dim <= 0:
         msg = "KoopmanMPC requires control_dim > 0"
         raise ValueError(msg)
-    if koopman.control_mode != "additive":
+    if koopman.control_mode not in {"additive", "bilinear"}:
         msg = (
-            "KoopmanMPC supports control_mode='additive' only in 0.6.0; "
-            f"got {koopman.control_mode!r} (bilinear iterated-QP is future work)"
+            "KoopmanMPC supports control_mode='additive' or 'bilinear'; "
+            f"got {koopman.control_mode!r}"
         )
         raise ValueError(msg)
     if koopman.B is None:
@@ -388,12 +388,16 @@ def _conformal_stage_margins(
 
 
 class KoopmanMPC:
-    """Additive-control receding-horizon MPC on Koopman latent dynamics.
+    """Receding-horizon MPC on per-node discrete Koopman latent dynamics.
+
+    Additive control uses a single condensed QP. Bilinear control uses
+    iterated sequential linearization around the previous input sequence
+    (local linearization; not a closed-loop certificate).
 
     Parameters
     ----------
     model : GraphKoopmanModel
-        Fitted model with a discrete additive ``KoopmanOperator``.
+        Fitted model with a discrete per-node ``KoopmanOperator``.
     horizon : int
         Prediction horizon ``H ≥ 1``.
     Q, R : Tensor or ndarray
@@ -405,25 +409,11 @@ class KoopmanMPC:
     y_min, y_max : Tensor or ndarray or None, optional
         Optional box bounds on linearized decoded outputs (local guarantee).
     constraint_tightening : ConformalKoopmanUQ or None, optional
-        Calibrated conformal wrapper on the **same** model. When set,
-        per-horizon half-widths shrink output boxes
-        (``y_min + m_h``, ``y_max - m_h``); input bounds stay exact.
-        Stage ``h = 0`` uses margin ``0``; stages ``1..H`` use
-        ``quantiles[h - 1]``. Scalar margins broadcast over features
-        (matches aggregate ``L_∞`` scores; conservative for ``per_node``).
-        Combined assumptions: conformal exchangeability is approximate for
-        temporal graph data, and output maps are local decoder linearizations
-        — margins are calibrated, not a formal closed-loop guarantee.
-
-    Raises
-    ------
-    ValueError
-        If the model/operator is unsupported, costs/bounds are invalid,
-        or tightening arguments are inconsistent.
-    TypeError
-        If ``constraint_tightening`` is not a ``ConformalKoopmanUQ``.
-    RuntimeError
-        If ``constraint_tightening`` is not calibrated.
+        Calibrated conformal wrapper on the **same** model.
+    bilinear_qp_iters : int, optional
+        Sequential-linearization iterations when
+        ``control_mode="bilinear"``. Default is 3. Additive mode ignores
+        this and solves once.
     """
 
     def __init__(
@@ -439,13 +429,14 @@ class KoopmanMPC:
         y_min: Tensor | NDArray[np.floating] | None = None,
         y_max: Tensor | NDArray[np.floating] | None = None,
         constraint_tightening: ConformalKoopmanUQ | None = None,
+        bilinear_qp_iters: int = 3,
     ) -> None:
         """Initialize the MPC controller from model, horizon, and costs.
 
         Parameters
         ----------
         model, horizon, Q, R, Qf, u_min, u_max, y_min, y_max,
-        constraint_tightening
+        constraint_tightening, bilinear_qp_iters
             See the class docstring.
         """
         if horizon < 1:
@@ -469,17 +460,39 @@ class KoopmanMPC:
             y_min=self.y_min,
             y_max=self.y_max,
         )
+        if bilinear_qp_iters < 1:
+            msg = f"bilinear_qp_iters must be >= 1, got {bilinear_qp_iters}"
+            raise ValueError(msg)
+        self.bilinear_qp_iters = int(bilinear_qp_iters)
 
-    def _plant_matrices(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    def _plant_matrices(
+        self,
+        linearization: NDArray[np.float64] | None = None,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Return column-convention ``(A, B_u)`` from the Koopman factors.
+
+        Parameters
+        ----------
+        linearization : ndarray or None, optional
+            Global control used to fold bilinear couplings into ``A``.
 
         Returns
         -------
-        tuple[NDArray[np.float64], NDArray[np.float64]]
-            See summary line."""
+        tuple of ndarray
+            Column-convention ``(A, B_u)`` plant matrices.
+        """
         # Row advance: z+ = z @ K.T + u @ B  →  x+ = K x + B.T u
         k = self._operator.K.detach().cpu().numpy().astype(np.float64)
         b_row = self._operator.B.detach().cpu().numpy().astype(np.float64)
+        if self._operator.control_mode == "bilinear" and linearization is not None:
+            coupling = (
+                self._operator.bilinear_matrices()
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float64)
+            )
+            k = k + np.einsum("c,cij->ij", linearization, coupling)
         return k, b_row.T
 
     def solve(
@@ -529,24 +542,36 @@ class KoopmanMPC:
             stage_margins = _conformal_stage_margins(
                 self._tightening, horizon=self.horizon
             )
-        p_mat, q_vec, a_ineq, l_vec, u_vec = assemble_condensed_mpc(
-            a_mat=a_mat,
-            b_mat=b_mat,
-            c_mat=c_mat,
-            x0=mean_z.detach().cpu().numpy().astype(np.float64),
-            references=refs,
-            q_cost=self.Q,
-            r_cost=self.R,
-            qf_cost=self.Qf,
-            u_min=self.u_min,
-            u_max=self.u_max,
-            y_min=self.y_min,
-            y_max=self.y_max,
-            stage_margins=stage_margins,
-        )
-        u_star = solve_dense_qp(p_mat, q_vec, a_ineq, l_vec, u_vec)
         control_dim = self._operator.control_dim
-        first = u_star[:control_dim].copy()
+        u_lin = np.zeros(control_dim, dtype=np.float64)
+        iters = (
+            self.bilinear_qp_iters if self._operator.control_mode == "bilinear" else 1
+        )
+        first = u_lin.copy()
+        for _ in range(iters):
+            a_mat, b_mat = self._plant_matrices(
+                linearization=u_lin
+                if self._operator.control_mode == "bilinear"
+                else None
+            )
+            p_mat, q_vec, a_ineq, l_vec, u_vec = assemble_condensed_mpc(
+                a_mat=a_mat,
+                b_mat=b_mat,
+                c_mat=c_mat,
+                x0=mean_z.detach().cpu().numpy().astype(np.float64),
+                references=refs,
+                q_cost=self.Q,
+                r_cost=self.R,
+                qf_cost=self.Qf,
+                u_min=self.u_min,
+                u_max=self.u_max,
+                y_min=self.y_min,
+                y_max=self.y_max,
+                stage_margins=stage_margins,
+            )
+            u_star = solve_dense_qp(p_mat, q_vec, a_ineq, l_vec, u_vec)
+            first = u_star[:control_dim].copy()
+            u_lin = first
         if self.u_min is not None:
             first = np.maximum(first, self.u_min)
         if self.u_max is not None:

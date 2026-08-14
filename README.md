@@ -43,17 +43,17 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 
 ## Highlights
 
-- **Topology-aware learning** — GCN/GAT/hypergraph encoders and decoders, delay embeddings, dynamic topology, optional self-adaptive edges, and edge weights
-- **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, multiplex / typed hetero (`koopman="hetero_graph"` with RelGraph), global/local, and continuous-graph operators, with soft or structural stability modes
-- **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, and checkpointing
-- **Spectral analysis** — eigendecomposition, mode shapes, dynamical similarity, anomaly helpers, SINDy, and spectral clustering
-- **Control and adaptation** — additive/bilinear control, Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
-- **Research tooling** — classical DMD-family baselines, lightweight GNN teaching baselines, conformal UQ, and reproducible graph benchmarks
-- **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, and Ray ensemble helpers under `koopman_graph.distributed` (power-user; compose with homo or hetero models; see [installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) extras `lightning` / `ray` / `distributed`)
+- **Topology-aware learning** — GCN/GAT/hypergraph encoders and decoders, delay embeddings, dynamic topology, optional self-adaptive edges, sheaf / cell / simplicial lifts, and a predicted-topology head (distinct from static AdaptiveAdjacency)
+- **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, multiplex hetero, global/local, Hodge-structured, switched, and mixture operators, with soft, structural, stochastic, or symplectic parameterizations
+- **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, checkpointing, and restricted `torch.export` / TorchScript (fixed-topology homogeneous MVP)
+- **Spectral analysis** — eigendecomposition, mode shapes, finite ResDMD on `evaluate`, Kronecker dispersion, dynamical similarity, anomaly helpers, and optional 0-d TDA extras
+- **Control and adaptation** — additive/bilinear control, iterated-QP Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
+- **Research tooling** — classical DMD-family baselines, teaching GNN ports plus LibCity/BasicTS leaderboard adapters, GraphVAMP / alanine-dipeptide teaching fetch, conformal UQ, and a $K^2$ VAE MVP
+- **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, Ray ensemble helpers, opt-in multi-node Ray recipe (`KOOPMAN_GRAPH_MULTINODE=1`), and in-tree FedAvg (`[federated]`)
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
 
-**Scope.** KoopmanGraph targets topology-aware Koopman autoencoders on graphs and hypergraphs, not traffic-forecasting leaderboards or full simplicial/Hodge / TopologicX parity. Optional GraphVAMP and synthetic molecular helpers are teaching / diagnostic paths — not Folding@home-scale MD or a PyEMMA replacement. Measured limits (transfer, factorization cost, residual diagnostics, UQ assumptions) are consolidated in [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html).
+**Scope.** KoopmanGraph targets topology-aware Koopman autoencoders on graphs and hypergraphs. Leaderboard adapters follow named protocols; they are not dedicated-library SOTA. Sheaf / cell / Hodge / TopologicX-bridge paths keep a linear Koopman head. GraphVAMP and the alanine-dipeptide fetch are teaching / diagnostic — not Folding@home-scale MD. Measured limits (finite ResDMD, restricted export, federated-not-DP, conservation on $K$ not decoded $x$) are consolidated in [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html).
 
 ## Installation
 
@@ -101,6 +101,18 @@ print(f"K eigenvalues: {tuple(spectrum.eigenvalues.shape)}")
 print(f"Top |λ|: {spectrum.magnitudes[:3].tolist()}")
 ```
 
+The constructor factory-builds a discrete per-node `KoopmanOperator`. Pass `koopman="graph"` when `edge_index` should enter the linear step (defaults are otherwise unchanged):
+
+```python
+graph_model = GraphKoopmanModel(
+    encoder=encoder,
+    decoder=decoder,
+    latent_dim=64,
+    time_step=0.1,
+    koopman="graph",
+)
+```
+
 Expected output:
 
 ```text
@@ -138,11 +150,10 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies, install paths, and CI platforms
 - [CLI](https://koopmangraph.readthedocs.io/en/latest/cli.html) — `koopman-graph train` / `predict` config workflow
 - [SECURITY.md](SECURITY.md) — supported versions and checkpoint trust boundaries
-- What’s new in 0.13.0: default `safetensors_v1` checkpoints (legacy pickle via
-  `format="legacy_pt"`), fit callbacks / CSV–TensorBoard tracking, config-driven
-  CLI, thin Ray Tune helpers, homogeneous `explain_representation` MVP, and
-  Ubuntu 3.10–3.12 plus macOS core-smoke CI — see [CHANGELOG.md](CHANGELOG.md).
-  Portable TorchScript / ONNX export is not shipped in this release.
+- What’s new in 0.14.0: opt-in stochastic / symplectic $K$, switched /
+  mixture / Hodge operators, equivariant block $K$, leaderboard adapters,
+  restricted `torch.export` / TorchScript, wired finite ResDMD, and TDA /
+  federated extras — defaults unchanged vs 0.13.0; see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -167,7 +178,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21909350},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.13.0},
+  version      = {0.14.0},
 }
 ```
 

@@ -80,7 +80,22 @@ from koopman_graph.training.history import (
 )
 from koopman_graph.training.loop import bind_pending_orbit_ties, resolve_lr_scheduler
 
-__all__ = ["run_ray_train_fit_loop"]
+__all__ = ["run_ray_train_fit_loop", "multinode_recipe_enabled"]
+
+
+def multinode_recipe_enabled() -> bool:
+    """Return whether opt-in multi-node smoke is requested.
+
+    Default CI stays single-process. Set ``KOOPMAN_GRAPH_MULTINODE=1`` to
+    enable the documented ``torchrun`` / Ray Train multi-node recipe.
+
+    Returns
+    -------
+    bool
+        ``True`` when the opt-in flag is set.
+    """
+    return os.environ.get("KOOPMAN_GRAPH_MULTINODE") == "1"
+
 
 _RAY_INSTALL_HINT = 'pip install "koopman-graph[ray]"'
 _RESULT_FILENAME = "ray_train_result.pt"

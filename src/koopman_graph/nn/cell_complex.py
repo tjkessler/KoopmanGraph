@@ -49,8 +49,8 @@ from koopman_graph.observables import (
 
 DecoderFn = Callable[[Tensor, Tensor, Tensor | None], Tensor]
 
-# Teaching MVP: 0-/1-/2-cells only.
-MAX_CELL_COMPLEX_DEGREE = 2
+# Teaching MVP: 0-/1-/2-cells, optional 3-cells via tetra_index.
+MAX_CELL_COMPLEX_DEGREE = 3
 
 
 def _validate_degree(k: int) -> None:
@@ -70,7 +70,7 @@ def _validate_degree(k: int) -> None:
         msg = (
             f"cell-complex degree k must be in "
             f"[0, {MAX_CELL_COMPLEX_DEGREE}], got {k}; "
-            f"teaching MVP supports 0-/1-/2-cells only"
+            f"teaching MVP supports 0-/1-/2-cells and optional 3-cells"
         )
         raise ValueError(msg)
 
@@ -93,6 +93,7 @@ class CellComplex:
     num_nodes: int
     edge_index: Tensor
     face_index: Tensor | None = None
+    tetra_index: Tensor | None = None
 
     def __post_init__(self) -> None:
         """Validate topology tensors and freeze cloned copies.
@@ -125,6 +126,17 @@ class CellComplex:
         else:
             faces = coerce_face_index(self.face_index, num_nodes=self.num_nodes)
         object.__setattr__(self, "face_index", faces)
+        if self.tetra_index is None:
+            tets = torch.empty((4, 0), dtype=torch.long, device=edges.device)
+        else:
+            tets = self.tetra_index.to(dtype=torch.long).detach().clone()
+            if tets.ndim != 2 or tets.shape[0] != 4:
+                msg = (
+                    "tetra_index must have shape (4, num_tets), "
+                    f"got {tuple(tets.shape)}"
+                )
+                raise ValueError(msg)
+        object.__setattr__(self, "tetra_index", tets)
         _validate_undirected_edges_unique(self.edge_index)
 
     @property
@@ -150,25 +162,40 @@ class CellComplex:
         assert self.face_index is not None
         return int(self.face_index.shape[1])
 
+    @property
+    def num_tets(self) -> int:
+        """Number of optional tetrahedral 3-cells.
+
+        Returns
+        -------
+        int
+            Count of columns in ``tetra_index``, or ``0`` when absent.
+        """
+        if self.tetra_index is None:
+            return 0
+        return int(self.tetra_index.shape[1])
+
     def num_cells(self, k: int) -> int:
         """Return the number of ``k``-cells.
 
         Parameters
         ----------
         k : int
-            Cell degree in ``{0, 1, 2}``.
+            Cell degree in ``{0, 1, 2, 3}``.
 
         Returns
         -------
         int
-            Count of ``k``-cells.
+            Number of ``k``-cells.
         """
         _validate_degree(k)
         if k == 0:
             return self.num_nodes
         if k == 1:
             return self.num_edges
-        return self.num_faces
+        if k == 2:
+            return self.num_faces
+        return self.num_tets
 
 
 def _validate_undirected_edges_unique(edge_index: Tensor) -> None:
@@ -289,6 +316,8 @@ def boundary_operator(complex_: CellComplex, k: int) -> Tensor:
             complex_.edge_index,
             num_nodes=complex_.num_nodes,
         )
+    if k == 3:
+        return _boundary_b3(complex_)
     assert complex_.face_index is not None
     num_edges = complex_.num_edges
     num_faces = complex_.num_faces
@@ -319,6 +348,53 @@ def boundary_operator(complex_: CellComplex, k: int) -> Tensor:
     return incidence
 
 
+def _boundary_b3(complex_: CellComplex) -> Tensor:
+    """Build ``B_3`` with shape ``(n_faces, n_tets)``.
+
+    Each tetrahedron ``(a, b, c, d)`` contributes the four triangular faces
+    ``(a,b,c)``, ``(a,b,d)``, ``(a,c,d)``, ``(b,c,d)`` with alternating sign.
+    Missing faces raise.
+
+    Parameters
+    ----------
+    complex_ : CellComplex
+        Oriented cell complex with optional ``tetra_index``.
+
+    Returns
+    -------
+    Tensor
+        Incidence of shape ``(n_faces, n_tets)``.
+    """
+    device = complex_.edge_index.device
+    num_faces = complex_.num_faces
+    num_tets = complex_.num_tets
+    incidence = torch.zeros(num_faces, num_tets, dtype=torch.float32, device=device)
+    if num_tets == 0 or complex_.tetra_index is None:
+        return incidence
+    faces = complex_.face_index
+    assert faces is not None
+    lookup: dict[tuple[int, int, int], int] = {}
+    for f in range(num_faces):
+        key = tuple(sorted((int(faces[0, f]), int(faces[1, f]), int(faces[2, f]))))
+        lookup[key] = f  # type: ignore[assignment]
+    tets = complex_.tetra_index
+    face_sets = (
+        (0, 1, 2, 1.0),
+        (0, 1, 3, -1.0),
+        (0, 2, 3, 1.0),
+        (1, 2, 3, -1.0),
+    )
+    for t in range(num_tets):
+        verts = [int(tets[i, t]) for i in range(4)]
+        for i, j, k, sign in face_sets:
+            key = tuple(sorted((verts[i], verts[j], verts[k])))
+            if key not in lookup:
+                msg = f"tetra {t} face {key} is missing from face_index"
+                raise ValueError(msg)
+            incidence[lookup[key], t] += sign  # type: ignore[index]
+    return incidence
+
+
 def hodge_laplacian(complex_: CellComplex, k: int) -> Tensor:
     """Return the dense Hodge Laplacian ``L_k`` of shape ``(n_k, n_k)``.
 
@@ -326,16 +402,15 @@ def hodge_laplacian(complex_: CellComplex, k: int) -> Tensor:
 
         L_k = B_k^T B_k + B_{k+1} B_{k+1}^T
 
-    with ``B_3 = 0`` (no 3-cells in the MVP). For ``k = 0`` this is the
-    combinatorial graph Laplacian ``B_1 B_1^T``, matching
-    :func:`~koopman_graph.observables.simplicial_one_laplacian_matvec`.
+    with ``B_4 = 0``. Empty ``tetra_index`` keeps ``B_3`` empty so ``L_2``
+    matches the 2-cell MVP.
 
     Parameters
     ----------
     complex_ : CellComplex
         Oriented cell complex.
     k : int
-        Form degree in ``{0, 1, 2}``.
+        Form degree in ``{0, 1, 2, 3}``.
 
     Returns
     -------
@@ -345,7 +420,7 @@ def hodge_laplacian(complex_: CellComplex, k: int) -> Tensor:
     Raises
     ------
     ValueError
-        If ``k`` is outside the teaching MVP range.
+        If ``k`` is outside ``[0, MAX_CELL_COMPLEX_DEGREE]``.
     """
     _validate_degree(k)
     b_k = boundary_operator(complex_, k)
@@ -368,14 +443,14 @@ def hodge_laplacian_matvec(
     For ``k = 0``, delegates to
     :func:`~koopman_graph.observables.simplicial_one_laplacian_matvec` so the
     0.10 simplicial path is not duplicated. For ``k ∈ {1, 2}`` uses the dense
-    :func:`hodge_laplacian`.
+    :func:`hodge_laplacian`. For ``k = 3`` uses dense ``L_3``.
 
     Parameters
     ----------
     complex_ : CellComplex
         Oriented cell complex.
     k : int
-        Form degree in ``{0, 1, 2}``.
+        Form degree in ``{0, 1, 2, 3}``.
     x : Tensor
         Cochain features ``(n_k, channels)`` or ``(n_k,)``.
 

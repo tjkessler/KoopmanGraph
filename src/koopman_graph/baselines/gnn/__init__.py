@@ -32,13 +32,21 @@ PEMS/METR traffic forecaster); ``[baselines-graphcast]`` is reserved.
 """
 
 from koopman_graph.baselines.gnn.agcrn import AGCRNBaseline
+from koopman_graph.baselines.gnn.attention import STAEformerBaseline
 from koopman_graph.baselines.gnn.dcrnn import DCRNNBaseline
 from koopman_graph.baselines.gnn.graphcast import GraphCastBaseline
+from koopman_graph.baselines.gnn.leaderboard import (
+    LeaderboardProtocol,
+    metr_la_leaderboard_protocol,
+    multi_seed_summary,
+    pems_leaderboard_protocol,
+)
 from koopman_graph.baselines.gnn.mtgnn import MTGNNBaseline
 from koopman_graph.baselines.gnn.protocol import (
     EmptyProtocolDeviationsError,
     ForecasterProtocol,
 )
+from koopman_graph.baselines.gnn.ssm import SpatiotemporalSSMBaseline
 from koopman_graph.baselines.gnn.stgcn import STGCNBaseline
 from koopman_graph.baselines.gnn.stgode import STGODEBaseline
 from koopman_graph.baselines.gnn.wavenet import GraphWaveNetBaseline
@@ -52,6 +60,8 @@ TEACHING_BASELINES: tuple[type, ...] = (
     MTGNNBaseline,
     STGODEBaseline,
     GraphCastBaseline,
+    STAEformerBaseline,
+    SpatiotemporalSSMBaseline,
 )
 
 __all__ = [
@@ -61,8 +71,14 @@ __all__ = [
     "ForecasterProtocol",
     "GraphCastBaseline",
     "GraphWaveNetBaseline",
+    "LeaderboardProtocol",
     "MTGNNBaseline",
+    "STAEformerBaseline",
     "STGCNBaseline",
     "STGODEBaseline",
+    "SpatiotemporalSSMBaseline",
     "TEACHING_BASELINES",
+    "metr_la_leaderboard_protocol",
+    "multi_seed_summary",
+    "pems_leaderboard_protocol",
 ]

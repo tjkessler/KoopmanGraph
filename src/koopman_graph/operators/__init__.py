@@ -82,6 +82,21 @@ Capability layout
     :class:`~koopman_graph.operators.continuous_hetero.ContinuousHeteroGraphKoopmanOperator`
     (continuous multiplex / typed relational generator; ``koopman="hetero_graph"``
     + ``dynamics_mode="continuous"``).
+``switched``
+    :class:`~koopman_graph.operators.switched.SwitchedKoopmanOperator`
+    (finite bank of LTI maps; ``koopman="switched"``).
+``mixture``
+    :class:`~koopman_graph.operators.mixture.MixtureKoopmanOperator`
+    (softmax mixture of LTI maps; ``koopman="mixture"``).
+``hodge``
+    :class:`~koopman_graph.operators.hodge.HodgeKoopmanOperator`
+    (Laplacian-structured neighbor term; ``koopman="hodge"``).
+``equivariant``
+    :class:`~koopman_graph.operators.equivariant.EquivariantKoopmanOperator`
+    (scalar plus vector blocks; ``[equivariance]``).
+``graphon``
+    :func:`~koopman_graph.operators.graphon.sample_graphon_adjacency`
+    for transfer experiments at multiple :math:`N`.
 
 Prefer ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
@@ -130,6 +145,7 @@ from koopman_graph.operators.contract import (
 )
 from koopman_graph.operators.control import ControlMode
 from koopman_graph.operators.discrete import KoopmanOperator
+from koopman_graph.operators.equivariant import EquivariantKoopmanOperator
 from koopman_graph.operators.global_local import (
     DEFAULT_LOCAL_HIDDEN_DIMS,
     DEFAULT_LOCAL_RANK,
@@ -141,7 +157,9 @@ from koopman_graph.operators.global_local import (
 )
 from koopman_graph.operators.graph import GraphKoopmanOperator
 from koopman_graph.operators.graph_types import GraphAdjacency, GraphSparsity
+from koopman_graph.operators.graphon import sample_graphon_adjacency
 from koopman_graph.operators.heterogeneous import HeteroGraphKoopmanOperator
+from koopman_graph.operators.hodge import HodgeKoopmanOperator
 from koopman_graph.operators.hypergraph import (
     HypergraphKoopmanOperator,
     HypergraphSparsity,
@@ -156,18 +174,27 @@ from koopman_graph.operators.matrix_free import (
     MatrixFreeSpectrumResult,
     apply_k_eff_graph,
     apply_k_eff_hetero,
+    apply_k_eff_hypergraph,
     flatten_node_latents,
     invert_k_eff_graph,
     invert_k_eff_hetero,
+    invert_k_eff_hypergraph,
     spectrum_k_eff_graph,
     spectrum_k_eff_hetero,
+    spectrum_k_eff_hypergraph,
     unflatten_node_latents,
 )
+from koopman_graph.operators.mixture import MixtureKoopmanOperator
+from koopman_graph.operators.sparse_backend import sparse_leading_eigenvalues
 from koopman_graph.operators.stochastic import (
     apply_process_noise,
     attach_process_noise,
     diagonal_process_covariance,
     maybe_apply_process_noise,
+)
+from koopman_graph.operators.switched import (
+    DEFAULT_NUM_MODES,
+    SwitchedKoopmanOperator,
 )
 
 __all__ = [
@@ -186,14 +213,17 @@ __all__ = [
     "DEFAULT_MATRIX_FREE_INVERSE_MAX_ITERS",
     "DEFAULT_MATRIX_FREE_INVERSE_TOL",
     "DEFAULT_MATRIX_FREE_SPECTRUM_TOL",
+    "DEFAULT_NUM_MODES",
     "DISSIPATIVE_MIN_EIGENVALUE",
     "DynamicsMode",
+    "EquivariantKoopmanOperator",
     "GeneratorParameterization",
     "GlobalLocalKoopmanOperator",
     "GraphAdjacency",
     "GraphKoopmanOperator",
     "GraphSparsity",
     "HeteroGraphKoopmanOperator",
+    "HodgeKoopmanOperator",
     "HypergraphKoopmanOperator",
     "HypergraphSparsity",
     "InitMode",
@@ -202,12 +232,15 @@ __all__ = [
     "KoopmanOperatorContract",
     "MatrixFreeInverseResult",
     "MatrixFreeSpectrumResult",
+    "MixtureKoopmanOperator",
     "Parameterization",
     "STABILITY_EPS_MARGIN",
     "StabilityCertificate",
+    "SwitchedKoopmanOperator",
     "VAN_LOAN_WRITEBACK_ATOL",
     "apply_k_eff_graph",
     "apply_k_eff_hetero",
+    "apply_k_eff_hypergraph",
     "apply_process_noise",
     "assemble_block_diagonal_generator",
     "attach_process_noise",
@@ -218,6 +251,7 @@ __all__ = [
     "flatten_node_latents",
     "invert_k_eff_graph",
     "invert_k_eff_hetero",
+    "invert_k_eff_hypergraph",
     "matrix_log",
     "maybe_apply_process_noise",
     "normalize_auxiliary_hidden_dims",
@@ -225,9 +259,12 @@ __all__ = [
     "pad_latent_window",
     "resolve_factory_stability_bound",
     "safe_diagonal_inverse",
+    "sample_graphon_adjacency",
+    "sparse_leading_eigenvalues",
     "spectral_output_dim",
     "spectrum_k_eff_graph",
     "spectrum_k_eff_hetero",
+    "spectrum_k_eff_hypergraph",
     "stack_latent_window",
     "strict_diagonal_values",
     "strict_spectral_bound",

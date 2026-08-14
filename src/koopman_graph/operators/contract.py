@@ -16,6 +16,9 @@ Parameterization = Literal[
     "dissipative",
     "lyapunov",
     "auxiliary_spectral",
+    "row_stochastic",
+    "doubly_stochastic",
+    "symplectic",
 ]
 #: Canonical dynamics vocabulary. Re-exported from
 #: :mod:`koopman_graph.protocols` as :data:`~koopman_graph.protocols.DynamicsMode`.
@@ -30,6 +33,9 @@ KoopmanKind = Literal[
     "hetero_graph",
     "global_local",
     "continuous_graph",
+    "switched",
+    "mixture",
+    "hodge",
 ]
 
 STABILITY_EPS_MARGIN = 1e-4

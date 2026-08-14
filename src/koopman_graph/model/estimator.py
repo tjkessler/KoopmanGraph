@@ -2046,6 +2046,7 @@ class GraphKoopmanModel(nn.Module):
         *,
         horizons: Sequence[int] = (3, 6, 12),
         start_indices: Sequence[int] | None = None,
+        include_resdmd: bool = False,
     ) -> EvaluationResult:
         """Evaluate multi-horizon forecast accuracy on a snapshot sequence.
 
@@ -2064,6 +2065,9 @@ class GraphKoopmanModel(nn.Module):
         start_indices : sequence of int or None, optional
             Forecast-origin indices. When ``None``, uses every valid origin in
             ``sequence``.
+        include_resdmd : bool, optional
+            When ``True``, attach a finite-dictionary ResDMD report from
+            frozen encodings. Default is ``False``.
 
         Returns
         -------
@@ -2075,6 +2079,7 @@ class GraphKoopmanModel(nn.Module):
             sequence,
             horizons=horizons,
             start_indices=start_indices,
+            include_resdmd=include_resdmd,
         )
 
     def fit(

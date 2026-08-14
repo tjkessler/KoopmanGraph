@@ -220,6 +220,9 @@ class EvaluationResult:
         Mean of per-horizon MAPE values.
     num_origins : int
         Number of forecast origins averaged over.
+    resdmd : object or None
+        Optional finite-dictionary :class:`~koopman_graph.analysis.ResDMDReport`
+        when ``include_resdmd=True``.
     """
 
     horizons: tuple[HorizonMetrics, ...]
@@ -227,6 +230,7 @@ class EvaluationResult:
     aggregate_rmse: float
     aggregate_mape: float
     num_origins: int
+    resdmd: object | None = None
 
 
 def _hetero_eval_feature_vector(
@@ -347,12 +351,42 @@ def _resolve_evaluate_sequence(
     raise TypeError(msg)
 
 
+def _identity_resdmd(model: TrainableKoopmanModel, sequence: GraphSnapshotSequence):
+    """Finite-dictionary ResDMD on frozen encodings (identity dictionary).
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``encode``.
+    sequence : GraphSnapshotSequence
+        Homogeneous snapshots.
+
+    Returns
+    -------
+    object or None
+        :class:`~koopman_graph.analysis.ResDMDReport` when encodings are
+        available and ``T >= 3``; otherwise ``None``.
+    """
+    encode = getattr(model, "encode", None)
+    if encode is None or sequence.num_timesteps < 3:
+        return None
+    rows = []
+    for index in range(sequence.num_timesteps):
+        latent = encode(sequence[index])
+        rows.append(latent.reshape(1, -1).detach())
+    stacked = torch.cat(rows, dim=0)
+    from koopman_graph.analysis.resdmd import resdmd
+
+    return resdmd(stacked[:-1], stacked[1:])
+
+
 def _pack_evaluation_result(
     horizons: Sequence[int],
     mae_sums: dict[int, float],
     rmse_sums: dict[int, float],
     mape_sums: dict[int, float],
     origins: Sequence[int],
+    resdmd: object | None = None,
 ) -> EvaluationResult:
     """Assemble per-horizon averages into :class:`EvaluationResult`.
 
@@ -364,6 +398,8 @@ def _pack_evaluation_result(
         Accumulated metric sums keyed by horizon.
     origins : sequence of int
         Forecast origins used for averaging.
+    resdmd : object or None, optional
+        Optional finite-dictionary ResDMD report.
 
     Returns
     -------
@@ -389,6 +425,7 @@ def _pack_evaluation_result(
         aggregate_mape=sum(metric.mape for metric in horizon_metrics)
         / len(horizon_metrics),
         num_origins=num_origins,
+        resdmd=resdmd,
     )
 
 
@@ -398,6 +435,7 @@ def evaluate_forecast(
     *,
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
+    include_resdmd: bool = False,
 ) -> EvaluationResult:
     """Evaluate autoregressive multi-horizon forecasts on a snapshot sequence.
 
@@ -429,6 +467,9 @@ def evaluate_forecast(
     start_indices : sequence of int or None, optional
         Forecast-origin indices. When ``None``, uses every valid origin in
         ``sequence``.
+    include_resdmd : bool, optional
+        When ``True``, attach a finite-dictionary ResDMD report from frozen
+        encodings. Default is ``False``.
 
     Returns
     -------
@@ -465,6 +506,7 @@ def evaluate_forecast(
         resolved,
         horizons=sorted_horizons,
         start_indices=start_indices,
+        include_resdmd=include_resdmd,
     )
 
 
@@ -474,6 +516,7 @@ def _evaluate_homogeneous_forecast(
     *,
     horizons: Sequence[int],
     start_indices: Sequence[int] | None,
+    include_resdmd: bool = False,
 ) -> EvaluationResult:
     """Homogeneous multi-horizon evaluate path.
 
@@ -487,6 +530,8 @@ def _evaluate_homogeneous_forecast(
         Sorted unique horizons.
     start_indices : sequence of int or None
         Explicit origins, or ``None`` for all valid origins.
+    include_resdmd : bool, optional
+        Attach finite-dictionary ResDMD when ``True``.
 
     Returns
     -------
@@ -572,7 +617,10 @@ def _evaluate_homogeneous_forecast(
     finally:
         model.train(was_training)
 
-    return _pack_evaluation_result(horizons, mae_sums, rmse_sums, mape_sums, origins)
+    report = _identity_resdmd(model, sequence) if include_resdmd else None
+    return _pack_evaluation_result(
+        horizons, mae_sums, rmse_sums, mape_sums, origins, resdmd=report
+    )
 
 
 def _evaluate_hetero_forecast(

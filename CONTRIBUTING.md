@@ -175,8 +175,11 @@ ruff format src/ tests/
 
 ## Testing and coverage requirements
 
-All contributions that change behavior must include appropriate tests in the
-`tests/` directory.
+All contributions that change behavior must include appropriate tests under
+`tests/`, in the subdirectory that matches the `src/koopman_graph/` package
+under test (for example `tests/operators/` for operator modules). Package-level
+checks live in `tests/package/`. Use `tests.helpers.REPO_ROOT` for
+repository-relative paths so tests remain correct at any subdirectory depth.
 
 - **New features** should include unit or integration tests demonstrating
   correct behavior and, where applicable, gradient flow or shape contracts.

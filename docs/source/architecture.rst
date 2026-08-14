@@ -451,8 +451,18 @@ power-user losses stay package imports outside root ``__all__``.
   ``training.loop.bind_pending_orbit_ties``. Rectangular hetero orbits
   remain unsupported. Opt-in ``koopman_symmetry="isotypic"`` (exact
   automorphism groups; :mod:`koopman_graph.graph_utils.representation`)
-  ties self-block isotypic projectors; neighbor-factor isotypic tying is
-  not shipped (see :doc:`limitations`).
+  ties self-block isotypic projectors. Opt-in neighbor-factor isotypic /
+  orbit banks apply the same per-orbit maps after the adjacency matvec
+  (see :doc:`limitations` for remaining Aut-consistency ceilings).
+* ``switched`` / ``mixture`` — piecewise-linear or convex-combination
+  discrete maps (``koopman="switched"`` / ``"mixture"``). Default
+  per-node advance remains linear time-invariant; these kinds are opt-in.
+* ``hodge`` — Laplacian-structured networked generator
+  (``koopman="hodge"``).
+* ``equivariant`` — block scalar/vector latent operator under
+  ``[equivariance]`` (not the factory default).
+* ``graphon`` — graphon-sampled adjacency helper for transfer experiments
+  (power-user).
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
@@ -2759,12 +2769,80 @@ cut for this release (see :doc:`limitations`).
      - Homogeneous MVP; interpretive / non-causal; ≠ ResDMD /
        ``ModeEnergyAttribution``
 
+v0.14.0 capability architecture
+-------------------------------
+
+Honesty-to-capability surfaces keep homogeneous **defaults** unchanged
+(``koopman=None`` → ``"pernode"``, ``sparsity="dense"``, AMP off, linear
+time-invariant per-node advance). New operator families, extras, and
+evaluation helpers are **opt-in**. Switched and mixture maps are
+piecewise linear (each mode remains a linear map).
+
+**Shipped capability list (0.14 peers)**
+
+* Structure-preserving discrete parameterizations
+  ``row_stochastic`` / ``doubly_stochastic`` / ``symplectic``
+* Bilinear iterated-QP :class:`~koopman_graph.mpc.KoopmanMPC` (per-node
+  discrete; local linearization honesty unchanged)
+* ``koopman="switched"`` / ``"mixture"`` / ``"hodge"``
+* :class:`~koopman_graph.nn.predicted_topology.PredictedTopologyHead`
+  (AdaptiveAdjacency remains static Graph WaveNet)
+* Equivariant latent :math:`K` under ``[equivariance]``; isotypic
+  neighbor-factor banks
+* Cell-complex degree cap 3; sheaf ``restriction_maps="general"`` remains
+  available under the existing channel ceiling
+* TopologicX incidence bridge (``[tdl]``);
+  :mod:`koopman_graph.analysis.tda` 0-dimensional persistence
+* Matrix-free hypergraph / continuous-graph distributed path; partitioned
+  subgraph sampler; growable :math:`N_{\max}` remap
+* Optional ResDMD attachment on ``evaluate``; Kronecker dispersion helper;
+  optional ``[control-lmi]``; Granger-style causal MVP
+* :class:`~koopman_graph.baselines.gnn.LeaderboardProtocol` (distinct from
+  teaching :class:`~koopman_graph.baselines.gnn.ForecasterProtocol`)
+* Restricted :mod:`koopman_graph.export`; :mod:`koopman_graph.federated`;
+  :mod:`koopman_graph.robustness`; :mod:`koopman_graph.probabilistic`
+
+**Capability and API-tier map (0.14 peers)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 18 58
+
+   * - Capability home
+     - API tier
+     - Contracts to preserve
+   * - Stochastic / symplectic ``Parameterization``
+     - Package (discrete orchestrator)
+     - Conserves parameterized :math:`K`, not decoded :math:`x`
+   * - Switched / mixture operators
+     - Package / factory kinds
+     - Opt-in; default LTI per-node unchanged
+   * - Predicted topology head
+     - Package
+     - Distinct from static AdaptiveAdjacency
+   * - Equivariant :math:`K`
+     - Power-user (``[equivariance]``)
+     - Vector blocks are multiples of :math:`I`
+   * - TDA / TDL interop
+     - Power-user extras
+     - Not a TDA library or TopologicX replacement
+   * - :mod:`koopman_graph.export`
+     - Power-user
+     - Fixed-topology discrete homogeneous MVP
+   * - Leaderboard protocol
+     - Package
+     - Protocol-matched adapters are not teaching ports and not SOTA
+   * - Federated / robustness / probabilistic
+     - Power-user extras
+     - FedAvg is not DP; FDI is data-integrity; VAE is not Laplace UQ
+
 Related documentation
 ---------------------
 
 * :doc:`api` — module-level API reference
 * :doc:`capabilities` — feature inventory
 * :doc:`limitations` — scope boundaries and when not to use
+* :doc:`graphon` — graphon sampling and continuum-limit citations
 * :doc:`quickstart` — end-user training and prediction walkthrough
 * :doc:`cli` — config-driven console script
 * :doc:`faq` — install / import / checkpoint troubleshooting and support routing

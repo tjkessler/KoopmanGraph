@@ -29,13 +29,9 @@ Capability layout
     :class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
     :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`
     (diagonal restriction maps by default; opt-in general maps).
-``sheaf``
-    :class:`~koopman_graph.nn.sheaf.SheafGNNEncoder` /
-    :class:`~koopman_graph.nn.sheaf.SheafGNNDecoder`
-    (diagonal restriction maps by default; opt-in general maps).
 ``cell_complex``
     :class:`~koopman_graph.nn.cell_complex.CellComplex` with boundary /
-    Hodge helpers ``B_k`` / ``L_k`` for ``k ∈ {0, 1, 2}``, plus
+    Hodge helpers ``B_k`` / ``L_k`` for ``k ∈ {0, 1, 2, 3}``, plus
     :class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
     :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`
     (factory ``encoder="cell_complex"``).
@@ -43,8 +39,16 @@ Capability layout
     :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
     (Tier A invariant distance/angle features from ``Data.pos``) and optional
     :class:`~koopman_graph.nn.equivariant.E3EquivariantEncoder` (Tier B
-    ``e3nn`` / ``[equivariance]``; steerable encode to invariant latents; not
+    ``e3nn`` / ``[equivariance]``; default projects to invariant latents;
+    ``project_invariants=False`` keeps steerable vector channels for an
     equivariant ``K``).
+``neural_operator``
+    :class:`~koopman_graph.nn.neural_operator.FourierNeuralOperatorEncoder`
+    (mesh-index Fourier lift; shared ``K`` across discretizations is a
+    teaching MVP).
+``predicted_topology``
+    :class:`~koopman_graph.nn.predicted_topology.PredictedTopologyHead`
+    (next-step edge logits; distinct from static AdaptiveAdjacency).
 ``heterogeneous``
     :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
     :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
@@ -131,6 +135,8 @@ from koopman_graph.nn.hypergraph import (
     HypergraphEncoder,
     bind_hypergraph_decoder,
 )
+from koopman_graph.nn.neural_operator import FourierNeuralOperatorEncoder
+from koopman_graph.nn.predicted_topology import PredictedTopologyHead
 from koopman_graph.nn.sheaf import (
     SheafGNNDecoder,
     SheafGNNEncoder,
@@ -155,6 +161,7 @@ __all__ = [
     "DiffConvEncoder",
     "DiffusionConv",
     "E3EquivariantEncoder",
+    "FourierNeuralOperatorEncoder",
     "GATDecoder",
     "GATEncoder",
     "GEOM_CHANNELS",
@@ -168,6 +175,7 @@ __all__ = [
     "HypergraphEncoder",
     "InvariantGeometryEncoder",
     "MAX_CELL_COMPLEX_DEGREE",
+    "PredictedTopologyHead",
     "RelGraphConv",
     "RelGraphDecoder",
     "RelGraphEncoder",
@@ -177,7 +185,6 @@ __all__ = [
     "SheafGNNEncoder",
     "SimplicialDecoder",
     "SimplicialEncoder",
-    "bind_cell_complex_decoder",
     "bind_cell_complex_decoder",
     "bind_hypergraph_decoder",
     "bind_sheaf_decoder",

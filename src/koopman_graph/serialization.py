@@ -6,7 +6,8 @@ Checkpoint format versions
     Full architecture config for discrete and continuous dynamics, hybrid
     physics observables, control (including bilinear metadata), delay
     embeddings, and built-in operator kinds (per-node / graph / hypergraph /
-    global_local / continuous_graph). Encoder/decoder ``type`` strings include
+    global_local / continuous_graph / switched / mixture / hodge).
+    Encoder/decoder ``type`` strings include
     ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
     ``"hyper_enc"``, ``"hyper_dec"``, ``"sim_enc"``, ``"sim_dec"``,
     ``"sheaf_enc"``, ``"sheaf_dec"``, ``"cell_enc"``, ``"cell_dec"``,
@@ -154,8 +155,11 @@ from koopman_graph.operators import (
     GlobalLocalKoopmanOperator,
     GraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
+    HodgeKoopmanOperator,
     HypergraphKoopmanOperator,
     KoopmanOperator,
+    MixtureKoopmanOperator,
+    SwitchedKoopmanOperator,
     resolve_factory_stability_bound,
 )
 from koopman_graph.protocols import ModeShapeModel
@@ -240,6 +244,9 @@ _SERIALIZABLE_KOOPMAN_TYPES = (
     GlobalLocalKoopmanOperator,
     ContinuousGraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
+    SwitchedKoopmanOperator,
+    MixtureKoopmanOperator,
+    HodgeKoopmanOperator,
 )
 _RESERVED_KOOPMAN_KINDS: dict[str, str] = {}
 
@@ -256,7 +263,7 @@ _RELATION_NORMALIZATION_MODES = frozenset({"rgcn_in_degree", "random_walk"})
 _RELATION_TYING_MODES = frozenset({"independent", "basis"})
 
 
-_NETWORKED_ADJACENCY_KINDS = frozenset({"graph", "continuous_graph"})
+_NETWORKED_ADJACENCY_KINDS = frozenset({"graph", "continuous_graph", "hodge"})
 _GRAPH_ADJACENCY_MODES = frozenset({"symmetric", "random_walk", "dual_random_walk"})
 
 
@@ -868,7 +875,9 @@ def _require_serializable_koopman(model: ModeShapeModel) -> None:
         "Checkpoint serialization supports only built-in KoopmanOperator, "
         "ContinuousKoopmanOperator, GraphKoopmanOperator, "
         "HypergraphKoopmanOperator, GlobalLocalKoopmanOperator, "
-        "ContinuousGraphKoopmanOperator, and HeteroGraphKoopmanOperator "
+        "ContinuousGraphKoopmanOperator, HeteroGraphKoopmanOperator, "
+        "SwitchedKoopmanOperator, MixtureKoopmanOperator, and "
+        "HodgeKoopmanOperator "
         "instances. Custom injected operators are not round-trippable; "
         "save the operator state separately or reconstruct the model with "
         f"koopman=... after load. Got {type(model.koopman).__name__}."
@@ -1130,7 +1139,10 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         ),
         "local_window": (
             int(model.koopman.local_window)
-            if isinstance(model.koopman, GlobalLocalKoopmanOperator)
+            if isinstance(
+                model.koopman,
+                (GlobalLocalKoopmanOperator, MixtureKoopmanOperator),
+            )
             else None
         ),
         "local_rank": (

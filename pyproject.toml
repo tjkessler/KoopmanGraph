@@ -112,6 +112,17 @@ distributed = [
     "ray[train]>=2.9.0",
     "dask[distributed]>=2024.1.0",
 ]
+tda = []
+tdl = []
+export = [
+    "onnx>=1.16.0",
+]
+federated = []
+sparse = []
+control-lmi = [
+    "cvxpy>=1.4.0",
+]
+probabilistic = []
 
 [project.scripts]
 koopman-graph = "koopman_graph.cli:main"
@@ -133,7 +144,8 @@ version = { attr = "koopman_graph.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v"
+pythonpath = ["."]
+addopts = ["-v", "--import-mode=importlib"]
 filterwarnings = [
     "ignore::tqdm.std.TqdmWarning",
 ]
@@ -141,6 +153,7 @@ markers = [
     "distributed: multi-process gloo/DDP smoke (opt-in via KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1)",
     "ray: starts a local Ray / Ray Train runtime (exclude on macOS smoke)",
     "slow: long-running CPU tests reserved for full Ubuntu matrix (exclude on macOS smoke)",
+    "multinode: opt-in multi-node Ray/torchrun smoke (KOOPMAN_GRAPH_MULTINODE=1)",
 ]
 
 [tool.coverage.run]

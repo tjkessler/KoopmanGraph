@@ -53,12 +53,15 @@ from koopman_graph.operators import (
     GraphAdjacency,
     GraphKoopmanOperator,
     HeteroGraphKoopmanOperator,
+    HodgeKoopmanOperator,
     HypergraphKoopmanOperator,
     InitMode,
     KoopmanKind,
     KoopmanOperator,
     KoopmanOperatorContract,
+    MixtureKoopmanOperator,
     Parameterization,
+    SwitchedKoopmanOperator,
 )
 from koopman_graph.operators.auxiliary_spectral import (
     DEFAULT_AUXILIARY_HIDDEN_DIMS,
@@ -946,11 +949,15 @@ def parse_koopman_arg(
             "hetero_graph",
             "global_local",
             "continuous_graph",
+            "switched",
+            "mixture",
+            "hodge",
         }:
             msg = (
                 "koopman string kind must be 'pernode', 'graph', "
-                "'hypergraph', 'hetero_graph', 'global_local', or "
-                f"'continuous_graph', got {koopman!r}"
+                "'hypergraph', 'hetero_graph', 'global_local', "
+                "'continuous_graph', 'switched', 'mixture', or 'hodge', "
+                f"got {koopman!r}"
             )
             raise ValueError(msg)
         return koopman, None
@@ -1143,6 +1150,12 @@ def resolve_injected_koopman(
             "'stochastic'"
         )
         raise ValueError(msg)
+    if (
+        isinstance(koopman, SwitchedKoopmanOperator | MixtureKoopmanOperator)
+        and dynamics_mode != "discrete"
+    ):
+        msg = f"Injected {type(koopman).__name__} requires dynamics_mode='discrete'"
+        raise ValueError(msg)
     if isinstance(koopman, HypergraphKoopmanOperator):
         if dynamics_mode == "stochastic":
             msg = (
@@ -1254,7 +1267,13 @@ def _reject_stochastic_kind(
     ValueError
         If the kind or rectangular hetero layout is unsupported.
     """
-    if kind in {"hypergraph", "global_local", "continuous_graph"}:
+    if kind in {
+        "hypergraph",
+        "global_local",
+        "continuous_graph",
+        "switched",
+        "mixture",
+    }:
         msg = (
             "dynamics_mode='stochastic' supports koopman='pernode', 'graph', "
             f"or shared-d 'hetero_graph'; got koopman={kind!r}"
@@ -1680,10 +1699,16 @@ def build_koopman(
             resolved_kind = "hetero_graph"
         elif isinstance(operator, HypergraphKoopmanOperator):
             resolved_kind = "hypergraph"
+        elif isinstance(operator, HodgeKoopmanOperator):
+            resolved_kind = "hodge"
         elif isinstance(operator, GraphKoopmanOperator):
             resolved_kind = "graph"
         elif isinstance(operator, GlobalLocalKoopmanOperator):
             resolved_kind = "global_local"
+        elif isinstance(operator, SwitchedKoopmanOperator):
+            resolved_kind = "switched"
+        elif isinstance(operator, MixtureKoopmanOperator):
+            resolved_kind = "mixture"
         else:
             resolved_kind = "pernode"
         return operator, resolved_kind
@@ -1696,11 +1721,11 @@ def build_koopman(
         )
 
     if dynamics_mode == "continuous":
-        if kind in {"hypergraph", "global_local"}:
+        if kind in {"hypergraph", "global_local", "switched", "mixture", "hodge"}:
             msg = (
                 f"koopman={kind!r} requires dynamics_mode='discrete'; "
-                "continuous hypergraph / global_local operators are not "
-                "implemented"
+                "continuous hypergraph / global_local / switched / mixture / "
+                "hodge operators are not implemented"
             )
             raise ValueError(msg)
         if kind == "hetero_graph":
@@ -1902,6 +1927,85 @@ def build_koopman(
                 orbit_method=koopman_orbit_method,
             ),
             "hetero_graph",
+            dynamics_mode=dynamics_mode,
+            latent_dim=latent_dim,
+        )
+
+    if kind == "switched":
+        if resolved_aux_dims is not None:
+            msg = (
+                "koopman_auxiliary_hidden_dims requires "
+                "dynamics_mode='continuous' and "
+                "koopman_parameterization='auxiliary_spectral'"
+            )
+            raise ValueError(msg)
+        return _finalize_built_koopman(
+            SwitchedKoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+            ),
+            "switched",
+            dynamics_mode=dynamics_mode,
+            latent_dim=latent_dim,
+        )
+
+    if kind == "mixture":
+        if resolved_aux_dims is not None:
+            msg = (
+                "koopman_auxiliary_hidden_dims requires "
+                "dynamics_mode='continuous' and "
+                "koopman_parameterization='auxiliary_spectral'"
+            )
+            raise ValueError(msg)
+        return _finalize_built_koopman(
+            MixtureKoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+                local_window=koopman_local_window,
+            ),
+            "mixture",
+            dynamics_mode=dynamics_mode,
+            latent_dim=latent_dim,
+        )
+
+    if kind == "hodge":
+        if resolved_aux_dims is not None:
+            msg = (
+                "koopman_auxiliary_hidden_dims requires "
+                "dynamics_mode='continuous' and "
+                "koopman_parameterization='auxiliary_spectral'"
+            )
+            raise ValueError(msg)
+        return _finalize_built_koopman(
+            HodgeKoopmanOperator(
+                latent_dim,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+                sparsity=koopman_sparsity,  # type: ignore[arg-type]
+                adjacency=koopman_adjacency,
+                orbit_partition=koopman_orbit_partition,
+                auto_orbits=koopman_auto_orbits,
+                orbit_method=koopman_orbit_method,
+                isotypic_symmetry=isotypic_symmetry,
+            ),
+            "hodge",
             dynamics_mode=dynamics_mode,
             latent_dim=latent_dim,
         )

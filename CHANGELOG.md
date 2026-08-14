@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-13
+
+Remaining-limits close-out on the 0.13 stack: opt-in operator families,
+analysis extras, scale helpers, protocol-matched evaluation, and restricted
+export. Homogeneous scientific defaults and the linear latent operator
+contract are unchanged (`koopman=None` still selects `"pernode"`).
+
+### Added
+
+- Discrete parameterizations `row_stochastic`, `doubly_stochastic`
+  (finite Sinkhorn), and `symplectic` (even `latent_dim`). Constraints
+  apply to parameterized `K`, not decoded `x`.
+- Bilinear `KoopmanMPC` sequential-linearization (iterated QP) on per-node
+  discrete operators; additive mode still solves one QP.
+- Factory kinds `koopman="switched"`, `"mixture"`, and `"hodge"`, plus
+  `PredictedTopologyHead` (AdaptiveAdjacency remains static Graph WaveNet).
+- Equivariant block `K` (`EquivariantKoopmanOperator`) and
+  `E3EquivariantEncoder(..., project_invariants=False)`; isotypic /
+  orbit neighbor-factor tying.
+- Cell-complex degree cap 3; `[tdl]` TopologicX incidence bridge;
+  `[tda]` 0-d persistence and `PersistenceRegularizer`.
+- Matrix-free hypergraph (Zhou-symmetric) and continuous-graph distributed
+  paths; `scipy.sparse` helper; cluster subgraph sampler; injective
+  `remap_node_features`; opt-in `KOOPMAN_GRAPH_MULTINODE=1` Ray recipe.
+- `evaluate(..., include_resdmd=True)`, `ResDMDFitCallback`, Kronecker
+  dispersion plots, Granger-style causal MVP, optional `[control-lmi]`.
+- `LeaderboardProtocol` (distinct from teaching `ForecasterProtocol`),
+  STAEformer-class and spatiotemporal SSM teaching ports, Fourier neural
+  operator encoder, ERA5-slice card, alanine-dipeptide teaching card.
+- Restricted `koopman_graph.export` (`torch.export` / TorchScript; ONNX
+  behind `[export]`), SVD `K` compression, in-tree FedAvg, FDI feature
+  corruption, and a `K^2` VAE MVP (`[probabilistic]`).
+- Sphinx graphon page plus `sample_graphon_adjacency`.
+
+### Changed
+
+- `explain_representation` accepts delay embeddings and additive control
+  when the explainer algebra is defined (hetero / hypergraph / adaptive
+  remain rejected).
+- README and Sphinx quickstart keep the default constructor and add a
+  second `koopman="graph"` snippet.
+- `limitations.rst` retires closed 0.13 bullets and records new ceilings
+  (finite ResDMD, TDA extra, federated-not-DP, restricted export,
+  leaderboard-not-SOTA, alanine-not-Folding@home).
+- Tests live in subdirectories that follow `src/koopman_graph/` packages.
+  Version-named coverage dump files were split into module-named tests.
+
+### Notes
+
+- New operator kinds round-trip `safetensors_v1`; custom injected modules
+  remain non-round-trippable. `FORMAT_VERSION` stays 1.
+- Export refuses hetero / hypergraph / control / switched. Federated
+  averaging is not DP-SGD. Windows remains out of the CI matrix.
+
 ## [0.13.0] - 2026-08-12
 
 Ops-and-trust release on the 0.12 stack: default safetensors checkpoints,
@@ -675,6 +729,10 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.14.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.13.0...0.14.0
+[0.13.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.12.0...0.13.0
+[0.12.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.11.0...0.12.0
+[0.11.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.10.0...0.11.0
 [0.10.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.9.0...0.10.0
 [0.9.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.8.2...0.9.0
 [0.8.2]: https://github.com/tjkessler/KoopmanGraph/releases/tag/0.8.2

@@ -32,9 +32,12 @@ from koopman_graph.operators.control import (
 )
 from koopman_graph.operators.discrete_parameterizations import (
     assemble_dissipative_matrix,
+    assemble_doubly_stochastic_matrix,
     assemble_lyapunov_matrix,
     assemble_odo_matrix,
+    assemble_row_stochastic_matrix,
     assemble_schur_matrix,
+    assemble_symplectic_matrix,
     dissipative_generator,
     identity_diag_raw,
     identity_strict_diag_raw,
@@ -44,9 +47,11 @@ from koopman_graph.operators.discrete_parameterizations import (
     odo_orthogonal_factors,
     reset_dense_matrix,
     reset_dissipative_matrix,
+    reset_logit_matrix,
     reset_lyapunov_matrix,
     reset_odo_matrix,
     reset_schur_matrix,
+    reset_symplectic_matrix,
     schur_triangular,
 )
 from koopman_graph.operators.discrete_propagation import (
@@ -181,7 +186,8 @@ class KoopmanOperator(nn.Module):
         init_scale : float, optional
             Standard deviation of Gaussian noise added when
             ``init_mode="identity_noise"``. Default is ``1e-2``.
-        parameterization : {"dense", "odo", "schur", "dissipative", "lyapunov"},
+        parameterization : {"dense", "odo", "schur", "dissipative", "lyapunov",
+            "row_stochastic", "doubly_stochastic", "symplectic"},
             optional
             Matrix parameterization. ``"dense"`` stores ``K`` directly with no
             stability guarantee (optional eigenvalue loss during training).
@@ -250,6 +256,12 @@ class KoopmanOperator(nn.Module):
                 "use ContinuousKoopmanOperator (dynamics_mode='continuous')"
             )
             raise ValueError(msg)
+        if parameterization == "symplectic" and latent_dim % 2 != 0:
+            msg = (
+                "parameterization='symplectic' requires even latent_dim, "
+                f"got {latent_dim}"
+            )
+            raise ValueError(msg)
         validate_control_mode(
             control_dim=control_dim,
             control_mode=control_mode,
@@ -285,6 +297,10 @@ class KoopmanOperator(nn.Module):
             self.cayley_Q = nn.Parameter(torch.zeros(latent_dim, latent_dim))
             self.lyap_diag_raw = nn.Parameter(torch.zeros(latent_dim))
             self.lyap_p_raw = nn.Parameter(torch.zeros(latent_dim))
+        elif parameterization in {"row_stochastic", "doubly_stochastic"}:
+            self.logit_raw = nn.Parameter(torch.zeros(latent_dim, latent_dim))
+        elif parameterization == "symplectic":
+            self.symplectic_raw = nn.Parameter(torch.zeros(latent_dim, latent_dim))
         else:
             msg = f"Unknown parameterization: {parameterization!r}"
             raise ValueError(msg)
@@ -401,6 +417,10 @@ class KoopmanOperator(nn.Module):
             return (self.dissipative_L,)
         if self.parameterization == "lyapunov":
             return (self.cayley_Q, self.lyap_diag_raw, self.lyap_p_raw)
+        if self.parameterization in {"row_stochastic", "doubly_stochastic"}:
+            return (self.logit_raw,)
+        if self.parameterization == "symplectic":
+            return (self.symplectic_raw,)
         return ()
 
     def _assembled_k_key(self) -> tuple[object, ...]:
@@ -530,6 +550,9 @@ class KoopmanOperator(nn.Module):
             "schur": self._reset_schur_parameters,
             "dissipative": self._reset_dissipative_parameters,
             "lyapunov": self._reset_lyapunov_parameters,
+            "row_stochastic": self._reset_logit_parameters,
+            "doubly_stochastic": self._reset_logit_parameters,
+            "symplectic": self._reset_symplectic_parameters,
         }
         resetters[self.parameterization]()
 
@@ -611,6 +634,62 @@ class KoopmanOperator(nn.Module):
             init_scale=self.init_scale,
             max_spectral_radius=self.max_spectral_radius,
         )
+
+    def _reset_logit_parameters(self) -> None:
+        """Reinitialize stochastic-map logits.
+
+        Notes
+        -----
+        Thin wrapper around :func:`reset_logit_matrix`.
+        """
+        reset_logit_matrix(
+            self.logit_raw,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+        )
+
+    def _reset_symplectic_parameters(self) -> None:
+        """Reinitialize the symplectic Cayley generator.
+
+        Notes
+        -----
+        Thin wrapper around :func:`reset_symplectic_matrix`.
+        """
+        reset_symplectic_matrix(
+            self.symplectic_raw,
+            init_mode=self.init_mode,
+            init_scale=self.init_scale,
+        )
+
+    def _assemble_row_stochastic_matrix(self) -> Tensor:
+        """Assemble a row-stochastic ``K``.
+
+        Returns
+        -------
+        Tensor
+            Softmax-row map.
+        """
+        return assemble_row_stochastic_matrix(self.logit_raw)
+
+    def _assemble_doubly_stochastic_matrix(self) -> Tensor:
+        """Assemble an approximately doubly-stochastic ``K``.
+
+        Returns
+        -------
+        Tensor
+            Sinkhorn-normalized map.
+        """
+        return assemble_doubly_stochastic_matrix(self.logit_raw)
+
+    def _assemble_symplectic_matrix(self) -> Tensor:
+        """Assemble a symplectic Cayley map.
+
+        Returns
+        -------
+        Tensor
+            Structured ``K`` on even ``latent_dim``.
+        """
+        return assemble_symplectic_matrix(self.symplectic_raw)
 
     def _odo_orthogonal_factors(self) -> tuple[Tensor, Tensor]:
         """Build orthogonal factors for the ODO parameterization.
@@ -749,6 +828,9 @@ class KoopmanOperator(nn.Module):
             "schur": self._assemble_schur_matrix,
             "dissipative": self._assemble_dissipative_matrix,
             "lyapunov": self._assemble_lyapunov_matrix,
+            "row_stochastic": self._assemble_row_stochastic_matrix,
+            "doubly_stochastic": self._assemble_doubly_stochastic_matrix,
+            "symplectic": self._assemble_symplectic_matrix,
         }
         return assemblers[self.parameterization]()
 
@@ -1049,6 +1131,16 @@ class KoopmanOperator(nn.Module):
                 self.parameterization,
                 lyapunov_cayley_q=self.cayley_Q,
                 lyapunov_diagonal=self._lyapunov_diagonal(),
+            )
+        if self.parameterization in {
+            "row_stochastic",
+            "doubly_stochastic",
+            "symplectic",
+        }:
+            return inverse_matrix_for_parameterization(
+                "dense",
+                dense_matrix=self.K,
+                inverse_matrix=inverse_matrix,
             )
         msg = f"Unknown parameterization: {self.parameterization!r}"
         raise ValueError(msg)

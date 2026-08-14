@@ -11,7 +11,8 @@ Backend default for :func:`init_process_group_from_env`:
 * ``gloo`` otherwise (CPU / CI)
 
 Multi-process gloo smoke coverage lives in
-``tests/test_distributed_ddp.py`` and ``tests/test_hetero_distributed.py``
+``tests/distributed/test_distributed_ddp.py`` and
+``tests/distributed/test_hetero_distributed.py``
 (``@pytest.mark.distributed``, opt-in via
 ``KOOPMAN_GRAPH_DISTRIBUTED_TESTS=1``); this module's unit tests cover the
 single-process defaults only.

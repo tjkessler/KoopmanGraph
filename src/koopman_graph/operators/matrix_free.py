@@ -49,6 +49,7 @@ from koopman_graph.graph_utils import (
     relation_normalized_adjacency_matvec,
 )
 from koopman_graph.graph_utils.topology import (
+    hyperedge_normalized_adjacency_matvec,
     random_walk_normalized_adjacency_matvec,
     symmetric_normalized_adjacency_matvec,
 )
@@ -67,11 +68,14 @@ __all__ = [
     "MatrixFreeSpectrumResult",
     "apply_k_eff_graph",
     "apply_k_eff_hetero",
+    "apply_k_eff_hypergraph",
     "flatten_node_latents",
     "invert_k_eff_graph",
     "invert_k_eff_hetero",
+    "invert_k_eff_hypergraph",
     "spectrum_k_eff_graph",
     "spectrum_k_eff_hetero",
+    "spectrum_k_eff_hypergraph",
     "unflatten_node_latents",
 ]
 
@@ -1153,6 +1157,210 @@ def spectrum_k_eff_hetero(
             num_nodes=num_nodes,
             normalization=normalization,
             edge_weights=edge_weights,
+        )
+
+    return _arnoldi_eigs(
+        _apply_k,
+        dim,
+        num_modes=num_modes,
+        tol=tol,
+        ncv=resolved_ncv,
+        seed=seed,
+        device=k_self.device,
+        dtype=k_self.dtype if k_self.is_floating_point() else torch.float32,
+    )
+
+
+def apply_k_eff_hypergraph(
+    flat: Tensor,
+    *,
+    k_self: Tensor,
+    k_hedge: Tensor,
+    hyperedge_index: Tensor,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+) -> Tensor:
+    """Apply Zhou-symmetric hypergraph ``K_eff`` without a dense assembly.
+
+    Parameters
+    ----------
+    flat : Tensor
+        Flat latents ``(N·d,)``.
+    k_self, k_hedge : Tensor
+        Self and hyperedge factors ``(d, d)``.
+    hyperedge_index : Tensor
+        Bipartite incidence.
+    num_nodes : int
+        Node count.
+    hyperedge_weight : Tensor or None, optional
+        Optional weights.
+
+    Returns
+    -------
+    Tensor
+        Flat ``K_eff z``.
+    """
+    latent_dim = int(k_self.shape[0])
+    _validate_square_factor(k_self, name="k_self", latent_dim=latent_dim)
+    _validate_square_factor(k_hedge, name="k_hedge", latent_dim=latent_dim)
+    z = unflatten_node_latents(flat, num_nodes=num_nodes, latent_dim=latent_dim)
+    coupled = hyperedge_normalized_adjacency_matvec(
+        hyperedge_index,
+        z,
+        hyperedge_weight=hyperedge_weight,
+        num_nodes=num_nodes,
+    )
+    z_next = z @ k_self.transpose(-2, -1) + coupled @ k_hedge.transpose(-2, -1)
+    return flatten_node_latents(z_next)
+
+
+def invert_k_eff_hypergraph(
+    rhs: Tensor,
+    *,
+    k_self: Tensor,
+    k_hedge: Tensor,
+    hyperedge_index: Tensor,
+    num_nodes: int,
+    hyperedge_weight: Tensor | None = None,
+    max_iters: int = DEFAULT_MATRIX_FREE_INVERSE_MAX_ITERS,
+    tol: float = DEFAULT_MATRIX_FREE_INVERSE_TOL,
+    x0: Tensor | None = None,
+) -> MatrixFreeInverseResult:
+    """Solve hypergraph ``K_eff x = b`` via Richardson iteration.
+
+    Parameters
+    ----------
+    rhs : Tensor
+        Flat right-hand side.
+    k_self, k_hedge : Tensor
+        Factor matrices.
+    hyperedge_index : Tensor
+        Incidence.
+    num_nodes : int
+        Node count.
+    hyperedge_weight : Tensor or None, optional
+        Optional weights.
+    max_iters, tol, x0
+        Richardson controls matching :func:`invert_k_eff_graph`.
+
+    Returns
+    -------
+    MatrixFreeInverseResult
+        Approximate solution and residual.
+    """
+    latent_dim = int(k_self.shape[0])
+    k_self_inv = _invert_square_factor(k_self)
+
+    def _apply_k(flat: Tensor) -> Tensor:
+        """Internal helper: apply hypergraph ``K_eff``.
+
+        Parameters
+        ----------
+        flat : Tensor
+            Flat latents.
+
+        Returns
+        -------
+        Tensor
+            Flat image.
+        """
+        return apply_k_eff_hypergraph(
+            flat,
+            k_self=k_self,
+            k_hedge=k_hedge,
+            hyperedge_index=hyperedge_index,
+            num_nodes=num_nodes,
+            hyperedge_weight=hyperedge_weight,
+        )
+
+    def _apply_m_inv(flat: Tensor) -> Tensor:
+        """Internal helper: apply the self-factor preconditioner.
+
+        Parameters
+        ----------
+        flat : Tensor
+            Flat residual.
+
+        Returns
+        -------
+        Tensor
+            Preconditioned residual.
+        """
+        return _apply_self_preconditioner(
+            flat,
+            k_self_inv,
+            num_nodes=num_nodes,
+            latent_dim=latent_dim,
+        )
+
+    return _richardson_invert(
+        _apply_k,
+        _apply_m_inv,
+        rhs,
+        max_iters=max_iters,
+        tol=tol,
+        x0=x0,
+    )
+
+
+def spectrum_k_eff_hypergraph(
+    *,
+    k_self: Tensor,
+    k_hedge: Tensor,
+    hyperedge_index: Tensor,
+    num_nodes: int,
+    num_modes: int,
+    hyperedge_weight: Tensor | None = None,
+    tol: float = DEFAULT_MATRIX_FREE_SPECTRUM_TOL,
+    ncv: int | None = None,
+    seed: int = 0,
+) -> MatrixFreeSpectrumResult:
+    """Arnoldi leading-modulus spectrum of hypergraph ``K_eff``.
+
+    Parameters
+    ----------
+    k_self, k_hedge : Tensor
+        Factor matrices.
+    hyperedge_index : Tensor
+        Incidence.
+    num_nodes : int
+        Node count.
+    num_modes : int
+        Number of modes.
+    hyperedge_weight : Tensor or None, optional
+        Optional weights.
+    tol, ncv, seed
+        Arnoldi controls matching :func:`spectrum_k_eff_graph`.
+
+    Returns
+    -------
+    MatrixFreeSpectrumResult
+        Leading-modulus eigenvalues.
+    """
+    latent_dim = int(k_self.shape[0])
+    dim = num_nodes * latent_dim
+    resolved_ncv = _default_ncv(dim, num_modes) if ncv is None else int(ncv)
+
+    def _apply_k(flat: Tensor) -> Tensor:
+        """Internal helper: apply hypergraph ``K_eff``.
+
+        Parameters
+        ----------
+        flat : Tensor
+            Flat latents.
+
+        Returns
+        -------
+        Tensor
+            Flat image.
+        """
+        return apply_k_eff_hypergraph(
+            flat,
+            k_self=k_self,
+            k_hedge=k_hedge,
+            hyperedge_index=hyperedge_index,
+            num_nodes=num_nodes,
+            hyperedge_weight=hyperedge_weight,
         )
 
     return _arnoldi_eigs(
