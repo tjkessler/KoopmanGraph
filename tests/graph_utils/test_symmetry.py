@@ -109,6 +109,24 @@ def test_orbit_tied_ring_reduces_params_vs_identity() -> None:
     assert _trainable_params(tied) < _trainable_params(identity)
 
 
+def test_cycle_auto_orbits_matches_shared_param_count() -> None:
+    """A one-orbit cycle must not keep a leftover untied neighbor bank."""
+    num_nodes = 8
+    latent_dim = 4
+    edge_index = _cycle_edge_index(num_nodes)
+    shared = GraphKoopmanOperator(latent_dim, init_mode="identity")
+    tied = GraphKoopmanOperator(
+        latent_dim,
+        init_mode="identity",
+        auto_orbits=True,
+    )
+    _ = tied.advance(torch.zeros(num_nodes, latent_dim), edge_index=edge_index)
+    assert tied._orbit_nbrs is not None
+    assert tied._nbr is tied._orbit_nbrs[0]
+    assert _trainable_params(tied) == _trainable_params(shared)
+    assert torch.allclose(tied.K_nbr, torch.zeros(latent_dim, latent_dim))
+
+
 def test_fit_trains_auto_orbit_k_self() -> None:
     """``fit`` binds auto orbits before the optimizer so ``K_self`` is trained."""
     from torch_geometric.data import Data

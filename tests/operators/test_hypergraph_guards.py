@@ -117,6 +117,8 @@ def test_hypergraph_forward_rw_inverse_and_dense_paths() -> None:
             tail_index=empty_t,
             head_index=empty_h,
         )
+    assert orbit_op._orbit_nbrs is not None
+    assert orbit_op._hedge is orbit_op._orbit_nbrs[0]
 
     dual = HypergraphKoopmanOperator(
         2,

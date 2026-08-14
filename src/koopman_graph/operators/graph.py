@@ -125,8 +125,8 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     (``koopman="graph"`` + ``dynamics_mode="continuous"``).
 
     When neighbor factors are zero, the step reduces exactly to the per-node
-    map ``Z @ K_self.T``. Orbit ties (when enabled) apply only to ``K_self``;
-    ``K_nbr`` / ``K_fwd`` / ``K_bwd`` stay globally shared.
+    map ``Z @ K_self.T``. Orbit ties (when enabled) apply to ``K_self`` and
+    ``K_nbr`` / ``K_fwd``; ``K_bwd`` stays globally shared.
 
     Attributes
     ----------
@@ -200,17 +200,17 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
             Neighbor-coupling normalization. Default ``"symmetric"`` preserves
             historical undirected behavior bit-for-bit.
         orbit_partition : sequence of sequence of int or None, optional
-            Explicit node-orbit partition tying ``K_self`` across orbit mates.
-            Overrides ``auto_orbits`` when provided. Neighbor factors are never
-            orbit-tied.
+            Explicit node-orbit partition tying ``K_self`` and ``K_nbr``
+            across orbit mates. Overrides ``auto_orbits`` when provided.
+            Dual ``K_bwd`` stays globally shared.
         auto_orbits : bool, optional
             When ``True``, compute orbits from ``edge_index`` on first advance
             (requires the ``[symmetry]`` extra for non-identity partitions).
         orbit_method : {"auto", "exact"}, optional
             Orbit backend for ``auto_orbits``. Default ``"auto"``.
         isotypic_symmetry : bool, optional
-            When ``True``, bind exact ``Aut(G)`` orbits for ``K_self`` ties
-            and store the isotypic decomposition (factory
+            When ``True``, bind exact ``Aut(G)`` orbits for ``K_self`` /
+            ``K_nbr`` ties and store the isotypic decomposition (factory
             ``koopman_symmetry="isotypic"``). Mutually exclusive with
             ``auto_orbits`` / ``orbit_partition``. Default ``False``.
 
@@ -324,7 +324,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
         ``K_bwd`` (dual mode) is always exactly zero so
         ``dual_random_walk`` begins equivalent to ``random_walk``.
         """
-        self._reset_factor_parameters(self._nbr, allow_noise=True)
+        orbit_nbrs = getattr(self, "_orbit_nbrs", None)
+        modules = list(orbit_nbrs) if orbit_nbrs is not None else [self._nbr]
+        for module in modules:
+            self._reset_factor_parameters(module, allow_noise=True)
         if self._bwd is not None:
             self._reset_factor_parameters(self._bwd, allow_noise=False)
 
@@ -360,6 +363,10 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
     @property
     def K_nbr(self) -> Tensor:
         """Forward / sole neighbor-coupling matrix ``(latent_dim, latent_dim)``.
+
+        When orbit-tied, returns the representative (orbit-0) neighbor matrix;
+        :meth:`~koopman_graph.operators.orbit_ties.OrbitTiedSelfMixin.apply_tied_neighbor`
+        uses the full per-orbit bank.
 
         Returns
         -------
@@ -472,7 +479,11 @@ class GraphKoopmanOperator(OrbitTiedSelfMixin, nn.Module):
                     control_matrix=control_matrix if orbit_id == 0 else None,
                     bilinear_matrices=bilinear_matrices if orbit_id == 0 else None,
                 )
-        self._nbr.set_dense_matrix(k_nbr, control_matrix=None)
+        if self._orbit_nbrs is None:
+            self._nbr.set_dense_matrix(k_nbr, control_matrix=None)
+        else:
+            for module in self._orbit_nbrs:
+                module.set_dense_matrix(k_nbr, control_matrix=None)
         if k_bwd is not None:
             assert self._bwd is not None
             self._bwd.set_dense_matrix(k_bwd, control_matrix=None)

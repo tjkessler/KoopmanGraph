@@ -139,6 +139,7 @@ def test_multiplex_cycle_auto_orbits_single_orbit() -> None:
     assert op.orbit_partition == ((0, 1, 2, 3, 4, 5),)
     assert op.uses_orbit_selves
     assert len(op._orbit_selves) == 1
+    assert op._orbit_nbrs is None
 
 
 def test_multiplex_star_orbit_tied_self_blocks_equal_within_orbit() -> None:
