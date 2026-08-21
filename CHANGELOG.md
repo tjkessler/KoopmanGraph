@@ -392,6 +392,19 @@ latent operator contract are unchanged (`koopman=None` still selects
   `GHSA-cq5v-8q36-5273`, out-of-bounds heap read on a malformed
   chunked HTTP response).
 
+### Fixed
+
+- `markov_closure_report` imports SciPy inside the χ² evaluation so
+  `import koopman_graph` no longer requires the `[dev]` / `[mpc]`
+  extra. That unblocks the CLI-only benchmark-smoke job and the
+  docs extra Sphinx build.
+- `LinearConservingDecoder` projects onto `Cx = c_0` through the
+  Gram system `C C^T` instead of a fat `lstsq`. On Linux CPU GELS
+  the old path could leave an O(1) residual on later rows while
+  the first equation looked exact.
+- Example 48 compares rotation leakage to 1 within `1e-8` rather
+  than requiring a bitwise `1.0`.
+
 ### Notes
 
 - Factory defaults are unchanged vs 0.14.0 (`koopman=None` →

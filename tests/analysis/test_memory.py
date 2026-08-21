@@ -99,6 +99,45 @@ def test_memory_module_does_not_import_model() -> None:
     assert not offenders
 
 
+def test_memory_does_not_import_scipy_at_module_level() -> None:
+    """χ² is function-local so CLI and docs extras do not need SciPy."""
+    source = Path(__file__).resolve().parents[2] / (
+        "src/koopman_graph/analysis/memory.py"
+    )
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            offenders.extend(
+                alias.name
+                for alias in node.names
+                if alias.name == "scipy" or alias.name.startswith("scipy.")
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            module = node.module
+            if module == "scipy" or module.startswith("scipy."):
+                offenders.append(module)
+    assert not offenders
+
+
+def test_markov_closure_report_requires_scipy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The χ² tail is gated on SciPy; the CLI extra must stay importable."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name: str, *args: object, **kwargs: object) -> object:
+        if name == "scipy" or name.startswith("scipy."):
+            raise ImportError("blocked scipy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(ImportError, match="requires SciPy"):
+        markov_closure_report(torch.randn(_SERIES_LEN), max_lag=_MAX_LAG)
+
+
 def test_white_innovations_do_not_flag_markov_mismatch() -> None:
     """i.i.d. residual energy fails to reject whiteness at a loose α."""
     torch.manual_seed(_SEED)

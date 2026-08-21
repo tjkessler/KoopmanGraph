@@ -7,6 +7,7 @@ formulas or invent forecast numbers.
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -42,6 +43,10 @@ from koopman_graph.identification.sparse_factors import (
     _group_soft_threshold,
 )
 from koopman_graph.operators import KoopmanOperator
+
+# analysis.__init__ binds ``resdmd`` over the submodule name; resolve
+# the module object so 3.10 ``patch`` does not getattr the function.
+_RESDMD_MODULE = importlib.import_module("koopman_graph.analysis.resdmd")
 
 
 def _line_encodings(*, n_times: int = 8, n_nodes: int = 4) -> torch.Tensor:
@@ -522,13 +527,13 @@ def test_build_identification_report_rejects_nonfinite_resdmd_residual() -> None
     snapshot = identify_operator(pairs, IdentificationConfig(solver="ridge", ridge=0.0))
     fake = SimpleNamespace(residuals=torch.tensor([float("nan")]))
     with (
-        patch("koopman_graph.analysis.resdmd.resdmd", return_value=fake),
+        patch.object(_RESDMD_MODULE, "resdmd", return_value=fake),
         pytest.raises(ValueError, match="residual_max must be a finite"),
     ):
         build_identification_report(pairs, snapshot, gate_resdmd=True)
     fake_neg = SimpleNamespace(residuals=torch.tensor([-0.1]))
     with (
-        patch("koopman_graph.analysis.resdmd.resdmd", return_value=fake_neg),
+        patch.object(_RESDMD_MODULE, "resdmd", return_value=fake_neg),
         pytest.raises(ValueError, match="residual_max must be a finite"),
     ):
         build_identification_report(pairs, snapshot, gate_resdmd=True)

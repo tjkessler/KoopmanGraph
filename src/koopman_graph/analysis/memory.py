@@ -26,7 +26,6 @@ import math
 from dataclasses import dataclass
 
 import torch
-from scipy.stats import chi2
 from torch import Tensor, nn
 
 DEFAULT_MAX_LAG = 10
@@ -332,6 +331,15 @@ def markov_closure_report(
     statistic = (
         float(n_timesteps) * (float(n_timesteps) + 2.0) * float(lag_terms.sum().item())
     )
+    try:
+        from scipy.stats import chi2
+    except ImportError as exc:
+        msg = (
+            "markov_closure_report requires SciPy. "
+            "Install with: pip install scipy  or  pip install "
+            "'koopman-graph[dev]' or 'koopman-graph[mpc]'"
+        )
+        raise ImportError(msg) from exc
     pvalue = float(chi2.sf(statistic, degrees))
     max_abs = float(autocorrelation.abs().max().item())
     return MarkovClosureReport(

@@ -162,7 +162,8 @@ def project_linear_conservation(
     Raises
     ------
     ValueError
-        If shapes are incompatible or values are non-finite.
+        If shapes are incompatible, values are non-finite, or
+        ``constraint`` is row-rank deficient.
     """
     _require_decoded_table("values", values.unsqueeze(-1))
     if constraint.ndim != 2 or int(constraint.shape[1]) != int(values.shape[0]):
@@ -187,7 +188,21 @@ def project_linear_conservation(
     matrix = constraint.to(dtype=torch.float64, device=working.device)
     rhs = target.to(dtype=torch.float64, device=working.device)
     residual = matrix @ working - rhs
-    delta = torch.linalg.lstsq(matrix, residual.unsqueeze(-1)).solution.squeeze(-1)
+    # Min-norm correction C^+ r via the Gram system (C C^T) λ = r,
+    # x ← x − C^T λ. ``lstsq`` on the fat (n_eq < N) factor is
+    # driver-dependent: CPU GELS on Linux can leave a large residual
+    # on later rows while the first equation looks exact.
+    gram = matrix @ matrix.T
+    try:
+        multiplier = torch.linalg.solve(gram, residual)
+    except torch.linalg.LinAlgError as exc:
+        msg = (
+            "constraint must have full row rank so Cx = c0 is a "
+            "well-posed affine section, "
+            f"got C with shape {tuple(matrix.shape)}"
+        )
+        raise ValueError(msg) from exc
+    delta = matrix.T @ multiplier
     return (working - delta).to(dtype=values.dtype)
 
 

@@ -15,7 +15,10 @@ from koopman_graph.nn import (
     MassConservingDecoder,
     PositivityDecoder,
 )
-from koopman_graph.nn.constraint_decoders import DEFAULT_CONSERVATION_ATOL
+from koopman_graph.nn.constraint_decoders import (
+    DEFAULT_CONSERVATION_ATOL,
+    project_linear_conservation,
+)
 from koopman_graph.operators import KoopmanOperator
 
 _ATOL = DEFAULT_CONSERVATION_ATOL
@@ -108,6 +111,32 @@ def test_affine_mass_bound_over_rollout() -> None:
         latents = operator.advance(latents)
     assert max(residuals) < _ATOL
     assert decoded.shape == (_N_NODES, 1)
+
+
+def test_project_linear_conservation_two_partition_is_exact() -> None:
+    """A fat two-row ``C`` meets ``c_0`` after the Gram correction."""
+    constraint = torch.tensor(
+        [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]],
+        dtype=torch.float64,
+    )
+    target = torch.tensor([0.5, 0.75], dtype=torch.float64)
+    torch.manual_seed(_SEED)
+    values = torch.randn(_N_NODES, dtype=torch.float64)
+    projected = project_linear_conservation(values, constraint, target)
+    residual = constraint @ projected - target
+    assert float(residual.abs().max().item()) < _ATOL
+
+
+def test_project_linear_conservation_rejects_rank_deficient_c() -> None:
+    """Repeated rows make ``C C^T`` singular; the head must refuse."""
+    constraint = torch.tensor(
+        [[1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0, 0.0, 0.0]],
+        dtype=torch.float64,
+    )
+    target = torch.tensor([0.5, 0.5], dtype=torch.float64)
+    values = torch.ones(_N_NODES, dtype=torch.float64)
+    with pytest.raises(ValueError, match="full row rank"):
+        project_linear_conservation(values, constraint, target)
 
 
 def test_linear_conservation_bound_over_rollout() -> None:
