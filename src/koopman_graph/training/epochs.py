@@ -18,6 +18,7 @@ from koopman_graph.data import (
     resolve_rollout_start_indices,
 )
 from koopman_graph.protocols import TrainableKoopmanModel
+from koopman_graph.training.batched_objectives import compute_batched_training_loss
 from koopman_graph.training.history import (
     ExtraLosses,
     LossWeights,
@@ -135,6 +136,7 @@ def train_one_epoch(
     use_amp: bool = False,
     amp_dtype: torch.dtype | None = None,
     grad_scaler: torch.amp.GradScaler | None = None,
+    batch_graphs: bool = False,
 ) -> TrainingLossBreakdown:
     """Run one training epoch and return the averaged loss breakdown.
 
@@ -164,6 +166,12 @@ def train_one_epoch(
         Autocast dtype (default ``float16`` on CUDA when AMP is active).
     grad_scaler : torch.amp.GradScaler or None, optional
         Reused scaler from :func:`~koopman_graph.training.loop.run_fit_loop`.
+    batch_graphs : bool, optional
+        When ``True``, collate homogeneous trajectories into one PyG
+        ``Batch`` and evaluate reconstruction (and forward, when weighted)
+        on the disconnected union. Default is ``False`` (per-sequence
+        Python loop). Mutually exclusive with windowed sampling at the
+        fit-loop layer.
 
     Returns
     -------
@@ -185,21 +193,24 @@ def train_one_epoch(
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
-    if amp_enabled and resolved_dtype is not None:
-        with torch.amp.autocast("cuda", dtype=resolved_dtype):
-            breakdowns = [
-                compute_training_loss(
-                    model,
-                    sequence,
-                    loss_weights,
-                    extra_losses=extra_losses,
-                    rollout_horizon=rollout_horizon,
-                    rollout_start_indices=rollout_start_indices,
-                )
-                for sequence in trajectory_list
-            ]
-            breakdown = mean_training_loss_breakdown(breakdowns)
-    else:
+
+    def _epoch_breakdown() -> TrainingLossBreakdown:
+        """Return the epoch loss, batched or per-sequence.
+
+        Returns
+        -------
+        TrainingLossBreakdown
+            Mean breakdown for this optimizer step.
+        """
+        if batch_graphs:
+            return compute_batched_training_loss(
+                model,
+                trajectory_list,
+                loss_weights,
+                extra_losses=extra_losses,
+                rollout_horizon=rollout_horizon,
+                rollout_start_indices=rollout_start_indices,
+            )
         breakdowns = [
             compute_training_loss(
                 model,
@@ -211,7 +222,13 @@ def train_one_epoch(
             )
             for sequence in trajectory_list
         ]
-        breakdown = mean_training_loss_breakdown(breakdowns)
+        return mean_training_loss_breakdown(breakdowns)
+
+    if amp_enabled and resolved_dtype is not None:
+        with torch.amp.autocast("cuda", dtype=resolved_dtype):
+            breakdown = _epoch_breakdown()
+    else:
+        breakdown = _epoch_breakdown()
     _backward_optimizer_step(
         model,
         optimizer,
@@ -364,6 +381,8 @@ def train_windowed_epoch(
                 "sparsity",
                 "worst_case",
                 "vamp2",
+                "topology",
+                "presence",
                 "total",
             )
         }
@@ -388,6 +407,7 @@ def eval_one_epoch(
     extra_losses: ExtraLosses | None = None,
     rollout_horizon: int | None = None,
     rollout_start_indices: Sequence[int] | None = None,
+    batch_graphs: bool = False,
 ) -> TrainingLossBreakdown:
     """Compute validation loss for one epoch without parameter updates.
 
@@ -405,6 +425,9 @@ def eval_one_epoch(
         Rollout origin indices for this epoch.
     extra_losses : ExtraLosses | None
         See the function signature / summary for ``extra_losses``.
+    batch_graphs : bool, optional
+        When ``True``, use the collated multi-graph loss path. Default is
+        ``False``.
 
     Returns
     -------
@@ -420,6 +443,15 @@ def eval_one_epoch(
     model.eval()
     try:
         with torch.no_grad():
+            if batch_graphs:
+                return compute_batched_training_loss(
+                    model,
+                    trajectory_list,
+                    loss_weights,
+                    extra_losses=extra_losses,
+                    rollout_horizon=rollout_horizon,
+                    rollout_start_indices=rollout_start_indices,
+                )
             breakdowns = [
                 compute_training_loss(
                     model,

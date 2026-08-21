@@ -78,13 +78,17 @@ Physics-informed helpers such as ``graph_laplacian_features`` live in
 :mod:`koopman_graph.protocols`, :mod:`koopman_graph.spectrum_types`,
 :mod:`koopman_graph.uq` (deep ensembles / optional ``predict_interval``),
 :mod:`koopman_graph.hierarchical` (TopK / SAG pool → coarse Koopman → unpool),
-:mod:`koopman_graph.mpc` (receding-horizon Koopman-MPC; ``[mpc]`` extra),
+:mod:`koopman_graph.mpc` (receding-horizon Koopman-MPC and residual-tube
+tightening; ``[mpc]`` extra),
 :mod:`koopman_graph.tracking` (CSV / TensorBoard fit adapters),
 :mod:`koopman_graph.cli` (``koopman-graph`` console script), and
 :mod:`koopman_graph.tuning` (HPO metric helpers; not AutoML)
 are importable but intentionally omitted from ``__all__`` (encoder/decoder/delay
 and operator *classes*, including ``DelayEmbeddingEncoder`` and
-``GraphKoopmanOperator``, remain root-stable). See the architecture docs for
+``GraphKoopmanOperator``, remain root-stable). Frozen identification
+config / report types and closed-form solvers live in
+:mod:`koopman_graph.identification` (opt-in ``fit(..., identification=)``;
+not on root ``__all__``). See the architecture docs for
 the public vs power-user contract.
 """
 
@@ -165,4 +169,4 @@ __all__ = [
     "__version__",
     "compute_spectrum",
 ]
-__version__ = "0.14.0"
+__version__ = "0.15.0"

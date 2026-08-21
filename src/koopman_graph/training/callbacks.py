@@ -1,14 +1,19 @@
-"""Observe-only hooks for :func:`~koopman_graph.training.loop.run_fit_loop`.
+"""Fit-loop observer hooks for :func:`~koopman_graph.training.loop.run_fit_loop`.
 
-Callbacks must not mutate model parameters. Wiring into the fit loop is
-added in a later task; this module defines the protocol and a no-op
-implementation for typing and smoke tests.
+Callbacks must not mutate model parameters. The loop invokes
+``on_fit_start``, ``on_epoch_end``, and ``on_fit_end``. Callbacks that
+expose ``observe_encodings`` receive a frozen time-major latent stack
+from the first training sequence at epoch end (identity-dictionary
+ResDMD layout).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
+
+from torch import Tensor
 
 from koopman_graph.training.history import FitHistory, TrainingLossBreakdown
 
@@ -128,25 +133,69 @@ class NoOpFitCallback:
 
 
 class ResDMDFitCallback:
-    """Observe-only callback recording the last mean ResDMD residual.
+    """Finite-dictionary ResDMD observer with optional opt-in gate.
 
-    Notes
-    -----
-    Does not mutate parameters. Callers set :attr:`last_mean_residual` from
-    an external :func:`~koopman_graph.analysis.resdmd` evaluation.
+    Default ``mode="observe"`` records residuals and does not abort.
+    ``mode="gate"`` sets :attr:`rejected` when the max residual exceeds
+    ``tolerance`` and raises :class:`ValueError` from :meth:`on_fit_end`.
+    Does not mutate model parameters. Not a certified infinite-dimensional
+    residual bound.
+
+    Attributes
+    ----------
+    mode : {"observe", "gate"}
+        Observe-only or reject-at-fit-end.
+    tolerance : float
+        Max-residual cutoff (same default as
+        :func:`~koopman_graph.analysis.resdmd`).
+    last_mean_residual : float or None
+        Mean residual from the last :meth:`record` / :meth:`observe_encodings`.
+    last_residual_max : float or None
+        Max residual from the last observation.
+    polluted : bool or None
+        Whether the last max residual exceeded ``tolerance``.
+    rejected : bool
+        True when ``mode="gate"`` and a polluted residual was recorded.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        mode: Literal["observe", "gate"] = "observe",
+        tolerance: float = 1e-2,
+    ) -> None:
         """Initialize with no recorded residual.
 
-        Notes
-        -----
-        ``last_mean_residual`` starts as ``None``.
+        Parameters
+        ----------
+        mode : {"observe", "gate"}, optional
+            Default ``"observe"``.
+        tolerance : float, optional
+            Pollution cutoff. Default ``1e-2``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is unknown or ``tolerance`` is invalid.
         """
+        if mode not in {"observe", "gate"}:
+            msg = f"mode must be 'observe' or 'gate', got {mode!r}"
+            raise ValueError(msg)
+        if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)):
+            msg = f"tolerance must be a finite float, got {type(tolerance).__name__}"
+            raise ValueError(msg)
+        if not math.isfinite(float(tolerance)) or float(tolerance) < 0.0:
+            msg = f"tolerance must be a finite non-negative float, got {tolerance!r}"
+            raise ValueError(msg)
+        self.mode: Literal["observe", "gate"] = mode
+        self.tolerance = float(tolerance)
         self.last_mean_residual: float | None = None
+        self.last_residual_max: float | None = None
+        self.polluted: bool | None = None
+        self.rejected = False
 
     def on_fit_start(self, *, model: Any, fit_kwargs: Mapping[str, Any]) -> None:
-        """Reset the recorded residual.
+        """Reset recorded residuals and gate flags.
 
         Parameters
         ----------
@@ -157,6 +206,9 @@ class ResDMDFitCallback:
         """
         del model, fit_kwargs
         self.last_mean_residual = None
+        self.last_residual_max = None
+        self.polluted = None
+        self.rejected = False
 
     def on_epoch_end(
         self,
@@ -166,7 +218,7 @@ class ResDMDFitCallback:
         val_breakdown: TrainingLossBreakdown | None,
         history_so_far: FitHistory | None,
     ) -> None:
-        """No parameter updates; residual is recorded by the caller.
+        """No parameter updates; residuals arrive via :meth:`observe_encodings`.
 
         Parameters
         ----------
@@ -182,21 +234,93 @@ class ResDMDFitCallback:
         del epoch, train_breakdown, val_breakdown, history_so_far
 
     def on_fit_end(self, *, history: FitHistory) -> None:
-        """No-op fit end.
+        """Raise in gate mode when a polluted residual was recorded.
 
         Parameters
         ----------
         history : FitHistory
             Unused final history.
+
+        Raises
+        ------
+        ValueError
+            If ``mode="gate"`` and :attr:`rejected` is True.
         """
         del history
+        if self.mode == "gate" and self.rejected:
+            peak = self.last_residual_max
+            msg = (
+                "ResDMD gate rejected the fit dictionary "
+                f"(residual_max={peak!r} > tolerance={self.tolerance:g})"
+            )
+            raise ValueError(msg)
 
-    def record(self, residual: float) -> None:
+    def record(self, residual: float, *, residual_max: float | None = None) -> None:
         """Store a scalar residual observation.
 
         Parameters
         ----------
         residual : float
             Mean finite-dictionary ResDMD residual.
+        residual_max : float or None, optional
+            Max residual used for the pollution test. Default uses
+            ``residual`` as both mean and max.
+
+        Raises
+        ------
+        ValueError
+            If a residual is non-finite or negative.
         """
-        self.last_mean_residual = float(residual)
+        mean_residual = float(residual)
+        peak = mean_residual if residual_max is None else float(residual_max)
+        for name, value in (("residual", mean_residual), ("residual_max", peak)):
+            if not math.isfinite(value) or value < 0.0:
+                msg = f"{name} must be a finite non-negative float, got {value!r}"
+                raise ValueError(msg)
+        self.last_mean_residual = mean_residual
+        self.last_residual_max = peak
+        self.polluted = peak > self.tolerance
+        if self.mode == "gate" and self.polluted:
+            self.rejected = True
+
+    def observe_encodings(self, encodings: Tensor) -> None:
+        """Run identity-dictionary ResDMD on a time-major latent stack.
+
+        Layout matches ``evaluate(..., include_resdmd=True)``: one row per
+        snapshot, width :math:`N\\cdot d` (or already ``(T, m)``). Needs
+        ``T >= 3``. Lazy-imports :mod:`koopman_graph.analysis.resdmd`.
+
+        Parameters
+        ----------
+        encodings : Tensor
+            Time-major latents ``(T, N, d)`` or ``(T, m)``.
+
+        Raises
+        ------
+        ValueError
+            If the tensor rank is not 2 or 3.
+        """
+        if encodings.ndim == 3:
+            stacked = encodings.reshape(encodings.shape[0], -1)
+        elif encodings.ndim == 2:
+            stacked = encodings
+        else:
+            msg = (
+                "encodings must have shape (T, d) or (T, N, d), "
+                f"got {tuple(encodings.shape)}"
+            )
+            raise ValueError(msg)
+        if stacked.shape[0] < 3:
+            return
+        from koopman_graph.analysis.resdmd import resdmd
+
+        report = resdmd(
+            stacked[:-1].detach(),
+            stacked[1:].detach(),
+            tolerance=self.tolerance,
+        )
+        residuals = report.residuals.real
+        self.record(
+            float(residuals.mean().item()),
+            residual_max=float(residuals.max().item()),
+        )

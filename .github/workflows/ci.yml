@@ -10,6 +10,7 @@ on:
       - "examples/**"
       - "docs/**"
       - "README.md"
+      - "benchmarks/**"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -32,6 +33,7 @@ jobs:
       notebooks: ${{ steps.filter.outputs.notebooks }}
       docs: ${{ steps.filter.outputs.docs }}
       workflow: ${{ steps.filter.outputs.workflow }}
+      benchmark: ${{ steps.filter.outputs.benchmark }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -101,12 +103,19 @@ jobs:
           notebooks = hit("examples/", "src/", "pyproject.toml", "uv.lock")
           docs = hit("docs/", "README.md", "src/", "pyproject.toml")
           workflow = hit(".github/workflows/ci.yml")
+          benchmark = hit(
+              "benchmarks/",
+              "src/koopman_graph/benchmark/",
+              "src/koopman_graph/cli/",
+              "tests/benchmark/",
+          )
 
           emit("lint", lint)
           emit("test", test)
           emit("notebooks", notebooks)
           emit("docs", docs)
           emit("workflow", workflow)
+          emit("benchmark", benchmark)
           PY
 
   lint:
@@ -268,6 +277,13 @@ jobs:
                               "examples/19_bilinear_control_koopman.ipynb",
                               "examples/22_gnn_forecaster_comparison.ipynb",
                               "examples/23_hierarchical_multiresolution.ipynb",
+                              "examples/47_benchmark_manifest.ipynb",
+                              "examples/48_identification_invariance.ipynb",
+                              "examples/50_graph_state_closure.ipynb",
+                              "examples/51_spectral_diagnostics.ipynb",
+                              "examples/52_cochain_hodge_modes.ipynb",
+                              "examples/53_latent_rank_selection.ipynb",
+                              "examples/54_criticality_monitor.ipynb",
                           ]
                       ),
                   }
@@ -289,11 +305,12 @@ jobs:
                       ),
                   },
                   {
-                      "shard": "27-46",
+                      "shard": "27-54",
                       "pattern": (
                           "examples/2[7-9]_*.ipynb "
                           "examples/3[0-9]_*.ipynb "
-                          "examples/4[0-6]_*.ipynb"
+                          "examples/4[0-9]_*.ipynb "
+                          "examples/5[0-4]_*.ipynb"
                       ),
                   },
               ]
@@ -325,7 +342,7 @@ jobs:
       - name: Install dependencies
         run: >
           uv sync --frozen
-          --extra dev --extra rl --extra mpc --extra symmetry
+          --extra dev --extra rl --extra mpc --extra symmetry --extra cli
 
       - name: Execute tutorial notebooks
         env:
@@ -356,11 +373,38 @@ jobs:
       - name: Build Sphinx documentation
         run: uv run --no-sync sphinx-build -b html -W --keep-going docs/source docs/build/html
 
+  benchmark-smoke:
+    # Identity-bound verify on hashed synthetics. Not METR-LA training.
+    name: benchmark-smoke
+    needs: changes
+    if: needs.changes.outputs.benchmark == 'true' || needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra cli
+
+      - name: Verify smoke manifests
+        run: |
+          for track in smoke_telemetry smoke_multiphysics smoke_topology_transfer; do
+            uv run --no-sync koopman-graph benchmark verify \
+              --manifest "benchmarks/v0.15/${track}.yaml" \
+              --against "benchmarks/v0.15/summaries/${track}.json"
+          done
+
   # Single required check for branch protection. Individual jobs may be skipped
   # by path filters; this aggregator still reports success when skips are expected.
   ci:
     name: ci
-    needs: [changes, lint, test, test-macos, notebook-plan, notebooks, docs]
+    needs: [changes, lint, test, test-macos, notebook-plan, notebooks, docs, benchmark-smoke]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -383,6 +427,7 @@ jobs:
               "notebook-plan",
               "notebooks",
               "docs",
+              "benchmark-smoke",
           ):
               result = needs[job]["result"]
               if result not in ("success", "skipped"):

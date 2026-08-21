@@ -103,7 +103,7 @@ baselines-ode = [
 # Reserved for future mesh/weather helper deps. GraphCastBaseline teaching
 # path is pure PyTorch (no JAX / DeepMind graphcast / eccodes); extra is a no-op.
 baselines-graphcast = []
-# Optional e3nn for Tier-B steerable SE(3) encode (not equivariant K).
+# Optional e3nn for Tier-B steerable encode and equivariant-K rotation tests.
 equivariance = [
     "e3nn>=0.5.1",
 ]
@@ -123,6 +123,9 @@ control-lmi = [
     "cvxpy>=1.4.0",
 ]
 probabilistic = []
+# Protocol-locked experiment manifests (schema/load). YAML still needs PyYAML
+# via ``[cli]``; JSON loads without extras. Runner CLI is a later increment.
+benchmark = []
 
 [project.scripts]
 koopman-graph = "koopman_graph.cli:main"
@@ -154,6 +157,7 @@ markers = [
     "ray: starts a local Ray / Ray Train runtime (exclude on macOS smoke)",
     "slow: long-running CPU tests reserved for full Ubuntu matrix (exclude on macOS smoke)",
     "multinode: opt-in multi-node Ray/torchrun smoke (KOOPMAN_GRAPH_MULTINODE=1)",
+    "benchmark_smoke: identity-bound manifests under benchmarks/v0.15/",
 ]
 
 [tool.coverage.run]

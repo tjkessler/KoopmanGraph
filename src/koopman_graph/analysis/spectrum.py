@@ -16,6 +16,7 @@ from koopman_graph.data.hetero_layout import (
 from koopman_graph.graph_utils.topology import resolve_edge_index, resolve_edge_weight
 from koopman_graph.protocols import ModeShapeModel
 from koopman_graph.spectrum_types import (
+    aliasing_warning_mask,
     compute_generator_spectrum,
     compute_spectrum,
     discrete_spectrum_at_delta_t,
@@ -50,7 +51,9 @@ class ImpliedTimescales:
     when ``ε < |λ| < 1 - ε``. Entries with ``|λ| ≥ 1 - ε`` (including the
     stationary eigenvalue near 1) or ``|λ| ≤ ε`` are **invalid**: the
     corresponding timescale is ``+∞`` and :attr:`valid` is ``False``. This
-    is never a silent ``NaN``.
+    is never a silent ``NaN``. :attr:`aliasing_warning` flags modes with
+    argument near :math:`\\pi` (Nyquist phase) but does **not** change
+    :attr:`valid`; :math:`t=-\\tau/\\ln|\\lambda|` still ignores sign.
 
     Timescales inherit the unit of ``τ``. With ``lag_steps`` alone,
     ``τ = lag_steps`` and :attr:`unit` is ``\"steps\"``. With an optional
@@ -70,7 +73,14 @@ class ImpliedTimescales:
         eigenvalues; invalid entries are ``+∞``.
     valid : Tensor
         Boolean mask aligned with ``timescales`` (``True`` when the
-        timescale is finite and meaningful).
+        timescale is finite and meaningful). Independent of
+        :attr:`aliasing_warning`.
+    aliasing_warning : Tensor
+        Boolean mask aligned with ``timescales``. ``True`` when
+        :math:`\\pi-|\\arg\\lambda|\\le` ``ALIASING_ARG_ATOL`` (radians).
+        Negative-real eigenvalues flag. Does not invalidate
+        :math:`\\lambda=-0.7` or other magnitudes inside the ``ε``
+        window.
     magnitudes : Tensor
         ``|λ|`` used in the formula (real, non-negative).
     lag_steps : int
@@ -88,6 +98,7 @@ class ImpliedTimescales:
 
     timescales: Tensor
     valid: Tensor
+    aliasing_warning: Tensor
     magnitudes: Tensor
     lag_steps: int
     tau: float
@@ -109,6 +120,11 @@ def implied_timescales(
     Uses :math:`t_i = -\\tau / \\ln|\\lambda_i|` with
     :math:`\\tau =` ``lag_steps`` (unit ``\"steps\"``) or
     ``lag_steps * timestep`` when ``timestep`` is provided.
+    Nyquist-adjacent arguments set ``aliasing_warning`` using the same
+    criterion as discrete
+    :class:`~koopman_graph.spectrum_types.SpectralDiagnostics` (Nyquist
+    frequency there is in cycles per unit time). The flag does not
+    change the :math:`|\\lambda|` validity window.
 
     Parameters
     ----------
@@ -130,7 +146,9 @@ def implied_timescales(
     Returns
     -------
     ImpliedTimescales
-        Timescales, validity mask, magnitudes, and unit metadata.
+        Timescales, validity mask, Nyquist-adjacent aliasing flags,
+        magnitudes, and unit metadata. Aliasing is a flag only; it does
+        not change the :math:`|\\lambda|` validity window.
 
     Raises
     ------
@@ -183,6 +201,7 @@ def implied_timescales(
     return ImpliedTimescales(
         timescales=timescales,
         valid=valid,
+        aliasing_warning=aliasing_warning_mask(eigenvalues),
         magnitudes=magnitudes,
         lag_steps=int(lag_steps),
         tau=tau,

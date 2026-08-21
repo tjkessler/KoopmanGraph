@@ -37,5 +37,9 @@ koopman-graph predict \
 `GraphSnapshotSequence` cache. The forecast file is a `torch.save` payload
 with `steps`, `forecasts`, and `summary`.
 
-See `koopman-graph train --help` and `koopman-graph predict --help` for
-flags and exit-code conventions.
+See `koopman-graph train --help`, `koopman-graph predict --help`, and
+`koopman-graph benchmark --help` for flags and exit-code conventions.
+Identity-bound `benchmark run` / `verify` hash a frozen manifest; they
+do not train a model. The Jupyter walkthrough is
+[`examples/47_benchmark_manifest.ipynb`](../47_benchmark_manifest.ipynb)
+(collected by `nbmake`; YAML still needs `[cli]`).

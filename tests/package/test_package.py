@@ -304,6 +304,11 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         "spectral_residuals",
         "SpectralResidualReport",
         "spectrum_distance",
+        "markov_closure_report",
+        "MarkovClosureReport",
+        "FiniteMemoryKoopman",
+        "hodge_decompose_modes",
+        "HodgeModeComponents",
     }
     exported = set(koopman_graph.__all__)
     assert not (demoted & exported)
@@ -312,6 +317,9 @@ def test_analysis_secondaries_demoted_from_root() -> None:
 
     from koopman_graph.analysis import (
         AnomalyDetectionResult,
+        FiniteMemoryKoopman,
+        HodgeModeComponents,
+        MarkovClosureReport,
         RepresentationExplanation,
         SpectralResidualReport,
         calibrate_anomaly_threshold,
@@ -321,7 +329,9 @@ def test_analysis_secondaries_demoted_from_root() -> None:
         discrete_spectrum_at_delta_t,
         dynamical_similarity,
         explain_representation,
+        hodge_decompose_modes,
         koopman_std,
+        markov_closure_report,
         plot_spectrum,
         spectral_residuals,
         spectrum_distance,
@@ -341,6 +351,11 @@ def test_analysis_secondaries_demoted_from_root() -> None:
     assert callable(plot_spectrum)
     assert callable(spectral_residuals)
     assert callable(spectrum_distance)
+    assert MarkovClosureReport is not None
+    assert FiniteMemoryKoopman is not None
+    assert HodgeModeComponents is not None
+    assert callable(markov_closure_report)
+    assert callable(hodge_decompose_modes)
 
 
 def test_statistics_module_off_root_all() -> None:
@@ -372,6 +387,8 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
         "FilterResult",
         "GraphKoopmanEnv",
         "KoopmanObserver",
+        "JointStateTopologyObserver",
+        "JointObserverResult",
         "RecursiveKoopmanAdapter",
         "TemporalSplit",
         "NeighborWindowSampler",
@@ -379,6 +396,59 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
         "as_multi_trajectory",
         "graph_laplacian_features",
         "temporal_split",
+        "BatchedGraphTrajectory",
+        "collate_graph_trajectories",
+        "GraphDynamicsConfig",
+        "GraphStateSnapshot",
+        "graph_dynamics_from_mapping",
+        "graph_state_at",
+        "EntityRemap",
+        "remap_node_features",
+        "SeparableDictionaryDecoder",
+        "SeparableDictionaryEncoder",
+        "GraphonEstimate",
+        "estimate_graphon",
+        "ConditioningContext",
+        "conditioning_at",
+        "diurnal_control_features",
+        "diurnal_phase_index",
+        "ParametricKoopmanOperator",
+        "LeaveOneRegimeOutReport",
+        "leave_one_regime_out",
+        "DriftDiffusionKoopman",
+        "JointCoverageSpec",
+        "gaussian_crps",
+        "gaussian_nll",
+        "energy_score",
+        "markov_closure_report",
+        "MarkovClosureReport",
+        "FiniteMemoryKoopman",
+        "hodge_decompose_modes",
+        "HodgeModeComponents",
+        "CochainState",
+        "CochainKoopmanOperator",
+        "boundary_nilpotency",
+        "order2_cochain_teaching",
+        "Order2CochainTeaching",
+        "bind_cochain_operator",
+        "teaching_order2_triangle",
+        "EquivariantKoopmanOperator",
+        "MassConservingDecoder",
+        "PositivityDecoder",
+        "LinearConservingDecoder",
+        "LinearOperatorProtocol",
+        "PolynomialGraphLinearOperator",
+        "MatrixFreeGraphLinearOperator",
+        "MAX_DENSE_LINEAR_OPERATOR_SIZE",
+        "EigResult",
+        "MemoryEstimate",
+        "TubeKoopmanMPC",
+        "TubeMPCReport",
+        "ensemble_residual_radii",
+        "SyntheticSCM",
+        "SyntheticInterventionReport",
+        "recover_synthetic_interventional_edges",
+        "teaching_three_node_scm",
     }
     exported = set(koopman_graph.__all__)
     assert not (demoted & exported)
@@ -388,30 +458,152 @@ def test_data_adaptation_observables_secondaries_demoted_from_root() -> None:
     from koopman_graph.adaptation import (
         AdaptationStepResult,
         FilterResult,
+        JointObserverResult,
+        JointStateTopologyObserver,
         KoopmanObserver,
         RecursiveKoopmanAdapter,
     )
+    from koopman_graph.analysis import (
+        FiniteMemoryKoopman,
+        HodgeModeComponents,
+        MarkovClosureReport,
+        SyntheticInterventionReport,
+        SyntheticSCM,
+        hodge_decompose_modes,
+        markov_closure_report,
+        recover_synthetic_interventional_edges,
+        teaching_three_node_scm,
+    )
     from koopman_graph.data import (
+        BatchedGraphTrajectory,
+        ConditioningContext,
+        EntityRemap,
+        GraphDynamicsConfig,
+        GraphStateSnapshot,
         NeighborWindowSampler,
         TemporalSplit,
         WindowSampler,
         as_multi_trajectory,
+        collate_graph_trajectories,
+        conditioning_at,
+        diurnal_control_features,
+        diurnal_phase_index,
+        graph_dynamics_from_mapping,
+        graph_state_at,
+        remap_node_features,
         temporal_split,
     )
     from koopman_graph.env import GraphKoopmanEnv
+    from koopman_graph.mpc import (
+        KoopmanMPC,
+        TubeKoopmanMPC,
+        TubeMPCReport,
+        ensemble_residual_radii,
+    )
+    from koopman_graph.nn import (
+        LinearConservingDecoder,
+        MassConservingDecoder,
+        Order2CochainTeaching,
+        PositivityDecoder,
+        SeparableDictionaryDecoder,
+        SeparableDictionaryEncoder,
+        bind_cochain_operator,
+        order2_cochain_teaching,
+        teaching_order2_triangle,
+    )
     from koopman_graph.observables import graph_laplacian_features
+    from koopman_graph.operators import (
+        MAX_DENSE_LINEAR_OPERATOR_SIZE,
+        CochainKoopmanOperator,
+        CochainState,
+        DriftDiffusionKoopman,
+        EigResult,
+        EquivariantKoopmanOperator,
+        GraphonEstimate,
+        LeaveOneRegimeOutReport,
+        LinearOperatorProtocol,
+        MatrixFreeGraphLinearOperator,
+        MemoryEstimate,
+        ParametricKoopmanOperator,
+        PolynomialGraphLinearOperator,
+        boundary_nilpotency,
+        estimate_graphon,
+        leave_one_regime_out,
+    )
+    from koopman_graph.uq import (
+        JointCoverageSpec,
+        energy_score,
+        gaussian_crps,
+        gaussian_nll,
+    )
 
     assert AdaptationStepResult is not None
     assert FilterResult is not None
     assert KoopmanObserver is not None
+    assert JointObserverResult is not None
+    assert JointStateTopologyObserver is not None
     assert RecursiveKoopmanAdapter is not None
     assert TemporalSplit is not None
     assert NeighborWindowSampler is not None
     assert WindowSampler is not None
     assert callable(as_multi_trajectory)
     assert callable(temporal_split)
+    assert BatchedGraphTrajectory is not None
+    assert callable(collate_graph_trajectories)
+    assert GraphDynamicsConfig is not None
+    assert GraphStateSnapshot is not None
+    assert callable(graph_dynamics_from_mapping)
+    assert callable(graph_state_at)
+    assert EntityRemap is not None
+    assert callable(remap_node_features)
+    assert ConditioningContext is not None
+    assert callable(conditioning_at)
+    assert callable(diurnal_control_features)
+    assert callable(diurnal_phase_index)
     assert GraphKoopmanEnv is not None
     assert callable(graph_laplacian_features)
+    assert SeparableDictionaryEncoder is not None
+    assert SeparableDictionaryDecoder is not None
+    assert GraphonEstimate is not None
+    assert callable(estimate_graphon)
+    assert ParametricKoopmanOperator is not None
+    assert LeaveOneRegimeOutReport is not None
+    assert callable(leave_one_regime_out)
+    assert DriftDiffusionKoopman is not None
+    assert JointCoverageSpec is not None
+    assert callable(gaussian_crps)
+    assert callable(gaussian_nll)
+    assert callable(energy_score)
+    assert MarkovClosureReport is not None
+    assert FiniteMemoryKoopman is not None
+    assert callable(markov_closure_report)
+    assert SyntheticSCM is not None
+    assert SyntheticInterventionReport is not None
+    assert callable(teaching_three_node_scm)
+    assert callable(recover_synthetic_interventional_edges)
+    assert HodgeModeComponents is not None
+    assert callable(hodge_decompose_modes)
+    assert CochainState is not None
+    assert CochainKoopmanOperator is not None
+    assert callable(boundary_nilpotency)
+    assert Order2CochainTeaching is not None
+    assert callable(order2_cochain_teaching)
+    assert callable(bind_cochain_operator)
+    assert callable(teaching_order2_triangle)
+    assert EquivariantKoopmanOperator is not None
+    assert MassConservingDecoder is not None
+    assert PositivityDecoder is not None
+    assert LinearConservingDecoder is not None
+    assert LinearOperatorProtocol is not None
+    assert PolynomialGraphLinearOperator is not None
+    assert MatrixFreeGraphLinearOperator is not None
+    assert MemoryEstimate is not None
+    assert EigResult is not None
+    assert MAX_DENSE_LINEAR_OPERATOR_SIZE == 4096
+    assert KoopmanMPC is not None
+    assert TubeKoopmanMPC is not None
+    assert TubeMPCReport is not None
+    assert callable(ensemble_residual_radii)
 
 
 def _documented_keep_in_all_names() -> set[str]:

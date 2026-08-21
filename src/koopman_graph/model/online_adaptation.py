@@ -14,7 +14,7 @@ import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data
 
-from koopman_graph.adaptation import AdaptationStepResult, RecursiveKoopmanAdapter
+from koopman_graph.adaptation.rls import AdaptationStepResult, RecursiveKoopmanAdapter
 from koopman_graph.operators.contract import KoopmanOperatorContract
 from koopman_graph.protocols import DynamicsMode
 

@@ -1,12 +1,20 @@
 """Cell-complex boundary operators and Hodge Laplacians (teaching MVP).
 
-Supports oriented 0-, 1-, and 2-cells. Higher-dimensional cells
-(``k > 2``) are refused. Boundary ``B_1`` reuses
-:func:`~koopman_graph.observables.boundary_incidence_b1`; the combinatorial
-graph Laplacian on 0-cells reuses
-:func:`~koopman_graph.observables.simplicial_one_laplacian_matvec` (the 0.10
-simplicial helper named ``L_1 = B_1 B_1^T`` on node features — Hodge degree
-``L_0`` here).
+Supports oriented 0-, 1-, and 2-cells plus optional tetrahedral
+3-cells. Degrees above :data:`MAX_CELL_COMPLEX_DEGREE` (3) are
+refused. That ceiling is the in-repo TDL teaching depth — **not**
+TopologicX / TDA ecosystem parity (``TopoX2024``). Boundary ``B_1``
+reuses :func:`~koopman_graph.observables.boundary_incidence_b1`; the
+combinatorial graph Laplacian on 0-cells reuses
+:func:`~koopman_graph.observables.simplicial_one_laplacian_matvec`
+(the 0.10 simplicial helper named ``L_1 = B_1 B_1^T`` on node
+features — Hodge degree ``L_0`` here).
+
+:func:`order2_cochain_teaching` binds
+:class:`~koopman_graph.operators.CochainKoopmanOperator` to a filled
+triangle. The operator advances :math:`k\\le 1`; face latents may be
+stored. Sheaf restriction maps stay learned-optional on the sheaf
+peers (default diagonal).
 
 Orientation convention
 ----------------------
@@ -18,6 +26,9 @@ Orientation convention
   the boundary cycle ``(a → b) + (b → c) + (c → a)``. Each induced edge
   contributes ``+1`` / ``-1`` according to whether it agrees with the stored
   1-cell orientation.
+* **3-cells.** Optional ``tetra_index`` columns ``(a, b, c, d)`` induce
+  the four triangular faces of a tetrahedron. This is the teaching
+  ceiling, not a general 3-complex library.
 
 Factory ``encoder="cell_complex"`` builds matched
 :class:`CellComplexGNNEncoder` / :class:`CellComplexGNNDecoder` peers that
@@ -31,6 +42,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
@@ -46,6 +58,12 @@ from koopman_graph.observables import (
     coerce_face_index,
     simplicial_one_laplacian_matvec,
 )
+
+if TYPE_CHECKING:
+    from koopman_graph.operators.cochain import (
+        BoundaryNilpotencyReport,
+        CochainKoopmanOperator,
+    )
 
 DecoderFn = Callable[[Tensor, Tensor, Tensor | None], Tensor]
 
@@ -77,7 +95,7 @@ def _validate_degree(k: int) -> None:
 
 @dataclass
 class CellComplex:
-    """Oriented cell complex with 0-/1-/2-cells.
+    """Oriented cell complex with 0-/1-/2-cells and optional 3-cells.
 
     Parameters
     ----------
@@ -88,6 +106,9 @@ class CellComplex:
     face_index : Tensor or None, optional
         Ordered triangular 2-cells with shape ``(3, num_faces)``, or
         ``None`` / empty for a pure 1-skeleton.
+    tetra_index : Tensor or None, optional
+        Ordered tetrahedral 3-cells with shape ``(4, num_tets)``. The
+        teaching ceiling is :data:`MAX_CELL_COMPLEX_DEGREE`.
     """
 
     num_nodes: int
@@ -289,7 +310,8 @@ def boundary_operator(complex_: CellComplex, k: int) -> Tensor:
         Oriented cell complex.
     k : int
         Boundary degree. ``k = 0`` returns an empty ``(0, n_0)`` matrix
-        (no ``(-1)``-cells). ``k ∈ {1, 2}`` return ``B_1`` / ``B_2``.
+        (no ``(-1)``-cells). ``k ∈ {1, 2, 3}`` return ``B_1`` /
+        ``B_2`` / ``B_3``. ``k > 3`` is refused.
 
     Returns
     -------
@@ -923,3 +945,226 @@ def bind_cell_complex_decoder(
     faces = _require_face_index(face_index, num_nodes=num_nodes)
     CellComplex(num_nodes=num_nodes, edge_index=edges, face_index=faces)
     return lambda z, _edge_index, _edge_weight: decoder(z, edges, None)
+
+
+@dataclass(frozen=True)
+class Order2CochainTeaching:
+    """Filled triangle bound to a :math:`k\\le 1` cochain operator.
+
+    Attributes
+    ----------
+    complex : CellComplex
+        Oriented 2-simplex (3 nodes, 3 edges, 1 face).
+    operator : CochainKoopmanOperator
+        Bound to the 1-skeleton. Not a factory kind; ``k=2`` is not
+        evolved.
+    nilpotency : BoundaryNilpotencyReport
+        :math:`B_1 B_2\\approx 0` on this triangle
+        (``Lim2020Hodge``).
+    max_cell_degree : int
+        Always :data:`MAX_CELL_COMPLEX_DEGREE` (3). Documents the
+        teaching ceiling, not ecosystem parity (``TopoX2024``).
+    """
+
+    complex: CellComplex
+    operator: CochainKoopmanOperator
+    nilpotency: BoundaryNilpotencyReport
+    max_cell_degree: int
+
+    def __post_init__(self) -> None:
+        """Validate the documented cell-complex ceiling.
+
+        Raises
+        ------
+        ValueError
+            If ``max_cell_degree`` is not the teaching ceiling.
+        """
+        if int(self.max_cell_degree) != int(MAX_CELL_COMPLEX_DEGREE):
+            msg = (
+                "max_cell_degree must equal MAX_CELL_COMPLEX_DEGREE "
+                f"{MAX_CELL_COMPLEX_DEGREE}, got {self.max_cell_degree}"
+            )
+            raise ValueError(msg)
+
+
+def teaching_order2_triangle() -> CellComplex:
+    """Return the oriented filled triangle used as the order-2 path.
+
+    Returns
+    -------
+    CellComplex
+        Three 0-cells, three 1-cells, and one 2-cell. Combinatorial
+        incidence only — not a sheaf or TopologicX complex
+        (``Lim2020Hodge``, ``TopoX2024``).
+    """
+    edge_index = torch.tensor([[0, 1, 0], [1, 2, 2]], dtype=torch.long)
+    face_index = torch.tensor([[0], [1], [2]], dtype=torch.long)
+    return CellComplex(num_nodes=3, edge_index=edge_index, face_index=face_index)
+
+
+def teaching_order3_tetrahedron() -> CellComplex:
+    """Return a filled tetrahedron at the cell-complex degree ceiling.
+
+    Returns
+    -------
+    CellComplex
+        Four 0-cells, six 1-cells, four 2-cells, and one 3-cell.
+        :data:`MAX_CELL_COMPLEX_DEGREE` is 3. This is not a general
+        3-complex library (``TopoX2024``).
+    """
+    edge_index = torch.tensor(
+        [[0, 1, 0, 0, 1, 2], [1, 2, 2, 3, 3, 3]],
+        dtype=torch.long,
+    )
+    face_index = torch.tensor(
+        [[0, 0, 0, 1], [1, 1, 2, 2], [2, 3, 3, 3]],
+        dtype=torch.long,
+    )
+    tetra_index = torch.tensor([[0], [1], [2], [3]], dtype=torch.long)
+    return CellComplex(
+        num_nodes=4,
+        edge_index=edge_index,
+        face_index=face_index,
+        tetra_index=tetra_index,
+    )
+
+
+def bind_cochain_operator(
+    complex_: CellComplex,
+    *,
+    latent_dim: int,
+    use_cross_degree: bool = False,
+) -> CochainKoopmanOperator:
+    """Bind a :math:`k\\le 1` cochain operator to a cell-complex 1-skeleton.
+
+    Face and tetra incidences stay on the complex for nilpotency
+    checks. The operator does not evolve :math:`k=2`. This hook lives
+    in ``nn`` because :mod:`koopman_graph.operators.cochain` must not
+    import ``nn``.
+
+    Parameters
+    ----------
+    complex_ : CellComplex
+        Oriented complex. ``edge_index`` and ``num_nodes`` bind
+        :math:`B_1`.
+    latent_dim : int
+        Shared node / edge feature width.
+    use_cross_degree : bool, optional
+        Enable incidence cross terms. Default ``False``.
+
+    Returns
+    -------
+    CochainKoopmanOperator
+        Operator on the 1-skeleton. Not a factory kind.
+
+    Raises
+    ------
+    TypeError
+        If ``complex_`` is not a :class:`CellComplex`.
+    ValueError
+        If ``latent_dim`` or the 1-skeleton is invalid.
+    """
+    if not isinstance(complex_, CellComplex):
+        msg = f"complex_ must be a CellComplex, got {type(complex_).__name__}"
+        raise TypeError(msg)
+    from koopman_graph.operators.cochain import CochainKoopmanOperator
+
+    return CochainKoopmanOperator(
+        int(latent_dim),
+        complex_.edge_index,
+        num_nodes=int(complex_.num_nodes),
+        use_cross_degree=use_cross_degree,
+    )
+
+
+def cell_complex_boundary_nilpotency(
+    complex_: CellComplex,
+    *,
+    atol: float | None = None,
+) -> BoundaryNilpotencyReport:
+    """Score :math:`B_1 B_2 \\approx 0` on a cell complex.
+
+    This is the cochain-operator hook for order-2 incidence. It does
+    not score :math:`B_2 B_3`; tetrahedra are ceiling fixtures only.
+
+    Parameters
+    ----------
+    complex_ : CellComplex
+        Oriented complex with at least one 2-cell.
+    atol : float or None, optional
+        Absolute entrywise tolerance. Default is the teaching
+        triangle floor ``1e-6``.
+
+    Returns
+    -------
+    BoundaryNilpotencyReport
+        Product, max absolute entry, and flag.
+
+    Raises
+    ------
+    TypeError
+        If ``complex_`` is not a :class:`CellComplex`.
+    ValueError
+        If the complex has no 2-cells.
+    """
+    if not isinstance(complex_, CellComplex):
+        msg = f"complex_ must be a CellComplex, got {type(complex_).__name__}"
+        raise TypeError(msg)
+    if int(complex_.num_faces) < 1:
+        raise ValueError(
+            "cell_complex_boundary_nilpotency requires at least one 2-cell"
+        )
+    from koopman_graph.operators.cochain import (
+        DEFAULT_NILPOTENCY_ATOL,
+        boundary_nilpotency,
+    )
+
+    tolerance = DEFAULT_NILPOTENCY_ATOL if atol is None else float(atol)
+    return boundary_nilpotency(
+        boundary_operator(complex_, 1),
+        boundary_operator(complex_, 2),
+        atol=tolerance,
+    )
+
+
+def order2_cochain_teaching(
+    *,
+    latent_dim: int = 2,
+    use_cross_degree: bool = False,
+) -> Order2CochainTeaching:
+    """Build the order-2 teaching path and bind a cochain operator.
+
+    The filled triangle satisfies :math:`B_1 B_2\\approx 0` at atol
+    ``1e-6``. The bound operator advances node and edge latents only.
+    Sheaf restriction maps are not required. Cell-complex degree 3
+    remains the teaching ceiling (``Lim2020Hodge``, ``TopoX2024``).
+
+    Parameters
+    ----------
+    latent_dim : int, optional
+        Shared node / edge width. Default ``2``.
+    use_cross_degree : bool, optional
+        Enable incidence cross terms. Default ``False``.
+
+    Returns
+    -------
+    Order2CochainTeaching
+        Triangle, bound operator, nilpotency report, and ceiling.
+
+    Raises
+    ------
+    ValueError
+        If ``latent_dim`` is invalid.
+    """
+    complex_ = teaching_order2_triangle()
+    operator = bind_cochain_operator(
+        complex_,
+        latent_dim=latent_dim,
+        use_cross_degree=use_cross_degree,
+    )
+    return Order2CochainTeaching(
+        complex=complex_,
+        operator=operator,
+        nilpotency=cell_complex_boundary_nilpotency(complex_),
+        max_cell_degree=MAX_CELL_COMPLEX_DEGREE,
+    )

@@ -31,7 +31,28 @@ from koopman_graph.operators import (
     van_loan_generator_from_discrete,
 )
 from koopman_graph.operators.continuous import negative_strict_diagonal_values
+from koopman_graph.spectrum_types import DefectiveSpectrumError
 from koopman_graph.training import LossWeights
+
+# Independent algebraic identity: J = I+N with N^2=0 ⇒ log J = N.
+# Float64 SciPy logm / matrix-exp residual vs that closed form.
+_JORDAN_LOG_REL = 1e-10
+_JORDAN_LOG_ABS = 1e-12
+
+
+def _assert_tensor_approx(
+    actual: Tensor,
+    expected: Tensor,
+    *,
+    rel: float,
+    abs_: float,
+) -> None:
+    """Compare tensors with a documented float64 residual."""
+    assert actual.detach().cpu().numpy() == pytest.approx(
+        expected.detach().cpu().numpy(),
+        rel=rel,
+        abs=abs_,
+    )
 
 
 def test_matrix_log_round_trips_spd_matrix() -> None:
@@ -54,6 +75,78 @@ def test_matrix_log_of_matrix_exp_recovers_symmetric_generator() -> None:
     )
     recovered = matrix_log(torch.linalg.matrix_exp(generator))
     assert torch.allclose(recovered, generator, atol=1e-5)
+
+
+def test_matrix_log_jordan_block_raises_by_default() -> None:
+    """A 2×2 Jordan block of 1 is not diagonalizable; default does not invert V."""
+    jordan = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
+    with pytest.raises(DefectiveSpectrumError, match="Schur") as exc_info:
+        matrix_log(jordan)
+    assert isinstance(exc_info.value, torch.linalg.LinAlgError)
+
+
+def test_matrix_log_schur_path_matches_jordan_closed_form() -> None:
+    """SciPy logm on J=[[1,1],[0,1]] is [[0,1],[0,0]] (N^2=0 ⇒ exp(N)=I+N).
+
+    Independent algebraic identity, not a literature table. Float64 SciPy
+    residual vs that closed form.
+    """
+    pytest.importorskip("scipy")
+    jordan = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
+    expected = torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=torch.float64)
+    logged = matrix_log(jordan, defective="schur")
+    _assert_tensor_approx(logged, expected, rel=_JORDAN_LOG_REL, abs_=_JORDAN_LOG_ABS)
+    _assert_tensor_approx(
+        torch.linalg.matrix_exp(logged),
+        jordan,
+        rel=_JORDAN_LOG_REL,
+        abs_=_JORDAN_LOG_ABS,
+    )
+
+
+def test_matrix_log_diagonalizable_nonnormal_still_logs() -> None:
+    """A triangular but diagonalizable map is not treated as Jordan."""
+    matrix = torch.tensor([[1.0, 10.0], [0.0, 2.0]], dtype=torch.float64)
+    logged = matrix_log(matrix)
+    _assert_tensor_approx(
+        torch.linalg.matrix_exp(logged),
+        matrix,
+        rel=_JORDAN_LOG_REL,
+        abs_=_JORDAN_LOG_ABS,
+    )
+
+
+def test_matrix_log_does_not_use_condition_warn_as_error() -> None:
+    """κ(V) above CONDITION_WARN=1e6 can still be diagonalizable.
+
+    Default rcond is n·ε (~1e-16), not the amplitude warning threshold.
+    """
+    matrix = torch.tensor([[1.0, 1.0e7], [0.0, 2.0]], dtype=torch.float64)
+    logged = matrix_log(matrix)
+    assert bool(torch.isfinite(logged).all().item())
+
+
+def test_matrix_log_rejects_invalid_defective_and_rcond() -> None:
+    """Keyword validation is explicit."""
+    matrix = torch.eye(2, dtype=torch.float64)
+    with pytest.raises(ValueError, match="defective must be"):
+        matrix_log(matrix, defective="nope")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="rcond must be a finite value > 0"):
+        matrix_log(matrix, rcond=0.0)
+    with pytest.raises(ValueError, match="rcond must be a finite value > 0"):
+        matrix_log(matrix, rcond=float("nan"))
+    with pytest.raises(ValueError, match="rcond must be a finite value > 0"):
+        matrix_log(matrix, rcond=float("inf"))
+    with pytest.raises(DefectiveSpectrumError, match="Schur"):
+        matrix_log(matrix, rcond=2.0)
+
+
+def test_van_loan_generator_from_discrete_raises_on_jordan_k() -> None:
+    """Van Loan inversion inherits matrix_log(..., defective='error')."""
+    discrete_k = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
+    discrete_b = torch.zeros(1, 2, dtype=torch.float64)
+    with pytest.raises(DefectiveSpectrumError, match="Schur"):
+        van_loan_generator_from_discrete(discrete_k, discrete_b, 0.1)
 
 
 @pytest.fixture

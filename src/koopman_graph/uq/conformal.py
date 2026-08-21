@@ -79,6 +79,7 @@ from koopman_graph.uq.common import (
     hetero_snapshot_with_features,
     snapshot_with_features,
 )
+from koopman_graph.uq.coverage import JointCoverageSpec, require_shipped_coverage
 
 CalibrationSequence = (
     GraphSnapshotSequence
@@ -380,6 +381,11 @@ class ConformalKoopmanUQ:
         ``[0, 1]``. ``None`` (default) disables smoothing. ``0`` reproduces
         unsmoothed ``node_wise`` exactly. Only valid with
         ``score="node_wise"``.
+    coverage : JointCoverageSpec or None, optional
+        Named estimand. Default ``None`` still reports
+        :attr:`coverage` as ``target="per_node_marginal"`` (not an
+        implied joint claim). Simultaneous / event targets and
+        ``block!="none"`` raise.
 
     Notes
     -----
@@ -392,7 +398,8 @@ class ConformalKoopmanUQ:
     and test scores; graph time series typically violate that assumption, so
     treat split coverage as approximate under temporal dependence (see the
     module ``Coverage semantics`` section). ``node_wise`` calibration
-    requires at least ``ceil(1 / alpha)`` sequences.
+    requires at least ``ceil(1 / alpha)`` sequences. The coverage
+    target is named by :attr:`coverage`; it is never implied.
 
     Score diffusion follows Zargarbashi et al. (ICML 2023) for classification
     conformity scores; using it on regression residuals is an adaptation with
@@ -412,12 +419,13 @@ class ConformalKoopmanUQ:
         score: ConformalScore = "aggregate",
         gamma: float = 0.005,
         neighbor_smoothing: float | None = None,
+        coverage: JointCoverageSpec | None = None,
     ) -> None:
         """Initialize conformal UQ settings.
 
         Parameters
         ----------
-        model, method, score, gamma, neighbor_smoothing
+        model, method, score, gamma, neighbor_smoothing, coverage
             See the class docstring.
         """
         if method not in {"split", "adaptive"}:
@@ -448,10 +456,29 @@ class ConformalKoopmanUQ:
         self.neighbor_smoothing = (
             None if neighbor_smoothing is None else float(neighbor_smoothing)
         )
+        self._coverage_spec = (
+            None if coverage is None else require_shipped_coverage(coverage)
+        )
         self._quantiles: Tensor | None = None
         self._alpha: float | None = None
         self._n_calibration: int = 0
         self._calibrated_steps: int = 0
+
+    @property
+    def coverage(self) -> JointCoverageSpec:
+        """Named coverage estimand (never an implied joint claim).
+
+        Returns
+        -------
+        JointCoverageSpec
+            ``target="per_node_marginal"`` and ``block="none"``. ``alpha``
+            is the constructor spec or the last calibrated rate (default
+            ``0.1`` before :meth:`calibrate`).
+        """
+        if self._coverage_spec is not None:
+            return self._coverage_spec
+        alpha = 0.1 if self._alpha is None else float(self._alpha)
+        return JointCoverageSpec(target="per_node_marginal", alpha=alpha, block="none")
 
     @property
     def _uses_hetero(self) -> bool:
@@ -641,6 +668,14 @@ class ConformalKoopmanUQ:
             raise ValueError(msg)
         if not 0.0 < alpha < 1.0:
             msg = f"alpha must lie in (0, 1), got {alpha}"
+            raise ValueError(msg)
+        if self._coverage_spec is not None and float(alpha) != float(
+            self._coverage_spec.alpha
+        ):
+            msg = (
+                "calibrate alpha must match coverage.alpha "
+                f"{self._coverage_spec.alpha}; got {alpha}"
+            )
             raise ValueError(msg)
         if not calibration_sequences:
             msg = "calibration_sequences must be non-empty"

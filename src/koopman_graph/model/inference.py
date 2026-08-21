@@ -7,12 +7,18 @@ the model façade; peer imports are for power-user / package-internal use.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
 from torch_geometric.data import Data, HeteroData
 
-from koopman_graph.data import SnapshotSequence
+from koopman_graph.data import (
+    GraphSnapshotSequence,
+    HeteroGraphSnapshotSequence,
+    SnapshotSequence,
+    resolve_sequence,
+)
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
     hold_last_topology_at,
@@ -20,7 +26,12 @@ from koopman_graph.graph_utils import (
     snapshot_hyperedge_index,
     snapshot_hyperedge_weight,
 )
-from koopman_graph.metrics import EvaluationResult, evaluate_forecast
+from koopman_graph.metrics import (
+    EvaluationResult,
+    _dense_pernode_discrete_k,
+    _encode_invariance_latents,
+    evaluate_forecast,
+)
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     ContinuousHeteroGraphKoopmanOperator,
@@ -38,6 +49,9 @@ from koopman_graph.spectrum_types import (
 
 from .timing import resolve_time_increments, validate_uniform_discrete_increments
 from .validation import validate_controls
+
+if TYPE_CHECKING:
+    from koopman_graph.identification import SubspaceInvarianceReport
 
 EncodeRolloutOriginFn = Callable[
     ...,
@@ -304,6 +318,9 @@ def latent_decode_rollout(
     history: Sequence[Data] | None = None,
     hyperedge_index: Tensor | None = None,
     hyperedge_weight: Tensor | None = None,
+    topology_policy: str = "auto",
+    topology_model: nn.Module | None = None,
+    parameters: Sequence[Tensor] | None = None,
 ) -> list[tuple[Tensor, Tensor, Tensor | None]]:
     """Autoregressively advance latent state and decode for multiple steps.
 
@@ -332,6 +349,16 @@ def latent_decode_rollout(
         Static hyperedge incidence for hypergraph operators. When omitted and
         ``x_or_data`` is a ``Data`` snapshot, incidence is read from the
         snapshot fields.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Rollout topology policy. ``auto`` uses predicted
+        :math:`\\hat A_{t+1}` when ``topology_model`` has a recursive
+        graph-state head; otherwise hold-last. Oracle
+        ``future_topologies`` still wins.
+    topology_model : nn.Module or None, optional
+        Model exposing ``predicted_topology`` / ``graph_dynamics``.
+        ``None`` keeps hold-last.
+    parameters : sequence of Tensor or None, optional
+        Per-step regime coordinates for parametric interpolants.
 
     Returns
     -------
@@ -351,6 +378,9 @@ def latent_decode_rollout(
     validate_controls(control_dim=control_dim, controls=controls, steps=steps)
     if step_deltas is not None and len(step_deltas) != steps:
         msg = f"expected {steps} step_deltas for rollout, got {len(step_deltas)}"
+        raise ValueError(msg)
+    if parameters is not None and len(parameters) != steps:
+        msg = f"expected {steps} parameters for rollout, got {len(parameters)}"
         raise ValueError(msg)
 
     z, edge_index, edge_weight = encode_rollout_origin(
@@ -386,18 +416,32 @@ def latent_decode_rollout(
     )
 
     control_at = None if controls is None else (lambda step: controls[step])
+    parameters_at = None if parameters is None else (lambda step: parameters[step])
     delta_t_at = None if step_deltas is None else (lambda step: step_deltas[step])
+    if topology_model is None:
+        topology_at = hold_last_topology_at(
+            edge_index,
+            edge_weight,
+            future_topologies,
+        )
+    else:
+        from koopman_graph.nn.predicted_topology import resolve_rollout_topology_at
+
+        topology_at = resolve_rollout_topology_at(
+            topology_model,
+            edge_index,
+            edge_weight,
+            future_topologies,
+            topology_policy,
+        )
     return autoregressive_latent_rollout(
         koopman,
         decoder,
         z,
         steps=steps,
-        topology_at=hold_last_topology_at(
-            edge_index,
-            edge_weight,
-            future_topologies,
-        ),
+        topology_at=topology_at,
         control_at=control_at,
+        parameters_at=parameters_at,
         delta_t_at=delta_t_at,
         presence_at=presence_at,
         initial_features=initial_features,
@@ -421,6 +465,8 @@ def predict_snapshots(
     future_topologies: Sequence[Data] | None = None,
     future_presence: Tensor | Sequence[Tensor] | None = None,
     history: Sequence[Data] | None = None,
+    topology_policy: str = "auto",
+    parameters: Sequence[Tensor] | None = None,
 ) -> list[Data]:
     """Run an eval-mode discrete-step rollout and pack ``Data`` snapshots.
 
@@ -448,6 +494,10 @@ def predict_snapshots(
         See the function signature / summary for ``future_topologies``.
     future_presence : Tensor | Sequence[Tensor] | None
         Optional per-step presence schedule for the inactive-node hold policy.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Forwarded to ``rollout_fn``.
+    parameters : sequence of Tensor or None, optional
+        Per-step regime coordinates forwarded to ``rollout_fn``.
 
     Returns
     -------
@@ -467,6 +517,8 @@ def predict_snapshots(
                 future_topologies=future_topologies,
                 future_presence=future_presence,
                 history=history,
+                topology_policy=topology_policy,
+                parameters=parameters,
             )
     finally:
         model.train(was_training)
@@ -487,6 +539,7 @@ def predict_at_snapshots(
     controls: Sequence[Tensor] | None = None,
     future_topologies: Sequence[Data] | None = None,
     future_presence: Tensor | Sequence[Tensor] | None = None,
+    topology_policy: str = "auto",
 ) -> list[Data]:
     """Forecast snapshots at arbitrary query times / step deltas.
 
@@ -518,6 +571,8 @@ def predict_at_snapshots(
         See the function signature / summary for ``controls``.
     future_presence : Tensor | Sequence[Tensor] | None
         Optional per-step presence schedule for the inactive-node hold policy.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Forwarded to ``rollout_fn``.
 
     Returns
     -------
@@ -547,6 +602,7 @@ def predict_at_snapshots(
                 future_topologies=future_topologies,
                 future_presence=future_presence,
                 step_deltas=increments,
+                topology_policy=topology_policy,
             )
     finally:
         model.train(was_training)
@@ -560,6 +616,8 @@ def evaluate_sequence(
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
     include_resdmd: bool = False,
+    include_invariance: bool = False,
+    topology_policy: str = "auto",
 ) -> EvaluationResult:
     """Evaluate multi-horizon forecast accuracy on a snapshot sequence.
 
@@ -576,6 +634,10 @@ def evaluate_sequence(
         Forecast-origin indices. When ``None``, uses every valid origin.
     include_resdmd : bool, optional
         Forwarded to :func:`~koopman_graph.metrics.evaluate_forecast`.
+    include_invariance : bool, optional
+        Forwarded to :func:`~koopman_graph.metrics.evaluate_forecast`.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Forwarded to :func:`~koopman_graph.metrics.evaluate_forecast`.
 
     Returns
     -------
@@ -588,4 +650,70 @@ def evaluate_sequence(
         horizons=horizons,
         start_indices=start_indices,
         include_resdmd=include_resdmd,
+        include_invariance=include_invariance,
+        topology_policy=topology_policy,
     )
+
+
+def sequence_subspace_invariance(
+    model: object,
+    sequence: SnapshotSequence | Sequence[Data] | Sequence[HeteroData],
+    *,
+    held_out: bool = True,
+) -> SubspaceInvarianceReport:
+    """Encode snapshots and report finite-sample subspace leakage.
+
+    Lazy-imports :mod:`koopman_graph.identification` so
+    ``import koopman_graph.model`` does not load that package.
+
+    Parameters
+    ----------
+    model
+        Homogeneous discrete per-node :class:`~koopman_graph.model.GraphKoopmanModel`.
+    sequence : GraphSnapshotSequence or sequence of Data
+        Snapshots to encode. Hetero sequences raise.
+    held_out : bool, optional
+        Use the last half of the time axis for both the projector and the
+        expectation. Default is ``True``.
+
+    Returns
+    -------
+    SubspaceInvarianceReport
+        Leakage :math:`\\eta`, sample count, rank, and ``held_out``.
+
+    Raises
+    ------
+    ValueError
+        If the sequence is hetero or the operator is not a dense discrete
+        per-node map.
+    TypeError
+        If ``held_out`` is not a ``bool``.
+    """
+    if isinstance(sequence, HeteroGraphSnapshotSequence):
+        msg = "subspace invariance does not support HeteroGraphSnapshotSequence"
+        raise ValueError(msg)
+    if not isinstance(sequence, GraphSnapshotSequence):
+        if (
+            isinstance(sequence, Sequence)
+            and not isinstance(sequence, (str, bytes))
+            and sequence
+            and isinstance(sequence[0], HeteroData)
+        ):
+            msg = "subspace invariance does not support HeteroData sequences"
+            raise ValueError(msg)
+        sequence = resolve_sequence(sequence)  # type: ignore[arg-type]
+    matrix = _dense_pernode_discrete_k(model)  # type: ignore[arg-type]
+    was_training = bool(getattr(model, "training", False))
+    eval_fn = getattr(model, "eval", None)
+    train_fn = getattr(model, "train", None)
+    if eval_fn is not None:
+        eval_fn()
+    try:
+        with torch.no_grad():
+            encodings = _encode_invariance_latents(model, sequence)  # type: ignore[arg-type]
+    finally:
+        if train_fn is not None:
+            train_fn(was_training)
+    from koopman_graph.identification import subspace_invariance_report
+
+    return subspace_invariance_report(encodings, matrix, held_out=held_out)

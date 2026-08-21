@@ -82,9 +82,9 @@ Optional feature extras
    pip install "koopman-graph[baselines-graphcast]"  # reserved; teaching GraphCast is pure PyTorch
    pip install "koopman-graph[distributed]"       # meta: lightning + ray + dask
 
-* **MPC:** ``from koopman_graph.mpc import KoopmanMPC``. Construction works
-  without OSQP; ``solve`` / ``rollout`` raise with install guidance if OSQP
-  is missing.
+* **MPC:** ``from koopman_graph.mpc import KoopmanMPC, TubeKoopmanMPC``.
+  Construction works without OSQP; ``solve`` / ``rollout`` /
+  ``evaluate`` raise with install guidance if OSQP is missing.
 * **Symmetry:** ``koopman_auto_orbits=True`` uses ``networkx``
   (``method="auto"``). Without ``[symmetry]``, ``node_orbit_partition``
   warns and returns the identity partition (no tying). Exact orbits /
@@ -132,7 +132,7 @@ aliases), for example:
        ConformalKoopmanUQ,
        EnsembleGraphKoopmanModel,
    )
-   from koopman_graph.mpc import KoopmanMPC
+   from koopman_graph.mpc import KoopmanMPC, TubeKoopmanMPC, TubeMPCReport
    from koopman_graph.nn import AdaptiveAdjacency
    from koopman_graph.analysis import (
        identify_sparse_dynamics,
@@ -170,6 +170,24 @@ incidence). Self-adaptive topology and orbit-tied ``K_{\mathrm{self}}`` are
 separate options and are not substitutes for directed normalization. See
 :doc:`architecture` (adjacency contract) and :doc:`limitations`.
 
+Can I train on several graphs or topologies?
+--------------------------------------------
+
+Yes. Pass a :class:`~koopman_graph.data.MultiTrajectory` of homogeneous
+(or all-hetero) sequences to :meth:`~koopman_graph.model.GraphKoopmanModel.fit`.
+That path already averages per-trajectory losses; it is not a
+single-topology restriction.
+
+``fit(..., batch_graphs=True)`` is an opt-in **vectorization** of that
+loop: independent graphs are collated into one PyG ``Batch`` so shared
+:math:`K` applies to the disconnected union with per-graph shifts.
+Reconstruction (and forward consistency when weighted) match the mean of
+the per-sequence losses on modest batches. The default Python loop is
+unchanged. Hetero, hypergraph, windowed, and DDP graph-batching are out
+of scope. This flag does not enable multi-topology training for the
+first time, and this page does not quote a throughput number.
+See :doc:`architecture` (multi-graph ``Batch``).
+
 Why is training slow on large :math:`N`?
 ----------------------------------------
 
@@ -192,8 +210,8 @@ supports are cached within an evaluation:
 
 Shared pair latents, inverse / support / :math:`\hat{H}` / :math:`\Phi`
 reuse, and PDE/worst-case prediction sharing reduce repeated work; they
-do not change those representation sizes. See :doc:`limitations` (Scale)
-and :doc:`capabilities` (Training performance).
+do not change those representation sizes. See :doc:`limitations` (Scale),
+:doc:`matrix_free`, and :doc:`capabilities` (Training performance).
 
 Does spectrum still assemble :math:`N\cdot d`?
 ----------------------------------------------
@@ -208,7 +226,10 @@ Not always for discrete ``GraphKoopmanOperator`` /
   ``{"symmetric", "random_walk"}``; ``sparsity`` in
   ``{"dense", "block_diagonal"}``) — Kronecker-sum exact spectrum
   (order :math:`O(N^3 + N d^3)` via dense :math:`N\times N`
-  :math:`\widehat{A}` plus :math:`N` blocks of size :math:`d\times d`)
+  :math:`\widehat{A}` plus :math:`N` blocks of size :math:`d\times d`).
+  Discrete hop degree :math:`P\ge 0` is eligible; the pencil is
+  :math:`B(\lambda)=\sum_k\lambda^k K_k`, not a sum of independent
+  factor eigenvalues. Continuous graph stays the one-tap generator.
 * Else — dense :math:`(N\cdot d)` eigendecomposition
   (``dual_random_walk``, discrete orbit / isotypic self banks, hetero /
   hypergraph, helper fall-back)
@@ -216,6 +237,116 @@ Not always for discrete ``GraphKoopmanOperator`` /
 Exact inverse and eigenvalue-regularization hinges are unchanged (still
 dense assembled ceilings where documented). Details:
 :doc:`limitations` (Scale) and :doc:`architecture` (spectrum routing).
+
+Does a deeper GNN encoder make up for one-hop :math:`K`?
+--------------------------------------------------------
+
+No. Encoder neighborhood mixing and the Koopman factor hop degree are
+different maps. :meth:`~koopman_graph.model.GraphKoopmanModel.fit`
+warns when encoder hops exceed discrete graph ``filter_degree``
+(GCN/GAT depth, or DiffConv ``num_layers * diffusion_steps``). Raise
+``koopman_filter_degree`` or reduce encoder depth if you want them
+matched. The check does not fail training and skips operators without
+a hop radius. See :doc:`limitations`,
+``examples/38_operator_factorization_ablation.ipynb`` (hop-matched
+:math:`P` arm; not a rewrite of the historical joint-LS gap), and
+``examples/49_multi_hop_factorization.ipynb`` (Kronecker versus dense
+:math:`P=2` spectrum).
+
+Does identification replace Adam ``fit``?
+-----------------------------------------
+
+No. :meth:`~koopman_graph.model.GraphKoopmanModel.fit` still defaults to
+Adam (``identification=None``). Pass
+:class:`~koopman_graph.identification.IdentificationConfig` to alternate
+frozen-encoder closed-form :math:`K` updates (ridge, TLS, or
+constrained least squares) with encoder/decoder Adam steps. That path
+currently supports discrete dense per-node
+:class:`~koopman_graph.operators.KoopmanOperator` only. After fit, read
+``model.identification_report`` for latent one-step / short-rollout
+mean squared error (MSE) and :math:`\rho(K)` — not a Haseli–Cortés,
+ResDMD, or stability certificate. Types and solvers stay off the root
+façade (``from koopman_graph.identification import ...``). Tutorials
+continue to use Adam unless they opt in. See :doc:`identification`
+and ``examples/48_identification_invariance.ipynb``.
+
+Is ``evaluate(..., include_invariance=True)`` a Haseli–Cortés certificate?
+--------------------------------------------------------------------------
+
+No. Opt-in ``include_invariance`` (and
+:meth:`~koopman_graph.model.GraphKoopmanModel.subspace_invariance_report`)
+reports a dimensionless finite-sample projection leakage
+:math:`\eta` on a truncated-SVD basis of encoded snapshots. Default
+evaluate MAE / RMSE / MAPE are unchanged. The helper currently
+supports discrete dense per-node
+:class:`~koopman_graph.operators.KoopmanOperator` only. It is **not**
+the Haseli–Cortés invariance-proximity certificate (principal angles /
+worst-case bound; ``HaseliCortes2023``), **not**
+:class:`~koopman_graph.losses.ForwardConsistencyLoss`, and **not**
+:func:`~koopman_graph.analysis.spectral_residuals`. Closed-form
+``fit`` still does not fill ``IdentificationReport.invariance``.
+
+Does residual-aware selection certify a ResDMD spectral measure?
+----------------------------------------------------------------
+
+No. :func:`~koopman_graph.identification.select_resdmd_gated` compares
+already-scored dictionaries: lowest train one-step mean squared error
+(MSE) wins, unless ``gate_resdmd=True`` first drops candidates whose
+max finite-dictionary ResDMD residual exceeds the default cutoff
+:math:`10^{-2}` (same as
+:func:`~koopman_graph.analysis.resdmd`).
+``IdentificationConfig.gate_resdmd=True`` fills
+``IdentificationReport.spectral`` on the final identification ``fit``;
+it does not abort training.
+:class:`~koopman_graph.training.ResDMDFitCallback` defaults to
+``mode="observe"``. ``mode="gate"`` raises at ``on_fit_end`` when the
+observed max residual exceeds that cutoff, without mutating parameters.
+None of these is an infinite-dimensional residual certificate.
+
+Does ``identify_sparse_graph_factors`` replace SINDy or L1 training?
+--------------------------------------------------------------------
+
+No. :func:`~koopman_graph.identification.identify_sparse_graph_factors`
+fits shared :math:`K_{\mathrm{self}}` / :math:`K_{\mathrm{nbr}}` on
+frozen encodings (STLSQ or a teaching proximal group-lasso, then an
+unpenalized refit). It is not
+:func:`~koopman_graph.analysis.identify_sparse_dynamics` (polynomial /
+graph library on learned latents) and not
+:class:`~koopman_graph.losses.KoopmanSparsityLoss` (soft training
+penalty on operator entries). Those tools still ship. Dual
+random-walk and polynomial :math:`P>1` hops are out of scope. Related
+sparse-Koopman literature: Pan, Arnold-Medabalimi, and Duraisamy
+(*J. Fluid Mech.*, 2021; ``Pan2021SparseSubspace``). The identifier is
+not that paper's multi-task EDMD dictionary pruning.
+
+Does ``select_latent_rank`` replace Ray Tune for ``latent_dim``?
+----------------------------------------------------------------
+
+No. :func:`~koopman_graph.identification.select_latent_rank` scores a
+truncated-SVD grid of **frozen** encodings (in-tree VAMP-2, a
+finite-dictionary ResDMD residual elbow, or stability-penalized
+held-out one-step mean squared error). It does not train an encoder
+per candidate and does not choose
+:class:`~koopman_graph.model.GraphKoopmanModel` ``latent_dim``.
+:mod:`koopman_graph.tuning` Ray Tune helpers remain caller-owned
+example scaffolds; KoopmanGraph is not an AutoML product. deeptime
+(``[msm]``; ``deeptime2021``) is an optional VAMP-2 cross-check, not a
+runtime requirement. See :doc:`identification` and
+``examples/53_latent_rank_selection.ipynb``.
+
+Does ``koopman-graph benchmark run`` train a model?
+---------------------------------------------------
+
+No. ``koopman-graph benchmark run --manifest … --data … --out …``
+verifies the dataset SHA-256 against a frozen
+:class:`~koopman_graph.benchmark.ExperimentManifest` and writes
+identity-bound ``summary.json`` (canonical digest;
+``executed=False``). ``verify`` recomputes that digest and fails on a
+tampered hash. Neither command fits
+:class:`~koopman_graph.model.GraphKoopmanModel`, downloads METR-LA, or
+hosts a LibCity / BasicTS leaderboard. Default CI verifies hashed
+stand-ins under ``benchmarks/v0.15/`` (see :doc:`cli` and
+:doc:`benchmarks`); it does not download full telemetry.
 
 When should I use ``sparsity="block_diagonal"``?
 ------------------------------------------------
@@ -341,6 +472,10 @@ Is trainer “distributed” the same as ``sparsity="distributed"``?
   matrix-free inverse and Arnoldi spectrum on discrete graph and multiplex
   hetero constructors (hypergraph / continuous peers may still assemble).
   It does **not** enable multi-GPU training.
+  :class:`~koopman_graph.operators.LinearOperatorProtocol` is the same
+  operator-math surface (polynomial graph + one-tap ``matrix_free``).
+  Trainer DDP does **not** shrink
+  :data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
 
 Can I use Dask with KoopmanGraph?
 ---------------------------------
@@ -411,6 +546,213 @@ They answer different questions:
   infinite-dimensional certified pseudospectra / spectral measures.
   See ``examples/40_resdmd_pseudospectra.ipynb`` and :doc:`limitations`.
 
+Does ``MpEDMDBaseline`` replace Euclidean EDMD or spectral conditioning?
+------------------------------------------------------------------------
+
+No. :class:`~koopman_graph.baselines.MpEDMDBaseline` is measure-preserving
+EDMD (Colbrook, *SIAM J. Numer. Anal.*, 2023; ``Colbrook2023mpEDMD``):
+a Gram-weighted orthogonal Procrustes polar factor of the dictionary
+map. Unitarity is in that Gram inner product. On a regular polygonal
+planar rotation (identity dictionary; empirical Gram a multiple of the
+identity), mpEDMD matches :class:`~koopman_graph.baselines.EDMDBaseline`;
+on a contraction it does **not** recover the dissipative map
+(eigenvalues stay on the unit circle). It does not obsolete Euclidean
+conditioning diagnostics on a general directed
+:math:`K_{\mathrm{eff}}`. Use
+:func:`~koopman_graph.metrics.evaluate_forecast` with the same Data-only
+``predict`` call site as EDMD. Euclidean conditioning on a general
+directed :math:`K` is :doc:`spectral_diagnostics`.
+
+Does ``GEDMDBaseline`` infer a generator from irregular timestamps?
+-------------------------------------------------------------------
+
+No. :class:`~koopman_graph.baselines.GEDMDBaseline` is generator EDMD
+(Klus et al., *Physica D*, 2020; ``Klus2020gEDMD``): least squares of
+:math:`\dot\psi \approx \psi L^{\top}` on a polynomial dictionary.
+Callers must supply :math:`dx/dt` as ``Data.dx_dt``
+or ``fit(..., derivatives=)``. Discrete neural ``fit`` still rejects
+non-uniform :math:`\Delta t`. Irregular timestamps on the gEDMD
+sequence are unused and do not create :math:`L`. This is not
+:func:`~koopman_graph.analysis.identify_sparse_dynamics` (SINDy / STLSQ
+on learned latents, including ``mode="derivative"``). ``predict``
+advances by :math:`\exp(L\,\Delta t)` with fitted ``time_step``;
+:func:`~koopman_graph.metrics.evaluate_forecast` uses the same Data-only
+call site as EDMD.
+
+Does SpectralDiagnostics certify a finite-horizon bound?
+--------------------------------------------------------
+
+No. :class:`~koopman_graph.spectrum_types.SpectralDiagnostics` reports
+:math:`\kappa(V)`, Wilkinson :math:`\kappa_i`, departure from
+normality, discrete Nyquist :math:`1/(2\Delta t)` in cycles per unit
+time, and per-mode aliasing flags. Discrete
+:func:`~koopman_graph.spectrum_types.compute_spectrum` warns when a
+mode is Nyquist-adjacent.
+:meth:`~koopman_graph.spectrum_types.KoopmanSpectrum.mode_amplitudes`
+warns when :math:`\kappa(V)` exceeds
+:data:`~koopman_graph.spectrum_types.CONDITION_WARN` (:math:`10^{6}`)
+and still solves :math:`Va=z^{\top}`. None of these is a bound on
+:math:`\|K^{k}\|`. See :doc:`spectral_diagnostics` and
+``examples/51_spectral_diagnostics.ipynb``.
+
+Does ``monitor_critical_transition`` certify a critical transition?
+-------------------------------------------------------------------
+
+No. :func:`~koopman_graph.analysis.monitor_critical_transition` is a
+sliding-window spectral-gap heuristic. A positive rate means the
+closest-eigenvalue gap shrank. It is not a Ghosh-grade
+topology-criticality certificate (``Ghosh2025``) and not
+:meth:`~koopman_graph.operators.KoopmanOperator.stability_certificate`.
+See :doc:`criticality` and ``examples/54_criticality_monitor.ipynb``.
+
+Does LinearOperatorProtocol replace Kronecker spectrum or DDP?
+--------------------------------------------------------------
+
+No. :class:`~koopman_graph.operators.LinearOperatorProtocol` is
+``matvec`` / ``solve`` / Arnoldi algebra without assembling
+:math:`K_{\mathrm{eff}}`. Leading eigpairs are Ritz values, not
+:math:`\operatorname{eig}(B(\lambda))`. Trainer DDP does not shrink
+the representation. Dense assembly is refused above
+:data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
+See :doc:`matrix_free`.
+
+Does GraphDynamicsConfig close the topology loop by default?
+------------------------------------------------------------
+
+No. Default ``graph_dynamics=None`` keeps the 0.14 hold-last path.
+Pass :class:`~koopman_graph.data.GraphDynamicsConfig` to attach a
+topology head (default ``sparse_candidate``). Recursive prediction
+is opt-in and mutually exclusive with
+``learn_topology="self_adaptive"`` when the head is not ``none``.
+See :doc:`graph_dynamics` and
+``examples/50_graph_state_closure.ipynb`` (wiring check, not a
+learned-forecast claim).
+
+Can discrete neural ``fit`` use irregular :math:`\\Delta t`?
+------------------------------------------------------------
+
+No. Discrete ``fit`` and ``predict_at`` still require a uniform
+increment equal to ``time_step``. Gaps raise
+(``validate_uniform_discrete_increments``). Set
+``dynamics_mode="continuous"`` so ``predict_at`` integrates a
+generator over the supplied intervals. Generator EDMD is a different
+escape hatch and **requires supplied derivatives**; irregular
+timestamps on that sequence do not create :math:`L`
+(``Klus2020gEDMD``). See :doc:`time_conditioning` and
+``examples/12_irregular_sampling_continuous_time.ipynb``.
+
+How do I encode time of day?
+----------------------------
+
+:func:`~koopman_graph.data.diurnal_control_features` returns Fourier
+sine/cosine columns for existing additive / bilinear
+``control_inputs``. :func:`~koopman_graph.data.diurnal_phase_index`
+bins timestamps for a per-step ``phase_index`` on
+``koopman="switched"``. These are recipes, not a native calendar
+field or checkpoint key. Discrete uniform-:math:`\\Delta t`
+validation is unchanged. Heterogeneous sequences have no calendar
+helper. See :doc:`time_conditioning`.
+
+What does example 22 report for GraphKoopman versus the GNN ports?
+------------------------------------------------------------------
+
+Saved METR-LA weekday-cache output ranks GraphKoopman first on
+aggregate RMSE (z-scored speed): :math:`0.6551` versus STGCN
+:math:`0.7076`, DCRNN :math:`1.0754`, and Graph WaveNet
+:math:`0.9036`. GraphKoopman uses a longer ODO / rollout /
+early-stopping budget than the GNN teaching refs (unequal budgets).
+These are in-repo teaching baselines, not dedicated-library SOTA.
+See ``examples/22_gnn_forecaster_comparison.ipynb``.
+
+Does ``CochainKoopmanOperator`` replace ``koopman="hodge"`` or TopologicX?
+--------------------------------------------------------------------------
+
+No. :class:`~koopman_graph.operators.CochainKoopmanOperator` advances
+node and edge latents on a static signed :math:`B_1`. It is not a
+factory kind; ``koopman=None`` stays ``"pernode"``.
+``koopman="hodge"`` is a node Laplacian neighbor term
+(:class:`~koopman_graph.operators.HodgeKoopmanOperator`). Face latents
+may be stored; :math:`k=2` is not evolved.
+:func:`~koopman_graph.operators.boundary_nilpotency` flags
+:math:`B_1 B_2\\approx 0`. This is not sheaf theory and not
+TopologicX parity (``Lim2020Hodge``, ``TopoX2024``).
+
+Is the order-2 teaching path TopologicX or TDA parity?
+------------------------------------------------------
+
+No. :func:`~koopman_graph.nn.order2_cochain_teaching` binds
+:class:`~koopman_graph.operators.CochainKoopmanOperator` to a filled
+triangle and scores :math:`B_1 B_2\\approx 0`. Face latents may be
+stored; :math:`k=2` is not evolved. Optional tetrahedra reach
+:data:`~koopman_graph.nn.MAX_CELL_COMPLEX_DEGREE` (3). Sheaf
+restriction maps stay learned-optional (default diagonal). This is
+not TopologicX or TDA ecosystem parity (``TopoX2024``).
+
+Are Hodge mode components physical circulation?
+-----------------------------------------------
+
+No. :func:`~koopman_graph.analysis.hodge_decompose_modes` projects
+stored eigenvector columns onto the combinatorial gradient / curl /
+harmonic subspaces of a static signed :math:`B_1`
+(``Lim2020Hodge``). On a consistently oriented cycle the constant
+1-cochain is harmonic; that algebraic kernel is not a validated
+fluid or electrical current. The helper is analysis-only, not a
+factory kind, not ``koopman="hodge"``, and not TopologicX / sheaf
+parity (``TopoX2024``).
+
+Is ``dynamics_mode="stochastic"`` a continuous-time SDE?
+--------------------------------------------------------
+
+No. That factory string adds learned diagonal process noise after a
+discrete linear map. :class:`~koopman_graph.operators.DriftDiffusionKoopman`
+is a separate Euler–Maruyama / Yosida stepper: ``forward`` is the
+conditional-expectation semigroup and ``advance`` samples a path. It
+is not certified Itô theory and not SDMD
+(``Xu2025StochasticSemigroup``, ``Zhou2025Yosida``).
+
+What coverage does conformal UQ claim?
+--------------------------------------
+
+:attr:`~koopman_graph.uq.ConformalKoopmanUQ.coverage` names
+:class:`~koopman_graph.uq.JointCoverageSpec`
+``target="per_node_marginal"``. That is frequentist marginal coverage
+under exchangeability, approximate on graph time series. Simultaneous
+node–feature–horizon boxes and event coverage are named but not
+implemented (``Schlembach2025Conformal``). Proper scores
+(:func:`~koopman_graph.uq.gaussian_crps`,
+:func:`~koopman_graph.uq.gaussian_nll`,
+:func:`~koopman_graph.uq.energy_score`) evaluate forecasts; they do
+not certify coverage.
+
+Does Hankel-DMD or HAVOK replace ``DelayEmbeddingEncoder``?
+-----------------------------------------------------------
+
+No. :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` stacks
+Takens-style channels around a sized GNN encoder.
+:class:`~koopman_graph.baselines.HankelDMDBaseline` (Arbabi and Mezić,
+*SIAM J. Appl. Dyn. Syst.*, 2017; ``Arbabi2017HankelDMD``) and
+:class:`~koopman_graph.baselines.HAVOKBaseline` (Brunton et al.,
+*Nature Communications*, 2017; ``Brunton2017HAVOK``) fit operators on
+delay-embedded flattened snapshots. HAVOK ``predict`` is autonomous
+(:math:`u=0`). Optional ``history`` supplies older delay slots
+(oldest → newest); without it, those slots are zeros, so
+``predict(data, steps)`` is not a faithful delay initial condition
+when ``n_delays > 1``.
+
+Is delay embedding or HAVOK a Mori–Zwanzig memory model?
+--------------------------------------------------------
+
+No. :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` stacks
+Takens-style channels. :class:`~koopman_graph.baselines.HAVOKBaseline`
+is delay-plus-forcing (``Brunton2017HAVOK``), not a projection-operator
+memory kernel. :func:`~koopman_graph.analysis.markov_closure_report`
+flags residual-energy autocorrelation (Ljung–Box-style;
+``Ljung1978Box``). :class:`~koopman_graph.analysis.FiniteMemoryKoopman`
+is a convolution MVP at the same latent width as a delay encoder, not
+a factory kind and not Mori–Zwanzig identification
+(``Lin2021MoriZwanzig``). Recovered memory length is an oracle test,
+not a general theorem.
+
 Does ``InvariantGeometryEncoder`` make the Koopman operator equivariant?
 ------------------------------------------------------------------------
 
@@ -419,10 +761,49 @@ Does ``InvariantGeometryEncoder`` make the Koopman operator equivariant?
 rotation-/translation-invariant features from ``Data.pos`` and lifts them
 with a standard GCN. Optional Tier B
 :class:`~koopman_graph.nn.E3EquivariantEncoder` (``e3nn``,
-``[equivariance]``) uses steerable message passing but still emits
-**invariant scalar latents** for the ordinary linear map :math:`K`.
-Neither path makes :math:`K` itself E(n)/SE(3) equivariant (see
-:doc:`limitations`).
+``[equivariance]``) uses steerable message passing but still **defaults**
+to invariant scalar latents. A separate
+:class:`~koopman_graph.operators.EquivariantKoopmanOperator` is a
+block MVP: scalars, ``scale * I_3`` vectors, and optional
+:math:`l=2` ``scale * I_5`` tensors. It is not a factory kind
+and not a molecular MD production stack (see :doc:`limitations`).
+
+Does symplectic :math:`K` conserve decoded mass?
+------------------------------------------------
+
+**No.** ``parameterization="symplectic"`` constrains the latent
+operator matrix. A nonlinear decoder can still break mass in
+feature space (``Greydanus2019HNN``). Use
+:class:`~koopman_graph.nn.MassConservingDecoder` or
+:class:`~koopman_graph.nn.LinearConservingDecoder` when a named
+decoded channel must satisfy a linear conservation law. Those
+heads do not turn IEEE-118 Laplacian diffusion into AC power
+flow.
+
+Does TubeKoopmanMPC prove recursive feasibility?
+------------------------------------------------
+
+**No.** :class:`~koopman_graph.mpc.TubeKoopmanMPC` erodes nominal
+output boxes by conformal quantiles or ensemble residual radii
+and reports constraint-violation rate, feasibility rate, and
+quadratic stage cost on a toy closed loop. Local decoder
+linearization is unchanged. The helper is not a chance-constraint
+solver and not a Lyapunov closed-loop certificate. Zhang et al.,
+*Automatica* 137:110114 (2022), prove robustness for an r-KMPC
+scheme with an offline nonlinear ancillary law; this MVP does not
+implement that controller or inherit those proofs
+(``Zhang2022TubeMPC``).
+
+Does ``granger_latent_influence`` recover interventional edges?
+---------------------------------------------------------------
+
+**No.** :func:`~koopman_graph.analysis.granger_latent_influence`
+is **non-interventional**: it reports linear residual-MSE
+reduction on observed latents. The labeled synthetic helper
+:func:`~koopman_graph.analysis.recover_synthetic_interventional_edges`
+recovers a known do-edge on
+:func:`~koopman_graph.analysis.teaching_three_node_scm` only. That
+protocol is not observational discovery on field data.
 
 Does ``evaluate_topology_transfer`` mean factorization transfers well?
 ----------------------------------------------------------------------

@@ -1,0 +1,47 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "smoke-topology-transfer",
+  "manifest_sha256": "bf019b7eaa3f455f87076df0ab7780142324a28d065378e1770cb9fb470d7f76",
+  "dataset_sha256": "5731a6bd2bc4200468a842c98816e9b2798acdfc312da0a1f57a0d4644e3fe24",
+  "track": "topology_transfer",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "hold_last",
+      "role": "control"
+    },
+    {
+      "name": "pernode_ls",
+      "role": "control"
+    },
+    {
+      "name": "joint_ls",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    1,
+    2,
+    4
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "hold_last",
+    "pernode",
+    "joint_ls"
+  ],
+  "package_version": "0.14.0",
+  "executed": false,
+  "summary_sha256": "27ebe7ba9454e52770524b06af513bbfed2330e989c12cb856341150fda861e8"
+}

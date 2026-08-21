@@ -73,7 +73,7 @@ def sequence_to_device(
     sequence: SnapshotSequence,
     device: torch.device,
 ) -> SnapshotSequence:
-    """Move a snapshot sequence and optional controls/timestamps to ``device``.
+    """Move a snapshot sequence and optional controls/timestamps/parameters.
 
     Preserves homogeneous vs multiplex container type (no silent cast from
     :class:`~koopman_graph.data.HeteroGraphSnapshotSequence` to
@@ -120,6 +120,11 @@ def sequence_to_device(
         ),
         timestamps=(
             None if sequence.timestamps is None else sequence.timestamps.to(device)
+        ),
+        parameter_trajectory=(
+            None
+            if sequence.parameter_trajectory is None
+            else sequence.parameter_trajectory.to(device)
         ),
         observation_masks=(
             None

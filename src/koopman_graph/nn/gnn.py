@@ -886,3 +886,15 @@ class BaseGNNModule(nn.Module):
             if layer_idx < len(self.convs) - 1:
                 x = self.activation(x)
         return x
+
+    def receptive_field_hops(self) -> int:
+        """Return the message-passing hop radius (one hop per layer).
+
+        DiffConv stacks override this by multiplying ``diffusion_steps``.
+
+        Returns
+        -------
+        int
+            ``num_layers``.
+        """
+        return int(self.num_layers)

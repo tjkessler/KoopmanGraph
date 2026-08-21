@@ -36,6 +36,8 @@ class ConstructedSnapshots:
         Coerced control tensor, or ``None``.
     timestamps : Tensor or None
         Coerced timestamp tensor, or ``None``.
+    parameter_trajectory : Tensor or None
+        Coerced regime-coordinate tensor, or ``None``.
     observation_masks : Tensor or None
         Coerced boolean observation mask, or ``None``.
     presence_masks : Tensor or None
@@ -47,6 +49,7 @@ class ConstructedSnapshots:
     snapshots: list[Data]
     control_inputs: Tensor | None = None
     timestamps: Tensor | None = None
+    parameter_trajectory: Tensor | None = None
     observation_masks: Tensor | None = None
     presence_masks: Tensor | None = None
     allow_dynamic_topology: bool = False
@@ -61,6 +64,7 @@ def build_snapshots_from_arrays(
     hyperedge_weight: ArrayLike | None = None,
     control_inputs: ArrayLike | None = None,
     timestamps: ArrayLike | None = None,
+    parameter_trajectory: ArrayLike | None = None,
     observation_masks: ArrayLike | None = None,
     presence_masks: ArrayLike | None = None,
     dtype: torch.dtype = torch.float32,
@@ -88,6 +92,9 @@ def build_snapshots_from_arrays(
     timestamps : array-like, optional
         Strictly increasing physical timestamps with shape
         ``(num_timesteps,)``.
+    parameter_trajectory : array-like, optional
+        Per-snapshot regime coordinates with shape
+        ``(num_timesteps, d_mu)``.
     observation_masks : array-like, optional
         Per-timestep node observation mask with shape
         ``(num_timesteps, num_nodes)``.
@@ -117,6 +124,11 @@ def build_snapshots_from_arrays(
         None if control_inputs is None else as_tensor(control_inputs, dtype=dtype)
     )
     times = None if timestamps is None else as_tensor(timestamps, dtype=dtype)
+    parameters = (
+        None
+        if parameter_trajectory is None
+        else as_tensor(parameter_trajectory, dtype=dtype)
+    )
     masks = (
         None
         if observation_masks is None
@@ -181,6 +193,7 @@ def build_snapshots_from_arrays(
         snapshots=snapshots,
         control_inputs=controls,
         timestamps=times,
+        parameter_trajectory=parameters,
         observation_masks=masks,
         presence_masks=presence,
         allow_dynamic_topology=False,
@@ -194,6 +207,7 @@ def build_snapshots_from_dynamic_arrays(
     edge_weights: Sequence[ArrayLike | None] | None = None,
     control_inputs: ArrayLike | None = None,
     timestamps: ArrayLike | None = None,
+    parameter_trajectory: ArrayLike | None = None,
     observation_masks: ArrayLike | None = None,
     presence_masks: ArrayLike | None = None,
     dtype: torch.dtype = torch.float32,
@@ -216,6 +230,9 @@ def build_snapshots_from_dynamic_arrays(
     timestamps : array-like, optional
         Strictly increasing physical timestamps with shape
         ``(num_timesteps,)``.
+    parameter_trajectory : array-like, optional
+        Per-snapshot regime coordinates with shape
+        ``(num_timesteps, d_mu)``.
     observation_masks : array-like, optional
         Per-timestep node observation mask with shape
         ``(num_timesteps, num_nodes)``.
@@ -301,6 +318,11 @@ def build_snapshots_from_dynamic_arrays(
         None if control_inputs is None else as_tensor(control_inputs, dtype=dtype)
     )
     times = None if timestamps is None else as_tensor(timestamps, dtype=dtype)
+    parameters = (
+        None
+        if parameter_trajectory is None
+        else as_tensor(parameter_trajectory, dtype=dtype)
+    )
     masks = (
         None
         if observation_masks is None
@@ -313,6 +335,7 @@ def build_snapshots_from_dynamic_arrays(
         snapshots=snapshots,
         control_inputs=controls,
         timestamps=times,
+        parameter_trajectory=parameters,
         observation_masks=masks,
         presence_masks=presence,
         allow_dynamic_topology=True,
@@ -401,6 +424,10 @@ def build_windowed_snapshots(
     if sequence.timestamps is not None:
         timestamps = sequence.timestamps[ends]
 
+    parameter_trajectory = getattr(sequence, "parameter_trajectory", None)
+    if parameter_trajectory is not None:
+        parameter_trajectory = parameter_trajectory[ends]
+
     observation_masks = None
     if sequence.observation_masks is not None:
         observation_masks = sequence.observation_masks[ends]
@@ -413,6 +440,7 @@ def build_windowed_snapshots(
         snapshots=stacked_snapshots,
         control_inputs=control_inputs,
         timestamps=timestamps,
+        parameter_trajectory=parameter_trajectory,
         observation_masks=observation_masks,
         presence_masks=presence_masks,
         allow_dynamic_topology=sequence.allow_dynamic_topology,

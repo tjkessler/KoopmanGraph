@@ -735,6 +735,58 @@ def as_tensor(value: ArrayLike, *, dtype: torch.dtype | None = None) -> Tensor:
     return torch.as_tensor(value, dtype=dtype)
 
 
+def validate_parameter_trajectory(
+    parameter_trajectory: Tensor,
+    *,
+    num_timesteps: int,
+) -> None:
+    """Validate optional per-snapshot regime coordinates.
+
+    Parameters
+    ----------
+    parameter_trajectory : Tensor
+        Regime coordinates :math:`\\mu_t` with shape
+        ``(num_timesteps, d_mu)`` and ``d_mu >= 1``. Entries must be
+        finite. Units are caller-defined (dimensionless if unspecified).
+    num_timesteps : int
+        Expected number of snapshots.
+
+    Raises
+    ------
+    ValueError
+        If rank, length, width, dtype, or finiteness is invalid.
+    """
+    if parameter_trajectory.ndim != 2:
+        msg = (
+            "parameter_trajectory must have shape (num_timesteps, d_mu), "
+            f"got {tuple(parameter_trajectory.shape)}"
+        )
+        raise ValueError(msg)
+    if int(parameter_trajectory.shape[0]) != num_timesteps:
+        msg = (
+            f"parameter_trajectory has {parameter_trajectory.shape[0]} "
+            f"timesteps, expected {num_timesteps}"
+        )
+        raise ValueError(msg)
+    if int(parameter_trajectory.shape[1]) < 1:
+        msg = (
+            "parameter_trajectory must have shape (num_timesteps, d_mu) "
+            f"with d_mu >= 1, got {tuple(parameter_trajectory.shape)}"
+        )
+        raise ValueError(msg)
+    if parameter_trajectory.dtype == torch.bool:
+        msg = (
+            "parameter_trajectory must be a real numeric tensor, "
+            f"got dtype {parameter_trajectory.dtype}"
+        )
+        raise ValueError(msg)
+    if parameter_trajectory.is_floating_point() and not torch.all(
+        torch.isfinite(parameter_trajectory)
+    ):
+        msg = "parameter_trajectory must be finite"
+        raise ValueError(msg)
+
+
 def validate_timestamps(
     timestamps: Tensor,
     *,
@@ -1080,7 +1132,10 @@ def validate_snapshot_metadata(snapshots: Sequence[Data]) -> None:
     ------
     ValueError
         If the sequence is empty or any snapshot differs in node count or
-        feature dimension from the first snapshot.
+        feature dimension from the first snapshot. A node-count mismatch
+        is unbounded growth without
+        :class:`~koopman_graph.data.EntityRemap`; pad into a shared
+        :math:`N_{\\max}` first.
     """
     if not snapshots:
         msg = "GraphSnapshotSequence requires at least one snapshot"
@@ -1094,7 +1149,9 @@ def validate_snapshot_metadata(snapshots: Sequence[Data]) -> None:
         if snapshot.num_nodes != ref_num_nodes:
             msg = (
                 f"Snapshot {idx} has {snapshot.num_nodes} nodes, "
-                f"expected {ref_num_nodes}"
+                f"expected {ref_num_nodes} (fixed N_max). "
+                "Use EntityRemap / remap_node_features into a shared union; "
+                "unbounded node growth without remap is refused."
             )
             raise ValueError(msg)
         if snapshot.x.shape[1] != ref_in_channels:

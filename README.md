@@ -46,9 +46,11 @@ The library sits in the consistent Koopman autoencoder lineage and is **not clai
 - **Topology-aware learning** — GCN/GAT/hypergraph encoders and decoders, delay embeddings, dynamic topology, optional self-adaptive edges, sheaf / cell / simplicial lifts, and a predicted-topology head (distinct from static AdaptiveAdjacency)
 - **Flexible dynamics** — discrete, continuous-time, networked (`koopman="graph"`), hypergraph, multiplex hetero, global/local, Hodge-structured, switched, and mixture operators, with soft, structural, stochastic, or symplectic parameterizations
 - **Forecasting stack** — multi-step rollout, consistency losses, temporal evaluation metrics, checkpointing, and restricted `torch.export` / TorchScript (fixed-topology homogeneous MVP)
-- **Spectral analysis** — eigendecomposition, mode shapes, finite ResDMD on `evaluate`, Kronecker dispersion, dynamical similarity, anomaly helpers, and optional 0-d TDA extras
-- **Control and adaptation** — additive/bilinear control, iterated-QP Koopman-MPC (`[mpc]`), online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
-- **Research tooling** — classical DMD-family baselines, teaching GNN ports plus LibCity/BasicTS leaderboard adapters, GraphVAMP / alanine-dipeptide teaching fetch, conformal UQ, and a $K^2$ VAE MVP
+- **Spectral analysis** — eigendecomposition, mode shapes, finite ResDMD on `evaluate`, optional `SpectralDiagnostics` (Nyquist $1/(2\Delta t)$ in cycles per unit time, $\kappa(V)$, aliasing flags), Kronecker dispersion, dynamical similarity, anomaly helpers, and optional 0-d TDA extras
+- **Identification (opt-in)** — closed-form ridge / TLS / constrained least squares for discrete dense per-node $K$; default `fit` remains Adam; residual-aware dictionary gating and a frozen-encoding rank grid (not Ray Tune for `latent_dim`)
+- **Identity-bound benchmarks** — frozen manifests and `koopman-graph benchmark run` / `verify` on hashed smoke fixtures; the runner does not train a model or invent MAE / RMSE, and it is not a LibCity / BasicTS host
+- **Control and adaptation** — additive/bilinear control, iterated-QP Koopman-MPC (`[mpc]`), residual-tube tightening, online RLS adaptation, Kalman observation, and a Gymnasium RL wrapper
+- **Research tooling** — classical DMD-family baselines, teaching GNN ports plus LibCity/BasicTS protocol adapters, GraphVAMP / alanine-dipeptide teaching fetch, conformal UQ, and a $K^2$ VAE MVP
 - **Optional distributed trainers** — native DDP / `torchrun`, Lightning Fabric, Ray ensemble helpers, opt-in multi-node Ray recipe (`KOOPMAN_GRAPH_MULTINODE=1`), and in-tree FedAvg (`[federated]`)
 
 Full inventory: [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) · [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html)
@@ -136,9 +138,9 @@ More detail: [Quickstart guide](https://koopmangraph.readthedocs.io/en/latest/qu
   <img src="https://raw.githubusercontent.com/tjkessler/KoopmanGraph/main/docs/source/_static/metrla-gnn-baselines.png" alt="METR-LA aggregate RMSE for GraphKoopman versus STGCN, DCRNN, and Graph WaveNet teaching baselines" width="640"/>
 </p>
 
-<p align="center"><em>METR-LA aggregate RMSE vs in-repo STGCN / DCRNN / Graph WaveNet <strong>teaching baselines</strong> (not dedicated-library SOTA) from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb">examples/22_gnn_forecaster_comparison.ipynb</a>.</em></p>
+<p align="center"><em>METR-LA aggregate RMSE: GraphKoopman leads (0.6551 vs 0.7076 / 1.0754 / 0.9036) against in-repo STGCN / DCRNN / Graph WaveNet <strong>teaching baselines</strong> (unequal budgets; not dedicated-library SOTA) from <a href="https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb">examples/22_gnn_forecaster_comparison.ipynb</a>.</em></p>
 
-Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [37 topology transfer](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb) · [39 hetero RelGraph](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb) · [42 teaching baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/42_traffic_teaching_baselines.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
+Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/01_synthetic_graph.ipynb) · [03 traffic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/03_traffic_network.ipynb) · [06 epidemic](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb) · [22 GNN baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb) · [37 topology transfer](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb) · [39 hetero RelGraph](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/39_heterogeneous_relational_koopman.ipynb) · [42 teaching baselines](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/42_traffic_teaching_baselines.ipynb) · [47 benchmark manifests](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/47_benchmark_manifest.ipynb) · [48 identification](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/48_identification_invariance.ipynb) · [full gallery](https://koopmangraph.readthedocs.io/en/latest/tutorials.html)
 
 ## Learn more
 
@@ -146,18 +148,20 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Capabilities](https://koopmangraph.readthedocs.io/en/latest/capabilities.html) — feature inventory and datasets
 - [Scope and limitations](https://koopmangraph.readthedocs.io/en/latest/limitations.html) — when not to use; measured boundaries
 - [Architecture](https://koopmangraph.readthedocs.io/en/latest/architecture.html) — public vs power-user API layers
+- [Benchmarks](https://koopmangraph.readthedocs.io/en/latest/benchmarks.html) — identity-bound manifests (not trained scores)
+- [Identification](https://koopmangraph.readthedocs.io/en/latest/identification.html) — opt-in closed-form $K$ versus Adam
 - [FAQ / troubleshooting](https://koopmangraph.readthedocs.io/en/latest/faq.html) — install, imports, checkpoints
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies, install paths, and CI platforms
-- [CLI](https://koopmangraph.readthedocs.io/en/latest/cli.html) — `koopman-graph train` / `predict` config workflow
+- [CLI](https://koopmangraph.readthedocs.io/en/latest/cli.html) — `koopman-graph train` / `predict` / `benchmark` config workflow
 - [SECURITY.md](SECURITY.md) — supported versions and checkpoint trust boundaries
-- What’s new in 0.14.0: opt-in stochastic / symplectic $K$, switched /
-  mixture / Hodge operators, equivariant block $K$, leaderboard adapters,
-  restricted `torch.export` / TorchScript, wired finite ResDMD, and TDA /
-  federated extras — defaults unchanged vs 0.13.0; see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.15.0: opt-in closed-form identification, identity-bound
+  benchmark manifests, polynomial graph filters, Nyquist / conditioning
+  diagnostics, and graph-state / cochain / matrix-free MVPs — defaults
+  unchanged vs 0.14.0; see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
-- [PyKoopman](https://pykoopman.readthedocs.io/) and [DLKoopman](https://github.com/GaloisInc/dlkoopman) target vector-valued Koopman / deep-Koopman workflows; they treat the state as a flat vector rather than propagating information along graph edges.
+- [PyKoopman](https://pykoopman.readthedocs.io/), [PyDMD](https://pydmd.github.io/PyDMD/), [kooplearn](https://kooplearn.readthedocs.io/), and [DLKoopman](https://github.com/GaloisInc/dlkoopman) target vector-valued Koopman / DMD / operator-learning workflows; they treat the state as a flat vector rather than propagating information along graph edges.
 - [PyTorch Geometric](https://pytorch-geometric.readthedocs.io/) provides mature GNN infrastructure on irregular graphs; KoopmanGraph adds an explicit linear latent operator, consistency losses, and a documented `fit` / `predict` forecasting stack on that substrate.
 - Spatiotemporal GNN forecasters such as STGCN, DCRNN, and Graph WaveNet typically learn nonlinear convolutional or recurrent maps on graphs; KoopmanGraph instead advances an inspectable linear Koopman matrix **K** (see in-repo teaching baselines in [examples/22](https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb)).
 
@@ -178,7 +182,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.21926723},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.14.0},
+  version      = {0.15.0},
 }
 ```
 

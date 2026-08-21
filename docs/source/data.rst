@@ -209,14 +209,62 @@ them:
   peer). Inactive rows stay at capacity :math:`N_{\max}` (padded zeros is
   conventional); losses ignore inactive nodes; operator matvecs still run
   at full capacity. Opt-in
-  :func:`~koopman_graph.data.remap_node_features` grows a larger union
+  :func:`~koopman_graph.data.remap_node_features` /
+  :class:`~koopman_graph.data.EntityRemap` grow a larger union
   from a user-supplied injective map; it is **not** entity resolution
-  (see :doc:`limitations`).
+  (see :doc:`limitations`). Changing :math:`N` across snapshots without
+  that remap is refused.
 
 Default sequences have neither stack (fully present and fully observed).
 Observation masks alone do **not** model entity drop-in/out; presence masks
 alone do **not** mark measurement gaps. See
 ``examples/41_node_churn_presence_masks.ipynb``.
+
+Regime parameters versus control
+--------------------------------
+
+Homogeneous :class:`~koopman_graph.data.GraphSnapshotSequence` may carry
+an optional ``parameter_trajectory`` with shape :math:`(T, d_\\mu)`.
+Units are caller-defined (dimensionless if unspecified).
+:func:`~koopman_graph.data.conditioning_at` returns a frozen
+:class:`~koopman_graph.data.ConditioningContext` with time (caller
+timestamp unit), :math:`\\mu`, and the existing control layout. This is
+a data record. It does not select ``koopman="switched"`` or
+``"mixture"``. Opt-in ``koopman="parametric"`` evaluates
+:math:`K(\\mu)` from the stored coordinates
+(``Macesic2018Nonautonomous``). Heterogeneous sequences do not store
+parameters. Discrete uniform-:math:`\\Delta t` validation is unchanged.
+
+Time-of-day helpers are recipes on those existing fields, not a
+calendar serializer and not a checkpoint key.
+:func:`~koopman_graph.data.diurnal_control_features` returns Fourier
+sine/cosine columns in the same unit as the timestamps and
+``period``; pass them as ``control_inputs``.
+:func:`~koopman_graph.data.diurnal_phase_index` bins timestamps for a
+per-step switched ``phase_index``. Discrete ``fit`` / ``predict_at``
+still reject non-uniform increments. Use
+``dynamics_mode="continuous"`` for irregular sampling, or supply
+derivatives to :class:`~koopman_graph.baselines.GEDMDBaseline`
+(``Klus2020gEDMD``); irregular timestamps do not create :math:`L`.
+
+Protocol-locked smoke fixtures
+------------------------------
+
+Tracked YAML manifests under ``benchmarks/v0.15/`` cover three tracks
+(telemetry-like, multiphysics, topology transfer) with hashed UTF-8
+payloads, FAIR cards, and identity-bound ``summary.json`` files.
+Default CI runs ``koopman-graph benchmark verify`` on those stubs. It
+does **not** download METR-LA / PEMS HDF5, train a model, or invent
+MAE / RMSE. Cards:
+
+* ``benchmarks/v0.15/cards/smoke_telemetry.md`` — METR-LA/PEMS-style
+  split stand-in (12-step history, 0.7 / 0.1 / 0.2, z-score)
+* ``benchmarks/v0.15/cards/smoke_multiphysics.md`` — path-graph
+  Laplacian diffusion stand-in
+* ``benchmarks/v0.15/cards/smoke_topology_transfer.md`` — unseen-\(N\)
+  / rewire stand-in with ``hold_last``, ``pernode``, and ``joint_ls``
+
+See :doc:`cli` and :doc:`benchmarks` for ``run`` / ``verify``.
 
 Related pages
 -------------
@@ -226,3 +274,6 @@ Related pages
 * :doc:`tutorials` — notebook gallery (including molecular / churn demos)
 * :doc:`api` — dataset module reference
 * :doc:`architecture` — simulated vs real-telemetry factory idioms
+* :doc:`benchmarks` — identity-bound manifests (not trained scores)
+* :doc:`time_conditioning` — :math:`(\\mu, t, u)` records and calendar recipes
+* :doc:`graph_dynamics` — predicted topology and fixed-union remap

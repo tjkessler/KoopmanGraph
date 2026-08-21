@@ -61,6 +61,7 @@ from koopman_graph.operators import (
     KoopmanOperatorContract,
     MixtureKoopmanOperator,
     Parameterization,
+    ParametricKoopmanOperator,
     SwitchedKoopmanOperator,
 )
 from koopman_graph.operators.auxiliary_spectral import (
@@ -74,7 +75,14 @@ from koopman_graph.operators.global_local import (
     DEFAULT_LOCAL_WINDOW,
     normalize_local_hidden_dims,
 )
+from koopman_graph.operators.parametric import (
+    DEFAULT_PARAMETER_DIM,
+    DEFAULT_WEIGHT_KIND,
+    WeightKind,
+)
+from koopman_graph.operators.polynomial_graph import validate_filter_degree
 from koopman_graph.operators.stochastic import attach_process_noise
+from koopman_graph.operators.switched import DEFAULT_NUM_MODES
 from koopman_graph.protocols import DynamicsMode
 
 Encoder = (
@@ -144,6 +152,10 @@ _HYPERGRAPH_INCIDENCE_MODES = frozenset(
 )
 DEFAULT_KOOPMAN_SYMMETRY: str | None = None
 DEFAULT_KOOPMAN_ADJACENCY: GraphAdjacency = "symmetric"
+DEFAULT_KOOPMAN_FILTER_DEGREE = 1
+DEFAULT_KOOPMAN_NUM_MODES = DEFAULT_NUM_MODES
+DEFAULT_KOOPMAN_PARAMETER_DIM = DEFAULT_PARAMETER_DIM
+DEFAULT_KOOPMAN_WEIGHT_KIND: WeightKind = DEFAULT_WEIGHT_KIND
 _NETWORKED_ADJACENCY_KINDS: frozenset[str] = frozenset({"graph", "continuous_graph"})
 _GRAPH_ADJACENCY_MODES: frozenset[str] = frozenset(
     {"symmetric", "random_walk", "dual_random_walk"}
@@ -495,6 +507,7 @@ def resolve_model_components(
     koopman_auxiliary_hidden_dims: Sequence[int] | None = None,
     koopman_sparsity: str = "dense",
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_filter_degree: int = DEFAULT_KOOPMAN_FILTER_DEGREE,
     koopman_hypergraph_incidence_mode: str = (
         DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
     ),
@@ -521,6 +534,9 @@ def resolve_model_components(
     koopman_basis_size: int | None = None,
     koopman_synthesize_reverse_relations: bool = False,
     koopman_latent_dims: Mapping[str, int] | None = None,
+    koopman_num_modes: int = DEFAULT_KOOPMAN_NUM_MODES,
+    koopman_parameter_dim: int = DEFAULT_KOOPMAN_PARAMETER_DIM,
+    koopman_weight_kind: WeightKind = DEFAULT_KOOPMAN_WEIGHT_KIND,
 ) -> ResolvedModelComponents:
     """Validate and assemble encoder / physics / Koopman construction inputs.
 
@@ -557,6 +573,9 @@ def resolve_model_components(
     koopman_adjacency : {"symmetric", "random_walk", "dual_random_walk"}
         Neighbor-coupling normalization for ``koopman="graph"`` /
         ``"continuous_graph"``. Default ``"symmetric"``.
+    koopman_filter_degree : int, optional
+        Monomial hop degree for discrete ``koopman="graph"``. Default ``1``
+        (one-tap). Rejected for other kinds and for continuous graph.
     koopman_hypergraph_incidence_mode : str
         Incidence normalization for ``koopman="hypergraph"``
         (``zhou_symmetric`` / ``forward_random_walk`` / ``dual_random_walk``).
@@ -604,6 +623,12 @@ def resolve_model_components(
         Opt-in per-type latent widths. When set, RelGraph peers are rebuilt to
         match and the discrete or continuous hetero operator receives the
         same mapping.
+    koopman_num_modes : int, optional
+        Interpolant mode count for ``koopman="parametric"``. Default 2.
+    koopman_parameter_dim : int, optional
+        Regime-coordinate width for ``koopman="parametric"``. Default 1.
+    koopman_weight_kind : {"rbf", "simplex"}, optional
+        Interpolant weights for ``koopman="parametric"``. Default ``"rbf"``.
 
     Returns
     -------
@@ -822,6 +847,7 @@ def resolve_model_components(
         koopman_auxiliary_hidden_dims=koopman_auxiliary_hidden_dims,
         koopman_sparsity=koopman_sparsity,
         koopman_adjacency=koopman_adjacency,
+        koopman_filter_degree=koopman_filter_degree,
         koopman_hypergraph_incidence_mode=koopman_hypergraph_incidence_mode,
         koopman_local_window=koopman_local_window,
         koopman_local_rank=koopman_local_rank,
@@ -837,6 +863,9 @@ def resolve_model_components(
         relation_tying=koopman_relation_tying,
         basis_size=koopman_basis_size,
         latent_dims=resolved_latent_dims,
+        koopman_num_modes=koopman_num_modes,
+        koopman_parameter_dim=koopman_parameter_dim,
+        koopman_weight_kind=koopman_weight_kind,
     )
     if isinstance(operator, HeteroKoopmanOperator):
         if not uses_relgraph:
@@ -951,12 +980,14 @@ def parse_koopman_arg(
             "continuous_graph",
             "switched",
             "mixture",
+            "parametric",
             "hodge",
         }:
             msg = (
                 "koopman string kind must be 'pernode', 'graph', "
                 "'hypergraph', 'hetero_graph', 'global_local', "
-                "'continuous_graph', 'switched', 'mixture', or 'hodge', "
+                "'continuous_graph', 'switched', 'mixture', "
+                "'parametric', or 'hodge', "
                 f"got {koopman!r}"
             )
             raise ValueError(msg)
@@ -987,9 +1018,13 @@ def resolve_injected_koopman(
     koopman_orbit_method: OrbitMethod = DEFAULT_KOOPMAN_ORBIT_METHOD,
     koopman_symmetry: str | None = DEFAULT_KOOPMAN_SYMMETRY,
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_filter_degree: int = DEFAULT_KOOPMAN_FILTER_DEGREE,
     koopman_hypergraph_incidence_mode: str = (
         DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
     ),
+    koopman_num_modes: int = DEFAULT_KOOPMAN_NUM_MODES,
+    koopman_parameter_dim: int = DEFAULT_KOOPMAN_PARAMETER_DIM,
+    koopman_weight_kind: WeightKind = DEFAULT_KOOPMAN_WEIGHT_KIND,
 ) -> KoopmanOperatorContract:
     """Validate and return an injected Koopman operator module.
 
@@ -1032,11 +1067,19 @@ def resolve_injected_koopman(
         See the function signature / summary for ``koopman_orbit_method``.
     koopman_adjacency : GraphAdjacency
         Factory adjacency mode (must be default when injecting).
+    koopman_filter_degree : int
+        Factory hop degree (must be default when injecting).
     koopman_symmetry
         See signature.
 
     koopman_hypergraph_incidence_mode
         See signature.
+    koopman_num_modes : int, optional
+        Must stay default when injecting.
+    koopman_parameter_dim : int, optional
+        Must stay default when injecting.
+    koopman_weight_kind : str, optional
+        Must stay default when injecting.
     Returns
     -------
 
@@ -1091,8 +1134,16 @@ def resolve_injected_koopman(
         conflicting.append("koopman_symmetry")
     if koopman_adjacency != DEFAULT_KOOPMAN_ADJACENCY:
         conflicting.append("koopman_adjacency")
+    if koopman_filter_degree != DEFAULT_KOOPMAN_FILTER_DEGREE:
+        conflicting.append("koopman_filter_degree")
     if koopman_hypergraph_incidence_mode != DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE:
         conflicting.append("koopman_hypergraph_incidence_mode")
+    if koopman_num_modes != DEFAULT_KOOPMAN_NUM_MODES:
+        conflicting.append("koopman_num_modes")
+    if koopman_parameter_dim != DEFAULT_KOOPMAN_PARAMETER_DIM:
+        conflicting.append("koopman_parameter_dim")
+    if koopman_weight_kind != DEFAULT_KOOPMAN_WEIGHT_KIND:
+        conflicting.append("koopman_weight_kind")
     if conflicting:
         names = ", ".join(conflicting)
         msg = (
@@ -1151,7 +1202,14 @@ def resolve_injected_koopman(
         )
         raise ValueError(msg)
     if (
-        isinstance(koopman, SwitchedKoopmanOperator | MixtureKoopmanOperator)
+        isinstance(
+            koopman,
+            (
+                SwitchedKoopmanOperator
+                | MixtureKoopmanOperator
+                | ParametricKoopmanOperator
+            ),
+        )
         and dynamics_mode != "discrete"
     ):
         msg = f"Injected {type(koopman).__name__} requires dynamics_mode='discrete'"
@@ -1273,6 +1331,7 @@ def _reject_stochastic_kind(
         "continuous_graph",
         "switched",
         "mixture",
+        "parametric",
     }:
         msg = (
             "dynamics_mode='stochastic' supports koopman='pernode', 'graph', "
@@ -1335,6 +1394,44 @@ def _reject_local_kwargs_unless_global_local(
         msg = (
             "koopman_local_window / koopman_local_rank / "
             "koopman_local_hidden_dims require koopman='global_local'"
+        )
+        raise ValueError(msg)
+
+
+def _reject_parametric_kwargs_unless_parametric(
+    kind: KoopmanKind,
+    *,
+    koopman_num_modes: int,
+    koopman_parameter_dim: int,
+    koopman_weight_kind: str,
+) -> None:
+    """Reject non-default interpolant kwargs for non-parametric kinds.
+
+    Parameters
+    ----------
+    kind : KoopmanKind
+        Resolved factory kind.
+    koopman_num_modes : int
+        Requested mode count.
+    koopman_parameter_dim : int
+        Requested :math:`d_\\mu`.
+    koopman_weight_kind : str
+        Requested weight kind.
+
+    Raises
+    ------
+    ValueError
+        If interpolant kwargs are set for another kind.
+    """
+    non_default = (
+        koopman_num_modes != DEFAULT_KOOPMAN_NUM_MODES
+        or koopman_parameter_dim != DEFAULT_KOOPMAN_PARAMETER_DIM
+        or koopman_weight_kind != DEFAULT_KOOPMAN_WEIGHT_KIND
+    )
+    if kind != "parametric" and non_default:
+        msg = (
+            "koopman_num_modes / koopman_parameter_dim / "
+            "koopman_weight_kind require koopman='parametric'"
         )
         raise ValueError(msg)
 
@@ -1449,6 +1546,7 @@ def build_koopman(
     koopman_auxiliary_hidden_dims: Sequence[int] | None,
     koopman_sparsity: str = "dense",
     koopman_adjacency: GraphAdjacency = DEFAULT_KOOPMAN_ADJACENCY,
+    koopman_filter_degree: int = DEFAULT_KOOPMAN_FILTER_DEGREE,
     koopman_hypergraph_incidence_mode: str = (
         DEFAULT_KOOPMAN_HYPERGRAPH_INCIDENCE_MODE
     ),
@@ -1468,6 +1566,9 @@ def build_koopman(
     relation_tying: str = "independent",
     basis_size: int | None = None,
     latent_dims: Mapping[str, int] | None = None,
+    koopman_num_modes: int = DEFAULT_KOOPMAN_NUM_MODES,
+    koopman_parameter_dim: int = DEFAULT_KOOPMAN_PARAMETER_DIM,
+    koopman_weight_kind: WeightKind = DEFAULT_KOOPMAN_WEIGHT_KIND,
 ) -> tuple[KoopmanOperatorContract, KoopmanKind]:
     """Construct or validate the model Koopman operator.
 
@@ -1504,6 +1605,8 @@ def build_koopman(
         trainer DDP / multi-GPU training (see :func:`build_koopman_model`).
     koopman_adjacency : GraphAdjacency
         Neighbor-coupling normalization for networked graph operators.
+    koopman_filter_degree : int
+        Monomial hop degree for discrete ``koopman="graph"``. Default ``1``.
     koopman_orbit_partition : Sequence[Sequence[int]] | None
         See the function signature / summary for ``koopman_orbit_partition``.
     koopman_auto_orbits : bool
@@ -1528,6 +1631,12 @@ def build_koopman(
     latent_dims : mapping of str to int or None, optional
         Opt-in per-type widths for discrete or continuous
         ``koopman="hetero_graph"``.
+    koopman_num_modes : int, optional
+        Interpolant mode count for ``koopman="parametric"``.
+    koopman_parameter_dim : int, optional
+        Regime-coordinate width for ``koopman="parametric"``.
+    koopman_weight_kind : {"rbf", "simplex"}, optional
+        Interpolant weights for ``koopman="parametric"``.
     koopman_hypergraph_incidence_mode
         See signature.
 
@@ -1572,6 +1681,23 @@ def build_koopman(
         msg = (
             "koopman_adjacency must be one of "
             f"{{{accepted}}}, got {koopman_adjacency!r}"
+        )
+        raise ValueError(msg)
+    filter_degree = validate_filter_degree(koopman_filter_degree)
+    discrete_graph = (
+        injected is None
+        and kind == "graph"
+        and dynamics_mode in {"discrete", "stochastic"}
+    )
+    if (
+        injected is None
+        and not discrete_graph
+        and filter_degree != DEFAULT_KOOPMAN_FILTER_DEGREE
+    ):
+        msg = (
+            "koopman_filter_degree is only meaningful for discrete "
+            f"koopman='graph'; got filter_degree={filter_degree!r} with "
+            f"koopman={kind!r} and dynamics_mode={dynamics_mode!r}"
         )
         raise ValueError(msg)
     if koopman_hypergraph_incidence_mode not in _HYPERGRAPH_INCIDENCE_MODES:
@@ -1658,6 +1784,18 @@ def build_koopman(
         koopman_local_rank=koopman_local_rank,
         koopman_local_hidden_dims=koopman_local_hidden_dims,
     )
+    _reject_parametric_kwargs_unless_parametric(
+        kind
+        if injected is None
+        else (
+            "parametric"
+            if isinstance(injected, ParametricKoopmanOperator)
+            else "pernode"
+        ),
+        koopman_num_modes=koopman_num_modes,
+        koopman_parameter_dim=koopman_parameter_dim,
+        koopman_weight_kind=koopman_weight_kind,
+    )
 
     if injected is not None:
         # Injection path: local kwargs must stay default (checked above for
@@ -1691,7 +1829,11 @@ def build_koopman(
             koopman_orbit_method=koopman_orbit_method,
             koopman_symmetry=koopman_symmetry,
             koopman_adjacency=koopman_adjacency,
+            koopman_filter_degree=koopman_filter_degree,
             koopman_hypergraph_incidence_mode=koopman_hypergraph_incidence_mode,
+            koopman_num_modes=koopman_num_modes,
+            koopman_parameter_dim=koopman_parameter_dim,
+            koopman_weight_kind=koopman_weight_kind,
         )
         if isinstance(operator, ContinuousGraphKoopmanOperator):
             resolved_kind: KoopmanKind = "continuous_graph"
@@ -1709,6 +1851,8 @@ def build_koopman(
             resolved_kind = "switched"
         elif isinstance(operator, MixtureKoopmanOperator):
             resolved_kind = "mixture"
+        elif isinstance(operator, ParametricKoopmanOperator):
+            resolved_kind = "parametric"
         else:
             resolved_kind = "pernode"
         return operator, resolved_kind
@@ -1721,11 +1865,18 @@ def build_koopman(
         )
 
     if dynamics_mode == "continuous":
-        if kind in {"hypergraph", "global_local", "switched", "mixture", "hodge"}:
+        if kind in {
+            "hypergraph",
+            "global_local",
+            "switched",
+            "mixture",
+            "parametric",
+            "hodge",
+        }:
             msg = (
                 f"koopman={kind!r} requires dynamics_mode='discrete'; "
                 "continuous hypergraph / global_local / switched / mixture / "
-                "hodge operators are not implemented"
+                "parametric / hodge operators are not implemented"
             )
             raise ValueError(msg)
         if kind == "hetero_graph":
@@ -1846,6 +1997,7 @@ def build_koopman(
                 bilinear_rank=bilinear_rank,
                 sparsity=koopman_sparsity,  # type: ignore[arg-type]
                 adjacency=koopman_adjacency,
+                filter_degree=filter_degree,
                 orbit_partition=koopman_orbit_partition,
                 auto_orbits=koopman_auto_orbits,
                 orbit_method=koopman_orbit_method,
@@ -1976,6 +2128,33 @@ def build_koopman(
                 local_window=koopman_local_window,
             ),
             "mixture",
+            dynamics_mode=dynamics_mode,
+            latent_dim=latent_dim,
+        )
+
+    if kind == "parametric":
+        if resolved_aux_dims is not None:
+            msg = (
+                "koopman_auxiliary_hidden_dims requires "
+                "dynamics_mode='continuous' and "
+                "koopman_parameterization='auxiliary_spectral'"
+            )
+            raise ValueError(msg)
+        return _finalize_built_koopman(
+            ParametricKoopmanOperator(
+                latent_dim,
+                num_modes=koopman_num_modes,
+                parameter_dim=koopman_parameter_dim,
+                weight_kind=koopman_weight_kind,
+                init_mode=koopman_init_mode,
+                init_scale=koopman_init_scale,
+                parameterization=koopman_parameterization,
+                max_spectral_radius=koopman_max_spectral_radius,
+                control_dim=control_dim,
+                control_mode=control_mode,
+                bilinear_rank=bilinear_rank,
+            ),
+            "parametric",
             dynamics_mode=dynamics_mode,
             latent_dim=latent_dim,
         )

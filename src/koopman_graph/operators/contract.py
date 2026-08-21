@@ -35,6 +35,7 @@ KoopmanKind = Literal[
     "continuous_graph",
     "switched",
     "mixture",
+    "parametric",
     "hodge",
 ]
 
@@ -52,6 +53,10 @@ class StabilityCertificate:
     :class:`~koopman_graph.analysis.JointStabilityCertificate` via
     topology-aware ``stability_certificate(...)`` on graph / hetero
     operators.
+
+    This is **not** a finite-horizon bound on :math:`\\|K^k\\|`. Non-normal
+    transients can exceed the spectral-radius envelope; see
+    :class:`~koopman_graph.spectrum_types.SpectralDiagnostics`.
 
     Public result types in this package are frozen dataclasses with attribute
     access (not mapping/dict styles).

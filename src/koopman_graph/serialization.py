@@ -6,7 +6,8 @@ Checkpoint format versions
     Full architecture config for discrete and continuous dynamics, hybrid
     physics observables, control (including bilinear metadata), delay
     embeddings, and built-in operator kinds (per-node / graph / hypergraph /
-    global_local / continuous_graph / switched / mixture / hodge).
+    global_local / continuous_graph / switched / mixture / parametric /
+    hodge).
     Encoder/decoder ``type`` strings include
     ``"gcn"``, ``"gat"``, ``"sage"``, ``"diffconv"``, ``"transformer"``,
     ``"hyper_enc"``, ``"hyper_dec"``, ``"sim_enc"``, ``"sim_dec"``,
@@ -23,7 +24,8 @@ Checkpoint format versions
     ``"block_diagonal"``, or ``"distributed"`` for supported networked kinds),
     ``adjacency`` (``"symmetric"`` / ``"random_walk"`` /
     ``"dual_random_walk"`` for graph / continuous-graph operators, else
-    ``None``), additive ``hypergraph_incidence_mode``
+    ``None``), additive ``filter_degree`` (monomial hop degree for discrete
+    graph operators; absent ⇒ ``1``), additive ``hypergraph_incidence_mode``
     (``"zhou_symmetric"`` / ``"forward_random_walk"`` /
     ``"dual_random_walk"``; absent ⇒ ``"zhou_symmetric"`` for hypergraph;
     ``None`` otherwise), ``learn_topology`` (``None`` or ``"self_adaptive"``)
@@ -31,7 +33,14 @@ Checkpoint format versions
     ``auto_orbits``, ``orbit_partition``, and ``method`` for orbit-tied
     graph / hypergraph operators; additive ``symmetry`` field
     ``"orbit"`` / ``"isotypic"`` records ``koopman_symmetry`` without a
-    format bump). When ``koopman_kind="hetero_graph"``,
+    format bump). Additive ``graph_dynamics`` (``None`` or a mapping with
+    ``topology_head``, ``recursive_training``, ``topology_loss_weight``,
+    ``presence_loss_weight``, and ``candidate_k``; absent ⇒ ``None``)
+    records opt-in graph-state closure without a format bump. Additive
+    ``koopman_num_modes`` / ``koopman_parameter_dim`` /
+    ``koopman_weight_kind`` (absent ⇒ factory defaults ``2`` / ``1`` /
+    ``"rbf"``) round-trip ``koopman_kind="parametric"`` without a format
+    bump. When ``koopman_kind="hetero_graph"``,
     additive keys ``node_types``, ``edge_types`` (JSON ``(src, rel, dst)``
     triples), ``relation_tying`` (``"independent"`` / ``"basis"``),
     ``basis_size``, and
@@ -116,6 +125,7 @@ from safetensors.torch import save as safetensors_save_bytes
 from safetensors.torch import save_file as safetensors_save_file
 from torch import nn
 
+from koopman_graph.data.graph_state import graph_dynamics_from_mapping
 from koopman_graph.data.hetero_layout import validate_latent_dims
 from koopman_graph.nn import (
     DEFAULT_TOPOLOGY_EMBEDDING_DIM,
@@ -159,6 +169,7 @@ from koopman_graph.operators import (
     HypergraphKoopmanOperator,
     KoopmanOperator,
     MixtureKoopmanOperator,
+    ParametricKoopmanOperator,
     SwitchedKoopmanOperator,
     resolve_factory_stability_bound,
 )
@@ -247,6 +258,7 @@ _SERIALIZABLE_KOOPMAN_TYPES = (
     SwitchedKoopmanOperator,
     MixtureKoopmanOperator,
     HodgeKoopmanOperator,
+    ParametricKoopmanOperator,
 )
 _RESERVED_KOOPMAN_KINDS: dict[str, str] = {}
 
@@ -876,8 +888,8 @@ def _require_serializable_koopman(model: ModeShapeModel) -> None:
         "ContinuousKoopmanOperator, GraphKoopmanOperator, "
         "HypergraphKoopmanOperator, GlobalLocalKoopmanOperator, "
         "ContinuousGraphKoopmanOperator, HeteroGraphKoopmanOperator, "
-        "SwitchedKoopmanOperator, MixtureKoopmanOperator, and "
-        "HodgeKoopmanOperator "
+        "SwitchedKoopmanOperator, MixtureKoopmanOperator, "
+        "ParametricKoopmanOperator, and HodgeKoopmanOperator "
         "instances. Custom injected operators are not round-trippable; "
         "save the operator state separately or reconstruct the model with "
         f"koopman=... after load. Got {type(model.koopman).__name__}."
@@ -1164,6 +1176,11 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         "decoder": decoder_config,
         "sparsity": sparsity,
         "adjacency": adjacency,
+        "filter_degree": (
+            int(model.koopman.filter_degree)
+            if isinstance(model.koopman, GraphKoopmanOperator)
+            else None
+        ),
         "hypergraph_incidence_mode": (
             str(incidence_mode)
             if isinstance(model.koopman, HypergraphKoopmanOperator)
@@ -1175,6 +1192,11 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
             if getattr(model, "learn_topology", None) is not None
             else None
         ),
+        "graph_dynamics": (
+            model.graph_dynamics.to_mapping()
+            if getattr(model, "graph_dynamics", None) is not None
+            else None
+        ),
         "symmetry": (
             model.koopman.symmetry_config()
             if hasattr(model.koopman, "symmetry_config")
@@ -1182,6 +1204,21 @@ def build_model_config(model: ModeShapeModel) -> dict[str, Any]:
         ),
         "allow_node_churn": bool(getattr(model, "allow_node_churn", False)),
         "has_presence_masks": bool(getattr(model, "has_presence_masks", False)),
+        "koopman_num_modes": (
+            int(model.koopman.num_modes)
+            if isinstance(model.koopman, ParametricKoopmanOperator)
+            else None
+        ),
+        "koopman_parameter_dim": (
+            int(model.koopman.parameter_dim)
+            if isinstance(model.koopman, ParametricKoopmanOperator)
+            else None
+        ),
+        "koopman_weight_kind": (
+            str(model.koopman.weight_kind)
+            if isinstance(model.koopman, ParametricKoopmanOperator)
+            else None
+        ),
     }
     entity_ids = getattr(model, "entity_ids", None)
     if entity_ids is not None:
@@ -1478,6 +1515,9 @@ def reconstruct_model(
         koopman_auxiliary_hidden_dims=config.get("koopman_auxiliary_hidden_dims"),
         koopman_sparsity=config.get("sparsity", "dense"),
         koopman_adjacency=koopman_adjacency,
+        koopman_filter_degree=(
+            1 if config.get("filter_degree") is None else int(config["filter_degree"])
+        ),
         koopman_hypergraph_incidence_mode=str(
             config.get("hypergraph_incidence_mode", "zhou_symmetric")
             or "zhou_symmetric"
@@ -1499,6 +1539,7 @@ def reconstruct_model(
             if topology_embedding_dim is not None
             else DEFAULT_TOPOLOGY_EMBEDDING_DIM
         ),
+        graph_dynamics=graph_dynamics_from_mapping(config.get("graph_dynamics")),
         control_dim=config.get("control_dim", 0),
         control_mode=config.get("control_mode", "additive"),
         bilinear_rank=config.get("bilinear_rank"),
@@ -1525,6 +1566,21 @@ def reconstruct_model(
             else False
         ),
         koopman_latent_dims=hetero_latent_dims,
+        koopman_num_modes=(
+            2
+            if config.get("koopman_num_modes") is None
+            else int(config["koopman_num_modes"])
+        ),
+        koopman_parameter_dim=(
+            1
+            if config.get("koopman_parameter_dim") is None
+            else int(config["koopman_parameter_dim"])
+        ),
+        koopman_weight_kind=(
+            "rbf"
+            if config.get("koopman_weight_kind") is None
+            else str(config["koopman_weight_kind"])
+        ),
     )
     if (
         koopman_symmetry == "isotypic"

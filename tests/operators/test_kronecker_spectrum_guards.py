@@ -17,8 +17,10 @@ from koopman_graph.operators.kronecker_spectrum import (
     _factors_finite,
     _k_eff_eigenpairs_kronecker_sum,
     _random_walk_eigendecomposition,
+    eigenvalues_k_eff_kronecker_polynomial,
     eigenvalues_k_eff_kronecker_sum,
     kronecker_sum_spectrum_eligible,
+    spectrum_k_eff_kronecker_polynomial,
     spectrum_k_eff_kronecker_sum,
     spectrum_l_eff_kronecker_sum,
 )
@@ -153,6 +155,44 @@ def test_adjacency_eigenpairs_unknown_mode_returns_none() -> None:
     )
 
 
+def test_dual_adjacency_raises_on_kronecker_helpers() -> None:
+    """Dual adjacency is structurally ineligible and raises on the helper."""
+    edge_index = _path_edge_index(3)
+    with pytest.raises(ValueError, match="non-commuting"):
+        eigenvalues_k_eff_kronecker_sum(
+            k_self=torch.eye(2),
+            k_nbr=torch.zeros(2, 2),
+            edge_index=edge_index,
+            num_nodes=3,
+            adjacency="dual_random_walk",
+        )
+    with pytest.raises(ValueError, match="non-commuting"):
+        spectrum_k_eff_kronecker_sum(
+            k_self=torch.eye(2),
+            k_nbr=torch.zeros(2, 2),
+            edge_index=edge_index,
+            num_nodes=3,
+            adjacency="dual_random_walk",
+            time_step=1.0,
+        )
+    with pytest.raises(ValueError, match="non-commuting"):
+        spectrum_k_eff_kronecker_polynomial(
+            hop_matrices=(torch.eye(2),),
+            edge_index=edge_index,
+            num_nodes=3,
+            adjacency="dual_random_walk",
+            time_step=1.0,
+        )
+    with pytest.raises(ValueError, match="non-commuting"):
+        spectrum_l_eff_kronecker_sum(
+            l_self=torch.eye(2),
+            l_nbr=torch.zeros(2, 2),
+            edge_index=edge_index,
+            num_nodes=3,
+            adjacency="dual_random_walk",
+        )
+
+
 @pytest.mark.parametrize(
     ("k_self", "k_nbr", "num_nodes"),
     [
@@ -270,7 +310,7 @@ def test_spectrum_helpers_return_none_when_pairs_fail() -> None:
     """Public spectrum wrappers propagate None from the eigenpair core."""
     edge_index = _path_edge_index(3)
     with patch(
-        "koopman_graph.operators.kronecker_spectrum._k_eff_eigenpairs_kronecker_sum",
+        "koopman_graph.operators.kronecker_spectrum._k_eff_eigenpairs_kronecker_polynomial",
         return_value=None,
     ):
         assert (
@@ -295,6 +335,25 @@ def test_spectrum_helpers_return_none_when_pairs_fail() -> None:
             is None
         )
         assert (
+            spectrum_k_eff_kronecker_polynomial(
+                hop_matrices=(torch.eye(2), torch.zeros(2, 2)),
+                edge_index=edge_index,
+                num_nodes=3,
+                adjacency="symmetric",
+                time_step=1.0,
+            )
+            is None
+        )
+        assert (
+            eigenvalues_k_eff_kronecker_polynomial(
+                hop_matrices=(torch.eye(2), torch.zeros(2, 2)),
+                edge_index=edge_index,
+                num_nodes=3,
+                adjacency="symmetric",
+            )
+            is None
+        )
+        assert (
             spectrum_l_eff_kronecker_sum(
                 l_self=torch.eye(2),
                 l_nbr=torch.zeros(2, 2),
@@ -311,7 +370,9 @@ def test_operator_spectrum_falls_back_when_kronecker_returns_none(
 ) -> None:
     """Eligible discrete spectrum dense-routes when the helper returns None."""
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", lambda **_: None)
+    monkeypatch.setattr(
+        graph_mod, "spectrum_k_eff_kronecker_polynomial", lambda **_: None
+    )
     edge_index = _path_edge_index(3)
     op = GraphKoopmanOperator(2, init_mode="identity")
     spectrum = op.spectrum(edge_index, 3, time_step=0.2)

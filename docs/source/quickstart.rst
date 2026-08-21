@@ -114,7 +114,8 @@ path from a JSON config. After installing the package (see
      --out /tmp/kg-cli/forecast.pt
 
 YAML configs require the optional ``[cli]`` extra. Subcommands, exit codes,
-and the MVP config schema are documented in :doc:`cli`.
+and the MVP config schema are documented in :doc:`cli`. Identity-bound
+``benchmark run`` / ``verify`` (no training) is documented there as well.
 
 Inspect the spectrum
 --------------------
@@ -344,8 +345,10 @@ Delay embeddings
 ~~~~~~~~~~~~~~~~
 
 For partially observed systems, stack the last ``n_delays`` snapshots into the
-encoder channels (delay-coordinate / Takens-style lifting; related Hankel
-constructions appear in HAVOK and Hankel-DMD). Size the base encoder yourself as
+encoder channels (delay-coordinate / Takens-style lifting). This is
+:class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`, not
+:class:`~koopman_graph.baselines.HankelDMDBaseline` or
+:class:`~koopman_graph.baselines.HAVOKBaseline`. Size the base encoder yourself as
 ``in_channels = n_delays * feature_dim`` (composition; layers are not rebuilt),
 then pass ``n_delays`` to the model. Training uses teacher-forced history;
 ``predict`` encodes the provided observation window once and advances in latent

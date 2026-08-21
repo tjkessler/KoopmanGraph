@@ -5,7 +5,9 @@ diagonal covariance on stacked latents
 :math:`Q = I_N \\otimes \\mathrm{diag}(\\sigma^2)`, where
 :math:`\\sigma = \\mathrm{softplus}(\\texttt{process_log_std})`. Noise is applied
 in :meth:`~koopman_graph.operators.contract.KoopmanOperatorContract.advance`
-after the linear map; :meth:`forward` stays deterministic.
+after the linear map; :meth:`forward` stays deterministic. Distinct from
+the opt-in :class:`~koopman_graph.operators.DriftDiffusionKoopman`
+Euler–Maruyama / Yosida stepper.
 """
 
 from __future__ import annotations

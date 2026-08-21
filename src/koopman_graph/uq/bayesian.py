@@ -28,6 +28,7 @@ from torch_geometric.data import Data, HeteroData
 
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
+    call_topology_at,
     hold_last_topology_at,
     pack_rollout_snapshots,
     propagate_latent,
@@ -40,6 +41,7 @@ from koopman_graph.graph_utils.topology import (
 )
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
+from koopman_graph.nn.predicted_topology import resolve_rollout_topology_at
 from koopman_graph.operators import GraphKoopmanOperator, KoopmanOperator
 from koopman_graph.uq.common import (
     PredictionInterval,
@@ -669,6 +671,7 @@ class BayesianKoopmanUQ:
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | None = None,
         history: Sequence[Data] | None = None,
+        topology_policy: str = "auto",
         **kwargs: Any,
     ) -> PredictionInterval:
         """Monte Carlo predictive interval from diagonal Laplace factor draws.
@@ -693,6 +696,9 @@ class BayesianKoopmanUQ:
             :attr:`observation_noise` at decode time only (aleatoric
             composition). Default ``False``.
         edge_index, edge_weight, controls, future_topologies, history
+            Same semantics as
+            :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
             Same semantics as
             :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
@@ -779,10 +785,12 @@ class BayesianKoopmanUQ:
                     if isinstance(initial_graph, Data)
                     else None
                 )
-                topology_at = hold_last_topology_at(
+                topology_at = resolve_rollout_topology_at(
+                    self.model,
                     init_edge,
                     init_weight,
                     future_topologies,
+                    topology_policy,
                 )
                 control_at = None if controls is None else (lambda step: controls[step])
 
@@ -883,7 +891,7 @@ class BayesianKoopmanUQ:
         steps : int
             Forecast horizon.
         topology_at : callable
-            Hold-last topology schedule.
+            Topology schedule (hold-last or predicted).
         control_at : callable or None
             Optional control schedule.
         generator : torch.Generator or None
@@ -897,7 +905,7 @@ class BayesianKoopmanUQ:
         snaps: list[Data] = []
         latent = z0
         for step in range(steps):
-            edge_t, weight_t = topology_at(step)
+            edge_t, weight_t = call_topology_at(topology_at, step, latent)
             control = None if control_at is None else control_at(step)
             latent = propagate_latent(
                 self.model.koopman,

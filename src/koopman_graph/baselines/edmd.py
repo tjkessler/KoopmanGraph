@@ -289,7 +289,7 @@ class EDMDBaseline(ClassicalBaseline):
         resolved = resolve_sequence(sequence)
         require_static_topology(resolved)
         if resolved.num_timesteps < 2:
-            msg = "EDMDBaseline.fit requires at least two snapshots"
+            msg = f"{type(self).__name__}.fit requires at least two snapshots"
             raise ValueError(msg)
 
         states = flatten_snapshots(resolved)
@@ -306,13 +306,30 @@ class EDMDBaseline(ClassicalBaseline):
         observables = self._observables(states)
         left = observables[:-1]
         self.selected_rank = resolve_fit_rank(left, self.rank)
-        self.K = fit_row_operator(left, observables[1:], self.selected_rank)
+        self.K = self._fit_observable_operator(left, observables[1:])
         self.reconstruction_matrix = torch.linalg.lstsq(observables, states).solution.T
         self.num_nodes = resolved.num_nodes
         self.in_channels = resolved.in_channels
         self.state_dim = states.shape[1]
         self.observable_dim = observables.shape[1]
         return self
+
+    def _fit_observable_operator(self, left: Tensor, right: Tensor) -> Tensor:
+        """Fit the row-convention map on consecutive dictionary snapshots.
+
+        Parameters
+        ----------
+        left : Tensor
+            Observables at time ``t`` with shape ``(num_pairs, m)``.
+        right : Tensor
+            Observables at time ``t + 1`` with the same shape as ``left``.
+
+        Returns
+        -------
+        Tensor
+            Operator ``K`` with shape ``(m, m)`` for ``psi_next = psi @ K.T``.
+        """
+        return fit_row_operator(left, right, self.selected_rank)
 
     def predict(self, initial_graph: Data, steps: int) -> list[Data]:
         """Autoregressively predict future graph snapshots (Data-only).

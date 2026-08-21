@@ -9,7 +9,15 @@ import torch
 from torch_geometric.data import Data
 
 from koopman_graph import GraphKoopmanModel
-from koopman_graph.baselines import DMDBaseline, DMDcBaseline, EDMDBaseline
+from koopman_graph.baselines import (
+    DMDBaseline,
+    DMDcBaseline,
+    EDMDBaseline,
+    GEDMDBaseline,
+    HankelDMDBaseline,
+    HAVOKBaseline,
+    MpEDMDBaseline,
+)
 from koopman_graph.data import GraphSnapshotSequence
 from koopman_graph.losses import rollout_multi_start_loss, rollout_sequence_loss
 from koopman_graph.nn import GNNDecoder, GNNEncoder
@@ -95,6 +103,10 @@ def test_baselines_satisfy_forecast_model_protocol() -> None:
         DMDBaseline(time_step=0.1),
         DMDcBaseline(time_step=0.1),
         EDMDBaseline(time_step=0.1, polynomial_degree=1),
+        MpEDMDBaseline(time_step=0.1, polynomial_degree=1),
+        GEDMDBaseline(time_step=0.1, polynomial_degree=1),
+        HankelDMDBaseline(time_step=0.1, n_delays=2),
+        HAVOKBaseline(time_step=0.1, n_delays=4, havok_rank=3),
     ):
         assert isinstance(baseline, ForecastModel)
         assert isinstance(baseline, SpectrumProvider)
@@ -114,6 +126,10 @@ def test_uncontrolled_forecast_peers() -> None:
     """Verify uncontrolled Data-only peers vs controlled-only implementers."""
     dmd = DMDBaseline(time_step=0.1)
     edmd = EDMDBaseline(time_step=0.1, polynomial_degree=1)
+    mpedmd = MpEDMDBaseline(time_step=0.1, polynomial_degree=1)
+    gedmd = GEDMDBaseline(time_step=0.1, polynomial_degree=1)
+    hankel = HankelDMDBaseline(time_step=0.1, n_delays=2)
+    havok = HAVOKBaseline(time_step=0.1, n_delays=4, havok_rank=3)
     dmdc = DMDcBaseline(time_step=0.1)
     model = _small_graph_koopman_model()
     controlled = GraphKoopmanModel(
@@ -134,7 +150,7 @@ def test_uncontrolled_forecast_peers() -> None:
         control_dim=1,
     )
 
-    for peer in (dmd, edmd, model):
+    for peer in (dmd, edmd, mpedmd, gedmd, hankel, havok, model):
         assert isinstance(peer, ForecastModel)
         assert isinstance(peer, UncontrolledForecastModel)
         assert accepts_uncontrolled_data_predict(peer)
@@ -153,6 +169,10 @@ def test_baselines_are_forecast_only_not_trainable() -> None:
         DMDBaseline(time_step=0.1),
         DMDcBaseline(time_step=0.1),
         EDMDBaseline(time_step=0.1, polynomial_degree=1),
+        MpEDMDBaseline(time_step=0.1, polynomial_degree=1),
+        GEDMDBaseline(time_step=0.1, polynomial_degree=1),
+        HankelDMDBaseline(time_step=0.1, n_delays=2),
+        HAVOKBaseline(time_step=0.1, n_delays=4, havok_rank=3),
     ):
         assert isinstance(baseline, ForecastModel)
         assert not hasattr(baseline, "encode")

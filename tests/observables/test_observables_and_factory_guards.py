@@ -189,6 +189,14 @@ def test_additional_coverage_gap_branches() -> None:
         GraphKoopmanModel(enc, dec, latent_dim=2, time_step=0.1, n_delays=0)
     with pytest.raises(ValueError, match="koopman string kind"):
         GraphKoopmanModel(enc, dec, latent_dim=2, time_step=0.1, koopman="bogus")  # type: ignore[arg-type]
+    parametric = GraphKoopmanModel(
+        enc,
+        dec,
+        latent_dim=2,
+        time_step=0.1,
+        koopman="parametric",
+    )
+    assert parametric.koopman_kind == "parametric"
     with pytest.raises(ValueError, match="koopman_auxiliary_hidden_dims"):
         GraphKoopmanModel(
             enc,

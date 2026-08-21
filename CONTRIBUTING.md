@@ -245,8 +245,8 @@ Mark the aggregator check from [`ci.yml`](.github/workflows/ci.yml) as
 **required** before merge:
 
 - `ci` — succeeds when path-selected jobs (`lint`, `test`, `test-macos`,
-  `notebooks`, `docs`) succeed or are intentionally skipped; fails if any
-  selected job fails
+  `notebooks`, `docs`, `benchmark-smoke`) succeed or are intentionally
+  skipped; fails if any selected job fails
 
 Individual jobs still appear on the workflow run for diagnosis:
 
@@ -260,10 +260,15 @@ Individual jobs still appear on the workflow run for diagnosis:
   `-m "not slow and not distributed and not ray"` (hard-fail; no Ray/Dask
   extras). Shares the same path filter as Ubuntu `test` (not the notebooks
   filter). Windows is not in CI (best-effort community).
-- `notebooks (smoke)` on pull requests — 10 representative tutorials; on pushes
-  to `main`, `notebooks (01-13)` / `notebooks (14-26)` / `notebooks (27-46)`
+- `notebooks (smoke)` on pull requests — representative tutorials; on pushes
+  to `main`, `notebooks (01-13)` / `notebooks (14-26)` / `notebooks (27-54)`
   run the full suite on **Ubuntu only** (macOS does not run nbmake)
 - `docs` — Sphinx documentation build (`sphinx-build -W`, warnings as errors)
+- `benchmark-smoke` — `koopman-graph benchmark verify` on the three
+  hashed stand-ins under `benchmarks/v0.15/` (YAML needs `[cli]`).
+  Identity-bound only: not METR-LA training and not invented MAE / RMSE.
+  Path filter: `benchmarks/`, `src/koopman_graph/benchmark/`,
+  `src/koopman_graph/cli/`, `tests/benchmark/`.
 
 The **Draft paper** workflow ([`draft-pdf.yml`](.github/workflows/draft-pdf.yml))
 compiles `paper.md` on changes; it is informational and need not block merges.
@@ -308,16 +313,12 @@ document them in [CHANGELOG.md](CHANGELOG.md) and in GitHub Release notes.
 
 ### Version source of truth
 
-Bump the version in a single place:
-
-```python
-# src/koopman_graph/__init__.py
-__version__ = "0.6.0"
-```
-
-`pyproject.toml` reads this value dynamically at build time via
-`[tool.setuptools.dynamic]`. Do not add a separate static `version` field to
-`pyproject.toml`.
+The package version is the `__version__` assignment in
+`src/koopman_graph/__init__.py`. `pyproject.toml` reads that string
+dynamically at build time via `[tool.setuptools.dynamic]`. Do not add a
+separate static `version` field to `pyproject.toml`, and do not copy the
+current version number into this guide (it would go stale). Bump that
+assignment when cutting a release (see the checklist below).
 
 ### Checkpoint format (current baseline)
 
@@ -338,7 +339,7 @@ Future incompatible schema changes must bump ``FORMAT_VERSION``, extend
 are therefore outside the checkpoint path.
 
 Do not confuse checkpoint ``format_version`` with the package
-``__version__`` (for example ``0.6.0``).
+``__version__`` (read the latter from `src/koopman_graph/__init__.py`).
 
 ### Maintainer release checklist
 

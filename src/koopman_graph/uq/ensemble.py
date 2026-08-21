@@ -3,7 +3,7 @@
 Composes independently seeded :class:`~koopman_graph.model.GraphKoopmanModel`
 members without subclassing. Member forecasts call
 :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` directly
-(same hold-last topology policy as ``predict``). Predictive uncertainty
+(same ``topology_policy`` as ``predict``). Predictive uncertainty
 follows the deep-ensemble practice of Lakshminarayanan et al. (NeurIPS
 2017): empirical mean and quantiles across member forecasts.
 """
@@ -21,13 +21,13 @@ from torch_geometric.data import Data
 
 from koopman_graph.graph_utils import (
     autoregressive_latent_rollout,
-    hold_last_topology_at,
     pack_rollout_snapshots,
     snapshot_hyperedge_index,
     snapshot_hyperedge_weight,
 )
 from koopman_graph.model import GraphKoopmanModel
 from koopman_graph.model.validation import validate_controls
+from koopman_graph.nn.predicted_topology import resolve_rollout_topology_at
 from koopman_graph.training import FitHistory
 from koopman_graph.uq.common import (
     PredictionInterval,
@@ -158,11 +158,13 @@ def _member_autoregressive_rollout(
     controls: Sequence[Tensor] | None,
     future_topologies: Sequence[Data] | None,
     history: Sequence[Data] | None,
+    topology_policy: str = "auto",
 ) -> list[Data]:
     """Roll out one ensemble member via the shared latent rollout primitive.
 
     Mirrors :meth:`~koopman_graph.model.GraphKoopmanModel.predict` semantics
-    (eval mode, no grad, hold-last topology, control validation) but calls
+    (eval mode, no grad, the same topology policy as
+    :meth:`~koopman_graph.model.GraphKoopmanModel.predict`) but calls
     :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` directly
     instead of going through ``member.predict``.
 
@@ -185,6 +187,8 @@ def _member_autoregressive_rollout(
         See the function signature / summary for ``future_topologies``.
     history : Sequence[Data] | None
         See the function signature / summary for ``history``.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
     Returns
     -------
@@ -227,10 +231,12 @@ def _member_autoregressive_rollout(
                 member.decoder,
                 z,
                 steps=steps,
-                topology_at=hold_last_topology_at(
+                topology_at=resolve_rollout_topology_at(
+                    member,
                     origin_edge,
                     origin_weight,
                     future_topologies,
+                    topology_policy,
                 ),
                 control_at=control_at,
                 default_delta_t=member.time_step,
@@ -286,7 +292,7 @@ class EnsembleGraphKoopmanModel:
     Aggregates member autoregressive forecasts into an empirical mean and
     quantile interval. Each member rollout uses
     :func:`~koopman_graph.graph_utils.autoregressive_latent_rollout` with the
-    same hold-last topology policy as
+    same ``topology_policy`` as
     :meth:`~koopman_graph.model.GraphKoopmanModel.predict`. Members remain
     ordinary :class:`~koopman_graph.model.GraphKoopmanModel` instances:
     spectrum, regularization, and ``koopman="graph"`` topology contracts are
@@ -478,6 +484,8 @@ class EnsembleGraphKoopmanModel:
         controls: Sequence[Tensor] | None = None,
         future_topologies: Sequence[Data] | None = None,
         history: Sequence[Data] | None = None,
+        *,
+        topology_policy: str = "auto",
     ) -> list[Data]:
         """Return the ensemble-mean autoregressive forecast.
 
@@ -497,6 +505,8 @@ class EnsembleGraphKoopmanModel:
             Known future topologies for hold-last rollout scheduling.
         history : sequence of Data or None, optional
             Delay-embedding history for each member encode.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
         Returns
         -------
@@ -512,6 +522,7 @@ class EnsembleGraphKoopmanModel:
             future_topologies=future_topologies,
             history=history,
             level=0.9,
+            topology_policy=topology_policy,
         )
         return interval.mean
 
@@ -526,6 +537,7 @@ class EnsembleGraphKoopmanModel:
         history: Sequence[Data] | None = None,
         *,
         level: float = 0.9,
+        topology_policy: str = "auto",
     ) -> PredictionInterval:
         """Return mean and empirical quantile bounds across members.
 
@@ -548,6 +560,8 @@ class EnsembleGraphKoopmanModel:
         level : float, optional
             Nominal central coverage in ``(0, 1)``. Default ``0.9`` uses the
             5th and 95th empirical percentiles across members.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
         Returns
         -------
@@ -565,6 +579,7 @@ class EnsembleGraphKoopmanModel:
                 controls=controls,
                 future_topologies=future_topologies,
                 history=history,
+                topology_policy=topology_policy,
             )
             for member in self._members
         ]

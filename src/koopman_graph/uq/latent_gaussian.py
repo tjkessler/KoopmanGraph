@@ -23,11 +23,12 @@ from torch import Tensor
 from torch_geometric.data import Data
 
 from koopman_graph.graph_utils import (
-    hold_last_topology_at,
+    call_topology_at,
     propagate_latent,
     resolve_delta_t,
 )
 from koopman_graph.model import GraphKoopmanModel
+from koopman_graph.nn.predicted_topology import resolve_rollout_topology_at
 from koopman_graph.operators import (
     ContinuousKoopmanOperator,
     GraphKoopmanOperator,
@@ -223,6 +224,7 @@ class LatentGaussianKoopmanUQ:
         future_topologies: Sequence[Data] | None = None,
         history: Sequence[Data] | None = None,
         observations: Sequence[Data] | None = None,
+        topology_policy: str = "auto",
     ) -> LatentGaussianForecast:
         """Propagate latent means and covariances for ``steps`` forecasts.
 
@@ -240,6 +242,8 @@ class LatentGaussianKoopmanUQ:
             provided, each step applies a Kalman update after the predict
             step using ``latent_encode`` measurements (heuristic under
             nonlinear encoders).
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
         Returns
         -------
@@ -269,6 +273,7 @@ class LatentGaussianKoopmanUQ:
                     future_topologies=future_topologies,
                     history=history,
                     observations=observations,
+                    topology_policy=topology_policy,
                 )
         finally:
             self.model.train(was_training)
@@ -283,6 +288,7 @@ class LatentGaussianKoopmanUQ:
         future_topologies: Sequence[Data] | None = None,
         history: Sequence[Data] | None = None,
         observations: Sequence[Data] | None = None,
+        topology_policy: str = "auto",
     ) -> list[Data]:
         """Decode the latent-mean forecast.
 
@@ -305,6 +311,8 @@ class LatentGaussianKoopmanUQ:
             See the function signature / summary for ``history``.
         observations : Sequence[Data] | None
             See the function signature / summary for ``observations``.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
         Returns
         -------
@@ -321,6 +329,7 @@ class LatentGaussianKoopmanUQ:
             history=history,
             observations=observations,
             level=0.9,
+            topology_policy=topology_policy,
         )
         return interval.mean
 
@@ -337,6 +346,7 @@ class LatentGaussianKoopmanUQ:
         observations: Sequence[Data] | None = None,
         level: float = 0.9,
         generator: torch.Generator | None = None,
+        topology_policy: str = "auto",
         **kwargs: Any,
     ) -> PredictionInterval:
         """Return mean decode plus Monte Carlo predictive quantiles.
@@ -358,6 +368,8 @@ class LatentGaussianKoopmanUQ:
             Nominal central coverage in ``(0, 1)``. Default ``0.9``.
         generator : torch.Generator or None, optional
             RNG for latent Monte Carlo draws.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`forecast_latents`.
 
         Returns
         -------
@@ -387,17 +399,20 @@ class LatentGaussianKoopmanUQ:
             future_topologies=future_topologies,
             history=history,
             observations=observations,
+            topology_policy=topology_policy,
         )
-        _, init_edge, init_weight = self.model.encode_rollout_origin(
+        z0, init_edge, init_weight = self.model.encode_rollout_origin(
             initial_graph,
             edge_index=edge_index,
             edge_weight=edge_weight,
             history=history,
         )
-        topology_at = hold_last_topology_at(
+        topology_at = resolve_rollout_topology_at(
+            self.model,
             init_edge,
             init_weight,
-            future_topologies=future_topologies,
+            future_topologies,
+            topology_policy,
         )
 
         was_training = self.model.training
@@ -407,8 +422,9 @@ class LatentGaussianKoopmanUQ:
                 mean_snaps: list[Data] = []
                 lower_snaps: list[Data] = []
                 upper_snaps: list[Data] = []
+                current_z = z0
                 for step in range(steps):
-                    edge_t, weight_t = topology_at(step)
+                    edge_t, weight_t = call_topology_at(topology_at, step, current_z)
                     template = Data(x=forecast.means[step], edge_index=edge_t)
                     if weight_t is not None:
                         template.edge_weight = weight_t
@@ -441,6 +457,7 @@ class LatentGaussianKoopmanUQ:
                     mean_snaps.append(snapshot_with_features(template, mean_x))
                     lower_snaps.append(snapshot_with_features(template, lower_x))
                     upper_snaps.append(snapshot_with_features(template, upper_x))
+                    current_z = forecast.means[step]
         finally:
             self.model.train(was_training)
 
@@ -463,6 +480,7 @@ class LatentGaussianKoopmanUQ:
         future_topologies: Sequence[Data] | None,
         history: Sequence[Data] | None,
         observations: Sequence[Data] | None,
+        topology_policy: str = "auto",
     ) -> LatentGaussianForecast:
         """Propagate latent moments while the caller manages evaluation mode.
 
@@ -485,6 +503,8 @@ class LatentGaussianKoopmanUQ:
             See the function signature / summary for ``history``.
         observations : Sequence[Data] | None
             See the function signature / summary for ``observations``.
+        topology_policy : {"auto", "recursive", "hold_last"}, optional
+            Same semantics as :meth:`~koopman_graph.model.GraphKoopmanModel.predict`.
 
         Returns
         -------
@@ -512,16 +532,19 @@ class LatentGaussianKoopmanUQ:
         means = torch.empty(steps, n_nodes, d, dtype=dtype, device=device)
         covs = torch.empty(steps, state_dim, state_dim, dtype=dtype, device=device)
 
-        topology_at = hold_last_topology_at(
+        topology_at = resolve_rollout_topology_at(
+            self.model,
             init_edge,
             init_weight,
-            future_topologies=future_topologies,
+            future_topologies,
+            topology_policy,
         )
         control_at = None if controls is None else (lambda step: controls[step])
         default_delta_t = self.model.time_step
 
         for t in range(steps):
-            edge_t, weight_t = topology_at(t)
+            z_t = mean.reshape(n_nodes, d)
+            edge_t, weight_t = call_topology_at(topology_at, t, z_t)
             control = None if control_at is None else control_at(t)
             transition, bias = self._transition_and_bias(
                 n_nodes=n_nodes,

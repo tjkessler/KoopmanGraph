@@ -12,6 +12,36 @@ Capability layout
     :func:`~koopman_graph.spectrum_types.compute_spectrum`,
     :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`, and
     :func:`~koopman_graph.spectrum_types.discrete_spectrum_at_delta_t`.
+``conditioning``
+    Re-export of :class:`~koopman_graph.spectrum_types.SpectralDiagnostics`
+    and :func:`~koopman_graph.spectrum_types.compute_spectral_diagnostics`.
+    Compute stays on the neutral leaf. Discrete Nyquist frequency is
+    :math:`1/(2\\Delta t)` in cycles per unit time (``None`` on
+    generator spectra). ``mode_amplitudes`` warns when :math:`\\kappa(V)`
+    exceeds ``CONDITION_WARN`` and raises
+    :class:`~koopman_graph.spectrum_types.DefectiveSpectrumError` when
+    :math:`V` is singular. Not a finite-horizon :math:`\\|K^k\\|` bound;
+    resolvent grids remain opt-in.
+``criticality``
+    Sliding-window spectral-gap / near-defectivity monitor
+    (:func:`~koopman_graph.analysis.monitor_critical_transition`,
+    :class:`~koopman_graph.analysis.CriticalityReport`). Heuristic
+    diagnostic on a sequence of spectra — **not** a Ghosh-grade
+    topology-criticality certificate.
+``memory``
+    Innovation-whiteness report
+    (:func:`~koopman_graph.analysis.markov_closure_report`,
+    :class:`~koopman_graph.analysis.MarkovClosureReport`) and a
+    convolution MVP
+    (:class:`~koopman_graph.analysis.FiniteMemoryKoopman`).
+    Diagnostic / parameterization only — **not** Mori–Zwanzig
+    identification, **not** delay embedding, and **not** HAVOK.
+``hodge_modes``
+    Combinatorial Hodge split of stored eigenvector columns
+    (:func:`~koopman_graph.analysis.hodge_decompose_modes`,
+    :class:`~koopman_graph.analysis.HodgeModeComponents`).
+    Analysis-only — **not** physical circulation, **not**
+    ``koopman="hodge"``, and **not** TopologicX / sheaf parity.
 ``similarity``
     Spectral distances, KoopSTD,
     :func:`~koopman_graph.analysis.resolve_spectrum`, and
@@ -95,7 +125,12 @@ Capability layout
 ``causal``
     Granger-style influence on mode amplitudes
     (:func:`~koopman_graph.analysis.granger_latent_influence`).
-    Assumption-laden; not interventional.
+    Assumption-laden; **non-interventional**.
+``causal_intervention``
+    Labeled synthetic SCM fixture and do-intervention recovery
+    (:func:`~koopman_graph.analysis.teaching_three_node_scm`,
+    :func:`~koopman_graph.analysis.recover_synthetic_interventional_edges`).
+    Synthetic only — not Granger and not field-data discovery.
 ``lmi``
     Small-system discrete Lyapunov SDP helper
     (:func:`~koopman_graph.analysis.discrete_lyapunov_lmi`). Optional
@@ -118,14 +153,36 @@ from koopman_graph.analysis.causal import (
     CausalInfluenceReport,
     granger_latent_influence,
 )
+from koopman_graph.analysis.causal_intervention import (
+    SyntheticInterventionReport,
+    SyntheticSCM,
+    recover_synthetic_interventional_edges,
+    sample_synthetic_intervention,
+    sample_synthetic_observational,
+    teaching_three_node_scm,
+)
 from koopman_graph.analysis.clustering import (
     ClusteringResult,
     koopman_spectral_clustering,
+)
+from koopman_graph.analysis.conditioning import (
+    CONDITION_WARN,
+    DefectiveSpectrumError,
+    SpectralDiagnostics,
+    compute_spectral_diagnostics,
+)
+from koopman_graph.analysis.criticality import (
+    CriticalityReport,
+    monitor_critical_transition,
 )
 from koopman_graph.analysis.dispersion import DispersionRelation, graph_dispersion
 from koopman_graph.analysis.explain import (
     RepresentationExplanation,
     explain_representation,
+)
+from koopman_graph.analysis.hodge_modes import (
+    HodgeModeComponents,
+    hodge_decompose_modes,
 )
 from koopman_graph.analysis.joint_stability import (
     MAX_JOINT_LYAPUNOV_SIZE,
@@ -137,6 +194,11 @@ from koopman_graph.analysis.joint_stability import (
     schur_radius_bound,
 )
 from koopman_graph.analysis.lmi import LyapunovLMIResult, discrete_lyapunov_lmi
+from koopman_graph.analysis.memory import (
+    FiniteMemoryKoopman,
+    MarkovClosureReport,
+    markov_closure_report,
+)
 from koopman_graph.analysis.plotting import (
     SpectrumLimits,
     plot_dispersion,
@@ -193,13 +255,19 @@ __all__ = [
     "AnomalyThresholdMethod",
     "CausalInfluenceReport",
     "ClusteringResult",
+    "CONDITION_WARN",
     "CouplingEstimate",
+    "CriticalityReport",
+    "DefectiveSpectrumError",
     "DispersionRelation",
     "EmpiricalSpectralMeasure",
+    "FiniteMemoryKoopman",
+    "HodgeModeComponents",
     "ImpliedTimescales",
     "JointStabilityCertificate",
     "KoopmanSpectrum",
     "LyapunovLMIResult",
+    "MarkovClosureReport",
     "MAX_JOINT_LYAPUNOV_SIZE",
     "MAX_JOINT_SCHUR_SIZE",
     "ModeEnergyAttribution",
@@ -208,10 +276,13 @@ __all__ = [
     "RepresentationExplanation",
     "ResolventNormGrid",
     "SINDyReport",
+    "SpectralDiagnostics",
     "SpectralResidualReport",
     "SpectrumDistanceMethod",
     "SpectrumLimits",
     "SpectrumSource",
+    "SyntheticInterventionReport",
+    "SyntheticSCM",
     "TRANSFER_ADVANTAGE_EPSILON",
     "TopologyTransferReport",
     "attribute_mode_energy",
@@ -219,6 +290,7 @@ __all__ = [
     "build_joint_stability_certificate",
     "calibrate_anomaly_threshold",
     "compute_generator_spectrum",
+    "compute_spectral_diagnostics",
     "compute_spectrum",
     "decode_mode_shapes",
     "detect_anomaly",
@@ -232,18 +304,25 @@ __all__ = [
     "gershgorin_radius_bound",
     "graph_dispersion",
     "granger_latent_influence",
+    "hodge_decompose_modes",
     "identify_sparse_dynamics",
     "implied_timescales",
     "koopman_spectral_clustering",
     "koopman_std",
     "lyapunov_joint_bound",
+    "markov_closure_report",
+    "monitor_critical_transition",
     "persistence_diagram_0d",
     "plot_dispersion",
     "plot_spectrum",
+    "recover_synthetic_interventional_edges",
     "resdmd",
     "resolvent_norm_grid",
     "resolve_spectrum",
+    "sample_synthetic_intervention",
+    "sample_synthetic_observational",
     "schur_radius_bound",
     "spectral_residuals",
     "spectrum_distance",
+    "teaching_three_node_scm",
 ]

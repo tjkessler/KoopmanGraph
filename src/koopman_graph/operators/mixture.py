@@ -2,7 +2,10 @@
 
 Softmax weights over a latent window mix a bank of LTI maps. Distinct from
 :class:`~koopman_graph.operators.GlobalLocalKoopmanOperator` (low-rank
-correction of a single backbone). Select via ``koopman="mixture"``.
+correction of a single backbone) and from a parameter interpolant
+:math:`K(\\mu)` (``Macesic2018Nonautonomous``). Carry regime coordinates
+on :attr:`~koopman_graph.data.GraphSnapshotSequence.parameter_trajectory`.
+Select via ``koopman="mixture"``.
 """
 
 from __future__ import annotations

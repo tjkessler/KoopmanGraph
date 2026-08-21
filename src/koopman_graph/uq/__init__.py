@@ -20,6 +20,14 @@ Capability layout
     forecast with closed-form covariance propagation and optional Kalman
     refinement, plus :class:`~koopman_graph.uq.LatentGaussianForecast` and
     :func:`~koopman_graph.uq.propagate_gaussian_covariance`.
+``coverage``
+    :class:`~koopman_graph.uq.JointCoverageSpec` names the interval
+    estimand (default ``per_node_marginal``). Simultaneous / event
+    targets and temporal / graph blocks are named but not implemented.
+``scores``
+    Proper scores :func:`~koopman_graph.uq.gaussian_crps`,
+    :func:`~koopman_graph.uq.gaussian_nll`, and
+    :func:`~koopman_graph.uq.energy_score`. Not coverage certificates.
 ``conformal``
     :class:`~koopman_graph.uq.ConformalKoopmanUQ` split / adaptive (ACI)
     conformal intervals returning
@@ -27,7 +35,8 @@ Capability layout
     ``HeteroData`` bands). Hetero models score stacked decoded features
     (``N = Σ_τ N_τ``). Calibration state is wrapper-local (not model
     ``FORMAT_VERSION``). Marginal coverage ``≥ 1 − α`` under
-    exchangeability; prefer ACI under drift.
+    exchangeability; prefer ACI under drift. :attr:`coverage` always
+    names ``per_node_marginal``.
 ``bayesian``
     :class:`~koopman_graph.uq.BayesianKoopmanUQ` diagonal Laplace posterior
     over dense linear factors (``K`` / ``K_self``+``K_nbr``) with
@@ -50,8 +59,9 @@ is a diagonal Laplace approximation over operator factors only.
 
 Latent-Gaussian forecasts reuse
 :meth:`~koopman_graph.model.GraphKoopmanModel.encode_rollout_origin` and
-:mod:`koopman_graph.graph_utils` hold-last topology / ``propagate_latent``
-scheduling; closed-form Gaussian moment updates remain local to this package.
+:mod:`koopman_graph.graph_utils` ``propagate_latent`` with the same
+``topology_policy`` as model ``predict``; closed-form Gaussian moment
+updates remain local to this package.
 """
 
 from koopman_graph.uq.bayesian import (
@@ -66,6 +76,7 @@ from koopman_graph.uq.common import (
     snapshot_with_features,
 )
 from koopman_graph.uq.conformal import ConformalKoopmanUQ
+from koopman_graph.uq.coverage import JointCoverageSpec, require_shipped_coverage
 from koopman_graph.uq.ensemble import (
     EnsembleGraphKoopmanModel,
     IntervalForecastModel,
@@ -77,12 +88,14 @@ from koopman_graph.uq.latent_gaussian import (
     dense_nodewise_transition,
     propagate_gaussian_covariance,
 )
+from koopman_graph.uq.scores import energy_score, gaussian_crps, gaussian_nll
 
 __all__ = [
     "BayesianKoopmanUQ",
     "ConformalKoopmanUQ",
     "EnsembleGraphKoopmanModel",
     "IntervalForecastModel",
+    "JointCoverageSpec",
     "LaplaceFactorSpec",
     "LaplacePosterior",
     "LatentGaussianForecast",
@@ -90,8 +103,12 @@ __all__ = [
     "PredictionInterval",
     "dense_nodewise_transition",
     "empirical_coverage",
+    "energy_score",
+    "gaussian_crps",
+    "gaussian_nll",
     "hetero_snapshot_with_features",
     "propagate_gaussian_covariance",
     "quantile_levels",
+    "require_shipped_coverage",
     "snapshot_with_features",
 ]

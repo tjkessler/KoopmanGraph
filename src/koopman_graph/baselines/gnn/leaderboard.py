@@ -4,6 +4,25 @@
 LibCity / BasicTS-style split rather than a teaching simplification.
 Teaching :class:`~koopman_graph.baselines.gnn.ForecasterProtocol` still
 rejects empty deviations.
+
+References
+----------
+Wang, J., Jiang, J., Jiang, W., Li, C. & Zhao, W. X. (2021). LibCity:
+An open library for traffic prediction. In *Proceedings of the 29th
+International Conference on Advances in Geographic Information Systems*
+(pp. 145–148). https://doi.org/10.1145/3474717.3483923
+(``LibCity2021``)
+
+Shao, Z., Wang, F., Xu, Y., Wei, W., Yu, C., Zhang, Z., Yao, D.,
+Sun, T., Jin, G., Cao, X., Cong, G., Jensen, C. S. & Cheng, X. (2025).
+Exploring progress in multivariate time series forecasting:
+comprehensive benchmarking and heterogeneity analysis. *IEEE
+Transactions on Knowledge and Data Engineering*, 37(1), 291–305.
+https://doi.org/10.1109/TKDE.2024.3484454
+(``BasicTS2024``)
+
+Named split / horizon / metric objects follow those protocol papers.
+The adapters are **not** LibCity or BasicTS implementations.
 """
 
 from __future__ import annotations

@@ -1,7 +1,10 @@
 """Pairwise Granger-style influence scores on latent time series.
 
-Assumption-laden: linear residual-MSE reduction, not interventional causal
-discovery and not :func:`~koopman_graph.analysis.explain_representation`.
+This helper is **non-interventional**. It reports linear residual-MSE
+reduction on observed latents — not do-operator causal discovery and
+not :func:`~koopman_graph.analysis.explain_representation`. A labeled
+synthetic SCM protocol lives in
+:mod:`koopman_graph.analysis.causal_intervention`.
 """
 
 from __future__ import annotations
@@ -28,6 +31,11 @@ class CausalInfluenceReport:
 
 def granger_latent_influence(latents: Tensor) -> CausalInfluenceReport:
     """Score directed influence among node latent trajectories.
+
+    This helper is **non-interventional**: it does not apply a
+    do-operator and does not recover interventional edges. Use
+    :func:`~koopman_graph.analysis.recover_synthetic_interventional_edges`
+    for the labeled synthetic SCM fixture.
 
     Parameters
     ----------

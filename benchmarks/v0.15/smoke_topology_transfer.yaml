@@ -1,0 +1,40 @@
+manifest_id: smoke-topology-transfer
+schema_version: benchmark_manifest_v1
+track: topology_transfer
+dataset:
+  name: smoke-topology-transfer
+  version: "1"
+  sha256: 5731a6bd2bc4200468a842c98816e9b2798acdfc312da0a1f57a0d4644e3fe24
+  card: benchmarks/v0.15/cards/smoke_topology_transfer.md
+split:
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  history_len: 4
+preprocessing:
+  zscore: false
+  notes:
+    - Unseen-N / rewire protocol stand-in; negative transfer remains allowed
+methods:
+  - name: graph_koopman
+    role: koopman
+  - name: hold_last
+    role: control
+  - name: pernode_ls
+    role: control
+  - name: joint_ls
+    role: control
+seeds: [0, 1, 2]
+horizons: [1, 2, 4]
+metrics: [mae, rmse]
+ood_shifts:
+  - name: unseen_n
+    kind: unseen_n
+    description: Unseen node-count stand-in; not a measured transfer result.
+  - name: rewire
+    kind: rewire
+    description: Rewiring stand-in; negative transfer remains allowed.
+compute_budget:
+  max_epochs: 2
+  device: cpu
+controls: [hold_last, pernode, joint_ls]

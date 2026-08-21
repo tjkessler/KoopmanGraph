@@ -134,6 +134,17 @@ def test_sequence_to_device_preserves_homogeneous_observation_masks() -> None:
     torch.testing.assert_close(moved[0].edge_weight, snapshots[0].edge_weight)
 
 
+def test_sequence_to_device_preserves_homogeneous_parameter_trajectory() -> None:
+    """Homogeneous parameter_trajectory survives device transfer."""
+    snapshots = [_homo_snapshot(seed=i) for i in range(3)]
+    mu = torch.tensor([[0.0, 1.0], [0.5, 1.5], [1.0, 2.0]])
+    sequence = GraphSnapshotSequence(snapshots, parameter_trajectory=mu)
+    moved = sequence_to_device(sequence, _CPU)
+    assert moved.parameter_trajectory is not None
+    torch.testing.assert_close(moved.parameter_trajectory, mu)
+    assert moved.parameter_trajectory.device == _CPU
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_hetero_sequence_cuda_cpu_round_trip() -> None:
     """Hetero sequence round-trips CPU → CUDA → CPU with matching stores."""

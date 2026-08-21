@@ -26,8 +26,10 @@ METR-LA teaching-baseline comparison
    :alt: METR-LA aggregate RMSE bar chart for GraphKoopman vs STGCN, DCRNN, and Graph WaveNet
    :width: 80%
 
-Protocol-matched aggregate RMSE on a METR-LA cache (notebook 22). Bars are
-**in-repo teaching baselines**, not dedicated-library SOTA implementations.
+Protocol-matched aggregate RMSE on a METR-LA cache (notebook 22). Saved
+ranking: GraphKoopman 0.6551 versus STGCN 0.7076, Graph WaveNet 0.9036,
+and DCRNN 1.0754 (unequal budgets). Bars are **in-repo teaching
+baselines**, not dedicated-library SOTA implementations.
 
 Architecture overview
 ~~~~~~~~~~~~~~~~~~~~~
@@ -57,7 +59,18 @@ Forecasting and benchmarks
    * - `06_epidemic_ring.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/06_epidemic_ring.ipynb>`_
      - SIR ring wave with Schur-stable spectrum
    * - `22_gnn_forecaster_comparison.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/22_gnn_forecaster_comparison.ipynb>`_
-     - GraphKoopman vs STGCN / DCRNN / Graph WaveNet references
+     - GraphKoopman vs STGCN / DCRNN / Graph WaveNet **teaching** baselines
+       (saved aggregate RMSE ranks GraphKoopman first: 0.6551 vs 0.7076 /
+       1.0754 / 0.9036; unequal budgets; not SOTA)
+   * - `47_benchmark_manifest.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/47_benchmark_manifest.ipynb>`_
+     - Identity-bound ``koopman-graph benchmark run`` / ``verify`` on
+       hashed v0.15 smoke fixtures (``executed=False``; not METR-LA
+       training; not invented MAE / RMSE)
+   * - `48_identification_invariance.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/48_identification_invariance.ipynb>`_
+     - Opt-in identification report fields, residual-aware rejection
+       of a polluted RMSE-only dictionary, and finite-sample leakage
+       :math:`\eta` on a rank-deficient line (not a Haseli–Cortés
+       certificate; default Adam path unchanged)
    * - `42_traffic_teaching_baselines.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/42_traffic_teaching_baselines.ipynb>`_
      - Teaching AGCRN / MTGNN / STGODE on a METR-LA slice, plus GraphCast on a
        separate small weather mesh (deviation tables; not leaderboard or
@@ -86,6 +99,22 @@ Analysis and stability
      - GAT encoder on grid graphs
    * - `07_koopman_spectrum.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/07_koopman_spectrum.ipynb>`_
      - Koopman eigenvalue analysis + held-out ``spectral_residuals`` / spurious-mode filter
+   * - `51_spectral_diagnostics.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/51_spectral_diagnostics.ipynb>`_
+     - Non-normal shear and Nyquist toys: ``SpectralDiagnostics``,
+       aliasing warning, ``CONDITION_WARN`` on mode amplitudes, and a
+       :math:`\rho<1` :math:`\|K^{k}\|` versus :math:`\rho^{k}` sketch
+       (not a finite-horizon :math:`\|K^{k}\|` bound)
+   * - `52_cochain_hodge_modes.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/52_cochain_hodge_modes.ipynb>`_
+     - Combinatorial Hodge split on a cycle: harmonic 1-cochain
+       identified (not physical circulation; not ``koopman="hodge"``;
+       not TopologicX)
+   * - `53_latent_rank_selection.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/53_latent_rank_selection.ipynb>`_
+     - ``select_latent_rank`` recovers oracle rank 3 on a linear
+       Gaussian embedding when each criterion uses a matching
+       excitation (not Ray Tune for ``latent_dim``)
+   * - `54_criticality_monitor.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/54_criticality_monitor.ipynb>`_
+     - Closing-gap diagonal toy: ``monitor_critical_transition`` score
+       rises versus a constant-gap control (not a Ghosh certificate)
    * - `40_resdmd_pseudospectra.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
      - Finite-dictionary ResDMD MVP + resolvent-norm grid (≠ ``spectral_residuals``; not infinite-dim certificates)
    * - `46_representation_explain.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/46_representation_explain.ipynb>`_
@@ -101,9 +130,15 @@ Analysis and stability
    * - `37_cross_topology_transfer.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/37_cross_topology_transfer.ipynb>`_
      - Measured zero-shot :math:`N_1\to N_2` transfer via ``evaluate_topology_transfer`` (mandatory ``pernode``; negative advantage allowed; adaptive/orbit/isotypic excluded)
    * - `38_operator_factorization_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/38_operator_factorization_ablation.ipynb>`_
-     - Factorized :math:`I\otimes K_{\mathrm{self}}+\hat{A}\otimes K_{\mathrm{nbr}}` vs joint :math:`Nd\times Nd` latent map (MSE, params, spectrum)
+     - One-tap factorized :math:`I\otimes K_{\mathrm{self}}+\hat{A}\otimes K_{\mathrm{nbr}}` vs joint :math:`Nd\times Nd` latent map (MSE, params, spectrum), plus a hop-matched :math:`P\in\{0,1,2\}` arm (40 epochs; not the 80-epoch historical protocol; hop order is not claimed as the cause of the joint-LS gap)
+   * - `49_multi_hop_factorization.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/49_multi_hop_factorization.ipynb>`_
+     - Kronecker polynomial spectrum versus dense :math:`K_{\mathrm{eff}}` on a tiny :math:`P=2` path, plus a hop-mismatch warning smoke fit (not a forecasting contest)
    * - `41_node_churn_presence_masks.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/41_node_churn_presence_masks.ipynb>`_
      - Fixed-union presence-mask churn (:math:`N_{\max}`) vs observation masks; losses ignore inactive nodes
+   * - `50_graph_state_closure.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/50_graph_state_closure.ipynb>`_
+     - Opt-in predicted topology versus hold-last on a synthetic structural
+       event (dense stub wiring check, not a learned-forecast claim;
+       permutation / ``EntityRemap`` note)
    * - `43_tdl_sheaf_cell_ablation.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/43_tdl_sheaf_cell_ablation.ipynb>`_
      - Sheaf / cell-complex / simplicial-1 / GNN encode ablation with the same linear Koopman head
    * - `44_graphvamp_md.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/44_graphvamp_md.ipynb>`_
@@ -210,4 +245,13 @@ Related pages
 * :doc:`capabilities` — feature and dataset inventory
 * :doc:`quickstart` — minimal train/predict script
 * :doc:`api` — API reference
-* :doc:`graphon` — graphon sampling for transfer at multiple :math:`N`
+* :doc:`graphon` — graphon sampling, dense teaching estimation, and continuum-limit citations
+* :doc:`benchmarks` — identity-bound manifests (example 47)
+* :doc:`identification` — closed-form :math:`K` and rank grid
+  (examples 48 / 53)
+* :doc:`spectral_diagnostics` — Nyquist and non-normal toys (example 51)
+* :doc:`graph_dynamics` — predicted topology versus hold-last (example 50)
+* :doc:`matrix_free` — ``LinearOperatorProtocol`` wrappers
+* :doc:`criticality` — gap-closure monitor (example 54)
+* :doc:`time_conditioning` — :math:`(\mu, t, u)` records and irregular
+  :math:`\Delta t`

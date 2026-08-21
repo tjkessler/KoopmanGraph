@@ -7,6 +7,390 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-19
+
+Integration increment on the 0.14 stack: opt-in closed-form
+identification, identity-bound benchmark manifests, polynomial graph
+filters, Nyquist / conditioning diagnostics, and labeled research MVPs
+(graph-state closure, cochain dynamics, matrix-free algebra,
+residual-tube MPC). Homogeneous scientific defaults and the linear
+latent operator contract are unchanged (`koopman=None` still selects
+`"pernode"`). `FORMAT_VERSION` stays 1.
+
+### Added
+
+- README Highlights for opt-in identification (closed-form $K$; default
+  Adam `fit` unchanged; rank grid is not Ray Tune) and identity-bound
+  benchmarks (`koopman-graph benchmark run` / `verify`; the runner does
+  not train or invent MAE / RMSE; not a LibCity / BasicTS host). Featured
+  tutorials list examples 47 and 48. Related software names PyDMD and
+  kooplearn as flat-vector peers.
+- `paper.bib` method keys for the post-0.14 catalog:
+  `Guo2025ModularEDMD`, `LibCity2021`, `BasicTS2024`, `kooplearn2026`,
+  `PyKoopman2024` (same work as `Pan2024`), and `PyDMD2018`. Existing
+  method keys remain cited in source or Sphinx pages. No invented
+  forecast numbers.
+- Sphinx guides for identity-bound benchmarks, opt-in identification,
+  spectral diagnostics, predicted graph dynamics, matrix-free linear
+  operators, the spectral-gap criticality monitor, and time /
+  parameter conditioning (`docs/source/benchmarks.rst`,
+  `identification.rst`, `spectral_diagnostics.rst`,
+  `graph_dynamics.rst`, `matrix_free.rst`, `criticality.rst`,
+  `time_conditioning.rst`). Narrative only; defaults and
+  `FORMAT_VERSION` stay 1. No telemetry download.
+- Examples 48 and 51–54: identification report plus residual-aware
+  reject of a polluted RMSE-only dictionary; non-normal / Nyquist
+  `SpectralDiagnostics` toys; cycle Hodge harmonic split; latent-rank
+  recovery on a linear Gaussian embedding; closing-gap criticality
+  score (not a certificate). Teaching-thin; no METR-LA download.
+- Optional `SpectralDiagnostics` on `KoopmanSpectrum` (`κ(V)` after
+  column normalization, per-mode Wilkinson `κ_i`, Frobenius departure
+  from normality and a scale-free relative variant, Nyquist frequency
+  `1/(2Δt)` in cycles per unit time on discrete spectra, per-mode
+  aliasing flags, and `sign(Re λ)`). Populated by `compute_spectrum` /
+  `compute_generator_spectrum` (`nyquist_frequency` is `None` on
+  generators). Discrete `compute_spectrum` emits one `UserWarning` when
+  any mode is Nyquist-adjacent. `implied_timescales` carries the same
+  flag without changing the `|λ|` validity window. Not a
+  finite-horizon stability certificate, not a sampling-theorem
+  identification result, and not on the root façade.
+  `mode_amplitudes` warns when `κ(V)` exceeds `CONDITION_WARN`
+  (`1e6`) and raises `DefectiveSpectrumError` (a `LinAlgError`) when
+  `V` is singular, with a Schur-subspace hint rather than a bare
+  `RuntimeError`. `matrix_log(..., defective="error")` (default) raises
+  the same error on Jordan / singular eigenbases instead of inverting
+  `V`; `defective="schur"` uses SciPy `logm` (CPU; Al-Mohy–Higham).
+  Neither path claims that defectivity marks every critical regime.
+  `monitor_critical_transition` scores sliding-window spectral-gap
+  closure and near-defectivity on a sequence of spectra (positive rate
+  means the gap shrank). Diagnostic only — not a Ghosh-grade
+  topology-criticality certificate, and not on the root façade.
+- Discrete `koopman="graph"` accepts `koopman_filter_degree` (default
+  `1`, the one-tap `I⊗K_self + Â⊗K_nbr` map). `P=0` is self only;
+  `P>1` is an opt-in monomial `sum_k Â^k ⊗ K_k` with globally shared
+  extra hops. Dual random-walk remains an extra direction, not an extra
+  hop. `P=1` checkpoints and forwards stay bit-identical. Block-diagonal
+  inverse and distributed inverse / Arnoldi require `P=1`; dense inverse
+  uses the assembled polynomial. Eligible discrete spectrum uses
+  Kronecker `eig(B(λ_i))` with `B(λ)=Σ_k λ^k K_k` for any `P>=0`
+  (not a sum of independent factor eigenvalues). Dual / orbit stay
+  dense; continuous-graph Kronecker remains one-tap. The helper raises
+  `ValueError` for dual adjacency; operator `.spectrum` still
+  dense-routes. Kronecker still does not invert or cheapen
+  eig-regularization. This does not
+  attribute the example-38 path-diffusion gap (hold-out MSE approximately
+  0.71 versus 0.019) to hop order.
+- `GraphKoopmanModel.fit` warns
+  (`ReceptiveFieldMismatchWarning`, off the root façade) when a
+  topology-aware encoder mixes more hops than discrete graph
+  `filter_degree`. GCN/GAT/SAGE/Transformer stacks count one hop per
+  layer; DiffConv counts `num_layers * diffusion_steps`. Encoder
+  neighborhood mixing does not compensate for a one-hop Koopman
+  factor. The check is warn-only and skips operators without
+  `receptive_field_hops`.
+- Opt-in `GraphKoopmanModel.fit(..., batch_graphs=True)` collates
+  independent homogeneous trajectories into one PyG `Batch` so shared
+  `K` applies to the disconnected union with per-graph shifts.
+  Reconstruction (and forward consistency when weighted) match the mean
+  of the existing per-sequence `MultiTrajectory` loop on modest
+  batches. The default Python loop is unchanged. This is vectorization,
+  not a new multi-topology capability. Collate types stay off the root
+  façade.
+- Example 38 adds a hop-matched degree-`P` arm (`P` in `{0, 1, 2}`, 40
+  epochs) on the same path-diffusion surrogate as the historical one-tap
+  versus joint least-squares comparison (80 epochs, unchanged numbers).
+  Example 49 checks Kronecker polynomial spectrum against dense `K_eff`
+  on a tiny `P=2` path and exercises the hop-mismatch warning. Neither
+  notebook attributes the historical hold-out MSE gap (approximately
+  0.71 versus 0.019) to hop order.
+- `koopman_graph.identification` closed-form ridge / TLS / constrained
+  least-squares solvers and opt-in
+  `GraphKoopmanModel.fit(..., identification=IdentificationConfig(...))`
+  (off the root façade). Default `identification=None` keeps the Adam
+  path and does not import the package. Alternating fit freezes the
+  encoder, writes dense per-node `K`, then takes encoder/decoder Adam
+  steps. Discrete dense `KoopmanOperator` only; graph / hetero /
+  continuous / controlled / delay / windowed / DDP layouts raise.
+  `solver="varpro"` raises `NotImplementedError`. After an
+  identification fit, `model.identification_report` holds one-step and
+  short-rollout latent mean squared error (MSE) plus `ρ(K)`. That
+  record is not a Haseli–Cortés, ResDMD, or Lyapunov certificate, and
+  is not ResKoopNet residual training.
+- Finite-sample subspace invariance leakage `η` via
+  `koopman_graph.identification.subspace_invariance_report` (off the
+  root façade) and opt-in `evaluate(..., include_invariance=True)` /
+  `GraphKoopmanModel.subspace_invariance_report`. Default evaluate
+  MAE / RMSE / MAPE are unchanged. The ratio is a truncated-SVD
+  projection residual on encoded samples, not a Haseli–Cortés
+  invariance-proximity certificate (`HaseliCortes2023`). Discrete
+  dense per-node `K` only; graph / hetero / continuous / delay /
+  controlled layouts raise. Closed-form `fit` still does not fill
+  `IdentificationReport.invariance`.
+- Residual-aware dictionary selection
+  (`koopman_graph.identification.select_resdmd_gated`, off the root
+  façade) and opt-in `ResDMDFitCallback(mode="gate")`. Lowest train
+  one-step mean squared error (MSE) wins unless the gate first drops
+  candidates whose max finite-dictionary ResDMD residual exceeds
+  `1e-2` (same default as `resdmd`).
+  `IdentificationConfig.gate_resdmd=True` fills
+  `IdentificationReport.spectral` on the final identification `fit`;
+  it does not abort training. Default callback mode remains
+  `"observe"`. This is not a certified infinite-dimensional residual
+  bound.
+- `MpEDMDBaseline` (off the root façade): measure-preserving EDMD via a
+  Gram-weighted Procrustes polar factor of the dictionary map
+  (`Colbrook2023mpEDMD`, doi:10.1137/22M1521407). Same dictionaries and
+  Data-only `predict` surface as `EDMDBaseline`. Unitarity is in the
+  Gram inner product; this does not obsolete Euclidean conditioning on
+  a general directed `K_eff`.
+- `GEDMDBaseline` (off the root façade): generator EDMD from supplied
+  dictionary derivatives (`Klus2020gEDMD`,
+  doi:10.1016/j.physd.2020.132416). `Data.dx_dt` or
+  `fit(..., derivatives=)`; polynomial dictionaries only. `K` stores
+  the generator `L`. Irregular timestamps do not create `L`. Distinct
+  from `identify_sparse_dynamics(..., mode="derivative")`.
+- `HankelDMDBaseline` and `HAVOKBaseline` (off the root façade):
+  teaching delay-row solvers on flattened snapshots
+  (`Arbabi2017HankelDMD`, doi:10.1137/17M1125236;
+  `Brunton2017HAVOK`, doi:10.1038/s41467-017-00030-8). Distinct from
+  `DelayEmbeddingEncoder`. Optional `history=` supplies older delays
+  (oldest → newest); omitted slots are zeros. HAVOK `predict` uses
+  forcing `u=0`. Default `n_delays=2`; HAVOK `havok_rank=3` must fit
+  inside `min(num_windows, n_delays * state_dim)` at fit.
+- `identify_sparse_graph_factors` (off the root façade): STLSQ or
+  teaching group-lasso on frozen `K_self` / `K_nbr`, then an
+  unpenalized refit (`Brunton2016SINDy`; related literature
+  `Pan2021SparseSubspace`, doi:10.1017/jfm.2021.271, not that paper's
+  multi-task EDMD pruning). Distinct from `identify_sparse_dynamics`
+  and `KoopmanSparsityLoss`, which still ship. Dual random-walk and
+  polynomial `P>1` maps are out of scope.
+- `select_latent_rank` (off the root façade): VAMP-2, ResDMD elbow, or
+  stability-penalized held-out MSE over a truncated-SVD candidate grid
+  on frozen encodings (`Wu2020VAMP`; `deeptime2021`,
+  doi:10.1088/2632-2153/ac3de0, optional `[msm]` cross-check). Distinct
+  from Ray Tune / `koopman_graph.tuning` HPO for encoder `latent_dim`.
+  Does not train a model per candidate and does not fill
+  `IdentificationReport.selected_rank` on `fit`.
+- `ExperimentManifest` (off the root façade): frozen
+  `benchmark_manifest_v1` records with dataset SHA-256, ≥3 seeds,
+  track-mandatory controls, and non-empty `deviations` for teaching GNN
+  methods. JSON always; YAML needs PyYAML (`[cli]`). Distinct from
+  LibCity / BasicTS leaderboard hosting. The `[benchmark]` extra is
+  empty.
+- `koopman-graph benchmark run` / `verify` (off the root façade):
+  identity-bound `summary.json` (`benchmark_summary_v1`) with a
+  canonical SHA-256. `run` requires `--data` and checks the dataset
+  payload digest. `verify` fails on a tampered summary hash. This
+  increment does not train models or invent RMSE. The CLI lazy-imports
+  `koopman_graph.benchmark` inside handlers only.
+- Tracked smoke fixtures under `benchmarks/v0.15/` (telemetry-like,
+  multiphysics, topology transfer): hashed UTF-8 stand-ins, FAIR
+  cards, and identity-bound summaries. CI job `benchmark-smoke` runs
+  `koopman-graph benchmark verify` on those stubs. Not METR-LA
+  training and not invented MAE / RMSE.
+- Example 47 (`examples/47_benchmark_manifest.ipynb`): CLI walkthrough
+  of identity-bound `benchmark run` / `verify` on tracked
+  `benchmarks/v0.15/` smoke fixtures. Does not download METR-LA and
+  does not invent MAE / RMSE.
+- Opt-in `GraphDynamicsConfig` / `GraphStateSnapshot` (package `data`,
+  off the root façade). Default `graph_dynamics=None` keeps 0.14 encode
+  / decode / advance. When a config is passed, `topology_head` defaults
+  to `sparse_candidate` (`candidate_k=8`) via
+  `SparseCandidateTopologyHead` (logits on at most `N k` candidate
+  pairs, not dense `N×N`). `dense_mlp` keeps `PredictedTopologyHead`
+  with an `N` ceiling of 64. Distinct from
+  `learn_topology="self_adaptive"` / `AdaptiveAdjacency`. Additive
+  format-1 key `graph_dynamics` (absent ⇒ `None`); `FORMAT_VERSION`
+  stays 1. When a head is attached and `recursive_training` is true,
+  `fit` / `predict` / `evaluate` / UQ use predicted
+  `Â_{t+1}=g_φ(z_t)` as sigmoid weights on the candidate COO unless
+  `future_topologies` or `topology_policy="hold_last"` is set. Evaluate
+  on dynamic sequences injects oracle futures only when that recursive
+  path is off. Presence BCE uses a linear per-node head when masks
+  exist. Topology / presence terms on `TrainingLossBreakdown` default
+  to zero when `graph_dynamics` is unset (`LossWeights` is unchanged).
+  `learn_topology="self_adaptive"` cannot be combined with a non-`none`
+  topology head. `GraphStateSnapshot` is a supervision record, not a
+  replacement for `GraphSnapshotSequence`.
+- `JointStateTopologyObserver` (package `adaptation`, off the root
+  façade): Kalman filter plus group-sparse `K_self` / `K_nbr` on the
+  observed COO, or dense RLS on per-node `K`.
+  `claim_homomorphism=True` raises unless the encoder is
+  `SeparableDictionaryEncoder` (`encoder_kind="separable"`) and the
+  operator is a one-tap graph Koopman operator (Peng, Shen & Zhu,
+  arXiv:2606.17797, `Peng2026KoopmanGKFA`). Default GNN encoders mix
+  neighbors and are not separable. The observer does not infer a new
+  edge set, does not run ADMM on `A`, and does not certify a three-term
+  MSE bound. Dual random-walk and `filter_degree != 1` graph maps raise. Class-only
+  encoder (no factory `encoder="separable"`). No checkpoint key;
+  `FORMAT_VERSION` stays 1. Importing `RecursiveKoopmanAdapter` /
+  `KoopmanObserver` does not load `identification`.
+- `EntityRemap` (package `data`, off the root façade): injective
+  placement of source nodes into a caller-chosen finite `N_max`.
+  `entity_ids` names union rows; `index` maps source rows onto that
+  union. `apply_snapshot` remaps `x` and `edge_index`.
+  `GraphSnapshotSequence` still refuses a changing node count;
+  the error names `EntityRemap` and unbounded growth. This is not
+  automatic entity resolution. Homogeneous `Data` only. No checkpoint
+  key; `FORMAT_VERSION` stays 1.
+- `estimate_graphon` / `GraphonEstimate` (package `operators`, off the
+  root façade): dense teaching fit of constant, product, or low-rank
+  kernels on aligned homogeneous graphs with a shared `N` (ceiling
+  256). Constant recovery is the mean off-diagonal edge probability
+  (dimensionless). Product recovery uses degree scores
+  `û_i = 2 d_i / (N-1)`. Low-rank is a truncated SVD sketch without an
+  oracle-quality claim. Sparse-graph graphon theory is refused.
+  Recovering a teaching kernel is not a transferability certificate on
+  arbitrary sparse sensor graphs (`Ruiz2023Transferability`). Optional
+  `positions=` on `sample_graphon_adjacency` holds latents for the
+  product oracle. No checkpoint key; `FORMAT_VERSION` stays 1.
+- Example 50 (`examples/50_graph_state_closure.ipynb`): opt-in
+  predicted topology versus hold-last on a seeded six-node directed
+  $G(n,p)$ event.
+  A dense stub that scores the post-event graph beats hold-last when
+  the target is the model's own oracle one-step forecast. That is a
+  wiring check, not a learned-forecast claim. Dense logits permute
+  with node order; changing `N` still needs `EntityRemap`.
+- Homogeneous `parameter_trajectory` and frozen `ConditioningContext`
+  (package `data`, off the root façade): per-snapshot
+  `(μ, t, u)` records with caller-defined regime coordinates
+  (dimensionless if unspecified) and timestamps in the caller time
+  unit. `koopman="switched"` / `"mixture"` remain latent-gated or
+  piecewise LTI maps, not `K(μ)` (`Macesic2018Nonautonomous`).
+  Carrying parameters does not change the default `koopman=None`
+  operator. `FORMAT_VERSION` stays 1.
+- Discrete `koopman="parametric"` interpolant `K(μ)=Σ_j α_j(μ) K_j`
+  with RBF or simplex weights (`ParametricKoopmanOperator`, off the
+  root façade). Distinct from latent-gated switched / mixture. Convex
+  combinations preserve dense / row-stochastic / doubly-stochastic
+  factors; symplectic / ODO / Schur / dissipative / Lyapunov /
+  auxiliary-spectral mixes raise. Export refuses the interpolant.
+  Additive checkpoint type string; `FORMAT_VERSION` stays 1.
+  `leave_one_regime_out` compares the interpolant to pooled LTI on
+  latent pairs.
+- Time-of-day recipes `diurnal_control_features` and
+  `diurnal_phase_index` (package `data`, off the root façade): Fourier
+  sine/cosine columns for existing additive / bilinear control, and
+  integer phase bins for a per-step switched `phase_index` that does
+  not mutate `mode_index`. Not a calendar serializer and not a
+  checkpoint key. Discrete `fit` / `predict_at` still reject
+  non-uniform `Δt`; use `dynamics_mode="continuous"` or supply gEDMD
+  derivatives (`Klus2020gEDMD`). Irregular timestamps do not create
+  `L`.
+- Opt-in `DriftDiffusionKoopman` (package `operators`, off the root
+  façade): Euler–Maruyama or Yosida step for `dz = Lz dt + F dW`.
+  `forward` is the conditional-expectation semigroup; `advance`
+  samples a path. Not a factory kind.
+  `dynamics_mode="stochastic"` stays diagonal process noise after
+  discrete `K`. Not certified SDE theory and not SDMD
+  (`Xu2025StochasticSemigroup`, `Zhou2025Yosida`). No checkpoint key;
+  `FORMAT_VERSION` stays 1.
+- `JointCoverageSpec` (package `uq`, off the root façade) names the
+  conformal estimand. Default `target="per_node_marginal"`.
+  Simultaneous / event targets and `block!="none"` raise.
+  `ConformalKoopmanUQ.coverage` always names the target. Proper
+  scores `gaussian_crps`, `gaussian_nll`, and `energy_score` evaluate
+  forecasts and do not certify coverage (`Schlembach2025Conformal`).
+- `CochainState` and `CochainKoopmanOperator` (package `operators`,
+  off the root façade): degree-specific `k<=1` maps on a static
+  signed `B_1`. Not a factory kind; default `koopman=None` stays
+  `"pernode"`. Distinct from `koopman="hodge"`. Face latents are
+  stored, not evolved. `boundary_nilpotency` flags `B_1 B_2 ≈ 0` at
+  atol `1e-6` (`Lim2020Hodge`, `TopoX2024`). Feature-axis
+  intertwining is a loss. No checkpoint key; `FORMAT_VERSION` stays 1.
+- `markov_closure_report` and `FiniteMemoryKoopman` (package
+  `analysis`, off the root façade): Ljung–Box-style residual-energy
+  whiteness (lags in timesteps) and a convolution
+  `z[t+1] = z[t] @ Omega.T + sum_s z[t-s] @ K_s.T`. Not a factory
+  kind, not delay embedding, and not HAVOK (`Brunton2017HAVOK`). Not
+  Mori–Zwanzig identification (`Lin2021MoriZwanzig`, `Ljung1978Box`).
+  Memory-order selection is not implemented. No checkpoint key;
+  `FORMAT_VERSION` stays 1.
+- `hodge_decompose_modes` and `HodgeModeComponents` (package
+  `analysis`, off the root façade): combinatorial Hodge split of
+  stored eigenvector columns into gradient / curl / harmonic parts
+  on a static signed `B_1` (`k` in `{0, 1}`). Analysis-only — not a
+  factory kind, not physical circulation, not `koopman="hodge"`, and
+  not TopologicX / sheaf parity (`Lim2020Hodge`, `TopoX2024`). Face
+  curl is not shipped. `FORMAT_VERSION` stays 1.
+- `order2_cochain_teaching` and `bind_cochain_operator` (package `nn`,
+  off the root façade): order-2 filled triangle bound to
+  `CochainKoopmanOperator`. `k=2` stored, not evolved. Cell-complex
+  teaching ceiling remains `MAX_CELL_COMPLEX_DEGREE` (3). Sheaf
+  restriction maps stay learned-optional (default diagonal). Not
+  TopologicX / TDA ecosystem parity (`TopoX2024`).
+  `FORMAT_VERSION` stays 1.
+- `EquivariantKoopmanOperator` adds one `l=2` irrep (`n_tensors`;
+  `scale * I_5`) beside the existing `scale * I_3` vector blocks.
+  Not a factory kind. Default `E3EquivariantEncoder` still projects
+  to invariant scalars. The operator leaf does not import `e3nn`;
+  the rotation test uses `[equivariance]`. Not a molecular MD
+  production stack (`Thomas2018TFN`, `Geiger2022e3nn`).
+  `FORMAT_VERSION` stays 1.
+- `MassConservingDecoder`, `PositivityDecoder`, and
+  `LinearConservingDecoder` (package `nn`, off the root façade):
+  opt-in decoded-space softmax / affine mass, positivity, and
+  min-norm `C x = c_0` heads on named channels. Not a factory
+  kind and not a checkpoint type string. Latent symplectic `K`
+  alone does not conserve decoded mass (`Greydanus2019HNN`).
+  IEEE-118 `generate` / `generate_typed` remain Laplacian
+  diffusion plus a load ramp — not AC power flow.
+  `FORMAT_VERSION` stays 1.
+- `LinearOperatorProtocol` with
+  `PolynomialGraphLinearOperator` and
+  `MatrixFreeGraphLinearOperator` (package `operators`, off the
+  root façade): common `matvec` / `rmatvec` / `solve` /
+  `expm_action` / leading eigpairs / residual norms wrapping a
+  degree-`P>=2` graph polynomial and the existing one-tap
+  `matrix_free` path. Dense assembly is refused when `N·d`
+  exceeds `MAX_DENSE_LINEAR_OPERATOR_SIZE` (4096). Trainer DDP
+  does not shrink that representation. Kronecker exact spectrum
+  remains a special case. Not a factory kind.
+  `FORMAT_VERSION` stays 1.
+- `TubeKoopmanMPC` and `TubeMPCReport` (package `mpc`, off the
+  root façade): residual-tube tightening from conformal quantiles
+  or ensemble residual radii on additive discrete plants.
+  Closed-loop `evaluate` reports constraint-violation rate,
+  feasibility rate, and quadratic stage cost against the nominal
+  output boxes — not tracking MSE alone. Local decoder
+  linearization is unchanged. Not a chance-constraint solver,
+  not a recursive-feasibility or Lyapunov closed-loop
+  certificate, and not Zhang et al. r-KMPC with an offline
+  ancillary law (`Zhang2022TubeMPC`). Bilinear / networked /
+  continuous plants raise. Not a factory kind.
+  `FORMAT_VERSION` stays 1.
+- Labeled synthetic SCM interventions (package `analysis`, off the
+  root façade): `teaching_three_node_scm` and
+  `recover_synthetic_interventional_edges` recover a known
+  do-edge `0 → 1` on a three-node linear Gaussian fixture.
+  `granger_latent_influence` remains **non-interventional**.
+  Not a factory kind and not field-data causal discovery.
+  `FORMAT_VERSION` stays 1.
+
+### Changed
+
+- Example 22 discussion, gallery caption, and `limitations.rst` cite the
+  saved GraphKoopman-leading aggregate RMSE (0.6551 vs 0.7076 / 1.0754 /
+  0.9036 for STGCN / DCRNN / Graph WaveNet) with unequal-budget and
+  teaching-baseline caveats. Examples 37/38 keep negative transfer and
+  the one-tap versus joint-LS gap as allowed outcomes, not SOTA.
+- `limitations.rst` re-homes the post-0.14 honesty ceilings on one
+  page: one-hop default versus polynomial opt-in; Nyquist and
+  non-normal diagnostics; node versus cochain; uniform discrete
+  `Δt`; identification versus Adam; graph-state fixed-union;
+  mpEDMD versus `SpectralDiagnostics`; decoded constraint heads;
+  matrix-free eligibility; criticality as a non-certificate;
+  example 22 ranking; and the example-38 joint-LS gap not
+  attributed to hop order. Neighbor-factor isotypic tying remains
+  shipped. Negative transfer and null ablations stay allowed.
+
+### Notes
+
+- Factory defaults are unchanged vs 0.14.0 (`koopman=None` →
+  `"pernode"`; `sparsity="dense"`; AMP off). `FORMAT_VERSION` stays 1.
+- The Zenodo DOI remains `10.5281/zenodo.21926723` until a new version
+  DOI is minted at the 0.15 tag.
+
 ## [0.14.0] - 2026-08-13
 
 Remaining-limits close-out on the 0.13 stack: opt-in operator families,
@@ -213,7 +597,8 @@ operator contract are unchanged.
   (`koopman_symmetry="isotypic"`; `compute_isotypic_decomposition`;
   textbook \(K_n\) / \(C_n\) oracles — `Serre1977LinearRepresentations`).
   Tutorial `examples/45_isotypic_symmetry.ipynb`. Neighbor-factor
-  (\(K_{\mathrm{nbr}}\)) isotypic tying is **not** shipped.
+  (\(K_{\mathrm{nbr}}\)) isotypic tying was not included in 0.11.0; it
+  shipped in 0.14.0.
 - Sphinx: rewritten `limitations.rst` / `capabilities.rst`, architecture
   v0.11 map, FAQ (Ray Train choice, transfer honesty, teaching vs
   leaderboard), API / installation extras, molecular dataset card and
@@ -732,6 +1117,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.15.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.14.0...0.15.0
 [0.14.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.13.0...0.14.0
 [0.13.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.12.0...0.13.0
 [0.12.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.11.0...0.12.0
