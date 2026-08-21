@@ -409,8 +409,8 @@ latent operator contract are unchanged (`koopman=None` still selects
 
 - Factory defaults are unchanged vs 0.14.0 (`koopman=None` →
   `"pernode"`; `sparsity="dense"`; AMP off). `FORMAT_VERSION` stays 1.
-- The Zenodo DOI remains `10.5281/zenodo.21926723` until a new version
-  DOI is minted at the 0.15 tag.
+- Zenodo version DOI:
+  [10.5281/zenodo.22045904](https://doi.org/10.5281/zenodo.22045904).
 
 ## [0.14.0] - 2026-08-13
 
