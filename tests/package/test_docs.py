@@ -414,7 +414,7 @@ def test_release_metadata_versions_agree() -> None:
     assert "## [Unreleased]" in changelog
     assert f"## [{version}]" in changelog
     assert _cff_top_level_field(cff_text, "version") == version
-    assert _cff_top_level_field(cff_text, "doi") == "10.5281/zenodo.21926723"
+    assert _cff_top_level_field(cff_text, "doi") == "10.5281/zenodo.22045904"
     assert f"version      = {{{version}}}" in readme
     assert f"Version **{version}**" in index
     bib_version = _bib_field(_bib_entry(bib_text, _SOFTWARE_BIB_KEY), "version")
