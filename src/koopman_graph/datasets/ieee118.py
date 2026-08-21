@@ -11,7 +11,10 @@ The transmission **topology** and bus roles come from the public MATPOWER
 ``case118`` artifact. Feature trajectories from ``generate`` /
 ``generate_typed`` are **simulated** (Laplacian diffusion on voltages/angles
 plus a sinusoidal load ramp) — they are **not** real grid telemetry or OPF
-solutions. Do not cite this benchmark as measured power-system dynamics.
+solutions, and they are **not** AC power-flow snapshots. Constraint-preserving
+decoder heads act after decode and do not create AC power-flow consistency
+on these trajectories. Do not cite this benchmark as measured power-system
+dynamics.
 """
 
 from __future__ import annotations
@@ -673,8 +676,9 @@ class IEEE118DynamicBenchmark:
     Voltages and angles evolve via graph Laplacian diffusion on the real IEEE
     118 transmission topology; loads follow a slow sinusoidal ramp to emulate
     changing grid conditions over time. These trajectories are **simulated**
-    teaching dynamics, not measured grid telemetry
-    (:data:`SIMULATED_DYNAMICS_DISCLAIMER`).
+    teaching dynamics, not measured grid telemetry, OPF solutions, or AC
+    power flow (:data:`SIMULATED_DYNAMICS_DISCLAIMER`). Constraint-preserving
+    decoder heads do not create power-flow consistency.
 
     Public entry points are the classmethods ``load_topology``, ``generate``,
     ``load_typed_topology``, and ``generate_typed``. Prefer those over the
@@ -801,6 +805,12 @@ class IEEE118DynamicBenchmark:
         ------
         ValueError
             If any generation parameter is invalid.
+
+        Notes
+        -----
+        Trajectories are Laplacian diffusion plus a load ramp — not
+        SCADA, OPF, or AC power flow. Constraint decoder heads do not
+        change that.
         """
         if num_timesteps < 1:
             msg = f"num_timesteps must be >= 1, got {num_timesteps}"
@@ -892,6 +902,7 @@ class IEEE118DynamicBenchmark:
         Dynamics match :meth:`generate` (simulated Laplacian diffusion + load
         ramp on the MATPOWER topology) and are then partitioned into typed
         ``HeteroData`` snapshots. See :data:`SIMULATED_DYNAMICS_DISCLAIMER`.
+        Constraint decoder heads do not create AC power-flow consistency.
 
         Parameters
         ----------

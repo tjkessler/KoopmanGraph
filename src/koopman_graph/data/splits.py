@@ -131,6 +131,11 @@ def temporal_split(
             timestamps=(
                 None if sequence.timestamps is None else sequence.timestamps[:train_end]
             ),
+            parameter_trajectory=(
+                None
+                if sequence.parameter_trajectory is None
+                else sequence.parameter_trajectory[:train_end]
+            ),
             observation_masks=(
                 None
                 if sequence.observation_masks is None
@@ -157,6 +162,11 @@ def temporal_split(
                 if sequence.timestamps is None
                 else sequence.timestamps[train_end:val_end]
             ),
+            parameter_trajectory=(
+                None
+                if sequence.parameter_trajectory is None
+                else sequence.parameter_trajectory[train_end:val_end]
+            ),
             observation_masks=(
                 None
                 if sequence.observation_masks is None
@@ -180,6 +190,11 @@ def temporal_split(
             ),
             timestamps=(
                 None if sequence.timestamps is None else sequence.timestamps[val_end:]
+            ),
+            parameter_trajectory=(
+                None
+                if sequence.parameter_trajectory is None
+                else sequence.parameter_trajectory[val_end:]
             ),
             observation_masks=(
                 None

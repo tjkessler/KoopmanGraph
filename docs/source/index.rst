@@ -7,15 +7,17 @@ space, a learned linear operator advances those states, and a matching decoder
 reconstructs physical node features for multi-step forecasting and spectral
 analysis.
 
-Version **0.14.0** is a remaining-limits close-out: opt-in structure-preserving
-operators, switched / mixture maps, equivariant and Hodge-structured
-:math:`K`, protocol-matched leaderboard adapters, restricted portable
-export, and analysis extras (wired finite ResDMD, dispersion, TDA).
-Homogeneous scientific defaults and the linear latent operator contract
-are unchanged relative to 0.13.0 (factory ``koopman=None`` still selects
-``"pernode"``; ``sparsity="dense"``; AMP off). See :doc:`capabilities`
-for the full inventory, :doc:`limitations` for the new honesty ceilings,
-and :doc:`architecture` for the public vs power-user API contract.
+Version **0.15.0** is an integration increment on the 0.14 stack: opt-in
+closed-form identification, identity-bound benchmark manifests,
+polynomial graph filters, Nyquist / conditioning diagnostics, and
+labeled research MVPs (graph-state closure, cochain dynamics,
+matrix-free algebra, residual-tube MPC). Homogeneous scientific
+defaults and the linear latent operator contract are unchanged
+relative to 0.14.0 (factory ``koopman=None`` still selects
+``"pernode"``; ``sparsity="dense"``; AMP off). ``FORMAT_VERSION``
+stays 1. See :doc:`capabilities` for the full inventory,
+:doc:`limitations` for the honesty ceilings, and :doc:`architecture`
+for the public vs power-user API contract.
 
 .. toctree::
    :maxdepth: 2
@@ -31,6 +33,13 @@ and :doc:`architecture` for the public vs power-user API contract.
    tutorials
    architecture
    graphon
+   benchmarks
+   identification
+   spectral_diagnostics
+   graph_dynamics
+   matrix_free
+   criticality
+   time_conditioning
    api
 
 Indices and tables

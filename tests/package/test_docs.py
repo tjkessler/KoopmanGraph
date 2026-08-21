@@ -233,6 +233,47 @@ _V070_BIB_KEYS = (
     "Rosenstein1993Lyapunov",
     "Welch1967",
 )
+# Method / software keys that shipped with the post-0.14 catalog.
+_V015_BIB_KEYS = (
+    "Colbrook2023mpEDMD",
+    "Klus2020gEDMD",
+    "HaseliCortes2023",
+    "Guo2025ModularEDMD",
+    "Macesic2018Nonautonomous",
+    "Zeng2022Sampling",
+    "Pan2021SparseSubspace",
+    "Ruiz2023Transferability",
+    "Zhang2022TubeMPC",
+    "Xu2025ResKoopNet",
+    "LibCity2021",
+    "BasicTS2024",
+    "kooplearn2026",
+    "PyKoopman2024",
+    "deeptime2021",
+    "PyDMD2018",
+    "TopoX2024",
+)
+_SOFTWARE_BIB_KEY = "koopmangraph2026"
+_STALE_SOFTWARE_VERSION = "0.11.0"
+_STALE_SOFTWARE_DOI_RECORD = "21763908"
+_ISOTYPIC_DOC_RELATIVE_PATHS = (
+    "docs/source/limitations.rst",
+    "CHANGELOG.md",
+    "docs/source/capabilities.rst",
+    "docs/source/architecture.rst",
+)
+_ISOTYPIC_UNSHIPPED_PRESENT_TENSE = (
+    re.compile(r"isotypic tying is\s+\*{0,2}not\*{0,2}\s+shipped", re.I),
+    re.compile(r"neighbor[- ]factor tying not shipped", re.I),
+)
+_STALE_CONTRIBUTING_VERSION = "0.6.0"
+_FROZEN_PACKAGE_VERSION_ASSIGNMENT = re.compile(r'__version__\s*=\s*"\d+\.\d+\.\d+"')
+_V015_ARCHITECTURE_HEADING = "v0.15.0 capability architecture"
+_UNSHIPPED_V015_PACKAGES: tuple[str, ...] = ()
+_UNSHIPPED_SPHINX_ROLE = re.compile(
+    r":(?:mod|class|func|data):`~?koopman_graph\.(?:%s)(?:\.[\w.]*)?`"
+    % ("|".join(_UNSHIPPED_V015_PACKAGES) or "NEVER_MATCH_UNSHIPPED")
+)
 _REQUIRED_PAPER_MD_CITES = (
     "Azencot2020",
     "Bruder2021",
@@ -301,6 +342,298 @@ def test_v070_bibliography_entries_are_cited() -> None:
     ):
         assert doi_fragment in bib_text, f"{key} missing DOI {doi_fragment}"
     assert "proceedings.mlr.press/v202/h-zargarbashi23a.html" in bib_text
+
+
+def test_v015_bibliography_entries_are_cited() -> None:
+    """Post-0.14 method keys must exist in paper.bib and appear in src/ or docs."""
+    bib_text = (_PROJECT_ROOT / "paper.bib").read_text(encoding="utf-8")
+    corpus_parts: list[str] = []
+    for root_name in ("src", "docs/source"):
+        root = _PROJECT_ROOT / root_name
+        for path in root.rglob("*"):
+            if path.suffix in {".py", ".rst", ".md"} and path.is_file():
+                corpus_parts.append(path.read_text(encoding="utf-8"))
+    corpus = "\n".join(corpus_parts)
+
+    missing_bib = [
+        key
+        for key in _V015_BIB_KEYS
+        if not re.search(rf"@\w+\{{{re.escape(key)}\s*,", bib_text)
+    ]
+    missing_cites = [key for key in _V015_BIB_KEYS if key not in corpus]
+    assert not missing_bib, f"paper.bib missing v0.15 keys: {missing_bib}"
+    assert not missing_cites, f"uncited v0.15 bib keys: {missing_cites}"
+
+    for key, locator in (
+        ("Colbrook2023mpEDMD", "10.1137/22M1521407"),
+        ("Klus2020gEDMD", "10.1016/j.physd.2020.132416"),
+        ("HaseliCortes2023", "2311.13033"),
+        ("Guo2025ModularEDMD", "10.1016/j.physd.2025.134651"),
+        ("Macesic2018Nonautonomous", "10.1137/17M1133610"),
+        ("Zeng2022Sampling", "10.1109/CDC51059.2022.9992482"),
+        ("Pan2021SparseSubspace", "10.1017/jfm.2021.271"),
+        ("Ruiz2023Transferability", "10.1109/TSP.2023.3297848"),
+        ("Zhang2022TubeMPC", "10.1016/j.automatica.2021.110114"),
+        ("Xu2025ResKoopNet", "proceedings.mlr.press/v267/xu25y.html"),
+        ("LibCity2021", "10.1145/3474717.3483923"),
+        ("BasicTS2024", "10.1109/TKDE.2024.3484454"),
+        ("kooplearn2026", "10.21105/joss.10342"),
+        ("PyKoopman2024", "10.21105/joss.05881"),
+        ("deeptime2021", "10.1088/2632-2153/ac3de0"),
+        ("PyDMD2018", "10.21105/joss.00530"),
+        ("TopoX2024", "2402.02441"),
+    ):
+        assert locator in bib_text, f"{key} missing locator {locator}"
+
+
+def test_readme_highlights_identification_and_benchmarks() -> None:
+    """README Highlights must name identification and identity-bound benchmarks."""
+    readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    version = koopman_graph.__version__
+    assert "## Highlights" in readme
+    assert "Identification (opt-in)" in readme
+    assert "Identity-bound benchmarks" in readme
+    assert "does not train" in readme.lower()
+    assert "not a LibCity / BasicTS host" in readme
+    assert "not Ray Tune" in readme
+    assert f"new in {version}" in readme
+    assert f"version      = {{{version}}}" in readme
+    assert "0.2.0" not in readme
+
+
+def test_release_metadata_versions_agree() -> None:
+    """Package, CHANGELOG, CITATION.cff, README, and paper.bib versions agree."""
+    version = koopman_graph.__version__
+    changelog = (_PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    readme = (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    bib_text = (_PROJECT_ROOT / "paper.bib").read_text(encoding="utf-8")
+    cff_text = (_PROJECT_ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    index = (_PROJECT_ROOT / "docs" / "source" / "index.rst").read_text(
+        encoding="utf-8"
+    )
+    assert "## [Unreleased]" in changelog
+    assert f"## [{version}]" in changelog
+    assert _cff_top_level_field(cff_text, "version") == version
+    assert _cff_top_level_field(cff_text, "doi") == "10.5281/zenodo.21926723"
+    assert f"version      = {{{version}}}" in readme
+    assert f"Version **{version}**" in index
+    bib_version = _bib_field(_bib_entry(bib_text, _SOFTWARE_BIB_KEY), "version")
+    assert bib_version == version
+
+
+def _bib_entry(bib_text: str, key: str) -> str:
+    """Return the BibTeX body for ``key`` (braces exclusive of the entry type)."""
+    match = re.search(rf"@\w+\{{{re.escape(key)}\s*,", bib_text)
+    if match is None:
+        msg = f"paper.bib missing entry {key}"
+        raise AssertionError(msg)
+    start = bib_text.find("{", match.start())
+    depth = 0
+    for index in range(start, len(bib_text)):
+        char = bib_text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return bib_text[start + 1 : index]
+    msg = f"paper.bib entry {key} is unclosed"
+    raise AssertionError(msg)
+
+
+def _bib_field(entry: str, field: str) -> str:
+    """Return a single braced BibTeX field value."""
+    match = re.search(
+        rf"(?im)^\s*{re.escape(field)}\s*=\s*\{{([^}}]*)\}}",
+        entry,
+    )
+    if match is None:
+        msg = f"paper.bib field {field} missing"
+        raise AssertionError(msg)
+    return match.group(1).strip()
+
+
+def _cff_top_level_field(cff_text: str, field: str) -> str:
+    """Return a top-level YAML scalar from CITATION.cff (no nested keys)."""
+    match = re.search(rf"(?m)^{re.escape(field)}:\s*(\S+)\s*$", cff_text)
+    if match is None:
+        msg = f"CITATION.cff missing top-level {field}"
+        raise AssertionError(msg)
+    return match.group(1).strip().strip("\"'")
+
+
+def test_software_citation_matches_citation_cff() -> None:
+    """Software bib entry version/DOI must match CITATION.cff (not stale 0.11.0)."""
+    bib_text = (_PROJECT_ROOT / "paper.bib").read_text(encoding="utf-8")
+    cff_text = (_PROJECT_ROOT / "CITATION.cff").read_text(encoding="utf-8")
+    entry = _bib_entry(bib_text, _SOFTWARE_BIB_KEY)
+    bib_version = _bib_field(entry, "version")
+    bib_doi = _bib_field(entry, "doi")
+    cff_version = _cff_top_level_field(cff_text, "version")
+    cff_doi = _cff_top_level_field(cff_text, "doi")
+    assert bib_version == cff_version, (
+        f"{_SOFTWARE_BIB_KEY} version {bib_version!r} != CITATION.cff {cff_version!r}"
+    )
+    assert bib_doi == cff_doi, (
+        f"{_SOFTWARE_BIB_KEY} doi {bib_doi!r} != CITATION.cff {cff_doi!r}"
+    )
+    assert _STALE_SOFTWARE_VERSION not in entry
+    assert _STALE_SOFTWARE_DOI_RECORD not in entry
+
+
+def test_isotypic_neighbor_tying_not_described_as_unshipped() -> None:
+    """Present-tense docs must not claim neighbor-factor isotypic tying is unshipped."""
+    hits: list[str] = []
+    texts: dict[str, str] = {}
+    for relative in _ISOTYPIC_DOC_RELATIVE_PATHS:
+        path = _PROJECT_ROOT / relative
+        text = path.read_text(encoding="utf-8")
+        texts[relative] = text
+        for pattern in _ISOTYPIC_UNSHIPPED_PRESENT_TENSE:
+            if pattern.search(text):
+                hits.append(f"{relative}: {pattern.pattern}")
+    assert not hits, (
+        "present-tense unshipped isotypic-tying wording remains in:\n" + "\n".join(hits)
+    )
+    assert "neighbor-factor ties" in texts["docs/source/capabilities.rst"]
+    assert (
+        "Neighbor-factor isotypic tying is shipped"
+        in texts["docs/source/limitations.rst"]
+    )
+    assert "was not included in 0.11.0" in texts["CHANGELOG.md"]
+    assert (
+        "neighbor-factor tying added in 0.14" in texts["docs/source/architecture.rst"]
+    )
+
+
+_V015_GUIDE_PAGES = (
+    "benchmarks",
+    "identification",
+    "spectral_diagnostics",
+    "graph_dynamics",
+    "matrix_free",
+    "criticality",
+    "time_conditioning",
+)
+
+
+def test_v015_guide_pages_exist_and_are_in_toctree() -> None:
+    """v0.15 guide pages must be tracked RST files listed in the Sphinx toctree."""
+    index = (_PROJECT_ROOT / "docs" / "source" / "index.rst").read_text(
+        encoding="utf-8"
+    )
+    for name in _V015_GUIDE_PAGES:
+        path = _PROJECT_ROOT / "docs" / "source" / f"{name}.rst"
+        assert path.is_file(), f"missing docs/source/{name}.rst"
+        assert f"\n   {name}\n" in index or f"\n   {name}\r\n" in index, (
+            f"{name} missing from docs/source/index.rst toctree"
+        )
+        text = path.read_text(encoding="utf-8")
+        assert "blueprint" not in text.lower()
+        assert "DESIGN-v" not in text
+        assert ":doc:`limitations`" in text or "limitations" in text
+
+
+def test_limitations_rehomes_v015_ceilings() -> None:
+    """Public limitations page must carry the post-0.14 honesty ceilings."""
+    text = (_PROJECT_ROOT / "docs" / "source" / "limitations.rst").read_text(
+        encoding="utf-8"
+    )
+    folded = _folded_rst(text)
+    assert "identification=None" in folded
+    assert "Adam" in folded
+    assert "MpEDMDBaseline" in folded
+    assert "SpectralDiagnostics" in folded
+    assert "fixed-union" in folded
+    assert "koopman_filter_degree=1" in folded
+    assert "Nyquist" in folded
+    assert "CochainKoopmanOperator" in folded
+    assert "validate_uniform_discrete_increments" in folded
+    assert "monitor_critical_transition" in folded
+    assert "0.6551" in folded
+    assert "hop order" in folded
+    assert "Neighbor-factor isotypic tying is shipped" in text
+    assert "Negative transfer" in folded
+    assert "MassConservingDecoder" in folded
+    assert "MAX_DENSE_LINEAR_OPERATOR_SIZE" in folded
+    assert "blueprint" not in text.lower()
+    assert "DESIGN-v" not in text
+
+
+def test_contributing_does_not_freeze_package_version() -> None:
+    """CONTRIBUTING must point at __init__.py, not freeze a package version string."""
+    text = (_PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "src/koopman_graph/__init__.py" in text
+    assert _STALE_CONTRIBUTING_VERSION not in text
+    match = _FROZEN_PACKAGE_VERSION_ASSIGNMENT.search(text)
+    assert match is None, (
+        f"frozen __version__ assignment in CONTRIBUTING: {match.group(0)!r}"
+    )
+
+
+def _architecture_section(heading: str) -> str:
+    """Return architecture.rst from ``heading`` through the next top-level section."""
+    text = (_PROJECT_ROOT / "docs/source/architecture.rst").read_text(encoding="utf-8")
+    start = text.index(heading)
+    related = text.index("Related documentation", start)
+    return text[start:related]
+
+
+def _folded_rst(text: str) -> str:
+    """Collapse RST wrapping so contract phrases can be matched."""
+    return re.sub(r"\s+", " ", text)
+
+
+def test_architecture_v015_scaffold_preserves_defaults_and_import_rules() -> None:
+    """v0.15 architecture scaffold must keep LTI defaults and planned import rules."""
+    section = _architecture_section(_V015_ARCHITECTURE_HEADING)
+    folded = _folded_rst(section)
+    assert "koopman=None" in folded
+    assert '"pernode"' in folded
+    assert "linear time-invariant per-node" in folded
+    assert "koopman_filter_degree" in folded
+    assert "default ``1``" in folded
+    assert "FORMAT_VERSION" in folded
+    assert "No other ``koopman_graph`` package imports ``benchmark``" in folded
+    assert "``training`` must not import ``identification`` at module load" in folded
+    assert "``identification`` must not import ``adaptation``" in folded
+    assert "EntityRemap" in folded
+    assert "estimate_graphon" in folded
+    assert "ConditioningContext" in folded
+    assert "diurnal_control_features" in folded
+    assert "ParametricKoopmanOperator" in folded
+    assert "DriftDiffusionKoopman" in folded
+    assert "JointCoverageSpec" in folded
+    assert "markov_closure_report" in folded
+    assert "FiniteMemoryKoopman" in folded
+    assert "CochainKoopmanOperator" in folded
+    assert "CochainState" in folded
+    assert "hodge_decompose_modes" in folded
+    assert "HodgeModeComponents" in folded
+    assert "order2_cochain_teaching" in folded
+    assert "MAX_CELL_COMPLEX_DEGREE" in folded
+    assert "EquivariantKoopmanOperator" in folded
+    assert "n_tensors" in folded
+    assert "MassConservingDecoder" in folded
+    assert "LinearConservingDecoder" in folded
+    assert "constraint_decoders" in folded
+    assert "LinearOperatorProtocol" in folded
+    assert "PolynomialGraphLinearOperator" in folded
+    assert "MAX_DENSE_LINEAR_OPERATOR_SIZE" in folded
+    assert "TubeKoopmanMPC" in folded
+    assert "TubeMPCReport" in folded
+    assert "SyntheticSCM" in folded
+    assert "SyntheticInterventionReport" in folded
+    assert "recover_synthetic_interventional_edges" in folded
+    assert "koopman_graph.identification" in folded
+    for name in _UNSHIPPED_V015_PACKAGES:
+        assert f"koopman_graph.{name}" in folded
+    assert "Planned" in folded
+    assert "koopman_graph.benchmark" in folded
+    role = _UNSHIPPED_SPHINX_ROLE.search(section)
+    assert role is None, (
+        f"unshipped package Sphinx role in v0.15 scaffold: {role.group(0)!r}"
+    )
 
 
 def test_joss_paper_narrative_word_count_at_most_1000() -> None:

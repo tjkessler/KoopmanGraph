@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from koopman_graph import GNNDecoder, GNNEncoder, GraphKoopmanModel
+from koopman_graph.serialization import FORMAT_VERSION, build_checkpoint
 
 
 def _tiny_model(*, koopman: str = "pernode", parameterization: str = "dense", **kwargs):
@@ -39,6 +40,20 @@ def test_switched_mixture_checkpoint_roundtrip(tmp_path: Path) -> None:
     hodge.save(path_h)
     loaded_h = GraphKoopmanModel.load(path_h)
     assert loaded_h.koopman_kind == "hodge"
+
+    parametric = _tiny_model(koopman="parametric", koopman_parameter_dim=2)
+    path_p = tmp_path / "parametric.pt"
+    parametric.save(path_p)
+    loaded_p = GraphKoopmanModel.load(path_p)
+    assert loaded_p.koopman_kind == "parametric"
+    assert loaded_p.koopman.parameter_dim == 2
+    assert loaded_p.koopman.weight_kind == "rbf"
+    checkpoint = build_checkpoint(parametric)
+    assert checkpoint["format_version"] == FORMAT_VERSION == 1
+    assert checkpoint["config"]["koopman_kind"] == "parametric"
+    assert checkpoint["config"]["koopman_parameter_dim"] == 2
+    assert checkpoint["config"]["koopman_weight_kind"] == "rbf"
+    assert checkpoint["config"]["koopman_num_modes"] == 2
 
     stochastic = _tiny_model(parameterization="row_stochastic")
     path2 = tmp_path / "row_stoch.pt"

@@ -1,0 +1,29 @@
+manifest_id: smoke-telemetry
+schema_version: benchmark_manifest_v1
+track: telemetry
+dataset:
+  name: smoke-telemetry
+  version: "1"
+  sha256: bcb2f305aaa35fbb8a5f0b2caff14192a2d66613c5970e214b0127175b1b6aba
+  card: benchmarks/v0.15/cards/smoke_telemetry.md
+split:
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  history_len: 12
+preprocessing:
+  zscore: true
+  notes:
+    - METR-LA/PEMS-style split stand-in; not metr-la.h5
+methods:
+  - name: graph_koopman
+    role: koopman
+  - name: pernode_ls
+    role: control
+seeds: [0, 1, 2]
+horizons: [3, 6, 12]
+metrics: [mae, rmse]
+compute_budget:
+  max_epochs: 2
+  device: cpu
+controls: [pernode]

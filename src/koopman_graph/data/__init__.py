@@ -22,6 +22,31 @@ Capability layout
     ``MultiTrajectory``, ``as_multi_trajectory``, ``resolve_sequence``,
     ``resolve_hetero_sequence``, ``SnapshotSequence``, and
     ``resolve_pair_delta_t``.
+``batching``
+    Opt-in PyG ``Batch`` collate for independent homogeneous trajectories
+    (``BatchedGraphTrajectory``, ``collate_graph_trajectories``). Package
+    export; not on root ``__all__``. Must not import ``nn``.
+``graph_state``
+    Frozen ``GraphDynamicsConfig`` and ``GraphStateSnapshot`` supervision
+    records for opt-in graph-state closure. Package export; not on root
+    ``__all__``. Must not import ``nn``.
+``conditioning``
+    Frozen ``ConditioningContext`` and :func:`conditioning_at` for
+    per-snapshot :math:`(\\mu, t, u)` records. Homogeneous
+    ``parameter_trajectory`` only. Package export; not on root
+    ``__all__``. Must not import ``nn``. Distinct from switched /
+    mixture operators.
+``calendar``
+    :func:`~koopman_graph.data.diurnal_control_features` and
+    :func:`~koopman_graph.data.diurnal_phase_index` time-of-day
+    recipes for existing control / switched ``phase_index``. Package
+    export; not on root ``__all__``. Not a calendar serializer. Must
+    not import ``nn``.
+``remap``
+    :class:`~koopman_graph.data.EntityRemap` and
+    :func:`~koopman_graph.data.remap_node_features` for injective
+    placement into a finite :math:`N_{\\max}`. Not entity resolution;
+    unbounded growth is refused. Package export; not on root ``__all__``.
 ``delay_windows``
     Hankel-style stack / flatten / observation-mask helpers shared by
     containers, ``nn.delay``, and model encode paths. Power-user submodule;
@@ -41,9 +66,25 @@ Capability layout
     Shared rollout-origin resolution for training and forecast evaluation.
 """
 
+from koopman_graph.data.batching import (
+    BatchedGraphTrajectory,
+    collate_graph_trajectories,
+)
+from koopman_graph.data.calendar import (
+    diurnal_control_features,
+    diurnal_phase_index,
+)
+from koopman_graph.data.conditioning import ConditioningContext, conditioning_at
 from koopman_graph.data.containers import (
     GraphSnapshotSequence,
     HeteroGraphSnapshotSequence,
+)
+from koopman_graph.data.graph_state import (
+    DEFAULT_CANDIDATE_K,
+    GraphDynamicsConfig,
+    GraphStateSnapshot,
+    graph_dynamics_from_mapping,
+    graph_state_at,
 )
 from koopman_graph.data.hetero_layout import (
     global_relation_edge_indices,
@@ -64,7 +105,7 @@ from koopman_graph.data.partition import (
     induced_cluster_subgraph,
     iter_cluster_subgraphs,
 )
-from koopman_graph.data.remap import remap_node_features
+from koopman_graph.data.remap import EntityRemap, remap_node_features
 from koopman_graph.data.rollout import (
     RolloutStartIndices,
     resolve_rollout_start_indices,
@@ -88,7 +129,13 @@ from koopman_graph.data.trajectories import (
 )
 
 __all__ = [
+    "BatchedGraphTrajectory",
+    "ConditioningContext",
+    "DEFAULT_CANDIDATE_K",
+    "EntityRemap",
+    "GraphDynamicsConfig",
     "GraphSnapshotSequence",
+    "GraphStateSnapshot",
     "HeteroGraphSnapshotSequence",
     "MultiTrajectory",
     "NeighborWindowSampler",
@@ -100,11 +147,17 @@ __all__ = [
     "WindowSampler",
     "as_multi_trajectory",
     "build_window_index_list",
+    "collate_graph_trajectories",
     "cluster_node_partition",
+    "conditioning_at",
+    "diurnal_control_features",
+    "diurnal_phase_index",
     "induced_cluster_subgraph",
     "iter_cluster_subgraphs",
     "remap_node_features",
     "global_relation_edge_indices",
+    "graph_dynamics_from_mapping",
+    "graph_state_at",
     "latent_type_slices",
     "latent_type_slices_from_dims",
     "mask_hetero_snapshot_features",

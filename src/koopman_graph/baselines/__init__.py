@@ -16,6 +16,24 @@ Capability layout
     :class:`~koopman_graph.baselines.EDMDBaseline` (polynomial / RBF / kernel
     dictionaries; Nyström / random-feature kernel approximations; full
     kernel centers are O(T^2)).
+``mpedmd``
+    :class:`~koopman_graph.baselines.MpEDMDBaseline` — measure-preserving
+    EDMD (Gram-weighted Procrustes polar factor; Colbrook 2023). Does
+    not obsolete Euclidean conditioning on general directed
+    :math:`K_{\\mathrm{eff}}`.
+``gedmd``
+    :class:`~koopman_graph.baselines.GEDMDBaseline` — generator EDMD from
+    supplied dictionary derivatives (Klus et al. 2020). Distinct from
+    derivative-mode SINDy. Irregular timestamps do not create
+    :math:`L`.
+``hankel_dmd``
+    :class:`~koopman_graph.baselines.HankelDMDBaseline` — Hankel-DMD on
+    delay-embedded flattened states (Arbabi and Mezić 2017). Not
+    :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`.
+``havok``
+    :class:`~koopman_graph.baselines.HAVOKBaseline` — teaching HAVOK
+    (Brunton et al. 2017) on the same delay rows. Not
+    :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`.
 ``fbdmd``
     :class:`~koopman_graph.baselines.FBDMDBaseline` — forward–backward DMD
     on flattened node states (topology-blind).
@@ -82,6 +100,7 @@ from koopman_graph.baselines.dmd import DMDBaseline
 from koopman_graph.baselines.dmdc import DMDcBaseline
 from koopman_graph.baselines.edmd import EDMDBaseline
 from koopman_graph.baselines.fbdmd import FBDMDBaseline
+from koopman_graph.baselines.gedmd import GEDMDBaseline
 from koopman_graph.baselines.gnn import (
     AGCRNBaseline,
     DCRNNBaseline,
@@ -92,6 +111,9 @@ from koopman_graph.baselines.gnn import (
     STGODEBaseline,
 )
 from koopman_graph.baselines.graph_vamp import GraphVAMPBaseline
+from koopman_graph.baselines.hankel_dmd import HankelDMDBaseline
+from koopman_graph.baselines.havok import HAVOKBaseline
+from koopman_graph.baselines.mpedmd import MpEDMDBaseline
 from koopman_graph.baselines.mrdmd import MRDMDBaseline
 from koopman_graph.baselines.optdmd import OptDMDBaseline
 from koopman_graph.baselines.streaming_dmd import StreamingDMDBaseline
@@ -107,11 +129,15 @@ __all__ = [
     "DMDcBaseline",
     "EDMDBaseline",
     "FBDMDBaseline",
+    "GEDMDBaseline",
     "GraphCastBaseline",
     "GraphVAMPBaseline",
     "GraphWaveNetBaseline",
+    "HAVOKBaseline",
+    "HankelDMDBaseline",
     "MRDMDBaseline",
     "MTGNNBaseline",
+    "MpEDMDBaseline",
     "OptDMDBaseline",
     "STGCNBaseline",
     "STGODEBaseline",

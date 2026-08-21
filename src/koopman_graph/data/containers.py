@@ -26,6 +26,7 @@ from koopman_graph.data.validation import (
     validate_hetero_snapshot_metadata,
     validate_node_churn_policy,
     validate_observation_masks,
+    validate_parameter_trajectory,
     validate_presence_masks,
     validate_shared_hetero_topology,
     validate_shared_topology,
@@ -57,6 +58,11 @@ class GraphSnapshotSequence:
     :class:`~koopman_graph.env.GraphKoopmanEnv` and
     :class:`~koopman_graph.baselines.DMDcBaseline` are global-only (see
     architecture control layout capability matrix). Optional
+    :attr:`parameter_trajectory` stores caller-defined regime coordinates
+    :math:`\\mu_t` with shape ``(T, d_mu)``. That tensor is a data record
+    for :class:`~koopman_graph.data.ConditioningContext`; it does not
+    select ``koopman="switched"`` / ``"mixture"`` or evaluate
+    :math:`K(\\mu)`. Optional
     :attr:`observation_masks` mark which nodes are **measured** at each
     timestep (``True`` = observed). Optional :attr:`presence_masks` mark
     which entities **exist** in a fixed union universe of size ``N_max`` at
@@ -90,6 +96,7 @@ class GraphSnapshotSequence:
     :attr:`hyperedge_weight`, :attr:`has_hyperedges`,
     :attr:`is_dynamic_topology`, :attr:`control_inputs`, :attr:`has_controls`,
     :attr:`control_dim`, :attr:`timestamps`, :attr:`has_timestamps`,
+    :attr:`parameter_trajectory`, :attr:`has_parameter_trajectory`,
     :attr:`observation_masks`, :attr:`has_observation_masks`,
     :attr:`presence_masks`, :attr:`has_presence_masks`,
     :attr:`entity_ids`, :attr:`has_entity_ids`, :attr:`allow_node_churn`,
@@ -106,6 +113,7 @@ class GraphSnapshotSequence:
         allow_dynamic_topology: bool = False,
         control_inputs: Tensor | None = None,
         timestamps: Tensor | None = None,
+        parameter_trajectory: Tensor | None = None,
         observation_masks: Tensor | None = None,
         presence_masks: Tensor | None = None,
         entity_ids: Sequence[str | int] | None = None,
@@ -131,6 +139,11 @@ class GraphSnapshotSequence:
             Strictly increasing physical timestamps with shape
             ``(num_timesteps,)``. When present, training uses per-pair
             ``Δt = timestamps[t+1] - timestamps[t]``.
+        parameter_trajectory : Tensor or None, optional
+            Per-snapshot regime coordinates with shape
+            ``(num_timesteps, d_mu)`` and ``d_mu >= 1``. Units are
+            caller-defined (dimensionless if unspecified). Carrying this
+            tensor does not change the default operator.
         observation_masks : Tensor or None, optional
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``. ``True`` (or ``1``) marks an
@@ -169,6 +182,11 @@ class GraphSnapshotSequence:
                 timestamps,
                 num_timesteps=num_timesteps,
             )
+        if parameter_trajectory is not None:
+            validate_parameter_trajectory(
+                parameter_trajectory,
+                num_timesteps=num_timesteps,
+            )
         validated_masks = None
         if observation_masks is not None:
             validated_masks = validate_observation_masks(
@@ -194,6 +212,7 @@ class GraphSnapshotSequence:
         self._snapshots = tuple(snapshot_list)
         self._control_inputs = control_inputs
         self._timestamps = timestamps
+        self._parameter_trajectory = parameter_trajectory
         self._observation_masks = validated_masks
         self._presence_masks = validated_presence
         self._entity_ids = validated_ids
@@ -214,6 +233,7 @@ class GraphSnapshotSequence:
         hyperedge_weight: ArrayLike | None = None,
         control_inputs: ArrayLike | None = None,
         timestamps: ArrayLike | None = None,
+        parameter_trajectory: ArrayLike | None = None,
         observation_masks: ArrayLike | None = None,
         presence_masks: ArrayLike | None = None,
         entity_ids: Sequence[str | int] | None = None,
@@ -243,6 +263,9 @@ class GraphSnapshotSequence:
         timestamps : array-like, optional
             Strictly increasing physical timestamps with shape
             ``(num_timesteps,)``.
+        parameter_trajectory : array-like, optional
+            Per-snapshot regime coordinates with shape
+            ``(num_timesteps, d_mu)``.
         observation_masks : array-like, optional
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``.
@@ -276,6 +299,7 @@ class GraphSnapshotSequence:
             hyperedge_weight=hyperedge_weight,
             control_inputs=control_inputs,
             timestamps=timestamps,
+            parameter_trajectory=parameter_trajectory,
             observation_masks=observation_masks,
             presence_masks=presence_masks,
             dtype=dtype,
@@ -284,6 +308,7 @@ class GraphSnapshotSequence:
             built.snapshots,
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
+            parameter_trajectory=built.parameter_trajectory,
             observation_masks=built.observation_masks,
             presence_masks=built.presence_masks,
             entity_ids=entity_ids,
@@ -299,6 +324,7 @@ class GraphSnapshotSequence:
         edge_weights: Sequence[ArrayLike | None] | None = None,
         control_inputs: ArrayLike | None = None,
         timestamps: ArrayLike | None = None,
+        parameter_trajectory: ArrayLike | None = None,
         observation_masks: ArrayLike | None = None,
         presence_masks: ArrayLike | None = None,
         entity_ids: Sequence[str | int] | None = None,
@@ -323,6 +349,9 @@ class GraphSnapshotSequence:
         timestamps : array-like, optional
             Strictly increasing physical timestamps with shape
             ``(num_timesteps,)``.
+        parameter_trajectory : array-like, optional
+            Per-snapshot regime coordinates with shape
+            ``(num_timesteps, d_mu)``.
         observation_masks : array-like, optional
             Per-timestep node observation mask with shape
             ``(num_timesteps, num_nodes)``.
@@ -354,6 +383,7 @@ class GraphSnapshotSequence:
             edge_weights=edge_weights,
             control_inputs=control_inputs,
             timestamps=timestamps,
+            parameter_trajectory=parameter_trajectory,
             observation_masks=observation_masks,
             presence_masks=presence_masks,
             dtype=dtype,
@@ -363,6 +393,7 @@ class GraphSnapshotSequence:
             allow_dynamic_topology=built.allow_dynamic_topology,
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
+            parameter_trajectory=built.parameter_trajectory,
             observation_masks=built.observation_masks,
             presence_masks=built.presence_masks,
             entity_ids=entity_ids,
@@ -452,6 +483,28 @@ class GraphSnapshotSequence:
             ``True`` when :attr:`timestamps` is not ``None``.
         """
         return self._timestamps is not None
+
+    @property
+    def parameter_trajectory(self) -> Tensor | None:
+        """Return per-snapshot regime coordinates when present.
+
+        Returns
+        -------
+        Tensor or None
+            Coordinates with shape ``(num_timesteps, d_mu)``.
+        """
+        return self._parameter_trajectory
+
+    @property
+    def has_parameter_trajectory(self) -> bool:
+        """Return whether the sequence carries regime coordinates.
+
+        Returns
+        -------
+        bool
+            ``True`` when :attr:`parameter_trajectory` is not ``None``.
+        """
+        return self._parameter_trajectory is not None
 
     def delta_t_at(self, index: int) -> Tensor:
         """Return ``timestamps[index + 1] - timestamps[index]``.
@@ -1002,6 +1055,11 @@ class GraphSnapshotSequence:
             timestamps=(
                 None if self.timestamps is None else self.timestamps[start:stop]
             ),
+            parameter_trajectory=(
+                None
+                if self.parameter_trajectory is None
+                else self.parameter_trajectory[start:stop]
+            ),
             observation_masks=(
                 None
                 if self.observation_masks is None
@@ -1069,6 +1127,7 @@ class GraphSnapshotSequence:
             allow_dynamic_topology=built.allow_dynamic_topology,
             control_inputs=built.control_inputs,
             timestamps=built.timestamps,
+            parameter_trajectory=built.parameter_trajectory,
             observation_masks=built.observation_masks,
             presence_masks=built.presence_masks,
             entity_ids=self.entity_ids,

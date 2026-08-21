@@ -26,6 +26,10 @@ from koopman_graph.nn.heterogeneous import (
     resolve_multiplex_relation_inputs,
     resolve_typed_relation_inputs,
 )
+from koopman_graph.nn.predicted_topology import (
+    make_recursive_topology_at,
+    recursive_training_enabled,
+)
 from koopman_graph.operators import HeteroGraphKoopmanOperator
 from koopman_graph.protocols import TrainableKoopmanModel
 
@@ -410,16 +414,30 @@ def rollout_sequence_loss(
             hyperedge_index,
             sequence.hyperedge_weight,
         )
+    origin = sequence[start]
+    if recursive_training_enabled(model):
+        head = getattr(model, "predicted_topology", None)
+        if head is None:
+            msg = "recursive graph-state training requires a predicted topology head"
+            raise ValueError(msg)
+        topology_at = make_recursive_topology_at(head, origin.edge_index)
+    else:
+        topology_at = snapshot_topology_at(targets)
     rollout = autoregressive_latent_rollout(
         model.koopman,
         decoder_fn,
         z,
         steps=horizon,
-        topology_at=snapshot_topology_at(targets),
+        topology_at=topology_at,
         control_at=(
             None
             if not sequence.has_controls
             else (lambda step: sequence.control_at(start + step))
+        ),
+        parameters_at=(
+            None
+            if getattr(sequence, "parameter_trajectory", None) is None
+            else (lambda step: sequence.parameter_trajectory[start + step])
         ),
         delta_t_at=lambda step: resolve_pair_delta_t(
             sequence,

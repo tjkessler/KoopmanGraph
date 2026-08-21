@@ -27,6 +27,13 @@ from koopman_graph.losses import (
     rollout_multi_start_loss,
     rollout_sequence_loss,
 )
+from koopman_graph.nn.predicted_topology import (
+    PredictedTopologyHead,
+    SparseCandidateTopologyHead,
+    build_supervision_index,
+    candidate_edge_labels,
+    dense_offdiag_index,
+)
 from koopman_graph.operators import (
     ContinuousGraphKoopmanOperator,
     ContinuousHeteroGraphKoopmanOperator,
@@ -490,6 +497,110 @@ def _validate_hetero_fit_surface(
         raise ValueError(msg)
 
 
+def compute_graph_dynamics_losses(
+    model: TrainableKoopmanModel,
+    sequence: SnapshotSequence,
+    *,
+    cache: SequenceLatentCache | None,
+    device: torch.device,
+) -> tuple[Tensor, Tensor]:
+    """Return unweighted topology and presence BCE terms.
+
+    Weights come from :class:`~koopman_graph.data.GraphDynamicsConfig`, not
+    :class:`~koopman_graph.training.LossWeights`. Presence is skipped when
+    the sequence has no presence masks.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``graph_dynamics``, ``predicted_topology``, and
+        optional ``presence_head``.
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Training snapshots.
+    cache : SequenceLatentCache or None
+        Teacher-forced latents. Required when a topology or presence
+        head is active on a homogeneous sequence.
+    device : torch.device
+        Device for zero scalars when the terms are inactive.
+
+    Returns
+    -------
+    topology : Tensor
+        Mean structural BCE (unweighted).
+    presence : Tensor
+        Mean presence BCE (unweighted).
+    """
+    zero = torch.zeros((), device=device)
+    config = getattr(model, "graph_dynamics", None)
+    if config is None or not isinstance(sequence, GraphSnapshotSequence):
+        return zero, zero
+    head = getattr(model, "predicted_topology", None)
+    presence_head = getattr(model, "presence_head", None)
+    topology_weight = float(config.topology_loss_weight)
+    presence_weight = float(config.presence_loss_weight)
+    need_topology = head is not None and topology_weight > 0.0
+    need_presence = (
+        presence_head is not None
+        and presence_weight > 0.0
+        and sequence.has_presence_masks
+    )
+    if not need_topology and not need_presence:
+        return zero, zero
+    if cache is None:
+        msg = "graph-state losses require a SequenceLatentCache of teacher latents"
+        raise ValueError(msg)
+    topology_terms: list[Tensor] = []
+    presence_terms: list[Tensor] = []
+    num_pairs = sequence.num_timesteps - 1
+    for timestep in range(num_pairs):
+        z_t = cache.z[timestep]
+        snapshot_t = sequence[timestep]
+        snapshot_t1 = sequence[timestep + 1]
+        if need_topology:
+            if isinstance(head, SparseCandidateTopologyHead):
+                candidates = build_supervision_index(
+                    int(z_t.shape[0]),
+                    head.candidate_k,
+                    snapshot_t.edge_index,
+                    snapshot_t1.edge_index,
+                    device=z_t.device,
+                )
+                logits = head.pair_logits(z_t, candidates)
+                labels = candidate_edge_labels(
+                    candidates,
+                    snapshot_t1.edge_index,
+                    int(z_t.shape[0]),
+                )
+                topology_terms.append(
+                    torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
+                )
+            elif isinstance(head, PredictedTopologyHead):
+                logits = head.pairwise_logits(z_t)
+                index = dense_offdiag_index(int(z_t.shape[0]), device=z_t.device)
+                labels = candidate_edge_labels(
+                    index,
+                    snapshot_t1.edge_index,
+                    int(z_t.shape[0]),
+                )
+                topology_terms.append(
+                    torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits[index[0], index[1]],
+                        labels,
+                    )
+                )
+        if need_presence:
+            target = sequence.presence_mask_at(timestep + 1).to(
+                dtype=z_t.dtype, device=z_t.device
+            )
+            logits = presence_head(z_t)
+            presence_terms.append(
+                torch.nn.functional.binary_cross_entropy_with_logits(logits, target)
+            )
+    topology = torch.stack(topology_terms).mean() if topology_terms else zero
+    presence = torch.stack(presence_terms).mean() if presence_terms else zero
+    return topology, presence
+
+
 def compute_rollout_loss(
     model: TrainableKoopmanModel,
     sequence: SnapshotSequence,
@@ -600,6 +711,7 @@ def compute_training_loss(
         or loss_weights.backward != 0.0
         or loss_weights.rollout != 0.0
         or loss_weights.vamp2 != 0.0
+        or getattr(model, "graph_dynamics", None) is not None
     )
     cache = encode_sequence_latents(model, sequence) if needs_latent_cache else None
     predictions = (
@@ -682,6 +794,16 @@ def compute_training_loss(
     else:
         rollout = torch.zeros((), device=device)
 
+    topology, presence = compute_graph_dynamics_losses(
+        model,
+        sequence,
+        cache=cache,
+        device=device,
+    )
+    config = getattr(model, "graph_dynamics", None)
+    topology_weight = 0.0 if config is None else float(config.topology_loss_weight)
+    presence_weight = 0.0 if config is None else float(config.presence_loss_weight)
+
     total = (
         loss_weights.reconstruction * reconstruction
         + loss_weights.forward * forward
@@ -693,6 +815,8 @@ def compute_training_loss(
         + loss_weights.sparsity * sparsity
         + loss_weights.worst_case * worst_case
         + loss_weights.vamp2 * vamp2
+        + topology_weight * topology
+        + presence_weight * presence
     )
     return TrainingLossBreakdown(
         reconstruction=reconstruction,
@@ -705,6 +829,8 @@ def compute_training_loss(
         sparsity=sparsity,
         worst_case=worst_case,
         vamp2=vamp2,
+        topology=topology,
+        presence=presence,
         total=total,
     )
 
@@ -713,6 +839,7 @@ __all__ = [
     "compute_backward_consistency_sequence_loss",
     "compute_eigenvalue_regularization_loss",
     "compute_forward_consistency_sequence_loss",
+    "compute_graph_dynamics_losses",
     "compute_rollout_loss",
     "compute_sequence_loss",
     "compute_training_loss",

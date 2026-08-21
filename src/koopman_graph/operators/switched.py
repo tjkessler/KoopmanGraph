@@ -3,9 +3,13 @@
 A finite bank of LTI :class:`~koopman_graph.operators.KoopmanOperator`
 maps. The active mode is an integer ``mode_index`` (default 0) or the
 argmax of a latent gate. Each mode remains linear; this is not a nonlinear
-latent operator.
+latent operator and is not a parameter interpolant :math:`K(\\mu)`
+(``Macesic2018Nonautonomous``). Carry regime coordinates on
+:attr:`~koopman_graph.data.GraphSnapshotSequence.parameter_trajectory`.
 
-Select via ``koopman="switched"``.
+Select via ``koopman="switched"``. Optional per-step ``phase_index``
+selects a mode without mutating :attr:`mode_index` (time-of-day bins
+from :func:`~koopman_graph.data.diurnal_phase_index`).
 """
 
 from __future__ import annotations
@@ -133,6 +137,33 @@ class SwitchedKoopmanOperator(nn.Module):
         """
         return self.modes[self.mode_index]  # type: ignore[return-value]
 
+    def _mode_for(self, phase_index: int | None) -> KoopmanOperator:
+        """Return the LTI mode for a step, optionally overriding the latch.
+
+        Parameters
+        ----------
+        phase_index : int or None
+            When set, select that bank index without writing
+            :attr:`mode_index`. ``None`` uses the latched mode.
+
+        Returns
+        -------
+        KoopmanOperator
+            Mode used for this step.
+
+        Raises
+        ------
+        ValueError
+            If ``phase_index`` is outside ``[0, num_modes)``.
+        """
+        if phase_index is None:
+            return self._active()
+        index = int(phase_index)
+        if not 0 <= index < self.num_modes:
+            msg = f"phase_index must be in [0, {self.num_modes}), got {phase_index}"
+            raise ValueError(msg)
+        return self.modes[index]  # type: ignore[return-value]
+
     def infer_mode(self, z: Tensor) -> int:
         """Return the argmax gate mode from mean latents.
 
@@ -188,6 +219,7 @@ class SwitchedKoopmanOperator(nn.Module):
         control: Tensor | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        phase_index: int | None = None,
     ) -> Tensor:
         """Advance with the active LTI map.
 
@@ -203,6 +235,8 @@ class SwitchedKoopmanOperator(nn.Module):
             Ignored (per-node modes).
         edge_weight : Tensor or None, optional
             Ignored.
+        phase_index : int or None, optional
+            Per-step mode override. Does not write :attr:`mode_index`.
 
         Returns
         -------
@@ -210,7 +244,7 @@ class SwitchedKoopmanOperator(nn.Module):
             Advanced latents.
         """
         del delta_t, edge_index, edge_weight
-        return self._active().advance(z, control=control)
+        return self._mode_for(phase_index).advance(z, control=control)
 
     def inverse_advance(
         self,
@@ -221,6 +255,7 @@ class SwitchedKoopmanOperator(nn.Module):
         inverse_matrix: Tensor | None = None,
         edge_index: Tensor | None = None,
         edge_weight: Tensor | None = None,
+        phase_index: int | None = None,
     ) -> Tensor:
         """Inverse step of the active LTI map.
 
@@ -238,6 +273,8 @@ class SwitchedKoopmanOperator(nn.Module):
             Ignored.
         edge_weight : Tensor or None, optional
             Ignored.
+        phase_index : int or None, optional
+            Per-step mode override. Does not write :attr:`mode_index`.
 
         Returns
         -------
@@ -245,11 +282,17 @@ class SwitchedKoopmanOperator(nn.Module):
             Inverse-advanced latents.
         """
         del delta_t, edge_index, edge_weight
-        return self._active().inverse_advance(
+        return self._mode_for(phase_index).inverse_advance(
             z, control=control, inverse_matrix=inverse_matrix
         )
 
-    def forward(self, z: Tensor, control: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        z: Tensor,
+        control: Tensor | None = None,
+        *,
+        phase_index: int | None = None,
+    ) -> Tensor:
         """Module forward: active-mode advance.
 
         Parameters
@@ -258,10 +301,12 @@ class SwitchedKoopmanOperator(nn.Module):
             Latent states.
         control : Tensor or None, optional
             Control input.
+        phase_index : int or None, optional
+            Per-step mode override. Does not write :attr:`mode_index`.
 
         Returns
         -------
         Tensor
             Advanced latents.
         """
-        return self.advance(z, control=control)
+        return self.advance(z, control=control, phase_index=phase_index)

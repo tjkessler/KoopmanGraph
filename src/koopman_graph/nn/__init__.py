@@ -18,6 +18,12 @@ Capability layout
     :class:`~koopman_graph.nn.decoder.SAGEDecoder` /
     :class:`~koopman_graph.nn.decoder.DiffConvDecoder` /
     :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`.
+``constraint_decoders``
+    :class:`~koopman_graph.nn.MassConservingDecoder` /
+    :class:`~koopman_graph.nn.PositivityDecoder` /
+    :class:`~koopman_graph.nn.LinearConservingDecoder`
+    (opt-in decoded-space simplex / positivity / linear conservation;
+    not a factory kind; must not import ``model``).
 ``hypergraph``
     :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
     :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`.
@@ -34,7 +40,11 @@ Capability layout
     Hodge helpers ``B_k`` / ``L_k`` for ``k ∈ {0, 1, 2, 3}``, plus
     :class:`~koopman_graph.nn.cell_complex.CellComplexGNNEncoder` /
     :class:`~koopman_graph.nn.cell_complex.CellComplexGNNDecoder`
-    (factory ``encoder="cell_complex"``).
+    (factory ``encoder="cell_complex"``). Order-2 teaching
+    (:func:`~koopman_graph.nn.order2_cochain_teaching`) binds
+    :class:`~koopman_graph.operators.CochainKoopmanOperator` to a
+    filled triangle. Degree 3 is the teaching ceiling — **not**
+    TopologicX parity.
 ``equivariant``
     :class:`~koopman_graph.nn.equivariant.InvariantGeometryEncoder`
     (Tier A invariant distance/angle features from ``Data.pos``) and optional
@@ -47,8 +57,13 @@ Capability layout
     (mesh-index Fourier lift; shared ``K`` across discretizations is a
     teaching MVP).
 ``predicted_topology``
+    :class:`~koopman_graph.nn.predicted_topology.SparseCandidateTopologyHead`
+    (default graph-state path; at most ``candidate_k`` destinations per
+    node), power-user
     :class:`~koopman_graph.nn.predicted_topology.PredictedTopologyHead`
-    (next-step edge logits; distinct from static AdaptiveAdjacency).
+    (dense :math:`N\\times N` logits with an :math:`N` ceiling), and
+    :class:`~koopman_graph.nn.predicted_topology.PresenceHead`. Distinct
+    from static AdaptiveAdjacency.
 ``heterogeneous``
     :class:`~koopman_graph.nn.heterogeneous.RelGraphEncoder` /
     :class:`~koopman_graph.nn.heterogeneous.RelGraphDecoder`
@@ -58,8 +73,19 @@ Capability layout
     :class:`~koopman_graph.nn.heterogeneous.HGTDecoder` (typed PyG
     ``HGTConv`` peers; not required for hetero support).
 ``delay``
-    :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` Hankel wrapper and
-    delay-window helpers.
+    :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder` Takens-style
+    channel stacking (not
+    :class:`~koopman_graph.baselines.HankelDMDBaseline` /
+    :class:`~koopman_graph.baselines.HAVOKBaseline`) and delay-window
+    helpers.
+``receptive_field``
+    Encoder vs discrete-graph-operator hop check
+    (:func:`~koopman_graph.nn.receptive_field.check_encoder_operator_receptive_field`;
+    warn-only; not in root ``__all__``).
+``separable``
+    :class:`~koopman_graph.nn.SeparableDictionaryEncoder` /
+    :class:`~koopman_graph.nn.SeparableDictionaryDecoder` node-wise
+    lifts (homomorphism precondition; not a GNN).
 ``adaptive_topology``
     :class:`~koopman_graph.nn.adaptive_topology.AdaptiveAdjacency` self-adaptive
     pairwise adjacency (Graph WaveNet construction; power-user).
@@ -79,11 +105,22 @@ from koopman_graph.nn.cell_complex import (
     CellComplex,
     CellComplexGNNDecoder,
     CellComplexGNNEncoder,
+    Order2CochainTeaching,
     bind_cell_complex_decoder,
+    bind_cochain_operator,
     boundary_incidence_b2,
     boundary_operator,
+    cell_complex_boundary_nilpotency,
     hodge_laplacian,
     hodge_laplacian_matvec,
+    order2_cochain_teaching,
+    teaching_order2_triangle,
+    teaching_order3_tetrahedron,
+)
+from koopman_graph.nn.constraint_decoders import (
+    LinearConservingDecoder,
+    MassConservingDecoder,
+    PositivityDecoder,
 )
 from koopman_graph.nn.decoder import (
     DiffConvDecoder,
@@ -136,7 +173,26 @@ from koopman_graph.nn.hypergraph import (
     bind_hypergraph_decoder,
 )
 from koopman_graph.nn.neural_operator import FourierNeuralOperatorEncoder
-from koopman_graph.nn.predicted_topology import PredictedTopologyHead
+from koopman_graph.nn.predicted_topology import (
+    DEFAULT_CANDIDATE_K,
+    DENSE_TOPOLOGY_MAX_NODES,
+    PredictedTopologyHead,
+    PresenceHead,
+    SparseCandidateTopologyHead,
+    TopologyPolicy,
+    build_candidate_index,
+    build_supervision_index,
+)
+from koopman_graph.nn.receptive_field import (
+    ReceptiveFieldMismatchWarning,
+    ReceptiveFieldReport,
+    check_encoder_operator_receptive_field,
+)
+from koopman_graph.nn.separable import (
+    SeparableDictionaryDecoder,
+    SeparableDictionaryEncoder,
+    is_separable_dictionary,
+)
 from koopman_graph.nn.sheaf import (
     SheafGNNDecoder,
     SheafGNNEncoder,
@@ -155,7 +211,9 @@ __all__ = [
     "CellComplex",
     "CellComplexGNNDecoder",
     "CellComplexGNNEncoder",
+    "DEFAULT_CANDIDATE_K",
     "DEFAULT_TOPOLOGY_EMBEDDING_DIM",
+    "DENSE_TOPOLOGY_MAX_NODES",
     "DelayEmbeddingEncoder",
     "DiffConvDecoder",
     "DiffConvEncoder",
@@ -174,26 +232,46 @@ __all__ = [
     "HypergraphDecoder",
     "HypergraphEncoder",
     "InvariantGeometryEncoder",
+    "LinearConservingDecoder",
     "MAX_CELL_COMPLEX_DEGREE",
+    "MassConservingDecoder",
+    "Order2CochainTeaching",
+    "PositivityDecoder",
+    "PresenceHead",
     "PredictedTopologyHead",
+    "ReceptiveFieldMismatchWarning",
+    "ReceptiveFieldReport",
     "RelGraphConv",
     "RelGraphDecoder",
     "RelGraphEncoder",
     "SAGEDecoder",
     "SAGEEncoder",
+    "SeparableDictionaryDecoder",
+    "SeparableDictionaryEncoder",
     "SheafGNNDecoder",
     "SheafGNNEncoder",
     "SimplicialDecoder",
     "SimplicialEncoder",
+    "SparseCandidateTopologyHead",
+    "TopologyPolicy",
     "bind_cell_complex_decoder",
+    "bind_cochain_operator",
     "bind_hypergraph_decoder",
     "bind_sheaf_decoder",
     "bind_simplicial_decoder",
     "boundary_incidence_b2",
     "boundary_operator",
+    "cell_complex_boundary_nilpotency",
+    "order2_cochain_teaching",
+    "teaching_order2_triangle",
+    "teaching_order3_tetrahedron",
+    "build_candidate_index",
+    "build_supervision_index",
+    "check_encoder_operator_receptive_field",
     "hodge_laplacian",
     "hodge_laplacian_matvec",
     "invariant_geometry_features",
+    "is_separable_dictionary",
     "build_diff_convs",
     "build_gat_convs",
     "build_gcn_convs",

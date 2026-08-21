@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -223,6 +224,10 @@ class EvaluationResult:
     resdmd : object or None
         Optional finite-dictionary :class:`~koopman_graph.analysis.ResDMDReport`
         when ``include_resdmd=True``.
+    invariance : object or None
+        Optional :class:`~koopman_graph.identification.SubspaceInvarianceReport`
+        when ``include_invariance=True``. Typed as ``object`` so this module
+        does not import ``identification`` at load.
     """
 
     horizons: tuple[HorizonMetrics, ...]
@@ -231,6 +236,7 @@ class EvaluationResult:
     aggregate_mape: float
     num_origins: int
     resdmd: object | None = None
+    invariance: object | None = None
 
 
 def _hetero_eval_feature_vector(
@@ -380,6 +386,142 @@ def _identity_resdmd(model: TrainableKoopmanModel, sequence: GraphSnapshotSequen
     return resdmd(stacked[:-1], stacked[1:])
 
 
+def _dense_pernode_discrete_k(model: TrainableKoopmanModel) -> Tensor:
+    """Return dense per-node ``K`` or refuse unsupported layouts.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``koopman`` and layout metadata.
+
+    Returns
+    -------
+    Tensor
+        Dense discrete map with shape ``(d, d)``.
+
+    Raises
+    ------
+    ValueError
+        If the operator is not an uncontrolled dense discrete
+        :class:`~koopman_graph.operators.KoopmanOperator`.
+    """
+    from koopman_graph.operators import KoopmanOperator
+
+    kind = getattr(model, "koopman_kind", "pernode")
+    if kind != "pernode":
+        msg = (
+            "subspace invariance currently supports discrete per-node "
+            f"KoopmanOperator only, got koopman_kind={kind!r}"
+        )
+        raise ValueError(msg)
+    if getattr(model, "dynamics_mode", "discrete") != "discrete":
+        msg = "subspace invariance requires dynamics_mode='discrete'"
+        raise ValueError(msg)
+    if getattr(model, "n_delays", 1) != 1:
+        msg = (
+            "subspace invariance does not support delay embeddings "
+            f"(n_delays={getattr(model, 'n_delays', None)})"
+        )
+        raise ValueError(msg)
+    if int(getattr(model, "control_dim", 0)) != 0:
+        msg = (
+            "subspace invariance does not support controlled models "
+            f"(control_dim={getattr(model, 'control_dim', None)})"
+        )
+        raise ValueError(msg)
+    koopman = model.koopman
+    if not isinstance(koopman, KoopmanOperator):
+        msg = (
+            "subspace invariance currently supports discrete per-node "
+            f"KoopmanOperator only, got {type(koopman).__name__}"
+        )
+        raise ValueError(msg)
+    if koopman.parameterization != "dense":
+        msg = (
+            "subspace invariance requires parameterization='dense', "
+            f"got {koopman.parameterization!r}"
+        )
+        raise ValueError(msg)
+    if koopman.control_dim != 0:
+        msg = (
+            "subspace invariance does not support controlled operators "
+            f"(control_dim={koopman.control_dim})"
+        )
+        raise ValueError(msg)
+    return koopman.K
+
+
+def _encode_invariance_latents(
+    model: TrainableKoopmanModel,
+    sequence: GraphSnapshotSequence,
+) -> Tensor:
+    """Stack per-snapshot encodings as ``(T, N, d)``.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``encode_at`` or ``encode``.
+    sequence : GraphSnapshotSequence
+        Homogeneous snapshots.
+
+    Returns
+    -------
+    Tensor
+        Time-major latents.
+
+    Raises
+    ------
+    ValueError
+        If the model has no encoder façade.
+    """
+    encode_at = getattr(model, "encode_at", None)
+    encode = getattr(model, "encode", None)
+    if encode_at is None and encode is None:
+        msg = "subspace invariance requires model.encode or model.encode_at"
+        raise ValueError(msg)
+    stacked = []
+    for index in range(sequence.num_timesteps):
+        if encode_at is not None:
+            stacked.append(encode_at(sequence, index))
+        else:
+            stacked.append(encode(sequence[index]))
+    return torch.stack(stacked, dim=0)
+
+
+def _identity_invariance(model: TrainableKoopmanModel, sequence: GraphSnapshotSequence):
+    """Finite-sample subspace leakage on frozen encodings.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Homogeneous discrete per-node model.
+    sequence : GraphSnapshotSequence
+        Evaluation snapshots.
+
+    Returns
+    -------
+    object
+        :class:`~koopman_graph.identification.SubspaceInvarianceReport`.
+
+    Raises
+    ------
+    ValueError
+        If the operator layout is unsupported or the leakage denominator
+        is degenerate.
+    """
+    matrix = _dense_pernode_discrete_k(model)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            encodings = _encode_invariance_latents(model, sequence)
+    finally:
+        model.train(was_training)
+    from koopman_graph.identification import subspace_invariance_report
+
+    return subspace_invariance_report(encodings, matrix, held_out=True)
+
+
 def _pack_evaluation_result(
     horizons: Sequence[int],
     mae_sums: dict[int, float],
@@ -387,6 +529,7 @@ def _pack_evaluation_result(
     mape_sums: dict[int, float],
     origins: Sequence[int],
     resdmd: object | None = None,
+    invariance: object | None = None,
 ) -> EvaluationResult:
     """Assemble per-horizon averages into :class:`EvaluationResult`.
 
@@ -400,6 +543,8 @@ def _pack_evaluation_result(
         Forecast origins used for averaging.
     resdmd : object or None, optional
         Optional finite-dictionary ResDMD report.
+    invariance : object or None, optional
+        Optional finite-sample subspace-invariance report.
 
     Returns
     -------
@@ -426,6 +571,7 @@ def _pack_evaluation_result(
         / len(horizon_metrics),
         num_origins=num_origins,
         resdmd=resdmd,
+        invariance=invariance,
     )
 
 
@@ -436,6 +582,8 @@ def evaluate_forecast(
     horizons: Sequence[int] = (3, 6, 12),
     start_indices: Sequence[int] | None = None,
     include_resdmd: bool = False,
+    include_invariance: bool = False,
+    topology_policy: str = "auto",
 ) -> EvaluationResult:
     """Evaluate autoregressive multi-horizon forecasts on a snapshot sequence.
 
@@ -470,6 +618,17 @@ def evaluate_forecast(
     include_resdmd : bool, optional
         When ``True``, attach a finite-dictionary ResDMD report from frozen
         encodings. Default is ``False``.
+    include_invariance : bool, optional
+        When ``True``, attach finite-sample subspace leakage :math:`\\eta`
+        from frozen encodings (truncated-SVD projector; last half of the
+        time axis). Default is ``False``. Discrete dense per-node
+        :math:`K` only; hetero / graph / continuous layouts raise.
+        This is not a Haseli–Cortés certificate.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Homogeneous topology schedule forwarded to ``predict``. When the
+        resolved policy is recursive, dynamic sequences do **not** inject
+        oracle future edges. Default ``"auto"`` keeps 0.14 oracle
+        injection unless a recursive graph-state head is attached.
 
     Returns
     -------
@@ -480,7 +639,8 @@ def evaluate_forecast(
     ------
     ValueError
         If ``horizons`` is empty, any horizon is invalid, the sequence is too
-        short, or unsupported hetero evaluate options are requested.
+        short, unsupported hetero evaluate options are requested, or
+        ``include_invariance=True`` is used on an unsupported layout.
     TypeError
         If ``sequence`` is neither homogeneous nor hetero.
     """
@@ -495,6 +655,12 @@ def evaluate_forecast(
 
     resolved = _resolve_evaluate_sequence(sequence)
     if isinstance(resolved, HeteroGraphSnapshotSequence):
+        if include_invariance:
+            msg = (
+                "include_invariance is unsupported for hetero evaluate; "
+                "use a discrete dense per-node KoopmanOperator"
+            )
+            raise ValueError(msg)
         return _evaluate_hetero_forecast(
             model,
             resolved,
@@ -507,6 +673,8 @@ def evaluate_forecast(
         horizons=sorted_horizons,
         start_indices=start_indices,
         include_resdmd=include_resdmd,
+        include_invariance=include_invariance,
+        topology_policy=topology_policy,
     )
 
 
@@ -517,6 +685,8 @@ def _evaluate_homogeneous_forecast(
     horizons: Sequence[int],
     start_indices: Sequence[int] | None,
     include_resdmd: bool = False,
+    include_invariance: bool = False,
+    topology_policy: str = "auto",
 ) -> EvaluationResult:
     """Homogeneous multi-horizon evaluate path.
 
@@ -532,12 +702,18 @@ def _evaluate_homogeneous_forecast(
         Explicit origins, or ``None`` for all valid origins.
     include_resdmd : bool, optional
         Attach finite-dictionary ResDMD when ``True``.
+    include_invariance : bool, optional
+        Attach finite-sample subspace leakage when ``True``.
+    topology_policy : {"auto", "recursive", "hold_last"}, optional
+        Topology schedule forwarded to ``predict``.
 
     Returns
     -------
     EvaluationResult
         Per-horizon and aggregate metrics.
     """
+    if include_invariance:
+        _dense_pernode_discrete_k(model)
     max_horizon = horizons[-1]
     origins = resolve_rollout_start_indices(
         sequence,
@@ -559,7 +735,16 @@ def _evaluate_homogeneous_forecast(
                 if model.control_dim > 0:
                     controls = sequence.rollout_controls(start, max_horizon)
                 future_topologies = None
-                if sequence.is_dynamic_topology:
+                inject_oracle = sequence.is_dynamic_topology
+                if inject_oracle:
+                    from koopman_graph.nn.predicted_topology import (
+                        resolve_topology_policy,
+                    )
+
+                    resolved_policy = resolve_topology_policy(model, topology_policy)
+                    if topology_policy == "hold_last" or resolved_policy == "recursive":
+                        inject_oracle = False
+                if inject_oracle:
                     future_topologies = [
                         sequence[start + step] for step in range(1, max_horizon + 1)
                     ]
@@ -580,6 +765,14 @@ def _evaluate_homogeneous_forecast(
                 # evaluate_forecast on all-present sequences.
                 if future_presence is not None:
                     predict_kwargs["future_presence"] = future_presence
+                if "topology_policy" in inspect.signature(model.predict).parameters:
+                    predict_kwargs["topology_policy"] = topology_policy
+                predict_params = inspect.signature(model.predict).parameters
+                trajectory = sequence.parameter_trajectory
+                if trajectory is not None and "parameters" in predict_params:
+                    predict_kwargs["parameters"] = [
+                        trajectory[start + step] for step in range(max_horizon)
+                    ]
                 if n_delays > 1:
                     history = [
                         sequence[t] for t in range(max(0, start - n_delays + 1), start)
@@ -618,8 +811,15 @@ def _evaluate_homogeneous_forecast(
         model.train(was_training)
 
     report = _identity_resdmd(model, sequence) if include_resdmd else None
+    invariance = _identity_invariance(model, sequence) if include_invariance else None
     return _pack_evaluation_result(
-        horizons, mae_sums, rmse_sums, mape_sums, origins, resdmd=report
+        horizons,
+        mae_sums,
+        rmse_sums,
+        mape_sums,
+        origins,
+        resdmd=report,
+        invariance=invariance,
     )
 
 

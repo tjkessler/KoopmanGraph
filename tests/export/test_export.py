@@ -142,3 +142,11 @@ def test_export_rejects_switched() -> None:
     graph = Data(x=torch.randn(4, 2), edge_index=_path_edges_v014_remaining(4))
     with pytest.raises(ValueError, match="switched"):
         export_inference_module(model, graph)
+
+
+def test_export_rejects_parametric() -> None:
+    """Portable export refuses parametric interpolants."""
+    model = _tiny_model_v014_remaining(koopman="parametric")
+    graph = Data(x=torch.randn(4, 2), edge_index=_path_edges_v014_remaining(4))
+    with pytest.raises(ValueError, match="parametric"):
+        export_inference_module(model, graph)

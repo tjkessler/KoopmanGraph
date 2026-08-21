@@ -83,6 +83,10 @@ def _reject_unsupported_export(model: GraphKoopmanModel) -> None:
     kind = type(model.koopman).__name__
     if kind in {"SwitchedKoopmanOperator", "MixtureKoopmanOperator"}:
         raise ValueError("export_inference_module refuses switched/mixture operators")
+    if kind == "ParametricKoopmanOperator":
+        raise ValueError(
+            "export_inference_module refuses parametric interpolants K(mu)"
+        )
 
 
 def export_inference_module(

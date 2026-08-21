@@ -53,7 +53,7 @@ def test_dispersion_rejects_ineligible_and_growth_fallback(
     operator = GraphKoopmanOperator(
         2, init_mode="identity", adjacency="dual_random_walk"
     )
-    with pytest.raises(ValueError, match="not eligible"):
+    with pytest.raises(ValueError, match="Dual random-walk|not eligible"):
         graph_dispersion(operator, _path_edges(4), 4)
 
     import koopman_graph.analysis.dispersion as disp_mod

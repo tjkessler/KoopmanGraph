@@ -105,6 +105,11 @@ GraphVAMP / MD teaching path (synthetic contact-graph oracle; optional
 * ``kalman`` — ``FilterResult``, ``reference_kalman_filter``, ``rts_smooth``
 * ``impute`` — ``graph_diffuse_impute`` heuristic warm-start
 * ``observer`` — ``KoopmanObserver`` façade (filter / smooth / impute)
+* ``joint_observer`` — ``JointStateTopologyObserver`` (Kalman filter plus
+  group-sparse :math:`K_{\mathrm{self}}` / :math:`K_{\mathrm{nbr}}` or
+  dense RLS). Homomorphism claims require
+  ``encoder_kind="separable"``. Lazy package export: importing RLS /
+  ``KoopmanObserver`` does not load ``identification``.
 
 ``koopman_graph.graph_utils`` package layout (topology vs propagation peers):
 
@@ -308,6 +313,10 @@ power-user losses stay package imports outside root ``__all__``.
   symbols across ``data/`` peers.
 * ``trajectories`` — ``MultiTrajectory``, ``as_multi_trajectory``,
   ``resolve_sequence``, ``resolve_pair_delta_t``
+* ``batching`` — ``BatchedGraphTrajectory`` and
+  ``collate_graph_trajectories`` (opt-in PyG ``Batch`` of independent
+  homogeneous trajectories; package export, not root ``__all__``).
+  :mod:`koopman_graph.data` must **not** import :mod:`koopman_graph.nn`
 * ``delay_windows`` — non-private Hankel-style delay helpers
   (``stack_delay_features``, ``flatten_delay_window``,
   ``history_from_snapshots``, ``apply_observation_mask_to_features``).
@@ -330,6 +339,23 @@ power-user losses stay package imports outside root ``__all__``.
   training approximation only — package export, not root ``__all__``)
 * ``splits`` — ``TemporalSplit``, ``temporal_split``
 * ``rollout`` — ``resolve_rollout_start_indices`` and related type aliases
+* ``remap`` — :class:`~koopman_graph.data.EntityRemap` and
+  :func:`~koopman_graph.data.remap_node_features` (injective placement
+  into a finite :math:`N_{\\max}`; not entity resolution; unbounded
+  growth refused). Off root ``__all__``.
+* ``conditioning`` — :class:`~koopman_graph.data.ConditioningContext` and
+  :func:`~koopman_graph.data.conditioning_at` (optional homogeneous
+  ``parameter_trajectory``). Off root ``__all__``. Not
+  ``koopman="switched"`` / ``"mixture"``. Opt-in
+  ``koopman="parametric"`` evaluates :math:`K(\\mu)` from the stored
+  coordinates. Optional ``period`` / ``num_phases`` fill
+  ``phase_index`` from timestamps.
+* ``calendar`` — :func:`~koopman_graph.data.diurnal_control_features`
+  and :func:`~koopman_graph.data.diurnal_phase_index` (Fourier control
+  columns and integer phase bins). Off root ``__all__``. Recipe for
+  existing additive / bilinear control and switched ``phase_index``,
+  not a calendar serializer. Discrete uniform-:math:`\\Delta t`
+  validation is unchanged. Must not import ``nn``.
 * ``sequence_types`` — internal ``SnapshotSequenceLike`` Protocol used by
   ``construction`` / ``delay_windows`` so those peers stay acyclic with
   ``containers``. Not package-exported; do not promote to
@@ -378,7 +404,10 @@ power-user losses stay package imports outside root ``__all__``.
   ``continuous_parameterizations``).
 * ``continuous_van_loan`` — cohesive matrix-log / Van Loan factor
   construction (``matrix_log``, ``van_loan_factors``,
-  ``van_loan_generator_from_discrete``). Continuous-surface owned via
+  ``van_loan_generator_from_discrete``). ``matrix_log`` defaults to
+  ``defective="error"`` (:class:`~koopman_graph.spectrum_types.DefectiveSpectrumError`
+  on singular :math:`V`); ``defective="schur"`` is a SciPy CPU
+  ceiling. Continuous-surface owned via
   ``continuous`` / package re-exports; do not nest under
   ``operators/continuous/``.
 * ``continuous_parameterizations`` — non-private ODO / Schur / dissipative /
@@ -404,9 +433,20 @@ power-user losses stay package imports outside root ``__all__``.
 * ``graph_inverse`` — block-diagonal / Jacobi approximate inverse helpers for
   ``GraphKoopmanOperator`` / ``HypergraphKoopmanOperator`` with
   ``sparsity="block_diagonal"`` (no ``operators/graph/`` subtree)
+* ``linear`` —
+  :class:`~koopman_graph.operators.LinearOperatorProtocol` with
+  :class:`~koopman_graph.operators.PolynomialGraphLinearOperator`
+  and :class:`~koopman_graph.operators.MatrixFreeGraphLinearOperator`
+  wrappers (off root ``__all__``). Dense assembly is refused when
+  :math:`N\cdot d` exceeds
+  :data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
+  Trainer DDP does **not** shrink that representation. Exact
+  Kronecker spectrum remains a special case.
 * ``kronecker_spectrum`` — exact Kronecker-sum spectrum helpers for eligible
   discrete / continuous graph operators (power-user; not in package
-  ``__all__``; auto-routed from ``.spectrum`` — see spectrum routing below)
+  ``__all__``; auto-routed from ``.spectrum`` — see spectrum routing below).
+  Discrete graph uses the polynomial pencil
+  :math:`B(\lambda)=\sum_k\lambda^k K_k`; continuous graph stays one-tap
 * ``continuous_graph`` —
   :class:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator`
   (continuous networked generator ``I⊗L_self + Â⊗L_nbr``; select via
@@ -457,12 +497,44 @@ power-user losses stay package imports outside root ``__all__``.
 * ``switched`` / ``mixture`` — piecewise-linear or convex-combination
   discrete maps (``koopman="switched"`` / ``"mixture"``). Default
   per-node advance remains linear time-invariant; these kinds are opt-in.
+  They are latent-gated or piecewise LTI banks, not a parameter
+  interpolant :math:`K(\\mu)` (``Macesic2018Nonautonomous``). Store
+  :math:`\\mu_t` on
+  :attr:`~koopman_graph.data.GraphSnapshotSequence.parameter_trajectory`.
+  Switched ``advance`` accepts optional ``phase_index`` without
+  writing ``mode_index``.
+* ``parametric`` — discrete interpolant
+  :math:`K(\\mu)=\\sum_j \\alpha_j(\\mu) K_j` with RBF or simplex weights
+  (``koopman="parametric"``). Distinct from switched / mixture. Convex
+  combinations preserve dense / row-stochastic / doubly-stochastic
+  factors; symplectic and other structural mixes raise. Export refuses
+  the interpolant. Additive checkpoint type string;
+  ``FORMAT_VERSION`` remains 1.
 * ``hodge`` — Laplacian-structured networked generator
   (``koopman="hodge"``).
-* ``equivariant`` — block scalar/vector latent operator under
-  ``[equivariance]`` (not the factory default).
-* ``graphon`` — graphon-sampled adjacency helper for transfer experiments
-  (power-user).
+* ``cochain`` —
+  :class:`~koopman_graph.operators.CochainState` and
+  :class:`~koopman_graph.operators.CochainKoopmanOperator`
+  (static signed :math:`B_1`; degree-specific :math:`k\\le 1` maps).
+  Not a factory kind; default ``koopman=None`` stays ``"pernode"``.
+  Distinct from ``koopman="hodge"``. Face latents are stored, not
+  evolved. :func:`~koopman_graph.operators.boundary_nilpotency`
+  scores :math:`B_1 B_2\\approx 0` (``Lim2020Hodge``). Not
+  TopologicX parity (``TopoX2024``).
+* ``equivariant`` — block scalar / vector / :math:`l=2` tensor
+  latent operator (not the factory default). Vector blocks are
+  ``scale * I_3``; the additional irrep is ``scale * I_5``.
+  Default encoders may still project to invariants. Not a molecular
+  MD stack (``Thomas2018TFN``, ``Geiger2022e3nn``).
+* ``graphon`` — sampled adjacency and dense teaching estimator
+  (:func:`~koopman_graph.operators.estimate_graphon`) for transfer
+  experiments (power-user). Sparse-graph graphon theory is refused.
+* ``stochastic_sde`` —
+  :class:`~koopman_graph.operators.DriftDiffusionKoopman` (opt-in
+  Euler–Maruyama / Yosida stepper). Not a factory kind.
+  ``dynamics_mode="stochastic"`` remains diagonal process noise after
+  discrete :math:`K`. Not certified SDE theory
+  (``Xu2025StochasticSemigroup``, ``Zhou2025Yosida``).
 
 Prefer ``from koopman_graph.operators import …`` (or the root façade for public
 operator classes). Former root modules ``koopman_graph.operator`` and
@@ -484,6 +556,14 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   :class:`~koopman_graph.nn.decoder.SAGEDecoder` /
   :class:`~koopman_graph.nn.decoder.DiffConvDecoder` /
   :class:`~koopman_graph.nn.decoder.GraphTransformerDecoder`
+* ``constraint_decoders`` —
+  :class:`~koopman_graph.nn.MassConservingDecoder` /
+  :class:`~koopman_graph.nn.PositivityDecoder` /
+  :class:`~koopman_graph.nn.LinearConservingDecoder`
+  (opt-in decoded-space simplex / positivity / :math:`Cx=c_0`
+  heads; not a factory kind). Must not import ``model``. Latent
+  symplectic :math:`K` alone does not conserve decoded mass
+  (``Greydanus2019HNN``).
 * ``hypergraph`` — :class:`~koopman_graph.nn.hypergraph.HypergraphEncoder` /
   :class:`~koopman_graph.nn.hypergraph.HypergraphDecoder`
   (PyG ``HypergraphConv``; static ``hyperedge_index`` / ``hyperedge_weight``)
@@ -509,7 +589,25 @@ PyG-style ``nn`` capability package, no ``conv/`` subtree):
   (``stack_delay_features``, ``flatten_delay_window``,
   ``history_from_snapshots``, ``apply_observation_mask_to_features``) are
   owned by :mod:`koopman_graph.data.delay_windows` and thin-re-exported
-  here for stable ``nn.delay`` import paths.
+  here for stable ``nn.delay`` import paths. Distinct from
+  :class:`~koopman_graph.baselines.HankelDMDBaseline` and
+  :class:`~koopman_graph.baselines.HAVOKBaseline`.
+* ``receptive_field`` — warn-only encoder vs discrete-graph-operator hop
+  check
+  (:func:`~koopman_graph.nn.receptive_field.check_encoder_operator_receptive_field`;
+  not in root ``__all__``). ``GraphKoopmanModel.fit`` emits
+  :class:`~koopman_graph.nn.ReceptiveFieldMismatchWarning` when encoder
+  hops exceed ``filter_degree``. Encoder mixing does not compensate for
+  a one-hop :math:`K`. Operators without ``receptive_field_hops`` are
+  skipped.
+* ``separable`` —
+  :class:`~koopman_graph.nn.SeparableDictionaryEncoder` /
+  :class:`~koopman_graph.nn.SeparableDictionaryDecoder`
+  (node-wise dictionary; ``encoder_kind="separable"``; zero graph hops;
+  class-only — no factory ``encoder="separable"``; off root
+  ``__all__``). Homomorphism precondition
+  (``Peng2026KoopmanGKFA``); neighbor-mixing GNN encoders are not
+  separable.
 * ``adaptive_topology`` —
   :class:`~koopman_graph.nn.adaptive_topology.AdaptiveAdjacency`
   (Graph WaveNet self-adaptive adjacency ``softmax(ReLU(E₁E₂ᵀ))``; power-user
@@ -559,14 +657,49 @@ classes). Former root modules ``koopman_graph.encoder``,
 Encoder and decoder remain peers: both import from ``nn.gnn``;
 neither imports the other.
 
-``koopman_graph.analysis`` package layout (spectrum / similarity / anomaly /
-plotting / residuals / topology estimation / SINDy / clustering / explain):
+``koopman_graph.analysis`` package layout (spectrum / conditioning /
+criticality / memory / hodge_modes / similarity / anomaly / plotting / residuals / topology estimation / SINDy /
+clustering / explain):
 
 * ``spectrum`` — re-exports neutral-leaf ``compute_spectrum``,
   ``compute_generator_spectrum``, and ``discrete_spectrum_at_delta_t``, plus
   analysis-owned ``decode_mode_shapes`` and
   :func:`~koopman_graph.analysis.implied_timescales`
   (:class:`~koopman_graph.analysis.ImpliedTimescales`)
+* ``conditioning`` — re-exports
+  :class:`~koopman_graph.spectrum_types.SpectralDiagnostics` and
+  :func:`~koopman_graph.spectrum_types.compute_spectral_diagnostics`
+  (compute stays on the neutral leaf). Discrete Nyquist
+  :math:`1/(2\Delta t)` is in cycles per unit time (``None`` on
+  generator spectra). ``mode_amplitudes`` warns when
+  :math:`\kappa(V)` exceeds ``CONDITION_WARN`` and raises
+  :class:`~koopman_graph.spectrum_types.DefectiveSpectrumError` when
+  :math:`V` is singular. Not a finite-horizon
+  :math:`\|K^{k}\|` bound; resolvent grids remain in ``pseudospectra``.
+* ``criticality`` —
+  :func:`~koopman_graph.analysis.monitor_critical_transition` and frozen
+  :class:`~koopman_graph.analysis.CriticalityReport` (sliding-window
+  spectral-gap / near-defectivity heuristic on a sequence of spectra;
+  **not** a Ghosh-grade topology-criticality certificate; off root
+  ``__all__``).
+* ``memory`` —
+  :func:`~koopman_graph.analysis.markov_closure_report` and frozen
+  :class:`~koopman_graph.analysis.MarkovClosureReport` (Ljung–Box-style
+  residual-energy whiteness; lags in timesteps) plus
+  :class:`~koopman_graph.analysis.FiniteMemoryKoopman` (convolution
+  :math:`z_{t+1}=z_t\\Omega^{\\top}+\\sum_s z_{t-s}K_s^{\\top}`).
+  Not Mori–Zwanzig identification (``Lin2021MoriZwanzig``), not
+  :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`, and not
+  :class:`~koopman_graph.baselines.HAVOKBaseline`
+  (``Brunton2017HAVOK``). Not a factory kind; off root ``__all__``.
+* ``hodge_modes`` —
+  :func:`~koopman_graph.analysis.hodge_decompose_modes` and frozen
+  :class:`~koopman_graph.analysis.HodgeModeComponents` (combinatorial
+  Hodge split of stored eigenvector columns on a static signed
+  :math:`B_1`; :math:`k\\in\\{0,1\\}`). Analysis-only — **not**
+  physical circulation, **not** ``koopman="hodge"``, and **not**
+  TopologicX / sheaf parity (``Lim2020Hodge``, ``TopoX2024``). Off
+  root ``__all__``.
 * ``similarity`` — ``spectrum_distance``, ``koopman_std``, ``resolve_spectrum``,
   ``dynamical_similarity``
 * ``anomaly`` — ``AnomalyDetectionResult``, ``calibrate_anomaly_threshold``,
@@ -623,12 +756,16 @@ plotting / residuals / topology estimation / SINDy / clustering / explain):
 :mod:`koopman_graph.protocols`, :mod:`koopman_graph.operators`, and
 :mod:`koopman_graph.model` never import heavy analysis code for spectrum
 assembly. It hosts :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`,
+:class:`~koopman_graph.spectrum_types.SpectralDiagnostics`,
+:class:`~koopman_graph.spectrum_types.DefectiveSpectrumError`,
+``CONDITION_WARN``,
 discrete :func:`~koopman_graph.spectrum_types.compute_spectrum`, continuous
 :func:`~koopman_graph.spectrum_types.compute_generator_spectrum`, and
 :func:`~koopman_graph.spectrum_types.discrete_spectrum_at_delta_t`.
 These are re-exported from :mod:`koopman_graph.analysis` (and
 ``KoopmanSpectrum`` / ``compute_spectrum`` from the package root) for the
-public API.
+public API. ``SpectralDiagnostics``, ``DefectiveSpectrumError``, and
+``CONDITION_WARN`` are **not** on root ``__all__``.
 
 ``koopman_graph.baselines`` package layout (peer DMD-family methods behind
 :class:`~koopman_graph.baselines.ClassicalBaseline`, plus GNN forecasters):
@@ -644,6 +781,22 @@ public API.
 * ``dmd`` — :class:`~koopman_graph.baselines.DMDBaseline`
 * ``dmdc`` — :class:`~koopman_graph.baselines.DMDcBaseline`
 * ``edmd`` — :class:`~koopman_graph.baselines.EDMDBaseline`
+* ``mpedmd`` — :class:`~koopman_graph.baselines.MpEDMDBaseline`
+  (Gram-weighted Procrustes polar factor; measure-preserving in the
+  dictionary Gram inner product, not a Euclidean
+  :math:`K_{\\mathrm{eff}}` certificate)
+* ``gedmd`` — :class:`~koopman_graph.baselines.GEDMDBaseline`
+  (generator EDMD from supplied dictionary derivatives,
+  ``Klus2020gEDMD``; not derivative-mode SINDy; irregular
+  :math:`\Delta t` does not create :math:`L`)
+* ``hankel_dmd`` — :class:`~koopman_graph.baselines.HankelDMDBaseline`
+  (Hankel-DMD on delay-embedded flattened states,
+  ``Arbabi2017HankelDMD``; not
+  :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`)
+* ``havok`` — :class:`~koopman_graph.baselines.HAVOKBaseline`
+  (teaching HAVOK on the same delay rows, ``Brunton2017HAVOK``;
+  delay-plus-forcing, not Mori–Zwanzig, and not
+  :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`)
 * Classical peers — ``FBDMDBaseline``, ``TLSDMDBaseline``,
   ``OptDMDBaseline``, ``StreamingDMDBaseline``, ``MRDMDBaseline``,
   ``UlamTransferOperatorBaseline`` (package ``__all__``; import from
@@ -889,7 +1042,8 @@ Dataset generators remain via :mod:`koopman_graph.datasets` (not root
 * :mod:`koopman_graph.training` — ``FitHistory``, ``LossWeights``
   (``FitCallback`` / ``NoOpFitCallback`` stay on root ``__all__`` as well)
 * :mod:`koopman_graph.adaptation` — ``RecursiveKoopmanAdapter``,
-  ``AdaptationStepResult``, ``KoopmanObserver``, ``FilterResult``
+  ``AdaptationStepResult``, ``KoopmanObserver``, ``FilterResult``,
+  ``JointStateTopologyObserver``, ``JointObserverResult``
 * :mod:`koopman_graph.env` — ``GraphKoopmanEnv``
 * :mod:`koopman_graph.data` — ``TemporalSplit``, ``temporal_split``,
   ``WindowSampler``, ``as_multi_trajectory``
@@ -949,9 +1103,11 @@ Examples:
   Off root ``__all__``. May import ``training`` types; ``training`` must
   not import ``tuning``. Importing the package does not import Ray
 * :mod:`koopman_graph.cli` — config-driven ``koopman-graph`` console script
-  (``train`` / ``predict``; JSON in core, YAML via ``[cli]``). Off root
-  ``__all__``. Leaf façade: may import ``model`` / ``serialization`` /
-  ``data``; other library packages must **not** import ``cli``
+  (``train`` / ``predict`` / ``benchmark``; JSON in core, YAML via
+  ``[cli]``). Off root ``__all__``. Leaf façade: may import ``model`` /
+  ``serialization`` / ``data`` and lazy-import ``benchmark`` inside
+  ``benchmark`` handlers; other library packages must **not** import
+  ``cli``
 * :mod:`koopman_graph.distributed` — optional DDP / Fabric trainer
   adapters, ``KoopmanLightningModule`` Trainer sugar,
   ``run_ray_train_fit_loop``, ``fit_ensemble_with_ray``, rank helpers, and
@@ -1000,12 +1156,15 @@ Examples:
   encoder/decoder/delay *classes* remain in ``__all__``. Peers import from
   ``nn.gnn`` only (no encoder↔decoder inversion).
 * :mod:`koopman_graph.spectrum_types` — neutral
-  :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` value type plus
+  :class:`~koopman_graph.spectrum_types.KoopmanSpectrum` value type,
+  :class:`~koopman_graph.spectrum_types.SpectralDiagnostics`,
+  :class:`~koopman_graph.spectrum_types.DefectiveSpectrumError`, and
+  ``CONDITION_WARN``, plus
   discrete / generator / ``Δt`` spectrum assembly helpers
   (``compute_spectrum``, ``compute_generator_spectrum``,
   ``discrete_spectrum_at_delta_t``; re-exported from
   :mod:`koopman_graph.analysis` and, for the type / discrete helper, the
-  package root)
+  package root). Diagnostics are off root ``__all__``.
 * :class:`~koopman_graph.operators.KoopmanOperatorContract` — shared Protocol for
   discrete and continuous operators (``matrix``, ``advance``,
   ``inverse_advance``, ``bound_metric``); importable from
@@ -1206,9 +1365,14 @@ other consumers reject it:
      - Supported via ``allow_dynamic_topology=True`` /
        :meth:`~koopman_graph.data.GraphSnapshotSequence.from_dynamic_arrays`
    * - Model ``predict`` / inference rollout
-     - Supported: hold-last topology (optional ``future_topologies`` schedule)
+     - Supported: hold-last topology (optional ``future_topologies``
+       schedule). When ``graph_dynamics`` attaches a recursive topology
+       head, omitted futures use predicted
+       :math:`\hat A_{t+1}=g_\phi(z_t)` (sigmoid weights on a candidate
+       COO); ``topology_policy="hold_last"`` restores the 0.14 control.
    * - Training losses (``rollout_sequence_loss``)
-     - Supported: teacher-target topology from observed snapshots
+     - Supported: teacher-target topology from observed snapshots, or
+       predicted topology when recursive graph-state training is on
    * - :class:`~koopman_graph.env.GraphKoopmanEnv`
      - **Rejected** at construction (episode topology frozen from reset)
    * - Classical baselines (DMD / EDMD / DMDc)
@@ -1345,6 +1509,19 @@ spectral analysis uses the explicit helpers ``effective_matrix`` /
   - ``"dual_random_walk"``:
     :math:`I_N \otimes K_{\mathrm{self}} + \widehat{A}_f \otimes K_{\mathrm{fwd}} + \widehat{A}_b \otimes K_{\mathrm{bwd}}`
     (``K_fwd`` aliases ``K_nbr``)
+
+  Default ``koopman_filter_degree`` is ``1`` (the one-tap forms above).
+  Setting :math:`P>1` extends the map by
+  :math:`\sum_{k=2}^{P} \widehat{A}^{k} \otimes K_{k}` (and matching
+  backward powers in dual mode). Extra hop factors (:math:`k\ge 2`) are
+  globally shared. ``block_diagonal`` inverse and ``distributed`` inverse
+  / Arnoldi require :math:`P=1`; dense inverse uses the assembled
+  polynomial. Eligible discrete ``.spectrum`` uses the Kronecker pencil
+  :math:`B(\lambda)=\sum_k\lambda^k K_k` (not a sum of independent factor
+  eigenvalues); dual / orbit paths stay dense.
+  ``GraphKoopmanModel.fit`` warns when encoder hops exceed
+  ``filter_degree``; encoder neighborhood mixing does not compensate for
+  a one-hop :math:`K`.
 * Continuous graph — assemble ``L_eff`` with the same ``adjacency`` modes as
   discrete ``GraphKoopmanOperator`` (``symmetric`` / ``random_walk`` /
   ``dual_random_walk``); advance applies ``exp(L_eff Δt)``. Dense realization
@@ -1432,9 +1609,12 @@ auto-route (no path-selection kwarg):
 2. Else if Kronecker-sum eligible — shared self factor,
    ``adjacency`` in ``{"symmetric", "random_walk"}``,
    ``sparsity`` in ``{"dense", "block_diagonal"}`` — exact reduction via
-   :mod:`koopman_graph.operators.kronecker_spectrum`
-   (:math:`I\otimes M_{\mathrm{self}} + \widehat{A}\otimes M_{\mathrm{nbr}}`
-   for discrete :math:`K` or continuous generator :math:`L`).
+   :mod:`koopman_graph.operators.kronecker_spectrum`. Discrete
+   :math:`K_{\mathrm{eff}}=\sum_k\widehat{A}^k\otimes K_k` uses
+   :math:`B(\lambda_i)=\sum_k\lambda_i^k K_k` (any :math:`P\ge 0`; not a
+   sum of independent factor eigenvalues). Continuous generator
+   :math:`L` stays the one-tap form
+   :math:`I\otimes L_{\mathrm{self}} + \widehat{A}\otimes L_{\mathrm{nbr}}`.
 3. Else — dense assembled eigendecomposition
    (``dual_random_walk``, discrete orbit / isotypic self banks, helper
    fall-back, hetero / hypergraph as applicable).
@@ -1468,14 +1648,19 @@ Checkpoint field ``config.adjacency`` is required for those kinds and is
 migrated). Hypergraph operators stay Zhou-symmetric and do not expose
 ``adjacency``.
 
+Factory keyword ``koopman_filter_degree`` selects the monomial hop degree
+for discrete ``koopman="graph"`` (default ``1``; rejected for other kinds
+and for continuous graph). Checkpoint field ``config.filter_degree`` is
+additive (absent ⇒ ``1``; format 1).
+
 **Symmetry-adapted self and neighbor factors (orbit ties).** Opt-in inductive
 bias for discrete ``koopman="graph"`` / ``"hypergraph"`` / multiplex and
 shared-d typed ``"hetero_graph"``: nodes in the same orbit share a
 ``K_self`` factor. Discrete graph / hypergraph / Hodge operators also
 allocate a per-orbit neighbor / hyperedge bank
 (``K_nbr`` / ``K_fwd`` / ``K_hedge``) applied after the adjacency
-matvec. Dual backward ``K_bwd`` and hetero relation factors ``K_r`` stay
-globally shared. Multiplex hetero orbits use the
+matvec. Dual backward ``K_bwd``, hop factors with :math:`k\ge 2`, and
+hetero relation factors ``K_r`` stay globally shared. Multiplex hetero orbits use the
 **union** of relation banks on the stacked ``N`` nodes; typed hetero
 orbits are computed independently inside each type block from intra-type
 banks (orbits must not mix types). Rectangular hetero orbits are
@@ -1504,7 +1689,11 @@ Dynamics mode and stability-bound vocabulary
 ``Literal["discrete", "continuous", "stochastic"]`` type, defined next to
 :data:`~koopman_graph.operators.Parameterization` in
 :mod:`koopman_graph.operators` and re-exported from
-:mod:`koopman_graph.protocols`. ``GraphKoopmanModel`` imports it from
+:mod:`koopman_graph.protocols`. ``"stochastic"`` is discrete linear
+advance plus learned diagonal process noise. The opt-in
+:class:`~koopman_graph.operators.DriftDiffusionKoopman` stepper is a
+separate Euler–Maruyama / Yosida MVP, not that factory string.
+``GraphKoopmanModel`` imports the type from
 protocols; :data:`~koopman_graph.adaptation.AdaptationMode` is an alias of
 the same type for the RLS adapter API. Do not redefine the literals in call
 sites.
@@ -1644,8 +1833,9 @@ package:
   ``pynauty`` at call time and raise ``ImportError`` with install guidance
   when absent. Core imports stay clean without the extra.
 * **Call-site import (``[mpc]`` / ``osqp``)** —
-  :class:`~koopman_graph.mpc.KoopmanMPC` imports ``osqp`` at solve time.
-  Missing extras raise ``ImportError`` with
+  :class:`~koopman_graph.mpc.KoopmanMPC` and
+  :class:`~koopman_graph.mpc.TubeKoopmanMPC` import ``osqp`` at solve
+  time. Missing extras raise ``ImportError`` with
   ``pip install 'koopman-graph[mpc]'`` guidance. Core imports stay clean
   without the extra.
 * **Call-site import (e.g. ``h5py`` for METR-LA / PEMS-BAY)** —
@@ -1725,6 +1915,17 @@ Discrimination rules (used by
 Validation input follows the same rules; a multi-trajectory validation
 container must match the training trajectory count, while a single validation
 sequence is reused for every training trajectory.
+
+``fit(..., batch_graphs=True)`` collates homogeneous trajectories into one
+PyG ``Batch`` so shared :math:`K_{\mathrm{self}}` / :math:`K_k` apply to
+the disconnected union with per-graph shifts. Reconstruction (and forward
+consistency when weighted) match the mean of the existing per-sequence
+loop on modest batches. The default ``MultiTrajectory`` path is unchanged.
+This is vectorization of a loop that already trained multiple topologies;
+it is not a new multi-graph capability. Hetero, hypergraph, continuous,
+controlled, delay, orbit-tied, learned-topology, windowed, and DDP
+requests raise. Collate lives in :mod:`koopman_graph.data` (off the root
+façade).
 
 Device and tensor conventions
 -----------------------------
@@ -1827,11 +2028,33 @@ handling is **not** an exact KF in feature space:
 Import the observer from :mod:`koopman_graph.adaptation` (power-user; not on
 the root façade). See ``examples/25_kalman_koopman_state_estimation.ipynb``.
 
+:class:`~koopman_graph.adaptation.JointStateTopologyObserver` composes
+that Kalman filter with either
+:func:`~koopman_graph.identification.identify_sparse_graph_factors`
+(one-tap dense ``koopman="graph"``; writes :math:`K_{\mathrm{self}}` /
+:math:`K_{\mathrm{nbr}}` on the **observed** COO) or
+:class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` (dense
+per-node :math:`K`). Set ``claim_homomorphism=True`` only when the
+encoder is :class:`~koopman_graph.nn.SeparableDictionaryEncoder` and
+the operator is a one-tap graph Koopman operator; GNN encoders and
+dense per-node :math:`K` raise (Peng, Shen & Zhu, arXiv:2606.17797,
+``Peng2026KoopmanGKFA``). The observer does **not** infer a new edge
+set, does not run ADMM on :math:`A`, and does not certify a
+three-term MSE bound. Dual random-walk and :math:`P\neq 1` graph maps
+raise. Wrapper-local: no checkpoint key; ``FORMAT_VERSION`` remains 1.
+Pass the separable encoder/decoder classes into
+:class:`~koopman_graph.model.GraphKoopmanModel` (no factory
+``encoder="separable"``).
+
 Classical baselines and datasets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 DMD-family baselines (:class:`~koopman_graph.baselines.DMDBaseline`,
 :class:`~koopman_graph.baselines.EDMDBaseline`,
+:class:`~koopman_graph.baselines.MpEDMDBaseline`,
+:class:`~koopman_graph.baselines.GEDMDBaseline`,
+:class:`~koopman_graph.baselines.HankelDMDBaseline`,
+:class:`~koopman_graph.baselines.HAVOKBaseline`,
 :class:`~koopman_graph.baselines.DMDcBaseline`) share
 :class:`~koopman_graph.baselines.ClassicalBaseline` for ``time_step`` /
 ``rank``, fitted metadata, and ``_check_fitted`` scaffolding, plus the
@@ -1845,6 +2068,31 @@ topology copy, and initial-graph checks). They remain siblings under that ABC
 ``dictionary`` in ``{"polynomial", "rbf", "kernel"}``. Kernel dictionaries
 with full-data centers are :math:`O(T^2)` and documented as small/medium-``T``
 only; the linear kernel uses the identity feature map (DMD reduction).
+:class:`~koopman_graph.baselines.MpEDMDBaseline` reuses that lift and
+replaces unconstrained least squares with a Gram-weighted Procrustes
+polar factor (``Colbrook2023mpEDMD``). Unitarity is in the dictionary
+Gram inner product; it does not obsolete Euclidean conditioning on a
+general directed :math:`K_{\mathrm{eff}}`.
+:class:`~koopman_graph.baselines.GEDMDBaseline` fits a generator
+:math:`L` by least squares on polynomial dictionary samples and
+supplied :math:`dx/dt` (``Data.dx_dt`` or
+``fit(..., derivatives=)``; ``Klus2020gEDMD``). ``predict`` advances
+by :math:`\exp(L\,\Delta t)` with fitted ``time_step``. Irregular
+timestamps do not create :math:`L`; this is not
+:func:`~koopman_graph.analysis.identify_sparse_dynamics`.
+:class:`~koopman_graph.baselines.HankelDMDBaseline` fits DMD on
+delay-embedded flattened states (``Arbabi2017HankelDMD``).
+:class:`~koopman_graph.baselines.HAVOKBaseline` fits a teaching HAVOK
+map on the same delay rows (``Brunton2017HAVOK``; autonomous
+``predict`` uses forcing :math:`u=0`). Neither is
+:class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`.
+``predict`` may take optional ``history`` (oldest → newest); without
+it, older delays are zero-padded. The Data-only call
+``predict(data, steps)`` remains valid but is not a faithful delay
+initial condition when ``n_delays > 1``.
+:func:`~koopman_graph.metrics.evaluate_forecast` uses the same
+Data-only ``predict(data, steps)`` call as EDMD; for Hankel-DMD and
+HAVOK that omits ``history`` and therefore zero-pads older delays.
 
 Dataset / benchmark generators and these baselines default to **CPU**
 ``float32`` tensors unless a docstring or parameter explicitly says otherwise.
@@ -1892,6 +2140,30 @@ must call ``predict(data, steps)`` portably.
      - ``Data`` only
      - None (uncontrolled peer)
      - None
+     - ``self`` (sklearn chaining)
+   * - :class:`~koopman_graph.baselines.MpEDMDBaseline`
+     - ``Data`` only
+     - None (uncontrolled peer)
+     - None
+     - ``self`` (sklearn chaining)
+   * - :class:`~koopman_graph.baselines.GEDMDBaseline`
+     - ``Data`` only
+     - None (uncontrolled peer)
+     - None
+     - ``self`` (sklearn chaining)
+   * - :class:`~koopman_graph.baselines.HankelDMDBaseline`
+     - ``Data`` only
+     - Optional ``history`` (oldest → newest); omitted slots
+       zero-pad. Not a faithful delay initial condition when
+       ``n_delays > 1`` without ``history``
+     - None
+     - ``self`` (sklearn chaining)
+   * - :class:`~koopman_graph.baselines.HAVOKBaseline`
+     - ``Data`` only
+     - Optional ``history``; omitted slots zero-pad; autonomous
+       forcing ``u=0``. Same delay-initial-condition caveat as
+       Hankel-DMD
+     - Spectrum of autonomous ``A``, not the full delay map
      - ``self`` (sklearn chaining)
    * - :class:`~koopman_graph.baselines.DMDcBaseline`
      - ``Data`` only
@@ -2250,13 +2522,15 @@ sklearn-like façade, functional helpers, string-mode configuration). Do
    * - :mod:`koopman_graph.mpc` (capability package)
      - Power-user
      - :class:`~koopman_graph.mpc.KoopmanMPC` composes a fitted model;
-       additive discrete per-node operators only (bilinear / networked /
-       continuous rejected); plant state is mean latent; OSQP behind
+       additive discrete per-node operators (bilinear sequential
+       linearization is opt-in on that class); networked /
+       continuous rejected; plant state is mean latent; OSQP behind
        ``[mpc]``; output constraints via local decoder Jacobian (local
        guarantee); optional ``constraint_tightening=`` with calibrated
        :class:`~koopman_graph.uq.ConformalKoopmanUQ` shrinks output boxes
        only (inputs exact; calibrated margins, not a closed-loop
-       guarantee); off root ``__all__``
+       guarantee); :class:`~koopman_graph.mpc.TubeKoopmanMPC` is
+       additive-only residual-tube tightening (off root ``__all__``)
 
 **UQ and optional uncertainty**
 
@@ -2278,7 +2552,11 @@ latent-Gaussian, and conformal peers must import those non-private symbols
 the shared interval type.
 :class:`~koopman_graph.uq.ConformalKoopmanUQ` documents frequentist
 marginal coverage under exchangeability and recommends adaptive conformal
-inference (ACI) when residuals drift. ``score="node_wise"`` stores
+inference (ACI) when residuals drift. :attr:`~koopman_graph.uq.ConformalKoopmanUQ.coverage`
+always names :class:`~koopman_graph.uq.JointCoverageSpec`
+``target="per_node_marginal"``; simultaneous and event
+targets are named but not implemented (``Schlembach2025Conformal``).
+``score="node_wise"`` stores
 per-node quantiles and returns per-node marginal half-widths (not joint
 coverage); legacy ``"per_node"`` still max-pools over nodes.
 ``PredictionInterval.mean`` / ``.lower`` / ``.upper`` are
@@ -2367,6 +2645,13 @@ shrinks output boxes by per-horizon half-widths (stage ``0`` unshrunk;
 stages ``1..H`` use ``quantiles[h-1]``; input bounds unchanged). Margins
 inherit conformal exchangeability caveats plus local linearization — they
 are statistically motivated, not a formal closed-loop guarantee.
+:class:`~koopman_graph.mpc.TubeKoopmanMPC` (``mpc/tube``; off root
+``__all__``) applies the same erosion from conformal quantiles or
+ensemble residual radii on **additive discrete** plants and reports
+constraint-violation rate, feasibility rate, and quadratic stage cost
+against the nominal boxes. It is not a chance-constraint solver and
+not a recursive-feasibility or Lyapunov closed-loop certificate
+(Zhang et al., *Automatica* 137:110114, 2022).
 
 **Current package boundaries**
 
@@ -2424,7 +2709,8 @@ new operator classes are the 0.6.0 root additions).
   ``node_wise`` / ``neighbor_smoothing``)
 * Classical DMD ``rank="auto"`` (Gavish–Donoho)
 * :class:`~koopman_graph.mpc.KoopmanMPC` (``[mpc]`` / OSQP; optional conformal
-  tightening)
+  tightening) and :class:`~koopman_graph.mpc.TubeKoopmanMPC` (additive
+  residual tube; violation rate, not a closed-loop proof)
 * Datasets: PEMS variants and SocioPatterns contact-epidemic FAIR cards
 * Tutorials ``27``–``38`` covering the surfaces above (including residual /
   transfer / factorization notebooks)
@@ -2489,7 +2775,8 @@ new operator classes are the 0.6.0 root additions).
 
 **Optional extras inventory**
 
-* ``[mpc]`` — OSQP for :class:`~koopman_graph.mpc.KoopmanMPC`
+* ``[mpc]`` — OSQP for :class:`~koopman_graph.mpc.KoopmanMPC` /
+  :class:`~koopman_graph.mpc.TubeKoopmanMPC`
 * ``[symmetry]`` — ``networkx`` for approximate node-orbit partitions
 * ``[rl]`` — Gymnasium / Stable-Baselines3 (unchanged)
 * ``[lightning]`` — Lightning for
@@ -2680,7 +2967,7 @@ TDL parity, PyEMMA-scale MD, guaranteed sample-efficiency) live in
   :mod:`koopman_graph.datasets.molecular`, :mod:`koopman_graph.interop`
 * ``koopman_symmetry="isotypic"`` +
   :func:`~koopman_graph.graph_utils.compute_isotypic_decomposition`
-  (self-block MVP; neighbor-factor tying not shipped)
+  (self-block MVP in 0.11; neighbor-factor tying added in 0.14)
 
 **Capability and API-tier map (0.11 peers)**
 
@@ -2798,7 +3085,10 @@ piecewise linear (each mode remains a linear map).
   :mod:`koopman_graph.analysis.tda` 0-dimensional persistence
 * Matrix-free hypergraph / continuous-graph distributed path; partitioned
   subgraph sampler; growable :math:`N_{\max}` remap
-* Optional ResDMD attachment on ``evaluate``; Kronecker dispersion helper;
+* Optional ResDMD attachment on ``evaluate``; optional subspace
+  invariance leakage :math:`\eta` on ``evaluate(...,
+  include_invariance=True)`` (finite-sample truncated-SVD residual,
+  not a Haseli–Cortés certificate); Kronecker dispersion helper;
   optional ``[control-lmi]``; Granger-style causal MVP
 * :class:`~koopman_graph.baselines.gnn.LeaderboardProtocol` (distinct from
   teaching :class:`~koopman_graph.baselines.gnn.ForecasterProtocol`)
@@ -2819,7 +3109,7 @@ piecewise linear (each mode remains a linear map).
      - Conserves parameterized :math:`K`, not decoded :math:`x`
    * - Switched / mixture operators
      - Package / factory kinds
-     - Opt-in; default LTI per-node unchanged
+     - Opt-in; default LTI per-node unchanged. Not :math:`K(\\mu)`
    * - Predicted topology head
      - Package
      - Distinct from static AdaptiveAdjacency
@@ -2839,13 +3129,497 @@ piecewise linear (each mode remains a linear map).
      - Power-user extras
      - FedAvg is not DP; FDI is data-integrity; VAE is not Laplace UQ
 
+v0.15.0 capability architecture
+-------------------------------
+
+Evidence-to-closure surfaces keep homogeneous **defaults** unchanged
+(``koopman=None`` → ``"pernode"``, ``sparsity="dense"``, AMP off, linear
+time-invariant per-node advance). ``FORMAT_VERSION`` remains 1. The four
+styles (composition, sklearn-like façade, functional helpers, string-mode
+configuration) are unchanged; do not introduce a fifth. Root ``__all__``
+is not grown. Identification, polynomial graph filters of degree greater
+than one, and the benchmark schema are **opt-in**.
+
+The capability map below records homes and acyclic import rules. Status
+**Current** means the named surface is importable. The CLI
+``benchmark run`` / ``verify`` commands write and check identity-bound
+summaries; they do not train models or invent forecast metrics.
+
+**Defaults (unchanged vs 0.14)**
+
+* Factory ``koopman=None`` still selects ``"pernode"``.
+* ``sparsity="dense"``; AMP off; discrete advance remains linear
+  time-invariant per node.
+* Opt-in identification does not replace the default Adam ``fit`` path.
+* Discrete ``koopman="graph"`` defaults to a single graph-filter tap
+  (``koopman_filter_degree`` default ``1``) so existing checkpoints
+  round-trip. Degree :math:`P>1` is opt-in.
+* New root-façade symbols are refused by default (deep imports).
+
+**Import rules**
+
+* :mod:`koopman_graph.benchmark` — frozen
+  :class:`~koopman_graph.benchmark.ExperimentManifest` (schema
+  ``benchmark_manifest_v1``) plus JSON/YAML load/dump, dataset
+  SHA-256 checks, and identity-bound ``run_manifest`` /
+  ``verify_summary`` (off root ``__all__``). May import ``baselines``,
+  ``datasets``, ``metrics``, and ``model``.
+  No other ``koopman_graph`` package imports ``benchmark``
+  at module load; ``cli`` lazy-imports it inside ``benchmark``
+  handlers. Teaching GNN methods require non-empty ``deviations``.
+  The runner is identity-bound (dataset SHA-256 plus a canonical
+  summary digest). Tracked smoke YAML under ``benchmarks/v0.15/`` is
+  what default CI verifies. It is not a LibCity / BasicTS leaderboard
+  host and does not fit :class:`~koopman_graph.model.GraphKoopmanModel`.
+* :mod:`koopman_graph.identification` — frozen
+  :class:`~koopman_graph.identification.IdentificationConfig` /
+  :class:`~koopman_graph.identification.IdentificationReport` and
+  :class:`~koopman_graph.identification.IdentificationBackend`
+  (off root ``__all__``). May import ``analysis``, ``losses``,
+  ``operators``, and ``graph_utils``. ``training`` must not import
+  ``identification`` at module load (lazy bind inside
+  :func:`~koopman_graph.training.run_fit_loop`).
+  ``fit(..., identification=IdentificationConfig(...))`` is opt-in;
+  default ``None`` is the Adam path. Closed-form ridge / TLS /
+  constrained least-squares solvers write dense per-node ``K``.
+  ``evaluate(..., include_invariance=True)`` lazily imports
+  identification from :mod:`koopman_graph.metrics` (not at module
+  load) and attaches finite-sample :math:`\eta`; not a Haseli–Cortés
+  certificate. Discrete dense per-node ``K`` only.
+  Opt-in finite-dictionary ResDMD gating is available via
+  :func:`~koopman_graph.identification.select_resdmd_gated`,
+  ``IdentificationConfig.gate_resdmd=True`` (fills the final report
+  ``spectral`` block; does not abort ``fit``), and
+  :class:`~koopman_graph.training.ResDMDFitCallback` ``mode="gate"``.
+  :func:`~koopman_graph.identification.identify_sparse_graph_factors`
+  fits sparse :math:`K_{\\mathrm{self}}` / :math:`K_{\\mathrm{nbr}}` on
+  frozen encodings (STLSQ or teaching group-lasso, then unpenalized
+  refit). It does not replace
+  :func:`~koopman_graph.analysis.identify_sparse_dynamics` or
+  :class:`~koopman_graph.losses.KoopmanSparsityLoss`. VarPro remains a
+  later increment.
+  :func:`~koopman_graph.identification.select_latent_rank` scores
+  truncated-SVD ranks of frozen encodings (VAMP-2, ResDMD elbow, or
+  stability-penalized held-out MSE). It is not Ray Tune AutoML for
+  encoder ``latent_dim``.
+  ``identification`` must not import ``adaptation``.
+* :mod:`koopman_graph.adaptation` —
+  :class:`~koopman_graph.adaptation.JointStateTopologyObserver` may
+  import ``identification`` (lazy package export). Importing
+  :class:`~koopman_graph.adaptation.RecursiveKoopmanAdapter` /
+  :class:`~koopman_graph.adaptation.KoopmanObserver` does not load
+  ``identification``. Homomorphism claims require
+  ``encoder_kind="separable"`` and a one-tap graph operator
+  (``Peng2026KoopmanGKFA``). The observer updates
+  :math:`K_{\mathrm{self}}` / :math:`K_{\mathrm{nbr}}` on the observed
+  COO; it does not infer a new edge set and is not Koopman-GKFA.
+* :mod:`koopman_graph.data` —
+  :class:`~koopman_graph.data.EntityRemap` places source nodes into a
+  finite :math:`N_{\max}`. Changing node count without that remap
+  raises.   Homogeneous :class:`~koopman_graph.data.ConditioningContext`
+  records :math:`(\\mu, t, u)` from optional
+  ``parameter_trajectory`` (off root ``__all__``).
+  :func:`~koopman_graph.data.diurnal_control_features` is a Fourier
+  recipe for existing control, not a calendar serializer. Must not
+  import ``nn``. ``koopman="parametric"`` is the interpolant factory
+  kind.
+* :mod:`koopman_graph.operators.graphon` must not import
+  :mod:`koopman_graph.data` (homogeneous ``Data`` only).
+* :mod:`koopman_graph.operators.stochastic_sde` must not import
+  ``model``, ``data``, or ``uq``.
+* :mod:`koopman_graph.operators.cochain` must not import ``model``,
+  ``data``, or ``nn``. The order-2 teaching hook
+  (:func:`~koopman_graph.nn.order2_cochain_teaching`,
+  :func:`~koopman_graph.nn.bind_cochain_operator`) lives in
+  :mod:`koopman_graph.nn.cell_complex` so the operator leaf stays
+  nn-free. Cell-complex teaching ceiling is
+  :data:`~koopman_graph.nn.MAX_CELL_COMPLEX_DEGREE` (3).
+* :mod:`koopman_graph.analysis.memory` must not import ``model``.
+* :mod:`koopman_graph.analysis.hodge_modes` must not import ``model``.
+* :mod:`koopman_graph.nn.constraint_decoders` must not import
+  ``model``. :class:`~koopman_graph.nn.MassConservingDecoder` /
+  :class:`~koopman_graph.nn.PositivityDecoder` /
+  :class:`~koopman_graph.nn.LinearConservingDecoder` wrap an inner
+  decoder; they are not a factory kind and have no checkpoint type
+  string. ``FORMAT_VERSION`` remains 1.
+* :mod:`koopman_graph.operators.linear` must not import ``model``.
+  :class:`~koopman_graph.operators.LinearOperatorProtocol` is
+  implemented by
+  :class:`~koopman_graph.operators.PolynomialGraphLinearOperator`
+  and :class:`~koopman_graph.operators.MatrixFreeGraphLinearOperator`.
+  Dense assembly is refused above
+  :data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
+  Trainer DDP is not a smaller operator representation.
+  ``FORMAT_VERSION`` remains 1.
+* :mod:`koopman_graph.mpc.tube` must not import
+  :mod:`koopman_graph.identification`.
+  :class:`~koopman_graph.mpc.TubeKoopmanMPC` /
+  :class:`~koopman_graph.mpc.TubeMPCReport` are additive discrete
+  only (bilinear / networked / continuous refused). Residual
+  tightening is not a factory kind and has no checkpoint type
+  string. ``FORMAT_VERSION`` remains 1.
+* :mod:`koopman_graph.analysis.causal_intervention` must not import
+  ``model``. :class:`~koopman_graph.analysis.SyntheticSCM` /
+  :func:`~koopman_graph.analysis.recover_synthetic_interventional_edges`
+  are a labeled synthetic do-protocol (teaching three-node SCM).
+  :func:`~koopman_graph.analysis.granger_latent_influence` remains
+  **non-interventional**. Not a factory kind.
+  ``FORMAT_VERSION`` remains 1.
+* ``analysis/`` must not import ``model``. ``interop/`` remains a sink:
+  nothing else imports it.
+
+**Planned layer order (acyclic)**
+
+.. code-block:: text
+
+   L6  benchmark / cli          (manifest runner; no inbound imports)
+   L5  mpc / uq / export        (action and uncertainty; export still restricted)
+   L4  model / training / adaptation (fit, evaluate, identification bind)
+   L3  identification / nn      (solvers, topology head, constraint decoders)
+   L2  operators / analysis     (polynomial graph, linear protocol, cochain, spectrum, memory, Hodge modes)
+   L1  data / graph_utils       (sequences, batching, graph-state, incidence)
+   L0  spectrum_types / protocols / observables
+
+**Capability and API-tier map (0.15 contract)**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 12 18 44
+
+   * - Capability home
+     - Status
+     - API tier
+     - Contracts to preserve
+   * - Default factory / discrete advance
+     - Current
+     - Package
+     - ``koopman=None`` → ``"pernode"``; linear time-invariant per-node;
+       dense sparsity; AMP off
+   * - Root ``__all__``
+     - Current
+     - Public façade
+     - Unchanged vs 0.14; no new root symbols in this contract
+   * - :mod:`koopman_graph.benchmark`
+     - Current
+     - Power-user / CLI
+     - Frozen :class:`~koopman_graph.benchmark.ExperimentManifest`
+       (``benchmark_manifest_v1``) and identity-bound
+       ``summary.json`` (``benchmark_summary_v1``). May import
+       ``baselines``, ``datasets``, ``metrics``, ``model``;
+       no other package imports ``benchmark`` at module load
+       (``cli`` lazy-imports handlers). Teaching GNN methods
+       require non-empty ``deviations``. Dataset SHA-256 mismatch is
+       rejected. ``run`` / ``verify`` do not train and are not SOTA.
+       Default CI verifies ``benchmarks/v0.15/`` stand-ins.
+   * - ``koopman_graph.identification``
+     - Current
+     - Package (off root)
+     - Frozen config / report / backend protocol and closed-form
+       ridge / TLS / constrained-LS solvers. May import
+       ``analysis``, ``losses``, ``operators``, and ``graph_utils``.
+       ``training`` must not
+       import ``identification`` at module load; default Adam path
+       unchanged. ``fit(..., identification=...)`` is opt-in (discrete
+       dense per-node ``K`` only). ``evaluate(...,
+       include_invariance=True)`` attaches finite-sample :math:`\eta`
+       (not a Haseli–Cortés certificate; same operator family).
+       Opt-in ``gate_resdmd`` fills finite-dictionary
+       ``spectral.residual_max``; ``select_resdmd_gated`` and
+       ``ResDMDFitCallback(mode="gate")`` may reject polluted
+       RMSE-only winners (not a certified ResDMD bound).
+       :func:`~koopman_graph.identification.identify_sparse_graph_factors`
+       is closed-form sparse :math:`K_{\\mathrm{self}}` /
+       :math:`K_{\\mathrm{nbr}}` on frozen encodings (not latent SINDy,
+       not :class:`~koopman_graph.losses.KoopmanSparsityLoss`).
+       :func:`~koopman_graph.identification.select_latent_rank` is a
+       frozen-encoding rank grid (not Ray Tune for ``latent_dim``).
+       Must not import ``adaptation``.
+   * - :class:`~koopman_graph.adaptation.JointStateTopologyObserver`
+     - Current
+     - ``adaptation`` (off root)
+     - Kalman filter plus group-sparse graph factors or dense RLS.
+       ``claim_homomorphism=True`` raises unless the encoder is
+       separable **and** the operator is one-tap dense graph
+       (not dual random-walk, not :math:`P\neq 1`). Does not infer a
+       new edge set, does not run ADMM on :math:`A`, and does not
+       certify a three-term MSE bound (``Peng2026KoopmanGKFA``
+       precondition only). Lazy identification import; no checkpoint
+       key; ``FORMAT_VERSION`` remains 1. Class-only separable
+       encoder (no factory ``encoder="separable"``).
+   * - ``koopman="graph"`` + ``koopman_filter_degree``
+     - Current
+     - Factory kwarg
+     - Default ``1`` (current one-tap); :math:`P>1` opt-in; extra hops
+       (:math:`k\ge 2`) are globally shared. Eligible discrete spectrum
+       uses exact Kronecker :math:`\mathrm{eig}(B(\lambda_i))` with
+       :math:`B(\lambda)=\sum_k\lambda^k K_k` (not a sum of independent
+       factor eigenvalues). Dual / orbit stay dense; distributed Arnoldi
+       still requires :math:`P=1`. Inverse of :math:`P\neq 1` remains
+       dense assembly
+   * - Encoder / operator receptive-field check
+     - Current
+     - ``nn`` (off root)
+     - ``fit`` warns when encoder hops exceed discrete graph
+       ``filter_degree``; DiffConv radius is
+       ``num_layers * diffusion_steps``; encoder mixing does not
+       compensate for one-hop :math:`K`; skipped when the operator has
+       no ``receptive_field_hops``
+   * - Multi-graph ``Batch`` collate (``batch_graphs=True``)
+     - Current
+     - ``data`` / ``fit`` (off root)
+     - Opt-in vectorization of the existing ``MultiTrajectory`` loop;
+       batched reconstruction matches the per-sequence mean on modest
+       graphs; default loop unchanged. Not a new multi-topology
+       capability
+   * - :class:`~koopman_graph.spectrum_types.SpectralDiagnostics`
+     - Current
+     - Package (``analysis.__all__``; off root)
+     - Optional on :class:`~koopman_graph.spectrum_types.KoopmanSpectrum`;
+       discrete Nyquist :math:`1/(2\Delta t)` in cycles per unit time
+       (``None`` on generator spectra); per-mode aliasing flag and
+       :math:`\operatorname{sign}(\operatorname{Re}\lambda)`;
+       ``mode_amplitudes`` warns when :math:`\kappa(V)` exceeds
+       ``CONDITION_WARN`` and raises
+       :class:`~koopman_graph.spectrum_types.DefectiveSpectrumError`
+       when :math:`V` is singular; not a finite-horizon
+       :math:`\|K^{k}\|` bound; Kronecker paths may omit ``diagnostics``
+   * - ``matrix_log(..., defective=...)``
+     - Current
+     - Package (``operators``; off root)
+     - Default ``"error"`` raises
+       :class:`~koopman_graph.spectrum_types.DefectiveSpectrumError`
+       on Jordan / singular :math:`V`; ``"schur"`` is SciPy ``logm``
+       on CPU (Al-Mohy–Higham); not a topology-criticality certificate
+   * - :func:`~koopman_graph.analysis.monitor_critical_transition`
+     - Current
+     - Package (``analysis.__all__``; off root)
+     - Sliding-window spectral-gap / near-defectivity heuristic;
+       positive rate means the gap shrank; not a Ghosh-grade
+       topology-criticality certificate
+   * - :class:`~koopman_graph.data.GraphDynamicsConfig`
+     - Current
+     - ``data`` / model kwarg (off root)
+     - Opt-in; default ``graph_dynamics=None`` is the 0.14 path. When a
+       config is passed, ``topology_head`` defaults to
+       ``sparse_candidate`` (at most ``candidate_k`` destinations per
+       node; default 8). ``dense_mlp`` keeps
+       :class:`~koopman_graph.nn.PredictedTopologyHead` with an
+       :math:`N` ceiling of 64. Distinct from
+       ``learn_topology="self_adaptive"`` /
+       :class:`~koopman_graph.nn.AdaptiveAdjacency` (mutually exclusive
+       with a non-``none`` topology head). Additive checkpoint key;
+       ``FORMAT_VERSION`` remains 1. When a head is attached and
+       ``recursive_training`` is true, ``fit`` / ``predict`` /
+       ``evaluate`` / UQ use predicted
+       :math:`\hat A_{t+1}=g_\phi(z_t)` unless
+       ``future_topologies`` or ``topology_policy="hold_last"`` is set.
+       Evaluate on dynamic sequences injects oracle futures only when
+       that recursive path is off.
+       :class:`~koopman_graph.data.GraphStateSnapshot` is a supervision
+       record, not a replacement for
+       :class:`~koopman_graph.data.GraphSnapshotSequence`
+   * - :class:`~koopman_graph.data.EntityRemap`
+     - Current
+     - ``data`` (off root)
+     - Injective placement into a caller-chosen finite
+       :math:`N_{\\max}`. ``entity_ids`` names union rows;
+       ``index`` maps source rows. Sequences with changing
+       :math:`N` raise unless remapped first. Not automatic
+       entity resolution; no unbounded growth; no checkpoint
+       key; ``FORMAT_VERSION`` remains 1. Homogeneous ``Data``
+       only.
+   * - :func:`~koopman_graph.operators.estimate_graphon`
+     - Current
+     - ``operators`` (off root)
+     - Dense teaching fit of constant / product / low-rank
+       kernels on aligned graphs with a shared :math:`N`.
+       Ceiling :math:`N \le 256`. Not a unique graphon
+       identifier, not sparse-graph graphon theory, and not a
+       transferability certificate
+       (``Ruiz2023Transferability``). No checkpoint key;
+       ``FORMAT_VERSION`` remains 1.
+   * - :class:`~koopman_graph.data.ConditioningContext`
+     - Current
+     - ``data`` (off root)
+     - Homogeneous ``parameter_trajectory`` shape
+       :math:`(T, d_\\mu)` plus per-index
+       :math:`(\\mu, t, u)`. Optional ``period`` /
+       ``num_phases`` fill ``phase_index``.
+       :func:`~koopman_graph.data.diurnal_control_features`
+       writes Fourier columns onto existing control; it is
+       not a calendar serializer. Data record only; default
+       operator is unchanged. ``koopman="switched"`` /
+       ``"mixture"`` are latent-gated or piecewise LTI maps,
+       not :math:`K(\\mu)` (``Macesic2018Nonautonomous``).
+       Discrete uniform-:math:`\\Delta t` validation is
+       unchanged; use continuous ``predict_at`` or supplied
+       gEDMD derivatives for irregular sampling.
+   * - :class:`~koopman_graph.operators.ParametricKoopmanOperator`
+     - Current
+     - ``operators`` (off root)
+     - Discrete interpolant :math:`K(\\mu)=\\sum_j \\alpha_j(\\mu) K_j`
+       with RBF or simplex weights (``koopman="parametric"``). Distinct
+       from switched / mixture. Convex combinations preserve dense /
+       row-stochastic / doubly-stochastic factors; symplectic / ODO /
+       Schur / dissipative / Lyapunov / auxiliary-spectral mixes raise.
+       Export refuses the interpolant. Additive checkpoint type string;
+       ``FORMAT_VERSION`` remains 1. Leave-one-regime-out helper
+       :func:`~koopman_graph.operators.leave_one_regime_out` compares
+       the interpolant to pooled LTI on latent pairs.
+   * - :class:`~koopman_graph.operators.CochainState` /
+       :class:`~koopman_graph.operators.CochainKoopmanOperator`
+     - Current
+     - ``operators`` (off root)
+     - Degree-specific :math:`k\\le 1` maps on a static signed
+       :math:`B_1`. Not a factory kind; default
+       ``koopman=None`` stays ``"pernode"``. Distinct from
+       ``koopman="hodge"``. Face latents are stored, not evolved.
+       :func:`~koopman_graph.operators.boundary_nilpotency` flags
+       :math:`B_1 B_2\\approx 0` at atol ``1e-6``. Not TopologicX
+       / sheaf parity (``Lim2020Hodge``, ``TopoX2024``). No
+       checkpoint key; ``FORMAT_VERSION`` remains 1
+   * - :func:`~koopman_graph.nn.order2_cochain_teaching` /
+       :func:`~koopman_graph.nn.bind_cochain_operator`
+     - Current
+     - ``nn`` (off root)
+     - Order-2 filled triangle bound to
+       :class:`~koopman_graph.operators.CochainKoopmanOperator`.
+       :math:`k=2` stored, not evolved. Cell-complex ceiling
+       :data:`~koopman_graph.nn.MAX_CELL_COMPLEX_DEGREE` (3).
+       Sheaf restriction maps stay learned-optional (default
+       diagonal). Not TopologicX / TDA ecosystem parity
+       (``TopoX2024``). ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.operators.DriftDiffusionKoopman`
+     - Current
+     - ``operators`` (off root)
+     - Opt-in :math:`dz=Lz\\,dt+F\\,dW` stepper with Euler–Maruyama or
+       Yosida increments. ``forward`` is the conditional-expectation
+       semigroup; ``advance`` samples a path. Not a factory kind;
+       ``dynamics_mode="stochastic"`` stays diagonal process noise.
+       Not certified SDE theory and not SDMD
+       (``Xu2025StochasticSemigroup``, ``Zhou2025Yosida``). No
+       checkpoint key; ``FORMAT_VERSION`` remains 1.
+   * - :class:`~koopman_graph.uq.JointCoverageSpec`
+     - Current
+     - ``uq`` (off root)
+     - Named coverage estimand. Default
+       ``target="per_node_marginal"``. Simultaneous / event targets
+       and ``block!="none"`` raise. Conformal
+       :attr:`~koopman_graph.uq.ConformalKoopmanUQ.coverage` always
+       names the target. Proper scores
+       :func:`~koopman_graph.uq.gaussian_crps`,
+       :func:`~koopman_graph.uq.gaussian_nll`, and
+       :func:`~koopman_graph.uq.energy_score` are not coverage
+       certificates (``Schlembach2025Conformal``).
+   * - :func:`~koopman_graph.analysis.markov_closure_report`
+     - Current
+     - Package (``analysis.__all__``; off root)
+     - Ljung–Box-style flag on residual-energy autocorrelation
+       (lags in timesteps). Scalar portmanteau, not a matrix-variate
+       test and not Mori–Zwanzig identification
+       (``Lin2021MoriZwanzig``, ``Ljung1978Box``)
+   * - :class:`~koopman_graph.analysis.FiniteMemoryKoopman`
+     - Current
+     - Package (``analysis.__all__``; off root)
+     - Convolution
+       :math:`z_{t+1}=z_t\\Omega^{\\top}+\\sum_{s=1}^{M}z_{t-s}K_s^{\\top}`.
+       Not a factory kind; not
+       :class:`~koopman_graph.nn.delay.DelayEmbeddingEncoder`; not
+       HAVOK (``Brunton2017HAVOK``). Memory-order selection is not
+       implemented. No checkpoint key; ``FORMAT_VERSION`` remains 1
+   * - :func:`~koopman_graph.analysis.hodge_decompose_modes` /
+       :class:`~koopman_graph.analysis.HodgeModeComponents`
+     - Current
+     - Package (``analysis.__all__``; off root)
+     - Combinatorial Hodge split of stored eigenvector columns
+       (gradient / curl / harmonic) on a static signed
+       :math:`B_1`. :math:`k\\in\\{0,1\\}`; face curl is not
+       shipped. Analysis-only — not a factory kind, not physical
+       circulation, not ``koopman="hodge"``, and not TopologicX /
+       sheaf parity (``Lim2020Hodge``, ``TopoX2024``).
+       ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.operators.EquivariantKoopmanOperator`
+     - Current
+     - ``operators`` (off root)
+     - Scalar block plus ``scale * I_3`` vectors and one
+       additional :math:`l=2` irrep (``scale * I_5``;
+       ``n_tensors``). Not a factory kind; default encode may still
+       project to invariants. Rotation test uses ``e3nn``
+       (``[equivariance]``); the operator does not import ``e3nn``.
+       Not a molecular MD production stack (``Thomas2018TFN``,
+       ``Geiger2022e3nn``). ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.operators.LinearOperatorProtocol` /
+       :class:`~koopman_graph.operators.PolynomialGraphLinearOperator`
+     - Current
+     - ``operators`` (off root)
+     - Common ``matvec`` / ``rmatvec`` / ``solve`` /
+       ``expm_action`` / leading eigpairs / residual norms.
+       One-tap wrapper reuses ``matrix_free``. Dense assembly
+       refused above
+       :data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
+       Trainer DDP does not shrink the representation. Kronecker
+       exact spectrum remains a special case. Not a factory kind.
+       ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.nn.MassConservingDecoder` /
+       :class:`~koopman_graph.nn.LinearConservingDecoder` /
+       :class:`~koopman_graph.nn.PositivityDecoder`
+     - Current
+     - ``nn`` (off root)
+     - Opt-in decoded-space simplex / affine mass,
+       :math:`Cx=c_0`, and positivity heads on named channels.
+       Not a factory kind; no checkpoint type string.
+       :mod:`koopman_graph.nn.constraint_decoders` must not import
+       ``model``. Latent symplectic :math:`K` alone does not
+       conserve decoded mass (``Greydanus2019HNN``). IEEE-118
+       remains Laplacian diffusion, not AC power flow.
+       ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.mpc.TubeKoopmanMPC` /
+       :class:`~koopman_graph.mpc.TubeMPCReport`
+     - Current
+     - ``mpc`` (off root)
+     - Residual-tube tightening from conformal or ensemble
+       radii on additive discrete plants. ``evaluate`` reports
+       constraint-violation rate, feasibility rate, and cost
+       against nominal boxes. Not a chance-constraint solver,
+       not recursive feasibility, and not a Lyapunov
+       closed-loop certificate (``Zhang2022TubeMPC``). Bilinear
+       / networked / continuous plants raise. Coverage stays
+       ``per_node_marginal``. Not a factory kind.
+       ``FORMAT_VERSION`` remains 1
+   * - :class:`~koopman_graph.analysis.SyntheticSCM` /
+       :class:`~koopman_graph.analysis.SyntheticInterventionReport` /
+       :func:`~koopman_graph.analysis.recover_synthetic_interventional_edges`
+     - Current
+     - ``analysis`` (off root)
+     - Labeled synthetic linear Gaussian SCM and paired
+       do-interventions. Teaching fixture recovers a known
+       edge ``0 → 1``.
+       :func:`~koopman_graph.analysis.granger_latent_influence`
+       remains **non-interventional**. Not a factory kind and
+       not field-data causal discovery.
+       ``FORMAT_VERSION`` remains 1
+   * - Checkpoint schema
+     - Current
+     - Serialization
+     - ``FORMAT_VERSION`` 1; additive type strings only
+
 Related documentation
 ---------------------
 
 * :doc:`api` — module-level API reference
 * :doc:`capabilities` — feature inventory
 * :doc:`limitations` — scope boundaries and when not to use
-* :doc:`graphon` — graphon sampling and continuum-limit citations
+* :doc:`graphon` — graphon sampling, dense teaching estimation, and
+  continuum-limit citations
+* :doc:`benchmarks` — identity-bound manifests and ``benchmark`` CLI
+* :doc:`identification` — opt-in closed-form :math:`K` and rank grid
+* :doc:`spectral_diagnostics` — conditioning, Nyquist, and
+  :math:`\kappa(V)`
+* :doc:`graph_dynamics` — predicted topology versus hold-last
+* :doc:`matrix_free` — ``LinearOperatorProtocol`` wrappers
+* :doc:`criticality` — sliding-window spectral-gap monitor
+* :doc:`time_conditioning` — :math:`(\mu, t, u)` records and
+  parametric :math:`K(\mu)`
 * :doc:`quickstart` — end-user training and prediction walkthrough
 * :doc:`cli` — config-driven console script
 * :doc:`faq` — install / import / checkpoint troubleshooting and support routing

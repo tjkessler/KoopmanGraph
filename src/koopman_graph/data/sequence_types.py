@@ -80,6 +80,17 @@ class SnapshotSequenceLike(Protocol):
         ...
 
     @property
+    def parameter_trajectory(self) -> Tensor | None:
+        """Optional regime coordinates aligned with timesteps.
+
+        Returns
+        -------
+        Tensor or None
+            Coordinates with shape ``(T, d_mu)``, or ``None``.
+        """
+        ...
+
+    @property
     def observation_masks(self) -> Tensor | None:
         """Optional boolean observation masks ``(T, N)``.
 

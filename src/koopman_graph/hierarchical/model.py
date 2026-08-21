@@ -1326,6 +1326,8 @@ class HierarchicalGraphKoopmanModel(nn.Module):
         }
         if sequence.timestamps is not None:
             kwargs["timestamps"] = sequence.timestamps
+        if getattr(sequence, "parameter_trajectory", None) is not None:
+            kwargs["parameter_trajectory"] = sequence.parameter_trajectory
         # Observation masks are fine-node specific; drop on coarse (documented).
         if self._uses_hetero:
             return (

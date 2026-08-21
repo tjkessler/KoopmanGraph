@@ -1,0 +1,3 @@
+KoopmanGraph smoke-topology-transfer v1
+protocol: unseen-N / rewire stand-in with hold_last, pernode, joint_ls
+this file is a hashed stand-in; negative transfer remains allowed

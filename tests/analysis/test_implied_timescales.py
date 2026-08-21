@@ -20,6 +20,7 @@ def test_analytic_diagonal_oracle_in_steps() -> None:
     assert report.tau == 1.0
     assert report.timestep is None
     assert report.valid.tolist() == [True, True, False, False]
+    assert report.aliasing_warning.tolist() == [False, False, False, False]
 
     expected_0 = -1.0 / math.log(0.9)
     expected_1 = -1.0 / math.log(0.5)
@@ -65,8 +66,25 @@ def test_near_unit_and_near_zero_marked_invalid() -> None:
     )
     report = implied_timescales(eigenvalues, lag_steps=3, magnitude_atol=eps)
     assert report.valid.tolist() == [False, False, False, True]
+    assert report.aliasing_warning.tolist() == [False, False, False, True]
     assert all(math.isinf(float(v)) for v in report.timescales[:3].tolist())
     assert report.timescales[3].item() == pytest.approx(-3.0 / math.log(0.7))
+
+
+def test_negative_and_positive_share_timescale_only_negative_flags() -> None:
+    """λ=-0.9 flags aliasing; λ=+0.9 does not; both remain valid.
+
+    Independent oracle: t = -1 / ln(0.9) for both magnitudes.
+    """
+    report = implied_timescales(
+        torch.tensor([-0.9, 0.9], dtype=torch.float64),
+        lag_steps=1,
+    )
+    assert report.aliasing_warning.tolist() == [True, False]
+    assert report.valid.tolist() == [True, True]
+    expected = -1.0 / math.log(0.9)
+    assert report.timescales[0].item() == pytest.approx(expected)
+    assert report.timescales[1].item() == pytest.approx(expected)
 
 
 def test_argument_validation() -> None:

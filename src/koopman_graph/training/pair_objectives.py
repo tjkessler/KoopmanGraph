@@ -9,6 +9,7 @@ non-private names (no cross-module leading-underscore imports).
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from inspect import Parameter, signature
 from typing import TYPE_CHECKING
 
 import torch
@@ -38,6 +39,10 @@ from koopman_graph.nn import HypergraphDecoder, RelGraphDecoder, RelGraphEncoder
 from koopman_graph.nn.heterogeneous import (
     resolve_multiplex_relation_inputs,
     resolve_typed_relation_inputs,
+)
+from koopman_graph.nn.predicted_topology import (
+    decode_weighted_topology,
+    recursive_training_enabled,
 )
 from koopman_graph.operators import (
     GlobalLocalKoopmanOperator,
@@ -648,6 +653,27 @@ def pair_control(sequence: SnapshotSequence, timestep: int) -> Tensor | None:
     return control_at(timestep)
 
 
+def pair_parameters(sequence: SnapshotSequence, timestep: int) -> Tensor | None:
+    """Return the regime coordinate for transition ``timestep -> timestep + 1``.
+
+    Parameters
+    ----------
+    sequence : GraphSnapshotSequence or HeteroGraphSnapshotSequence
+        Snapshot sequence that may carry ``parameter_trajectory``.
+    timestep : int
+        Index of the source snapshot in the transition pair.
+
+    Returns
+    -------
+    Tensor or None
+        :math:`\\mu` with shape ``(d_mu,)`` when present, otherwise ``None``.
+    """
+    trajectory = getattr(sequence, "parameter_trajectory", None)
+    if trajectory is None:
+        return None
+    return trajectory[timestep]
+
+
 def mean_pair_sequence_loss(
     model: TrainableKoopmanModel,
     sequence: SnapshotSequence,
@@ -888,6 +914,43 @@ def _backward_consistency_pair(
     )
 
 
+def _homogeneous_operator_topology(
+    model: TrainableKoopmanModel,
+    z: Tensor,
+    snapshot_t: Data,
+    snapshot_t1: Data,
+) -> tuple[Tensor, Tensor | None]:
+    """Return operator topology for a homogeneous one-step pair.
+
+    Recursive graph-state uses predicted :math:`\\hat A_{t+1}=g_\\phi(z_t)`
+    with sigmoid weights. Otherwise the teacher target snapshot topology
+    is used.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``predicted_topology`` when recursive.
+    z : Tensor
+        Encoded latents at time ``t``.
+    snapshot_t : Data
+        Source snapshot (candidate seed).
+    snapshot_t1 : Data
+        Teacher target snapshot.
+
+    Returns
+    -------
+    tuple[Tensor, Tensor or None]
+        COO index and optional weights for the operator step.
+    """
+    if recursive_training_enabled(model):
+        head = getattr(model, "predicted_topology", None)
+        if head is None:
+            msg = "recursive graph-state training requires a predicted topology head"
+            raise ValueError(msg)
+        return decode_weighted_topology(head, z, snapshot_t.edge_index)
+    return snapshot_t1.edge_index, getattr(snapshot_t1, "edge_weight", None)
+
+
 def one_step_prediction(
     model: TrainableKoopmanModel,
     sequence: SnapshotSequence,
@@ -973,6 +1036,7 @@ def one_step_prediction(
         cache is not None
         or uses_global_local
         or (n_delays > 1 and callable(getattr(model, "encode_at", None)))
+        or recursive_training_enabled(model)
     )
     if use_encode_path:
         snapshot_t = sequence[timestep]
@@ -987,19 +1051,23 @@ def one_step_prediction(
             timestep,
             default_time_step=default_delta_t,
         )
+        op_index, op_weight = _homogeneous_operator_topology(
+            model, z, snapshot_t, snapshot_t1
+        )
         z_next = propagate_latent(
             model.koopman,
             z,
             control=pair_control(sequence, timestep),
             delta_t=delta_t,
             default_delta_t=default_delta_t,
-            edge_index=snapshot_t1.edge_index,
-            edge_weight=getattr(snapshot_t1, "edge_weight", None),
+            edge_index=op_index,
+            edge_weight=op_weight,
             hyperedge_index=snapshot_hyperedge_index(snapshot_t1),
             hyperedge_weight=snapshot_hyperedge_weight(snapshot_t1),
             tail_index=snapshot_tail_index(snapshot_t1),
             head_index=snapshot_head_index(snapshot_t1),
             latent_window=_pair_latent_window(model, sequence, timestep, cache=cache),
+            parameters=pair_parameters(sequence, timestep),
         )
         if isinstance(model.decoder, HypergraphDecoder):
             hyperedge_index = snapshot_hyperedge_index(snapshot_t)
@@ -1011,21 +1079,37 @@ def one_step_prediction(
                 hyperedge_index,
                 snapshot_hyperedge_weight(snapshot_t),
             )
+        decode_index = (
+            op_index if recursive_training_enabled(model) else snapshot_t.edge_index
+        )
+        decode_weight = (
+            op_weight
+            if recursive_training_enabled(model)
+            else getattr(snapshot_t, "edge_weight", None)
+        )
         return model.decoder(
             z_next,
-            snapshot_t.edge_index,
-            getattr(snapshot_t, "edge_weight", None),
+            decode_index,
+            decode_weight,
         )
 
-    return model(
-        sequence[timestep],
-        control=pair_control(sequence, timestep),
-        delta_t=resolve_pair_delta_t(
+    kwargs: dict[str, object] = {
+        "control": pair_control(sequence, timestep),
+        "delta_t": resolve_pair_delta_t(
             sequence,
             timestep,
             default_time_step=model_default_delta_t(model),
         ),
-    )
+    }
+    forward = getattr(model, "forward", model)
+    try:
+        params = signature(forward).parameters
+    except (TypeError, ValueError):
+        params = {}
+    accepts_var_kw = any(item.kind == Parameter.VAR_KEYWORD for item in params.values())
+    if accepts_var_kw or "parameters" in params:
+        kwargs["parameters"] = pair_parameters(sequence, timestep)
+    return model(sequence[timestep], **kwargs)  # type: ignore[arg-type]
 
 
 def one_step_predictions(

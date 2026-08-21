@@ -1,0 +1,37 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "smoke-telemetry",
+  "manifest_sha256": "0b8da52e31d006b1bdef764dc3a4302414e118cd13c0b2695d2dde5a12d03560",
+  "dataset_sha256": "bcb2f305aaa35fbb8a5f0b2caff14192a2d66613c5970e214b0127175b1b6aba",
+  "track": "telemetry",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "pernode_ls",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    3,
+    6,
+    12
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "pernode"
+  ],
+  "package_version": "0.14.0",
+  "executed": false,
+  "summary_sha256": "0b6c25dfe9139c84fcf69f3032bc969f47ea55a7dd02b5249480864c3101d31d"
+}

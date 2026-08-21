@@ -33,6 +33,10 @@ callable so intentional decode-topology differences stay explicit:
 * **Hold-last (inference):** :func:`hold_last_topology_at` — start from the
   initial graph topology; when ``future_topologies[step]`` is provided, update
   and retain that topology for later steps.
+* **Predicted graph-state (opt-in):** a ``topology_at(step, latent)``
+  callable that scores :math:`\\hat A_{t+1}=g_\\phi(z_t)` on a candidate
+  set and returns sigmoid edge weights. Unary ``topology_at(step)``
+  callables remain valid.
 * **Per-step / teacher targets (training):** :func:`snapshot_topology_at` —
   decode step ``i`` uses the topology of snapshot ``i`` (typically the
   observed target at ``start + i + 1``).
@@ -72,11 +76,51 @@ RelationDecoderFn = Callable[
     [Tensor, Sequence[Tensor], Sequence[Tensor | None] | None],
     Tensor | dict[str, Tensor],
 ]
-TopologyAtFn = Callable[[int], tuple[Tensor, Tensor | None]]
+TopologyAtFn = Callable[..., tuple[Tensor, Tensor | None]]
 RelationTopologyAtFn = Callable[[int], tuple[list[Tensor], list[Tensor | None]]]
 ControlAtFn = Callable[[int], Tensor | None]
+ParametersAtFn = Callable[[int], Tensor | None]
 DeltaTAtFn = Callable[[int], float | Tensor | None]
 PresenceAtFn = Callable[[int], Tensor | None]
+
+
+def call_topology_at(
+    topology_at: TopologyAtFn,
+    step: int,
+    latent: Tensor,
+) -> tuple[Tensor, Tensor | None]:
+    """Dispatch unary or latent-conditioned ``topology_at``.
+
+    Parameters
+    ----------
+    topology_at : callable
+        ``topology_at(step)`` or ``topology_at(step, latent)``.
+    step : int
+        Zero-based rollout step.
+    latent : Tensor
+        Current node latents (ignored by unary callables).
+
+    Returns
+    -------
+    tuple[Tensor, Tensor or None]
+        Decode ``edge_index`` and optional ``edge_weight``.
+    """
+    try:
+        signature = inspect.signature(topology_at)
+    except (TypeError, ValueError):
+        return topology_at(step)
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    if len(positional) >= 2:
+        return topology_at(step, latent)
+    return topology_at(step)
 
 
 def resolve_delta_t(
@@ -118,9 +162,16 @@ def _topology_kwargs_for(
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
     num_nodes_dict: Mapping[str, int] | None = None,
+    parameters: Tensor | None = None,
+    phase_index: int | None = None,
 ) -> dict[
     str,
-    Tensor | None | Sequence[Tensor] | Sequence[Tensor | None] | Mapping[str, int],
+    Tensor
+    | None
+    | Sequence[Tensor]
+    | Sequence[Tensor | None]
+    | Mapping[str, int]
+    | int,
 ]:
     """Return topology / window kwargs accepted by ``method``.
 
@@ -153,6 +204,11 @@ def _topology_kwargs_for(
         Optional per-relation edge weights.
     num_nodes_dict : mapping of str to int or None, optional
         Per-type node counts for typed hetero operators.
+    parameters : Tensor or None, optional
+        Regime coordinate forwarded when ``method`` declares ``parameters``.
+    phase_index : int or None, optional
+        Switched-by-clock mode forwarded when ``method`` declares
+        ``phase_index``.
 
     Returns
     -------
@@ -165,7 +221,12 @@ def _topology_kwargs_for(
     )
     kwargs: dict[
         str,
-        Tensor | None | Sequence[Tensor] | Sequence[Tensor | None] | Mapping[str, int],
+        Tensor
+        | None
+        | Sequence[Tensor]
+        | Sequence[Tensor | None]
+        | Mapping[str, int]
+        | int,
     ] = {}
     if accepts_var_kw or "edge_index" in params:
         kwargs["edge_index"] = edge_index
@@ -187,6 +248,10 @@ def _topology_kwargs_for(
         kwargs["latent_window"] = latent_window
     if "num_nodes_dict" in params:
         kwargs["num_nodes_dict"] = num_nodes_dict
+    if accepts_var_kw or "parameters" in params:
+        kwargs["parameters"] = parameters
+    if accepts_var_kw or "phase_index" in params:
+        kwargs["phase_index"] = phase_index
     return kwargs
 
 
@@ -207,6 +272,8 @@ def propagate_latent(
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
     num_nodes_dict: Mapping[str, int] | None = None,
+    parameters: Tensor | None = None,
+    phase_index: int | None = None,
 ) -> Tensor:
     """Advance latent states via the unified Koopman contract.
 
@@ -251,6 +318,11 @@ def propagate_latent(
     num_nodes_dict : mapping of str to int or None, optional
         Per-type node counts for typed hetero operators (forwarded only when
         the operator's ``advance`` declares the parameter).
+    parameters : Tensor or None, optional
+        Regime coordinate :math:`\\mu` forwarded when ``advance`` declares
+        it (parametric interpolants).
+    phase_index : int or None, optional
+        Switched-by-clock mode forwarded when ``advance`` declares it.
 
     Returns
     -------
@@ -274,6 +346,8 @@ def propagate_latent(
             edge_indices=edge_indices,
             edge_weights=edge_weights,
             num_nodes_dict=num_nodes_dict,
+            parameters=parameters,
+            phase_index=phase_index,
         ),
     )
 
@@ -296,6 +370,8 @@ def inverse_propagate_latent(
     edge_indices: Sequence[Tensor] | None = None,
     edge_weights: Sequence[Tensor | None] | None = None,
     num_nodes_dict: Mapping[str, int] | None = None,
+    parameters: Tensor | None = None,
+    phase_index: int | None = None,
 ) -> Tensor:
     """Apply one inverse Koopman step via the unified contract.
 
@@ -338,6 +414,11 @@ def inverse_propagate_latent(
         Optional per-relation edge weights.
     num_nodes_dict : mapping of str to int or None, optional
         Per-type node counts for typed hetero operators.
+    parameters : Tensor or None, optional
+        Regime coordinate forwarded when ``inverse_advance`` declares it.
+    phase_index : int or None, optional
+        Switched-by-clock mode forwarded when ``inverse_advance``
+        declares it.
 
     Returns
     -------
@@ -362,6 +443,8 @@ def inverse_propagate_latent(
             tail_index=tail_index,
             head_index=head_index,
             num_nodes_dict=num_nodes_dict,
+            parameters=parameters,
+            phase_index=phase_index,
         ),
     )
 
@@ -381,6 +464,8 @@ def advance_and_decode(
     tail_index: Tensor | None = None,
     head_index: Tensor | None = None,
     latent_window: Tensor | None = None,
+    parameters: Tensor | None = None,
+    phase_index: int | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Advance latent state once and decode to physical node features.
 
@@ -415,6 +500,10 @@ def advance_and_decode(
         Directed-hypergraph incidence for random-walk modes.
     latent_window : Tensor or None, optional
         Latent history for global/local operators.
+    parameters : Tensor or None, optional
+        Regime coordinate forwarded to parametric interpolants.
+    phase_index : int or None, optional
+        Switched-by-clock mode forwarded to switched operators.
 
     Returns
     -------
@@ -434,6 +523,8 @@ def advance_and_decode(
         tail_index=tail_index,
         head_index=head_index,
         latent_window=latent_window,
+        parameters=parameters,
+        phase_index=phase_index,
     )
     prediction = decoder(z_next, edge_index, edge_weight)
     return z_next, prediction
@@ -535,6 +626,7 @@ def autoregressive_latent_rollout(
     steps: int,
     topology_at: TopologyAtFn,
     control_at: ControlAtFn | None = None,
+    parameters_at: ParametersAtFn | None = None,
     delta_t_at: DeltaTAtFn | None = None,
     presence_at: PresenceAtFn | None = None,
     initial_features: Tensor | None = None,
@@ -568,11 +660,16 @@ def autoregressive_latent_rollout(
     steps : int
         Number of advance/decode steps (must be >= 1).
     topology_at : callable
-        ``topology_at(step) -> (edge_index, edge_weight)`` for decode step
-        ``step`` in ``0 .. steps - 1``.
+        ``topology_at(step) -> (edge_index, edge_weight)`` or
+        ``topology_at(step, latent) -> (edge_index, edge_weight)`` for
+        decode step ``step`` in ``0 .. steps - 1``. Unary callables keep
+        the 0.14 hold-last / teacher-target schedules.
     control_at : callable or None, optional
         ``control_at(step) -> Tensor | None``. When omitted, every step is
         uncontrolled.
+    parameters_at : callable or None, optional
+        ``parameters_at(step) -> Tensor | None``. When omitted, parametric
+        operators use a stored :math:`\\mu` or raise.
     delta_t_at : callable or None, optional
         ``delta_t_at(step) -> float | Tensor | None``. When omitted (or when a
         step returns ``None``), ``default_delta_t`` is used.
@@ -618,8 +715,9 @@ def autoregressive_latent_rollout(
     accepts_window = "latent_window" in inspect.signature(koopman.advance).parameters
     local_window = int(getattr(koopman, "local_window", 0) or 0)
     for step in range(steps):
-        edge_index, edge_weight = topology_at(step)
+        edge_index, edge_weight = call_topology_at(topology_at, step, latent)
         control = None if control_at is None else control_at(step)
+        parameters = None if parameters_at is None else parameters_at(step)
         delta_t = None if delta_t_at is None else delta_t_at(step)
         latent_window = None
         if accepts_window and local_window > 0:
@@ -644,6 +742,7 @@ def autoregressive_latent_rollout(
             tail_index=tail_index,
             head_index=head_index,
             latent_window=latent_window,
+            parameters=parameters,
         )
         if presence_at is not None:
             presence = presence_at(step)

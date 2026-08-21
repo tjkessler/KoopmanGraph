@@ -360,6 +360,7 @@ def induce_neighbor_subgraph_sequence(
         snapshots,
         control_inputs=control_inputs,
         timestamps=sequence.timestamps,
+        parameter_trajectory=sequence.parameter_trajectory,
         observation_masks=observation_masks,
         presence_masks=presence_masks,
         entity_ids=entity_ids,

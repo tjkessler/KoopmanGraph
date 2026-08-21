@@ -29,17 +29,24 @@ Capability layout
     composition (re-exports pair helpers for stable deep imports).
 ``epochs``
     ``train_one_epoch``, ``train_windowed_epoch``, ``eval_one_epoch``.
+``batched_objectives``
+    Opt-in ``compute_batched_training_loss`` for collated multi-graph
+    reconstruction / forward (package import; not on root ``__all__``).
 ``inputs``
     Multi-trajectory classification and
     ``resolve_training_sequences`` / ``resolve_validation_sequences``.
 ``loop``
     ``run_fit_loop`` plus early-stopping / LR-scheduler helpers.
 ``callbacks``
-    Observe-only :class:`FitCallback` protocol and :class:`NoOpFitCallback`
-    (fit-loop wiring is separate; optional trackers live under
-    ``koopman_graph.tracking`` when added).
+    Observe-only :class:`FitCallback` protocol, :class:`NoOpFitCallback`,
+    and :class:`ResDMDFitCallback` (default ``mode="observe"``;
+    ``mode="gate"`` may raise at fit end without mutating parameters).
 """
 
+from koopman_graph.training.batched_objectives import (
+    compute_batched_training_loss,
+    validate_graph_batching_request,
+)
 from koopman_graph.training.callbacks import (
     FitCallback,
     NoOpFitCallback,
@@ -100,6 +107,7 @@ __all__ = [
     "TrainingInput",
     "ValidationInput",
     "compute_backward_consistency_sequence_loss",
+    "compute_batched_training_loss",
     "compute_eigenvalue_regularization_loss",
     "compute_forward_consistency_sequence_loss",
     "compute_rollout_loss",
@@ -121,4 +129,5 @@ __all__ = [
     "should_stop_early",
     "train_one_epoch",
     "train_windowed_epoch",
+    "validate_graph_batching_request",
 ]

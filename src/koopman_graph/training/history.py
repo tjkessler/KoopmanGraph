@@ -129,6 +129,10 @@ class TrainingLossBreakdown:
         Worst-case (max over nodes) reconstruction loss.
     vamp2 : Tensor
         Topology-blind VAMP-2 precursor loss (``-vamp2_score``).
+    topology : Tensor
+        Unweighted structural BCE on predicted next-step edges.
+    presence : Tensor
+        Unweighted presence BCE (zero when masks are absent).
     total : Tensor
         Weighted sum of all active loss terms.
     """
@@ -144,6 +148,8 @@ class TrainingLossBreakdown:
     sparsity: Tensor = field(default_factory=lambda: torch.tensor(0.0))
     worst_case: Tensor = field(default_factory=lambda: torch.tensor(0.0))
     vamp2: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    topology: Tensor = field(default_factory=lambda: torch.tensor(0.0))
+    presence: Tensor = field(default_factory=lambda: torch.tensor(0.0))
 
     @classmethod
     def zeros(cls, device: torch.device) -> TrainingLossBreakdown:
@@ -172,6 +178,8 @@ class TrainingLossBreakdown:
             sparsity=zero,
             worst_case=zero,
             vamp2=zero,
+            topology=zero,
+            presence=zero,
         )
 
     def to_floats(self) -> dict[str, float]:
@@ -182,7 +190,8 @@ class TrainingLossBreakdown:
         dict of str to float
             Mapping with keys ``reconstruction``, ``forward``, ``backward``,
             ``rollout``, ``eigenvalue``, ``lie``, ``pde``, ``sparsity``,
-            ``worst_case``, ``vamp2``, and ``total``.
+            ``worst_case``, ``vamp2``, ``topology``, ``presence``, and
+            ``total``.
         """
         return {
             "reconstruction": float(self.reconstruction.detach().cpu()),
@@ -195,6 +204,8 @@ class TrainingLossBreakdown:
             "sparsity": float(self.sparsity.detach().cpu()),
             "worst_case": float(self.worst_case.detach().cpu()),
             "vamp2": float(self.vamp2.detach().cpu()),
+            "topology": float(self.topology.detach().cpu()),
+            "presence": float(self.presence.detach().cpu()),
             "total": float(self.total.detach().cpu()),
         }
 
@@ -234,6 +245,8 @@ def mean_training_loss_breakdown(
         sparsity=sum(b.sparsity for b in breakdowns) / count,
         worst_case=sum(b.worst_case for b in breakdowns) / count,
         vamp2=sum(b.vamp2 for b in breakdowns) / count,
+        topology=sum(b.topology for b in breakdowns) / count,
+        presence=sum(b.presence for b in breakdowns) / count,
         total=sum(b.total for b in breakdowns) / count,
     )
 
@@ -272,6 +285,10 @@ class FitHistory:
         Per-epoch unweighted worst-case reconstruction loss.
     vamp2_loss : tuple of float
         Per-epoch unweighted VAMP-2 precursor loss (``-vamp2_score``).
+    topology_loss : tuple of float
+        Per-epoch unweighted structural topology BCE.
+    presence_loss : tuple of float
+        Per-epoch unweighted presence BCE.
     val_loss : tuple of float or None
         Per-epoch validation loss when a validation sequence is provided.
     val_reconstruction_loss : tuple of float or None
@@ -294,6 +311,10 @@ class FitHistory:
         Per-epoch unweighted validation worst-case reconstruction loss.
     val_vamp2_loss : tuple of float or None
         Per-epoch unweighted validation VAMP-2 precursor loss.
+    val_topology_loss : tuple of float or None
+        Per-epoch unweighted validation structural topology BCE.
+    val_presence_loss : tuple of float or None
+        Per-epoch unweighted validation presence BCE.
     stopped_early : bool
         Whether training stopped before the requested epoch count.
     best_epoch : int or None
@@ -316,6 +337,8 @@ class FitHistory:
     sparsity_loss: tuple[float, ...] = ()
     worst_case_loss: tuple[float, ...] = ()
     vamp2_loss: tuple[float, ...] = ()
+    topology_loss: tuple[float, ...] = ()
+    presence_loss: tuple[float, ...] = ()
     val_loss: tuple[float, ...] | None = None
     val_reconstruction_loss: tuple[float, ...] | None = None
     val_forward_loss: tuple[float, ...] | None = None
@@ -327,6 +350,8 @@ class FitHistory:
     val_sparsity_loss: tuple[float, ...] | None = None
     val_worst_case_loss: tuple[float, ...] | None = None
     val_vamp2_loss: tuple[float, ...] | None = None
+    val_topology_loss: tuple[float, ...] | None = None
+    val_presence_loss: tuple[float, ...] | None = None
     stopped_early: bool = False
     best_epoch: int | None = None
     best_loss: float | None = None

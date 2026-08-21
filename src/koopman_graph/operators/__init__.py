@@ -45,7 +45,19 @@ Capability layout
     / structural / propagation peers and thin orchestration.
 ``graph``
     :class:`~koopman_graph.operators.graph.GraphKoopmanOperator` (spatially
-    coupled discrete advance).
+    coupled discrete advance; optional monomial ``filter_degree``).
+``polynomial_graph``
+    Dense monomial Kronecker assembly and repeated-adjacency matvec
+    helpers used by the graph operator when ``filter_degree>1`` (not a
+    second public operator class; not in package ``__all__``).
+``linear``
+    :class:`~koopman_graph.operators.LinearOperatorProtocol` plus
+    polynomial-graph and one-tap
+    :class:`~koopman_graph.operators.MatrixFreeGraphLinearOperator`
+    wrappers (off root ``__all__``). Dense assembly is refused above
+    :data:`~koopman_graph.operators.MAX_DENSE_LINEAR_OPERATOR_SIZE`.
+    Trainer DDP does **not** shrink that representation. Exact
+    Kronecker spectrum remains a special case.
 ``graph_inverse``
     Block-diagonal / Jacobi approximate ``inverse_advance`` helpers for
     graph / hypergraph ``sparsity="block_diagonal"`` (no ``graph/`` subtree).
@@ -63,14 +75,18 @@ Capability layout
     extras; does **not** enable multi-GPU training).
 ``kronecker_spectrum``
     Exact Kronecker-sum spectrum reduction for eligible networked
-    operators (``I⊗M_self + Â⊗M_nbr`` for discrete ``K`` or continuous
-    generator ``L``). Auto-routed from
+    operators. Discrete graph uses the polynomial pencil
+    :math:`B(\\lambda)=\\sum_k\\lambda^k K_k` (one-tap when ``P=1``);
+    continuous graph stays the one-tap generator
+    ``I⊗L_self + Â⊗L_nbr``. Auto-routed from
     :meth:`~koopman_graph.operators.graph.GraphKoopmanOperator.spectrum`
     and
     :meth:`~koopman_graph.operators.continuous_graph.ContinuousGraphKoopmanOperator.spectrum`
     when eligible; also available as a power-user import from
     ``koopman_graph.operators.kronecker_spectrum`` (not in package
     ``__all__``). Distinct from Arnoldi ``matrix_free`` surrogates.
+    Dual adjacency raises on the helper; operator ``.spectrum``
+    dense-routes instead.
 ``global_local``
     :class:`~koopman_graph.operators.global_local.GlobalLocalKoopmanOperator`
     (discrete global backbone + low-rank local window correction).
@@ -84,19 +100,48 @@ Capability layout
     + ``dynamics_mode="continuous"``).
 ``switched``
     :class:`~koopman_graph.operators.switched.SwitchedKoopmanOperator`
-    (finite bank of LTI maps; ``koopman="switched"``).
+    (finite bank of LTI maps; ``koopman="switched"``). Optional
+    per-step ``phase_index`` does not mutate ``mode_index``. Not
+    :math:`K(\\mu)`.
 ``mixture``
     :class:`~koopman_graph.operators.mixture.MixtureKoopmanOperator`
-    (softmax mixture of LTI maps; ``koopman="mixture"``).
+    (softmax mixture of LTI maps; ``koopman="mixture"``). Not
+    :math:`K(\\mu)`.
+``parametric``
+    :class:`~koopman_graph.operators.parametric.ParametricKoopmanOperator`
+    (discrete interpolant :math:`K(\\mu)=\\sum_j \\alpha_j(\\mu) K_j`;
+    ``koopman="parametric"``). Distinct from switched / mixture.
+    Leave-one-regime-out helper
+    :func:`~koopman_graph.operators.leave_one_regime_out` is a package
+    export, not in root ``__all__``.
 ``hodge``
     :class:`~koopman_graph.operators.hodge.HodgeKoopmanOperator`
     (Laplacian-structured neighbor term; ``koopman="hodge"``).
+``cochain``
+    :class:`~koopman_graph.operators.CochainState` and
+    :class:`~koopman_graph.operators.CochainKoopmanOperator`
+    (degree-specific :math:`k\\le 1` maps on a static signed
+    :math:`B_1`). Not a factory kind. Distinct from
+    ``koopman="hodge"``. Face latents are stored, not evolved.
+    :func:`~koopman_graph.operators.boundary_nilpotency` scores
+    :math:`B_1 B_2\\approx 0` on caller-supplied incidences.
 ``equivariant``
     :class:`~koopman_graph.operators.equivariant.EquivariantKoopmanOperator`
-    (scalar plus vector blocks; ``[equivariance]``).
+    (scalar, ``scale * I_3`` vector, and ``scale * I_5`` :math:`l=2`
+    tensor blocks). Not a factory kind. Rotation tests use
+    ``[equivariance]`` / ``e3nn``; the operator leaf does not import
+    ``e3nn``. Not a molecular MD stack.
 ``graphon``
     :func:`~koopman_graph.operators.graphon.sample_graphon_adjacency`
-    for transfer experiments at multiple :math:`N`.
+    and :func:`~koopman_graph.operators.graphon.estimate_graphon` for
+    dense teaching kernels at multiple :math:`N`.
+``stochastic``
+    Diagonal process-noise helpers for ``dynamics_mode="stochastic"``.
+``stochastic_sde``
+    :class:`~koopman_graph.operators.DriftDiffusionKoopman` opt-in
+    Euler–Maruyama / Yosida stepper. Not a factory kind. Default
+    ``dynamics_mode="stochastic"`` stays diagonal process noise. Not
+    certified SDE theory.
 
 Prefer ``from koopman_graph import KoopmanOperator, ContinuousKoopmanOperator,
 GraphKoopmanOperator, HypergraphKoopmanOperator, GlobalLocalKoopmanOperator,
@@ -110,6 +155,13 @@ from koopman_graph.operators.auxiliary_spectral import (
     assemble_block_diagonal_generator,
     normalize_auxiliary_hidden_dims,
     spectral_output_dim,
+)
+from koopman_graph.operators.cochain import (
+    DEFAULT_NILPOTENCY_ATOL,
+    BoundaryNilpotencyReport,
+    CochainKoopmanOperator,
+    CochainState,
+    boundary_nilpotency,
 )
 from koopman_graph.operators.continuous import (
     VAN_LOAN_WRITEBACK_ATOL,
@@ -157,12 +209,25 @@ from koopman_graph.operators.global_local import (
 )
 from koopman_graph.operators.graph import GraphKoopmanOperator
 from koopman_graph.operators.graph_types import GraphAdjacency, GraphSparsity
-from koopman_graph.operators.graphon import sample_graphon_adjacency
+from koopman_graph.operators.graphon import (
+    MAX_GRAPHON_NODES,
+    GraphonEstimate,
+    estimate_graphon,
+    sample_graphon_adjacency,
+)
 from koopman_graph.operators.heterogeneous import HeteroGraphKoopmanOperator
 from koopman_graph.operators.hodge import HodgeKoopmanOperator
 from koopman_graph.operators.hypergraph import (
     HypergraphKoopmanOperator,
     HypergraphSparsity,
+)
+from koopman_graph.operators.linear import (
+    MAX_DENSE_LINEAR_OPERATOR_SIZE,
+    EigResult,
+    LinearOperatorProtocol,
+    MatrixFreeGraphLinearOperator,
+    MemoryEstimate,
+    PolynomialGraphLinearOperator,
 )
 from koopman_graph.operators.matrix_free import (
     DEFAULT_DISTRIBUTED_EIGREG_NUM_MODES,
@@ -185,6 +250,11 @@ from koopman_graph.operators.matrix_free import (
     unflatten_node_latents,
 )
 from koopman_graph.operators.mixture import MixtureKoopmanOperator
+from koopman_graph.operators.parametric import (
+    LeaveOneRegimeOutReport,
+    ParametricKoopmanOperator,
+    leave_one_regime_out,
+)
 from koopman_graph.operators.sparse_backend import sparse_leading_eigenvalues
 from koopman_graph.operators.stochastic import (
     apply_process_noise,
@@ -192,6 +262,7 @@ from koopman_graph.operators.stochastic import (
     diagonal_process_covariance,
     maybe_apply_process_noise,
 )
+from koopman_graph.operators.stochastic_sde import DriftDiffusionKoopman
 from koopman_graph.operators.switched import (
     DEFAULT_NUM_MODES,
     SwitchedKoopmanOperator,
@@ -199,6 +270,10 @@ from koopman_graph.operators.switched import (
 
 __all__ = [
     "AuxiliarySpectralNetwork",
+    "BoundaryNilpotencyReport",
+    "CochainKoopmanOperator",
+    "CochainState",
+    "DEFAULT_NILPOTENCY_ATOL",
     "ContinuousGraphKoopmanOperator",
     "ContinuousGraphSparsity",
     "ContinuousHeteroGraphKoopmanOperator",
@@ -215,13 +290,16 @@ __all__ = [
     "DEFAULT_MATRIX_FREE_SPECTRUM_TOL",
     "DEFAULT_NUM_MODES",
     "DISSIPATIVE_MIN_EIGENVALUE",
+    "DriftDiffusionKoopman",
     "DynamicsMode",
+    "EigResult",
     "EquivariantKoopmanOperator",
     "GeneratorParameterization",
     "GlobalLocalKoopmanOperator",
     "GraphAdjacency",
     "GraphKoopmanOperator",
     "GraphSparsity",
+    "GraphonEstimate",
     "HeteroGraphKoopmanOperator",
     "HodgeKoopmanOperator",
     "HypergraphKoopmanOperator",
@@ -230,10 +308,18 @@ __all__ = [
     "KoopmanKind",
     "KoopmanOperator",
     "KoopmanOperatorContract",
+    "LinearOperatorProtocol",
+    "MAX_DENSE_LINEAR_OPERATOR_SIZE",
+    "MatrixFreeGraphLinearOperator",
     "MatrixFreeInverseResult",
     "MatrixFreeSpectrumResult",
+    "MAX_GRAPHON_NODES",
+    "MemoryEstimate",
     "MixtureKoopmanOperator",
+    "ParametricKoopmanOperator",
+    "LeaveOneRegimeOutReport",
     "Parameterization",
+    "PolynomialGraphLinearOperator",
     "STABILITY_EPS_MARGIN",
     "StabilityCertificate",
     "SwitchedKoopmanOperator",
@@ -244,14 +330,17 @@ __all__ = [
     "apply_process_noise",
     "assemble_block_diagonal_generator",
     "attach_process_noise",
+    "boundary_nilpotency",
     "bounded_diagonal",
     "build_stability_certificate",
     "cayley_orthogonal",
     "diagonal_process_covariance",
+    "estimate_graphon",
     "flatten_node_latents",
     "invert_k_eff_graph",
     "invert_k_eff_hetero",
     "invert_k_eff_hypergraph",
+    "leave_one_regime_out",
     "matrix_log",
     "maybe_apply_process_noise",
     "normalize_auxiliary_hidden_dims",

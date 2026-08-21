@@ -36,7 +36,11 @@ class ForecastModel(Protocol):
     Structural contract for classical baselines
     (:class:`~koopman_graph.baselines.DMDBaseline`,
     :class:`~koopman_graph.baselines.DMDcBaseline`,
-    :class:`~koopman_graph.baselines.EDMDBaseline`),
+    :class:`~koopman_graph.baselines.EDMDBaseline`,
+    :class:`~koopman_graph.baselines.MpEDMDBaseline`,
+    :class:`~koopman_graph.baselines.GEDMDBaseline`,
+    :class:`~koopman_graph.baselines.HankelDMDBaseline`,
+    :class:`~koopman_graph.baselines.HAVOKBaseline`),
     spatiotemporal GNN forecaster baselines
     (:class:`~koopman_graph.baselines.gnn.STGCNBaseline`,
     :class:`~koopman_graph.baselines.gnn.DCRNNBaseline`,
@@ -45,7 +49,8 @@ class ForecastModel(Protocol):
 
     **Not drop-in interchangeable at call sites.** Implementer signatures diverge
     (DMDc ``predict`` requires ``controls``; classical baselines accept ``Data``
-    only; GNN forecasters accept optional ``controls`` /
+    only; Hankel-DMD / HAVOK also accept optional ``history`` and zero-pad
+    older delays when it is omitted; GNN forecasters accept optional ``controls`` /
     ``future_topologies`` kwargs but reject non-``None`` values;
     ``GraphKoopmanModel.predict`` also accepts tensors, optional topology /
     control kwargs; continuous ``spectrum`` may take ``delta_t``; GNN
@@ -171,9 +176,15 @@ class UncontrolledForecastModel(Protocol):
     where ``initial_graph`` is a PyG ``Data`` snapshot. Satisfied (as a
     signature superset or exact match) by
     :class:`~koopman_graph.baselines.DMDBaseline`,
-    :class:`~koopman_graph.baselines.EDMDBaseline`, and
+    :class:`~koopman_graph.baselines.EDMDBaseline`,
+    :class:`~koopman_graph.baselines.MpEDMDBaseline`,
+    :class:`~koopman_graph.baselines.GEDMDBaseline`,
+    :class:`~koopman_graph.baselines.HankelDMDBaseline`,
+    :class:`~koopman_graph.baselines.HAVOKBaseline`, and
     :class:`~koopman_graph.model.GraphKoopmanModel` when called with
-    ``Data`` + ``steps`` only.
+    ``Data`` + ``steps`` only. Optional ``history`` on Hankel-DMD / HAVOK
+    does not break that Data-only call; omitted history zero-pads older
+    delays.
 
     :class:`~koopman_graph.baselines.DMDcBaseline` is **not** in this peer set:
     its ``predict`` requires a ``controls`` sequence. Use loose

@@ -169,7 +169,9 @@ contact-graph oracle needs no extra. The ``[equivariance]`` extra pins
 ``e3nn`` for :class:`~koopman_graph.nn.E3EquivariantEncoder` (steerable
 encode to invariant latents by default; pass
 ``project_invariants=False`` for steerable channels consumed by
-:class:`~koopman_graph.operators.EquivariantKoopmanOperator`).
+:class:`~koopman_graph.operators.EquivariantKoopmanOperator`, whose
+optional :math:`l=2` blocks are ``scale * I_5``). The extra also
+runs the rotation test for that block.
 ``[baselines-ode]`` is required to construct
 :class:`~koopman_graph.baselines.gnn.STGODEBaseline`.
 ``[baselines-graphcast]`` is a reserved no-op — the GraphCast teaching
@@ -241,8 +243,8 @@ version with the tag you intend; see PyPI and ``CHANGELOG.md``):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.14.0
-   # or: uv pip install koopman-graph==0.14.0
+   pip install koopman-graph==0.15.0
+   # or: uv pip install koopman-graph==0.15.0
 
 YAML CLI configs from PyPI:
 
@@ -268,6 +270,7 @@ on your ``PATH``:
    koopman-graph --version
    koopman-graph train --help
    koopman-graph predict --help
+   koopman-graph benchmark --help
 
 JSON train configs work with the core install. YAML requires
 ``pip install "koopman-graph[cli]"`` (or ``-e ".[cli]"``). See :doc:`cli` for

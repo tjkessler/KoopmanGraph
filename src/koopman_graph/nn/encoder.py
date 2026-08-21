@@ -346,6 +346,19 @@ class DiffConvEncoder(BaseGNNModule):
         """
         clear_diff_conv_support_caches(self.convs)
 
+    def receptive_field_hops(self) -> int:
+        """Return spatial hops mixed by the DiffConv stack.
+
+        Each layer expands by ``diffusion_steps``, so the radius is
+        ``num_layers * diffusion_steps``.
+
+        Returns
+        -------
+        int
+            Encoder hop radius.
+        """
+        return int(self.num_layers) * int(self.diffusion_steps)
+
 
 class GraphTransformerEncoder(BaseGNNModule):
     """Graph Transformer encoder for longer-range spatial attention.

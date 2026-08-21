@@ -290,6 +290,7 @@ def test_save_checkpoint_uses_current_format_version(
         "adjacency",
         "learn_topology",
         "topology_embedding_dim",
+        "graph_dynamics",
         "symmetry",
         "local_window",
         "local_rank",
@@ -979,7 +980,9 @@ def test_build_model_config_includes_placeholder_keys(
     config = build_model_config(graph_koopman_model)
     assert config["sparsity"] == "dense"
     assert config["adjacency"] is None
+    assert config["filter_degree"] is None
     assert config["learn_topology"] is None
+    assert config["graph_dynamics"] is None
     assert config["symmetry"] is None
     assert config["local_window"] is None
     assert config["local_rank"] is None

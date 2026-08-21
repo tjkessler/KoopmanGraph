@@ -153,13 +153,13 @@ def test_spectrum_eligible_default_uses_kronecker_path(
     from koopman_graph.operators import graph as graph_mod
 
     calls: list[dict[str, object]] = []
-    original = graph_mod.spectrum_k_eff_kronecker_sum
+    original = graph_mod.spectrum_k_eff_kronecker_polynomial
 
     def _spy(**kwargs: object):
         calls.append(kwargs)
         return original(**kwargs)
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_polynomial", _spy)
     edge_index = _path_edge_index(3)
     op = GraphKoopmanOperator(2, init_mode="identity")
     spectrum = op.spectrum(edge_index, 3, time_step=0.25)
@@ -178,7 +178,7 @@ def test_spectrum_ineligible_paths_skip_kronecker(
         msg = "kronecker helper should not run on ineligible spectrum paths"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _boom)
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_polynomial", _boom)
     edge_index = _path_edge_index(3)
     time_step = 0.1
 
@@ -235,7 +235,7 @@ def test_spectrum_isotypic_skips_kronecker_and_matches_dense(
         msg = "kronecker helper should not run for isotypic self banks"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _boom)
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_polynomial", _boom)
     star = _star_edge_index(5)
     time_step = 0.1
     op = GraphKoopmanOperator(2, init_mode="identity", isotypic_symmetry=True)
@@ -302,13 +302,13 @@ def test_operator_spectrum_block_diagonal_uses_kronecker(
     from koopman_graph.operators import graph as graph_mod
 
     calls: list[int] = []
-    original = graph_mod.spectrum_k_eff_kronecker_sum
+    original = graph_mod.spectrum_k_eff_kronecker_polynomial
 
     def _spy(**kwargs: object):
         calls.append(1)
         return original(**kwargs)
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_polynomial", _spy)
     edge_index = _path_edge_index(4)
     op = GraphKoopmanOperator(2, init_mode="identity", sparsity="block_diagonal")
     spectrum = op.spectrum(edge_index, 4, time_step=0.1)
@@ -332,13 +332,13 @@ def test_operator_spectrum_moderate_n_kronecker_smoke(
     from koopman_graph.operators import graph as graph_mod
 
     calls: list[int] = []
-    original = graph_mod.spectrum_k_eff_kronecker_sum
+    original = graph_mod.spectrum_k_eff_kronecker_polynomial
 
     def _spy(**kwargs: object):
         calls.append(1)
         return original(**kwargs)
 
-    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_sum", _spy)
+    monkeypatch.setattr(graph_mod, "spectrum_k_eff_kronecker_polynomial", _spy)
     num_nodes = 100
     latent_dim = 2
     ambient = num_nodes * latent_dim

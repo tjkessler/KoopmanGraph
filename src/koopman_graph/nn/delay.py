@@ -1,8 +1,12 @@
 """Delay-coordinate encoder wrapper for partial observability.
 
 Stacks a short history of node features into encoder channels (Takens-style
-delay coordinates). Related Hankel delay matrices appear in HAVOK / Hankel-DMD;
-this module does not implement those full algorithms.
+delay coordinates). Distinct from
+:class:`~koopman_graph.baselines.HankelDMDBaseline` and
+:class:`~koopman_graph.baselines.HAVOKBaseline`, which fit delay-row
+operators on flattened snapshots rather than wrapping a GNN, and distinct
+from :class:`~koopman_graph.analysis.FiniteMemoryKoopman` (convolution
+taps are not a Mori–Zwanzig decomposition).
 
 Composition style (see architecture docs): callers size the base encoder with
 ``in_channels = n_delays * feature_dim`` and wrap it explicitly, or pass
@@ -81,7 +85,9 @@ class DelayEmbeddingEncoder(nn.Module):
     Stacks the last ``n_delays`` per-node feature vectors along the channel
     axis before calling ``base_encoder``. The base encoder must already be
     sized with ``in_channels = n_delays * feature_dim`` (composition; this
-    wrapper does not rebuild layers).
+    wrapper does not rebuild layers). This is not
+    :class:`~koopman_graph.baselines.HankelDMDBaseline` or
+    :class:`~koopman_graph.baselines.HAVOKBaseline`.
 
     Attributes
     ----------
@@ -130,6 +136,30 @@ class DelayEmbeddingEncoder(nn.Module):
         ):
             if hasattr(base_encoder, attr):
                 setattr(self, attr, getattr(base_encoder, attr))
+
+    def receptive_field_hops(self) -> int:
+        """Return the spatial hop radius of the wrapped base encoder.
+
+        Delay stacking is temporal and does not add graph hops.
+
+        Returns
+        -------
+        int
+            Base encoder hop radius.
+
+        Raises
+        ------
+        AttributeError
+            If the base encoder does not expose a hop radius.
+        """
+        getter = getattr(self.base_encoder, "receptive_field_hops", None)
+        if callable(getter):
+            return int(getter())
+        num_layers = getattr(self.base_encoder, "num_layers", None)
+        if isinstance(num_layers, int) and not isinstance(num_layers, bool):
+            return int(num_layers)
+        msg = "DelayEmbeddingEncoder.base_encoder does not expose a hop radius"
+        raise AttributeError(msg)
 
     def forward(
         self,

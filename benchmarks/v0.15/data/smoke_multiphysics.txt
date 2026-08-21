@@ -1,0 +1,3 @@
+KoopmanGraph smoke-multiphysics v1
+protocol: path-graph Laplacian diffusion stand-in
+this file is a hashed stand-in; it is not a measured PDE field

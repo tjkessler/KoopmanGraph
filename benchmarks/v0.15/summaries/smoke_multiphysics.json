@@ -1,0 +1,37 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "smoke-multiphysics",
+  "manifest_sha256": "176b242147902fdf5f4dcfdf8cdedc91c5030319f0b5fb272a570b3bc79bf56e",
+  "dataset_sha256": "ede4f9e03583be708bdb82d322980d588eff8b49e00ce3f6c8fd6bb6c299d922",
+  "track": "multiphysics",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "joint_ls",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    1,
+    4,
+    8
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "joint_ls"
+  ],
+  "package_version": "0.14.0",
+  "executed": false,
+  "summary_sha256": "01d05d9d192df7af10cb2a0f1cbb341055d2cdb9fb523df5c81c18745b7da344"
+}

@@ -16,3 +16,10 @@ def test_causal_rejects_bad_rank_and_short_series() -> None:
         granger_latent_influence(torch.randn(4, 3))
     with pytest.raises(ValueError, match="T >= 3"):
         granger_latent_influence(torch.randn(2, 3, 2))
+
+
+def test_granger_docstring_is_non_interventional() -> None:
+    """Acceptance: Granger remains labeled non-interventional."""
+    doc = granger_latent_influence.__doc__
+    assert doc is not None
+    assert "non-interventional" in doc

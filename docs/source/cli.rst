@@ -2,10 +2,12 @@ Command-line interface
 ======================
 
 The ``koopman-graph`` console script is a config-driven façade over the library
-``fit`` / ``predict`` / ``save`` / ``load`` path. It does not fork training
-mathematics. Prefer the Python API when you need custom encoders, distributed
+``fit`` / ``predict`` / ``save`` / ``load`` path, plus identity-bound
+``benchmark run`` / ``verify``. It does not fork training mathematics.
+Prefer the Python API when you need custom encoders, distributed
 strategies, or experiment callbacks; use the CLI for reproducible train and
-predict smokes from JSON (or YAML) configs.
+predict smokes from JSON (or YAML) configs, and for hashing a frozen
+:class:`~koopman_graph.benchmark.ExperimentManifest`.
 
 Install the package as usual (:doc:`installation`). The console script is then
 available as ``koopman-graph``. YAML configs additionally need
@@ -27,6 +29,9 @@ Subcommands
 | ``predict``       | Load a checkpoint, take the first snapshot from          |
 |                   | ``--data``, roll out ``--steps``, write a ``.pt``        |
 |                   | forecast payload.                                        |
++-------------------+----------------------------------------------------------+
+| ``benchmark``     | Nested ``run`` / ``verify``: hash protocol identity.     |
+|                   | Does not train a model or invent forecast metrics.       |
 +-------------------+----------------------------------------------------------+
 
 Global flags include ``--help`` and ``--version``.
@@ -68,6 +73,55 @@ Predict
 
 The forecast payload is a ``torch.save`` dict with keys ``steps``,
 ``forecasts`` (list of PyG ``Data``), and ``summary``.
+
+Benchmark
+~~~~~~~~~
+
+.. code-block:: bash
+
+   koopman-graph benchmark run \
+     --manifest /tmp/kg-bench/manifest.json \
+     --data /tmp/kg-bench/payload.bin \
+     --out /tmp/kg-bench/artifacts
+
+   koopman-graph benchmark verify \
+     --manifest /tmp/kg-bench/manifest.json \
+     --against /tmp/kg-bench/artifacts
+
+* ``run --manifest`` (required) — JSON always; ``.yaml`` / ``.yml`` require
+  ``pip install "koopman-graph[cli]"`` (PyYAML).
+* ``run --data`` (required) — dataset payload whose SHA-256 must match
+  ``dataset.sha256`` on the manifest.
+* ``run --out`` (required) — directory that receives ``summary.json``.
+* ``verify --against`` (required) — that directory, or the ``summary.json``
+  file itself.
+
+``run`` writes schema ``benchmark_summary_v1`` with ``executed=False``
+and a canonical SHA-256 of the identity fields (UTF-8 JSON,
+``sort_keys=True``, compact separators, ``summary_sha256`` omitted from
+the digest). It does **not** fit
+:class:`~koopman_graph.model.GraphKoopmanModel` or GNN teaching ports
+and does not invent MAE / RMSE / MAPE numbers. ``verify`` recomputes
+the digest and binds the summary to the loaded manifest; a tampered
+hash or identity field fails with exit code 1.
+
+``koopman-graph benchmark --help`` lists ``run`` and ``verify``. Bare
+``benchmark`` (no nested command) prints that help and exits 0.
+
+Tracked smoke fixtures live under ``benchmarks/v0.15/`` (three tracks:
+telemetry-like, multiphysics, topology transfer). Payloads are tiny
+hashed UTF-8 stand-ins, not METR-LA HDF5. YAML needs
+``pip install "koopman-graph[cli]"``. Example:
+
+.. code-block:: bash
+
+   koopman-graph benchmark verify \
+     --manifest benchmarks/v0.15/smoke_telemetry.yaml \
+     --against benchmarks/v0.15/summaries/smoke_telemetry.json
+
+Default CI runs that verify on all three stubs. It does not download
+full telemetry or invent forecast metrics. See :doc:`benchmarks` and
+the walkthrough ``examples/47_benchmark_manifest.ipynb``.
 
 Exit codes
 ----------

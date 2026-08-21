@@ -257,6 +257,9 @@ docs/MATHEMATICS_VERIFICATION.md
 .cursor-tmp/
 docs/blueprint/
 
+# Local run artifacts (benchmark summaries, CLI checkpoints, tracking CSVs).
+artifacts/
+
 # Large / non-shipped benchmark downloads (rebuild via scripts/download_*.py).
 # Tracked teaching fixtures and source files under 50 MB may live under
 # data/metr_la/, data/ieee118/, data/cylinder_wake/, data/pems_bay/,

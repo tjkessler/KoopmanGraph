@@ -262,6 +262,11 @@ class KoopmanObserver:
             timestamps=(
                 None if sequence.timestamps is None else sequence.timestamps.clone()
             ),
+            parameter_trajectory=(
+                None
+                if sequence.parameter_trajectory is None
+                else sequence.parameter_trajectory.clone()
+            ),
             observation_masks=(
                 None
                 if sequence.observation_masks is None

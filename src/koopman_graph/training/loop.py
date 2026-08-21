@@ -28,6 +28,7 @@ from koopman_graph.data.hetero_layout import (
 from koopman_graph.graph_utils import snapshot_hyperedge_index
 from koopman_graph.nn.heterogeneous import resolve_multiplex_relation_inputs
 from koopman_graph.protocols import TrainableKoopmanModel
+from koopman_graph.training.batched_objectives import validate_graph_batching_request
 from koopman_graph.training.callbacks import FitCallback
 from koopman_graph.training.device import resolve_device, sequence_to_device
 from koopman_graph.training.epochs import (
@@ -60,6 +61,8 @@ def _build_fit_history(
     sparsity_losses: list[float],
     worst_case_losses: list[float],
     vamp2_losses: list[float],
+    topology_losses: list[float],
+    presence_losses: list[float],
     val_losses: list[float] | None,
     val_reconstruction_losses: list[float] | None,
     val_forward_losses: list[float] | None,
@@ -71,6 +74,8 @@ def _build_fit_history(
     val_sparsity_losses: list[float] | None,
     val_worst_case_losses: list[float] | None,
     val_vamp2_losses: list[float] | None,
+    val_topology_losses: list[float] | None,
+    val_presence_losses: list[float] | None,
     stopped_early: bool,
     best_epoch: int | None,
     best_loss: float | None,
@@ -81,12 +86,14 @@ def _build_fit_history(
     ----------
     losses, reconstruction_losses, forward_losses, backward_losses,
     rollout_losses, eigenvalue_losses, lie_losses, pde_losses,
-    sparsity_losses, worst_case_losses, vamp2_losses : list of float
+    sparsity_losses, worst_case_losses, vamp2_losses, topology_losses,
+    presence_losses : list of float
         Per-epoch training loss series (same length as ``losses``).
     val_losses, val_reconstruction_losses, val_forward_losses,
     val_backward_losses, val_rollout_losses, val_eigenvalue_losses,
     val_lie_losses, val_pde_losses, val_sparsity_losses,
-    val_worst_case_losses, val_vamp2_losses : list of float or None
+    val_worst_case_losses, val_vamp2_losses, val_topology_losses,
+    val_presence_losses : list of float or None
         Optional per-epoch validation series; ``None`` when validation
         was not run.
     stopped_early : bool
@@ -114,6 +121,8 @@ def _build_fit_history(
         sparsity_loss=tuple(sparsity_losses),
         worst_case_loss=tuple(worst_case_losses),
         vamp2_loss=tuple(vamp2_losses),
+        topology_loss=tuple(topology_losses),
+        presence_loss=tuple(presence_losses),
         val_loss=None if val_losses is None else tuple(val_losses),
         val_reconstruction_loss=(
             None
@@ -141,10 +150,268 @@ def _build_fit_history(
             None if val_worst_case_losses is None else tuple(val_worst_case_losses)
         ),
         val_vamp2_loss=(None if val_vamp2_losses is None else tuple(val_vamp2_losses)),
+        val_topology_loss=(
+            None if val_topology_losses is None else tuple(val_topology_losses)
+        ),
+        val_presence_loss=(
+            None if val_presence_losses is None else tuple(val_presence_losses)
+        ),
         stopped_early=stopped_early,
         best_epoch=best_epoch,
         best_loss=best_loss,
     )
+
+
+def _validate_identification_fit_request(
+    model: TrainableKoopmanModel,
+    train_sequences: Sequence[SnapshotSequence],
+    identification: object,
+    *,
+    window_sampler: object | None,
+    batch_graphs: bool,
+) -> None:
+    """Reject identification layouts that this increment does not support.
+
+    Lazy-imports identification types so ``import koopman_graph.training``
+    does not load that package.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Fit target.
+    train_sequences : sequence of SnapshotSequence
+        Training trajectories.
+    identification : object
+        Expected :class:`~koopman_graph.identification.IdentificationConfig`.
+    window_sampler : object or None
+        Resolved window sampler; must be ``None``.
+    batch_graphs : bool
+        Multi-graph collate flag; must be ``False``.
+
+    Raises
+    ------
+    TypeError
+        If ``identification`` is not an ``IdentificationConfig``.
+    ValueError
+        If the operator, delays, controls, topology, or sampling path is
+        outside the per-node dense discrete MVP.
+    """
+    from koopman_graph.identification import IdentificationConfig
+    from koopman_graph.operators import KoopmanOperator
+
+    if not isinstance(identification, IdentificationConfig):
+        msg = (
+            "identification must be IdentificationConfig or None, got "
+            f"{type(identification).__name__}"
+        )
+        raise TypeError(msg)
+    if window_sampler is not None:
+        msg = (
+            "fit(..., identification=...) does not support windowed sampling; "
+            "use full-sequence fit (window_length=None, sampler=None)"
+        )
+        raise ValueError(msg)
+    if batch_graphs:
+        msg = (
+            "fit(..., identification=...) is mutually exclusive with batch_graphs=True"
+        )
+        raise ValueError(msg)
+    if any(
+        isinstance(sequence, HeteroGraphSnapshotSequence)
+        for sequence in train_sequences
+    ):
+        msg = "identification does not support HeteroGraphSnapshotSequence"
+        raise ValueError(msg)
+    if any(
+        getattr(sequence, "allow_node_churn", False) for sequence in train_sequences
+    ):
+        msg = "identification does not support sequences with allow_node_churn=True"
+        raise ValueError(msg)
+    kind = getattr(model, "koopman_kind", "pernode")
+    if kind != "pernode":
+        msg = (
+            "identification currently supports discrete per-node "
+            f"KoopmanOperator only, got koopman_kind={kind!r}"
+        )
+        raise ValueError(msg)
+    if getattr(model, "dynamics_mode", "discrete") != "discrete":
+        msg = "identification requires dynamics_mode='discrete'"
+        raise ValueError(msg)
+    if getattr(model, "n_delays", 1) != 1:
+        msg = (
+            "identification does not support delay embeddings "
+            f"(n_delays={getattr(model, 'n_delays', None)})"
+        )
+        raise ValueError(msg)
+    if int(getattr(model, "control_dim", 0)) != 0:
+        msg = (
+            "identification does not support controlled models "
+            f"(control_dim={getattr(model, 'control_dim', None)})"
+        )
+        raise ValueError(msg)
+    if getattr(model, "adaptive_topology", None) is not None:
+        msg = "identification does not support learned pairwise topology"
+        raise ValueError(msg)
+    koopman = model.koopman
+    if not isinstance(koopman, KoopmanOperator):
+        msg = (
+            "identification currently supports discrete per-node "
+            f"KoopmanOperator only, got {type(koopman).__name__}"
+        )
+        raise ValueError(msg)
+
+
+def _encode_sequence_latents(
+    model: TrainableKoopmanModel,
+    sequence: SnapshotSequence,
+) -> Tensor:
+    """Stack per-timestep encodings for one trajectory.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Model exposing ``encode_at`` or ``encode``.
+    sequence : SnapshotSequence
+        Training trajectory.
+
+    Returns
+    -------
+    Tensor
+        Latents with shape ``(T, N, d)``.
+    """
+    encode_at = getattr(model, "encode_at", None)
+    stacked = []
+    for index in range(sequence.num_timesteps):
+        if encode_at is not None:
+            stacked.append(encode_at(sequence, index))
+        else:
+            stacked.append(model.encode(sequence[index]))
+    return torch.stack(stacked, dim=0)
+
+
+def _observe_callback_encodings(
+    callbacks: Sequence[object],
+    model: TrainableKoopmanModel,
+    sequence: SnapshotSequence,
+) -> None:
+    """Push a frozen latent stack to callbacks that observe encodings.
+
+    Encodes the first training sequence under ``eval`` / ``no_grad``.
+    Layout matches ``evaluate(..., include_resdmd=True)``: time-major
+    ``(T, N, d)``. No-ops when no callback exposes
+    ``observe_encodings``.
+
+    Parameters
+    ----------
+    callbacks : sequence of object
+        Active fit callbacks.
+    model : TrainableKoopmanModel
+        Encoder source.
+    sequence : SnapshotSequence
+        Trajectory to encode (typically ``train_sequences[0]``).
+    """
+    observers = [
+        callback
+        for callback in callbacks
+        if callable(getattr(callback, "observe_encodings", None))
+    ]
+    if not observers:
+        return
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            encodings = _encode_sequence_latents(model, sequence)
+    finally:
+        model.train(was_training)
+    for callback in observers:
+        callback.observe_encodings(encodings)
+
+
+def _collect_identification_pairs(
+    model: TrainableKoopmanModel,
+    train_sequences: Sequence[SnapshotSequence],
+):
+    """Encode frozen latent pairs for closed-form identification.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Encoder source.
+    train_sequences : sequence of SnapshotSequence
+        Trajectories to encode.
+
+    Returns
+    -------
+    tuple
+        ``(joint_pairs, per_sequence_pairs)`` as
+        :class:`~koopman_graph.identification.LatentPairs` objects.
+
+    Raises
+    ------
+    ValueError
+        If a trajectory has fewer than two snapshots.
+    """
+    from koopman_graph.identification import LatentPairs
+
+    was_training = model.training
+    model.eval()
+    per_sequence: list[LatentPairs] = []
+    try:
+        with torch.no_grad():
+            for sequence in train_sequences:
+                if sequence.num_timesteps < 2:
+                    msg = "identification requires at least two snapshots"
+                    raise ValueError(msg)
+                latents = _encode_sequence_latents(model, sequence)
+                per_sequence.append(LatentPairs(z_t=latents[:-1], z_next=latents[1:]))
+    finally:
+        model.train(was_training)
+    width = per_sequence[0].z_t.shape[-1]
+    z_t = torch.cat([pairs.z_t.reshape(-1, width) for pairs in per_sequence], dim=0)
+    z_next = torch.cat(
+        [pairs.z_next.reshape(-1, width) for pairs in per_sequence],
+        dim=0,
+    )
+    return LatentPairs(z_t=z_t, z_next=z_next), tuple(per_sequence)
+
+
+def _run_identification_step(
+    model: TrainableKoopmanModel,
+    train_sequences: Sequence[SnapshotSequence],
+    identification: object,
+    *,
+    attach_report: bool,
+) -> None:
+    """Closed-form ``K`` update from the current encoder.
+
+    Parameters
+    ----------
+    model : TrainableKoopmanModel
+        Fit target; ``koopman`` is overwritten in place.
+    train_sequences : sequence of SnapshotSequence
+        Trajectories encoded under ``eval`` / ``no_grad``.
+    identification : object
+        :class:`~koopman_graph.identification.IdentificationConfig`.
+    attach_report : bool
+        When ``True``, store :class:`~koopman_graph.identification.IdentificationReport`
+        on ``model.identification_report``.
+    """
+    from koopman_graph.identification import (
+        apply_operator_snapshot,
+        build_identification_report,
+        identify_operator,
+    )
+
+    joint_pairs, per_sequence = _collect_identification_pairs(model, train_sequences)
+    snapshot = identify_operator(joint_pairs, identification)
+    apply_operator_snapshot(model.koopman, snapshot)
+    if attach_report:
+        model.identification_report = build_identification_report(  # type: ignore[attr-defined]
+            per_sequence,
+            snapshot,
+            gate_resdmd=bool(getattr(identification, "gate_resdmd", False)),
+        )
 
 
 __all__ = [
@@ -381,6 +648,8 @@ def run_fit_loop(
     restore_best_weights: bool = False,
     checkpoint_path: str | Path | None = None,
     callbacks: Sequence[FitCallback] | None = None,
+    batch_graphs: bool = False,
+    identification: object | None = None,
     **optimizer_kwargs: Any,
 ) -> FitHistory:
     """Run the multi-epoch training loop for a trainable Koopman model.
@@ -398,12 +667,16 @@ def run_fit_loop(
 
     * ``on_fit_start`` once after device / optimizer setup and before epoch 0
     * ``on_epoch_end`` after each epoch's train (and optional val) losses are
-      recorded and best-epoch tracking is updated, before early-stop ``break``
+      recorded and best-epoch tracking is updated, before early-stop ``break``.
+      Callbacks that expose ``observe_encodings`` receive a frozen time-major
+      latent stack from the first training sequence first (identity-dictionary
+      ResDMD layout).
     * ``on_fit_end`` once with the final :class:`FitHistory`, after optional
-      best-weight restore / checkpoint write
+      best-weight restore / checkpoint write. ``ResDMDFitCallback(mode="gate")``
+      may raise here without mutating parameters.
 
-    Callbacks are observe-only: do not mutate model parameters or optimizer
-    state. Default ``None`` preserves prior behavior.
+    Callbacks must not mutate model parameters or optimizer state. Default
+    ``None`` preserves prior behavior.
 
     Parameters
     ----------
@@ -476,6 +749,20 @@ def run_fit_loop(
         Write a checkpoint at the lowest-loss epoch when set.
     callbacks : sequence of FitCallback or None, optional
         Observe-only fit hooks. Default ``None`` skips all hook calls.
+    batch_graphs : bool, optional
+        When ``True``, collate homogeneous trajectories into one PyG
+        ``Batch`` for the full-sequence epoch path. Default is ``False``
+        (existing per-sequence ``MultiTrajectory`` loop). Mutually
+        exclusive with ``window_length``, ``sampler``, and DDP.
+    identification : IdentificationConfig or None, optional
+        Opt-in closed-form operator identification. ``None`` (default)
+        keeps the Adam path and does not import
+        :mod:`koopman_graph.identification`. When set, each epoch freezes
+        the encoder, fits dense per-node ``K`` (ridge / TLS / constrained
+        LS), then takes encoder/decoder Adam steps. Graph, hetero,
+        continuous, controlled, delay, windowed, and ``batch_graphs``
+        layouts raise. The report is stored on
+        ``model.identification_report``.
     **optimizer_kwargs
         Extra keyword arguments for the optimizer constructor.
 
@@ -487,16 +774,21 @@ def run_fit_loop(
     Raises
     ------
     ValueError
-        If ``early_stopping_monitor="val"`` without ``val_sequences``, if both
-        ``sampler`` and ``window_length`` are provided, or if a
+        If         ``early_stopping_monitor="val"`` without ``val_sequences``, if both
+        ``sampler`` and ``window_length`` are provided, if ``batch_graphs``
+        is combined with windowed sampling, if a
         :class:`~koopman_graph.data.NeighborWindowSampler` is used with
-        hetero training sequences.
+        hetero training sequences, or if ``identification`` is set on an
+        unsupported operator / sampling layout.
     """
     if early_stopping_monitor == "val" and val_sequences is None:
         msg = 'early_stopping_monitor="val" requires val_sequences'
         raise ValueError(msg)
     if sampler is not None and window_length is not None:
         msg = "pass sampler or window_length, not both"
+        raise ValueError(msg)
+    if batch_graphs and (sampler is not None or window_length is not None):
+        msg = "batch_graphs=True is mutually exclusive with window_length and sampler"
         raise ValueError(msg)
     has_hetero_train = any(
         isinstance(sequence, HeteroGraphSnapshotSequence)
@@ -524,23 +816,14 @@ def run_fit_loop(
             sequence_to_device(sequence, train_device) for sequence in val_sequences
         ]
 
+    if batch_graphs:
+        validate_graph_batching_request(model, train_sequences)
+        if val_sequences is not None:
+            validate_graph_batching_request(model, val_sequences)
+
     # Allocate orbit-tied K_self before Adam sees module.parameters().
     bind_pending_orbit_ties(module, train_sequences)
 
-    optim = optimizer(module.parameters(), lr=lr, **optimizer_kwargs)
-    scheduler = resolve_lr_scheduler(lr_scheduler, optim)
-    amp_enabled, resolved_amp_dtype, grad_scaler = prepare_training_amp(
-        use_amp,
-        train_device,
-        amp_dtype,
-    )
-    # Epoch helpers also accept use_amp; pass the resolved scaler so state
-    # persists across epochs when AMP is active.
-    amp_kwargs = {
-        "use_amp": amp_enabled,
-        "amp_dtype": resolved_amp_dtype,
-        "grad_scaler": grad_scaler,
-    }
     if sampler is not None:
         sampler.sequences = [
             sequence_to_device(sequence, train_device) for sequence in sampler.sequences
@@ -554,6 +837,46 @@ def run_fit_loop(
         sampler=sampler,
         distributed=False,
     )
+    if identification is not None:
+        _validate_identification_fit_request(
+            model,
+            train_sequences,
+            identification,
+            window_sampler=window_sampler,
+            batch_graphs=batch_graphs,
+        )
+        koopman_ids = {id(parameter) for parameter in model.koopman.parameters()}
+        trainable = [
+            parameter
+            for parameter in module.parameters()
+            if parameter.requires_grad and id(parameter) not in koopman_ids
+        ]
+        if trainable:
+            optim: Optimizer | None = optimizer(trainable, lr=lr, **optimizer_kwargs)
+        else:
+            if lr_scheduler is not None:
+                msg = (
+                    "identification fit with no trainable encoder/decoder "
+                    "parameters cannot use lr_scheduler"
+                )
+                raise ValueError(msg)
+            optim = None
+    else:
+        model.identification_report = None  # type: ignore[attr-defined]
+        optim = optimizer(module.parameters(), lr=lr, **optimizer_kwargs)
+    scheduler = None if optim is None else resolve_lr_scheduler(lr_scheduler, optim)
+    amp_enabled, resolved_amp_dtype, grad_scaler = prepare_training_amp(
+        use_amp,
+        train_device,
+        amp_dtype,
+    )
+    # Epoch helpers also accept use_amp; pass the resolved scaler so state
+    # persists across epochs when AMP is active.
+    amp_kwargs = {
+        "use_amp": amp_enabled,
+        "amp_dtype": resolved_amp_dtype,
+        "grad_scaler": grad_scaler,
+    }
     losses: list[float] = []
     reconstruction_losses: list[float] = []
     forward_losses: list[float] = []
@@ -565,6 +888,8 @@ def run_fit_loop(
     sparsity_losses: list[float] = []
     worst_case_losses: list[float] = []
     vamp2_losses: list[float] = []
+    topology_losses: list[float] = []
+    presence_losses: list[float] = []
     val_losses: list[float] | None = [] if val_sequences is not None else None
     val_reconstruction_losses: list[float] | None = (
         [] if val_sequences is not None else None
@@ -582,6 +907,8 @@ def run_fit_loop(
         [] if val_sequences is not None else None
     )
     val_vamp2_losses: list[float] | None = [] if val_sequences is not None else None
+    val_topology_losses: list[float] | None = [] if val_sequences is not None else None
+    val_presence_losses: list[float] | None = [] if val_sequences is not None else None
     best_loss_for_stop = float("inf")
     best_loss: float | None = None
     best_epoch: int | None = None
@@ -608,11 +935,20 @@ def run_fit_loop(
         "restore_best_weights": restore_best_weights,
         "checkpoint_path": checkpoint_path,
         "has_val_sequences": val_sequences is not None,
+        "batch_graphs": batch_graphs,
+        "identification": identification is not None,
     }
     for callback in active_callbacks:
         callback.on_fit_start(model=model, fit_kwargs=fit_kwargs)
 
     for epoch in range(epochs):
+        if identification is not None:
+            _run_identification_step(
+                model,
+                train_sequences,
+                identification,
+                attach_report=False,
+            )
         epoch_weights = resolve_loss_weights_for_epoch(
             epoch,
             loss_weights=loss_weights,
@@ -633,18 +969,33 @@ def run_fit_loop(
                 rollout_start_seed=rollout_start_seed,
                 epoch=epoch,
             )
-            breakdown = train_one_epoch(
-                model,
-                train_sequences,
-                optim,
-                epoch_weights,
-                extra_losses=extra_losses,
-                max_grad_norm=max_grad_norm,
-                rollout_horizon=rollout_horizon,
-                rollout_start_indices=epoch_rollout_starts,
-                **amp_kwargs,
-            )
+            if optim is None:
+                breakdown = eval_one_epoch(
+                    model,
+                    train_sequences,
+                    epoch_weights,
+                    extra_losses=extra_losses,
+                    rollout_horizon=rollout_horizon,
+                    rollout_start_indices=epoch_rollout_starts,
+                    batch_graphs=batch_graphs,
+                )
+            else:
+                breakdown = train_one_epoch(
+                    model,
+                    train_sequences,
+                    optim,
+                    epoch_weights,
+                    extra_losses=extra_losses,
+                    max_grad_norm=max_grad_norm,
+                    rollout_horizon=rollout_horizon,
+                    rollout_start_indices=epoch_rollout_starts,
+                    batch_graphs=batch_graphs,
+                    **amp_kwargs,
+                )
         else:
+            if optim is None:
+                msg = "windowed fit requires trainable parameters"
+                raise ValueError(msg)
             breakdown = train_windowed_epoch(
                 model,
                 window_sampler,
@@ -674,6 +1025,8 @@ def run_fit_loop(
         sparsity_losses.append(term_values["sparsity"])
         worst_case_losses.append(term_values["worst_case"])
         vamp2_losses.append(term_values["vamp2"])
+        topology_losses.append(term_values["topology"])
+        presence_losses.append(term_values["presence"])
 
         monitored_loss = term_values["total"]
         epoch_val_breakdown = None
@@ -685,6 +1038,7 @@ def run_fit_loop(
                 extra_losses=extra_losses,
                 rollout_horizon=rollout_horizon,
                 rollout_start_indices=epoch_rollout_starts,
+                batch_graphs=batch_graphs,
             )
             val_terms = epoch_val_breakdown.to_floats()
             assert val_losses is not None
@@ -698,6 +1052,8 @@ def run_fit_loop(
             assert val_sparsity_losses is not None
             assert val_worst_case_losses is not None
             assert val_vamp2_losses is not None
+            assert val_topology_losses is not None
+            assert val_presence_losses is not None
             val_losses.append(val_terms["total"])
             val_reconstruction_losses.append(val_terms["reconstruction"])
             val_forward_losses.append(val_terms["forward"])
@@ -709,6 +1065,8 @@ def run_fit_loop(
             val_sparsity_losses.append(val_terms["sparsity"])
             val_worst_case_losses.append(val_terms["worst_case"])
             val_vamp2_losses.append(val_terms["vamp2"])
+            val_topology_losses.append(val_terms["topology"])
+            val_presence_losses.append(val_terms["presence"])
             if early_stopping_monitor == "val":
                 monitored_loss = val_terms["total"]
 
@@ -730,6 +1088,8 @@ def run_fit_loop(
                 sparsity_losses=sparsity_losses,
                 worst_case_losses=worst_case_losses,
                 vamp2_losses=vamp2_losses,
+                topology_losses=topology_losses,
+                presence_losses=presence_losses,
                 val_losses=val_losses,
                 val_reconstruction_losses=val_reconstruction_losses,
                 val_forward_losses=val_forward_losses,
@@ -741,10 +1101,13 @@ def run_fit_loop(
                 val_sparsity_losses=val_sparsity_losses,
                 val_worst_case_losses=val_worst_case_losses,
                 val_vamp2_losses=val_vamp2_losses,
+                val_topology_losses=val_topology_losses,
+                val_presence_losses=val_presence_losses,
                 stopped_early=False,
                 best_epoch=best_epoch,
                 best_loss=best_loss,
             )
+            _observe_callback_encodings(active_callbacks, model, train_sequences[0])
             for callback in active_callbacks:
                 callback.on_epoch_end(
                     epoch=epoch,
@@ -780,6 +1143,14 @@ def run_fit_loop(
         if not restore_best_weights and last_state_dict is not None:
             module.load_state_dict(last_state_dict)
 
+    if identification is not None:
+        _run_identification_step(
+            model,
+            train_sequences,
+            identification,
+            attach_report=True,
+        )
+
     history = _build_fit_history(
         losses=losses,
         reconstruction_losses=reconstruction_losses,
@@ -792,6 +1163,8 @@ def run_fit_loop(
         sparsity_losses=sparsity_losses,
         worst_case_losses=worst_case_losses,
         vamp2_losses=vamp2_losses,
+        topology_losses=topology_losses,
+        presence_losses=presence_losses,
         val_losses=val_losses,
         val_reconstruction_losses=val_reconstruction_losses,
         val_forward_losses=val_forward_losses,
@@ -803,6 +1176,8 @@ def run_fit_loop(
         val_sparsity_losses=val_sparsity_losses,
         val_worst_case_losses=val_worst_case_losses,
         val_vamp2_losses=val_vamp2_losses,
+        val_topology_losses=val_topology_losses,
+        val_presence_losses=val_presence_losses,
         stopped_early=stopped_early,
         best_epoch=best_epoch,
         best_loss=best_loss,

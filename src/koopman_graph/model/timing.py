@@ -81,7 +81,10 @@ def validate_uniform_discrete_increments(
     Raises
     ------
     ValueError
-        If any increment differs from ``time_step``.
+        If any increment differs from ``time_step``. Discrete models
+        reject gaps. Use ``dynamics_mode='continuous'`` for irregular
+        sampling, or supply derivatives to generator EDMD; irregular
+        timestamps do not create :math:`L`.
     """
     tolerance = max(1e-6, 1e-4 * time_step)
     for value in increments:

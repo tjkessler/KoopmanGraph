@@ -1,0 +1,29 @@
+manifest_id: smoke-multiphysics
+schema_version: benchmark_manifest_v1
+track: multiphysics
+dataset:
+  name: smoke-multiphysics
+  version: "1"
+  sha256: ede4f9e03583be708bdb82d322980d588eff8b49e00ce3f6c8fd6bb6c299d922
+  card: benchmarks/v0.15/cards/smoke_multiphysics.md
+split:
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  history_len: 8
+preprocessing:
+  zscore: false
+  notes:
+    - Path-graph Laplacian diffusion stand-in; not a measured PDE field
+methods:
+  - name: graph_koopman
+    role: koopman
+  - name: joint_ls
+    role: control
+seeds: [0, 1, 2]
+horizons: [1, 4, 8]
+metrics: [mae, rmse]
+compute_budget:
+  max_epochs: 2
+  device: cpu
+controls: [joint_ls]
