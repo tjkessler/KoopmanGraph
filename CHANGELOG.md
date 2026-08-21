@@ -383,6 +383,14 @@ latent operator contract are unchanged (`koopman=None` still selects
   example 22 ranking; and the example-38 joint-LS gap not
   attributed to hop order. Neighbor-factor isotypic tying remains
   shipped. Negative transfer and null ablations stay allowed.
+- CI and release workflows pin `astral-sh/setup-uv` 10.0.1 (v10
+  disables the default cache on `release` events).
+
+### Security
+
+- Locked `aiohttp` 3.14.2 → 3.14.3 (indirect extra;
+  `GHSA-cq5v-8q36-5273`, out-of-bounds heap read on a malformed
+  chunked HTTP response).
 
 ### Notes
 
