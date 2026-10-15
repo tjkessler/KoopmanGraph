@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import Callable, Iterator
 
@@ -12,6 +13,27 @@ os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 import pytest
 import torch
 from torch_geometric.data import Data
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip ``@pytest.mark.cantera`` tests when the ``[cantera]`` extra is absent.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        Active pytest configuration (unused).
+    items : list of pytest.Item
+        Collected test items; ``cantera``-marked ones gain a skip marker.
+    """
+    del config
+    if importlib.util.find_spec("cantera") is not None:
+        return
+    skip = pytest.mark.skip(reason="requires the optional [cantera] extra")
+    for item in items:
+        if "cantera" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

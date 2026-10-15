@@ -299,6 +299,9 @@ handling, read the maintainer architecture guide:
   adaptation, and classical baselines/datasets, plus **optional-dependency**
   (fail-at-call / `[rl]` soft-import) and **frozen dataclass result-type**
   conventions.
+- **Import hygiene**: `import koopman_graph` must not load SciPy, Cantera, or
+  torchdiffeq, even when their extras are installed. Import them inside the
+  function that needs them. `tests/test_import_hygiene.py` enforces this.
 - **Package layout** (same page): when to nest into one-level capability
   packages vs stay flat; keep `model.py` at the package root; no deep trees;
   three-layer API preserved under any folder move; compatibility contract for

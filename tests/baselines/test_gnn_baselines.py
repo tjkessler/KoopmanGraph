@@ -434,6 +434,29 @@ def test_stgode_requires_baselines_ode_extra(monkeypatch: pytest.MonkeyPatch) ->
         model.fit(_diffusion_sequence(timesteps=4), epochs=1)
 
 
+def test_stgode_failed_import_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing torchdiffeq is not cached; a later install is picked up."""
+    import sys
+    import types
+
+    import koopman_graph.baselines.gnn.stgode as stgode_module
+
+    monkeypatch.setattr(stgode_module, "_odeint", stgode_module._UNRESOLVED)
+    # ``None`` in sys.modules makes ``import torchdiffeq`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "torchdiffeq", None)
+    with pytest.raises(ImportError, match=r"koopman-graph\[baselines-ode\]"):
+        stgode_module._require_odeint()
+    assert stgode_module._odeint is stgode_module._UNRESOLVED
+
+    def _fake_odeint(*args: object, **kwargs: object) -> None:
+        return None
+
+    fake = types.ModuleType("torchdiffeq")
+    fake.odeint = _fake_odeint  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torchdiffeq", fake)
+    assert stgode_module._require_odeint() is _fake_odeint
+
+
 def test_stgode_fit_predict_smoke() -> None:
     """Fit/predict smoke when torchdiffeq is installed."""
     pytest.importorskip("torchdiffeq")

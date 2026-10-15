@@ -57,10 +57,12 @@ def _require_odeint() -> Callable[..., Any]:
     """
     global _odeint
     if _odeint is _UNRESOLVED:
+        # A failed import is not cached, so installing the extra mid-session
+        # (e.g. in a notebook) takes effect on the next call.
         try:
             from torchdiffeq import odeint as _resolved
-        except ImportError:  # pragma: no cover - depends on optional extra
-            _resolved = None
+        except ImportError as exc:
+            raise ImportError(_TORCHDIFFEQ_IMPORT_ERROR) from exc
         _odeint = _resolved
     if _odeint is None:
         raise ImportError(_TORCHDIFFEQ_IMPORT_ERROR)

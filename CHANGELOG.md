@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `koopman_graph.datasets.reaction` skeleton: module docstring, empty
+  `__all__`, placeholder submodules, and a `data/` directory for packaged
+  JSON. Not exported from `koopman_graph.datasets` or the root `__all__`.
+- `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
+  and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
+- `cantera` pytest marker; marked tests are skipped automatically when the
+  `[cantera]` extra is not installed.
+- `tests/test_import_hygiene.py`: `import koopman_graph` must not load
+  SciPy, Cantera, or torchdiffeq.
+
+### Changed
+
+- `STGODEBaseline` now imports `torchdiffeq` on first fit / predict instead
+  of at module import, so `import koopman_graph` with `[baselines-ode]`
+  installed no longer loads SciPy. A missing `torchdiffeq` is no longer
+  cached: installing the extra mid-session takes effect on the next call.
+- `uv.lock` relocked; it was missing extras already declared in
+  `pyproject.toml` (`export`, `control-lmi`, ...).
+
 ## [0.15.0] - 2026-08-19
 
 Integration increment on the 0.14 stack: opt-in closed-form

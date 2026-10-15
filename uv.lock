@@ -2122,7 +2122,7 @@ symmetry = [
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.0" },
-    { name = "cantera", marker = "extra == 'cantera'", specifier = ">=3.0" },
+    { name = "cantera", marker = "extra == 'cantera'", specifier = ">=3.2,<3.3" },
     { name = "captum", marker = "extra == 'explain'", specifier = ">=0.7" },
     { name = "cvxpy", marker = "extra == 'control-lmi'", specifier = ">=1.4.0" },
     { name = "dask", extras = ["distributed"], marker = "extra == 'dask'", specifier = ">=2024.1.0" },
