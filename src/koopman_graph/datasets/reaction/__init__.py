@@ -38,4 +38,26 @@ operator recovers slow kinetic timescales and respects conservation — not a
 replacement for a production kinetics solver.
 """
 
-__all__: list[str] = []
+from koopman_graph.datasets.reaction.system import (
+    GAS_CONSTANT_J_PER_MOL_K,
+    ArrheniusParams,
+    ElementBalanceReport,
+    ReactionSystem,
+    check_element_balance,
+)
+from koopman_graph.datasets.reaction.transform import (
+    DEFAULT_LOG_FLOOR,
+    LogConcentrationTransform,
+    element_balance_violation,
+)
+
+__all__ = [
+    "DEFAULT_LOG_FLOOR",
+    "GAS_CONSTANT_J_PER_MOL_K",
+    "ArrheniusParams",
+    "ElementBalanceReport",
+    "LogConcentrationTransform",
+    "ReactionSystem",
+    "check_element_balance",
+    "element_balance_violation",
+]

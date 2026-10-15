@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `koopman_graph.datasets.reaction` skeleton: module docstring, empty
   `__all__`, placeholder submodules, and a `data/` directory for packaged
   JSON. Not exported from `koopman_graph.datasets` or the root `__all__`.
+- `koopman_graph.datasets.reaction.system`: frozen `ReactionSystem`
+  (reactant / product stoichiometry, mass-action rates and right-hand side,
+  stoichiometric matrix, linearity check, optional element matrix and
+  per-reaction `ArrheniusParams`, `at_temperature`, dict round trip) and
+  `check_element_balance`, which reports per-reaction element residuals
+  (open-system source / sink reactions show up as unbalanced). Stored
+  tensors are owned copies but not write-protected; treat them as
+  read-only.
+- `koopman_graph.datasets.reaction.transform`: `LogConcentrationTransform`
+  (floored `log c`, its inverse, a below-floor mask, and a serializable
+  record of the floor) and `element_balance_violation` for element-total
+  drift from a reference state.
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
 - `cantera` pytest marker; marked tests are skipped automatically when the
