@@ -468,6 +468,11 @@ def _stoichiometric_basis(system: ReactionSystem) -> tuple[int, Tensor, Tensor]:
 
 _CANONICAL_PIVOT_TOL = 1e-6
 
+# Entries of the canonical rows that should be exactly zero come out as
+# round-off (~1e-16) whose value depends on the LAPACK build; snap them so
+# the stored basis is identical across platforms, not just close.
+_CANONICAL_ZERO_TOL = 1e-12
+
 
 def _canonical_row_basis(w: Tensor) -> Tensor:
     """Return a basis-independent orthonormal basis of ``rowspace(w)``.
@@ -481,7 +486,8 @@ def _canonical_row_basis(w: Tensor) -> Tensor:
     -------
         Orthonormal rows spanning the same subspace, chosen by Gram-Schmidt in
         coordinate order on the projector ``wᵀw`` (independent of which
-        orthonormal ``w`` was passed)."""
+        orthonormal ``w`` was passed), with round-off entries below
+        ``1e-12`` set to exactly zero."""
     num_laws, num_species = int(w.shape[0]), int(w.shape[1])
     if num_laws == 0:
         return w
@@ -496,7 +502,8 @@ def _canonical_row_basis(w: Tensor) -> Tensor:
             basis.append(v / norm)
             if len(basis) == num_laws:
                 break
-    return torch.stack(basis)
+    rows = torch.stack(basis)
+    return torch.where(rows.abs() < _CANONICAL_ZERO_TOL, torch.zeros_like(rows), rows)
 
 
 def _svd_rank(matrix: Tensor) -> tuple[Tensor, Tensor, int]:
