@@ -331,3 +331,7 @@ def test_conservation_laws_are_canonical_across_bases() -> None:
     expected = torch.tensor([0.0, 1.0, 1.0, 1.0], dtype=_F64) / math.sqrt(3.0)
     assert torch.allclose(w[1], expected, atol=1e-12)
     assert _canonical_row_basis(torch.zeros(0, 4, dtype=_F64)).shape == (0, 4)
+    # Round-off zeros are exact zeros, so stored bases match across platforms.
+    assert float(w[1, 0]) == 0.0
+    noisy = w + 1e-16 * torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    assert float(_canonical_row_basis(noisy.to(_F64))[1, 0]) == 0.0
