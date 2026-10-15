@@ -100,6 +100,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `compute_card_oracle` and `scripts/build_reaction_cards.py` (with
     `--check`) regenerate the oracle sections; tests recompute them to catch
     drift.
+- Example `55_reaction_network_oracles.ipynb` compares estimators against the
+  `ReactionNetworkBenchmark` oracles:
+  - exact DMD recovers the chain's `exp(λ Δt)` (errors ~1e-7) and conserves
+    mass in rollouts;
+  - DMD on the card's log features misses by up to ~0.13;
+  - a short `koopman="graph"` fit is approximate, and
+    `element_balance_violation` flags its rollout drift;
+  - a late-window DMD recovers the Michaelis-Menten slow mode against each
+    trajectory's own equilibrium linearization.
+
+  Registered in the PR notebook smoke set and the full `27-55` shard.
+- `ReactionDataset.sequence(..., graph_encoding=)` overrides the card's
+  encoding (e.g. drop `hyperedge_index` for `DMDBaseline`).
 - `eigenvalue_timescales`: `-1/Re(λ)` with numerically zero real parts
   (relative to `max|λ|`) mapped to `inf`; `OracleSpectrum.timescales` uses it.
 

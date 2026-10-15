@@ -286,6 +286,7 @@ jobs:
                               "examples/52_cochain_hodge_modes.ipynb",
                               "examples/53_latent_rank_selection.ipynb",
                               "examples/54_criticality_monitor.ipynb",
+                              "examples/55_reaction_network_oracles.ipynb",
                           ]
                       ),
                   }
@@ -307,12 +308,12 @@ jobs:
                       ),
                   },
                   {
-                      "shard": "27-54",
+                      "shard": "27-55",
                       "pattern": (
                           "examples/2[7-9]_*.ipynb "
                           "examples/3[0-9]_*.ipynb "
                           "examples/4[0-9]_*.ipynb "
-                          "examples/5[0-4]_*.ipynb"
+                          "examples/5[0-5]_*.ipynb"
                       ),
                   },
               ]

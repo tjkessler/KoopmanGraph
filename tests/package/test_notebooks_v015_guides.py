@@ -1,4 +1,4 @@
-"""Honesty locks for examples 48–49 and 51–54 (guides; no telemetry download)."""
+"""Honesty locks for examples 48–49 and 51–55 (guides; no telemetry download)."""
 
 from __future__ import annotations
 
@@ -84,6 +84,17 @@ _NOTEBOOKS = {
             "does not download metr-la",
         ),
     ),
+    "55_reaction_network_oracles.ipynb": (
+        "# Reaction-network oracles: recovering kinetic timescales",
+        (
+            "ReactionNetworkBenchmark",
+            "element_balance_violation",
+            "not a production kinetics benchmark",
+            "linearization",
+            "own equilibrium",
+            "does not download metr-la",
+        ),
+    ),
 }
 
 
@@ -114,7 +125,7 @@ def _notebook_text(path: pathlib.Path) -> str:
 
 
 def test_v015_guide_notebooks_exist_with_scientific_arc() -> None:
-    """Examples 48–49 and 51–54 must exist and follow the scientific arc."""
+    """Examples 48–49 and 51–55 must exist and follow the scientific arc."""
     for name, (title, _needles) in _NOTEBOOKS.items():
         path = _PROJECT_ROOT / "examples" / name
         assert path.is_file(), f"missing {name}"

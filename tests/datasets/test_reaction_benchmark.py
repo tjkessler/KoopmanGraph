@@ -260,6 +260,13 @@ def test_sequence_layout_and_encodings() -> None:
     assert not hasattr(raw.sequence(0)[0], "hyperedge_index")
     with pytest.raises(IndexError, match="out of range"):
         raw.sequence(5)
+    plain = dataset.sequence(1, graph_encoding="species_influence")
+    assert not hasattr(plain[0], "hyperedge_index")
+    assert torch.equal(plain[0].x, snapshot.x)
+    with_hyper = raw.sequence(0, graph_encoding="reaction_hyperedge")
+    assert with_hyper[0].hyperedge_index.shape[0] == 2
+    with pytest.raises(ValueError, match="graph_encoding must be"):
+        raw.sequence(0, graph_encoding="bipartite")  # type: ignore[arg-type]
 
 
 def test_cstr_controls_are_piecewise_constant_and_in_range() -> None:
