@@ -38,6 +38,26 @@ operator recovers slow kinetic timescales and respects conservation — not a
 replacement for a production kinetics solver.
 """
 
+from koopman_graph.datasets.reaction.graphs import (
+    PRODUCT_RELATION,
+    REACTANT_RELATION,
+    REACTION_NODE,
+    SPECIES_NODE,
+    reaction_directed_hyperedges,
+    reaction_hyperedge_index,
+    species_influence_graph,
+    species_reaction_bipartite,
+)
+from koopman_graph.datasets.reaction.integrate import (
+    IntegrationMethod,
+    integrate_expm,
+    integrate_reaction_system,
+    integrate_rk4,
+    integrate_stiff,
+    linear_rate_equations,
+    mass_action_jacobian,
+    require_scipy,
+)
 from koopman_graph.datasets.reaction.system import (
     GAS_CONSTANT_J_PER_MOL_K,
     ArrheniusParams,
@@ -54,10 +74,26 @@ from koopman_graph.datasets.reaction.transform import (
 __all__ = [
     "DEFAULT_LOG_FLOOR",
     "GAS_CONSTANT_J_PER_MOL_K",
+    "PRODUCT_RELATION",
+    "REACTANT_RELATION",
+    "REACTION_NODE",
+    "SPECIES_NODE",
     "ArrheniusParams",
     "ElementBalanceReport",
+    "IntegrationMethod",
     "LogConcentrationTransform",
     "ReactionSystem",
     "check_element_balance",
     "element_balance_violation",
+    "integrate_expm",
+    "integrate_reaction_system",
+    "integrate_rk4",
+    "integrate_stiff",
+    "linear_rate_equations",
+    "mass_action_jacobian",
+    "reaction_directed_hyperedges",
+    "reaction_hyperedge_index",
+    "require_scipy",
+    "species_influence_graph",
+    "species_reaction_bipartite",
 ]
