@@ -38,6 +38,19 @@ operator recovers slow kinetic timescales and respects conservation — not a
 replacement for a production kinetics solver.
 """
 
+from koopman_graph.datasets.reaction.catalog import (
+    DEFAULT_BRUSSELATOR_PARAMS,
+    DEFAULT_CHAIN_RATE,
+    DEFAULT_CHAIN_RATIO,
+    DEFAULT_DIMERIZATION_RATES,
+    DEFAULT_LOTKA_VOLTERRA_RATES,
+    DEFAULT_MICHAELIS_MENTEN_RATES,
+    brusselator,
+    first_order_chain,
+    lotka_volterra,
+    michaelis_menten,
+    reversible_dimerization,
+)
 from koopman_graph.datasets.reaction.graphs import (
     PRODUCT_RELATION,
     REACTANT_RELATION,
@@ -58,6 +71,14 @@ from koopman_graph.datasets.reaction.integrate import (
     mass_action_jacobian,
     require_scipy,
 )
+from koopman_graph.datasets.reaction.oracles import (
+    OracleSpectrum,
+    conservation_laws,
+    equilibrium,
+    oracle_spectrum,
+    oracle_timescales,
+    stoichiometric_rank,
+)
 from koopman_graph.datasets.reaction.system import (
     GAS_CONSTANT_J_PER_MOL_K,
     ArrheniusParams,
@@ -72,7 +93,13 @@ from koopman_graph.datasets.reaction.transform import (
 )
 
 __all__ = [
+    "DEFAULT_BRUSSELATOR_PARAMS",
+    "DEFAULT_CHAIN_RATE",
+    "DEFAULT_CHAIN_RATIO",
+    "DEFAULT_DIMERIZATION_RATES",
     "DEFAULT_LOG_FLOOR",
+    "DEFAULT_LOTKA_VOLTERRA_RATES",
+    "DEFAULT_MICHAELIS_MENTEN_RATES",
     "GAS_CONSTANT_J_PER_MOL_K",
     "PRODUCT_RELATION",
     "REACTANT_RELATION",
@@ -82,18 +109,29 @@ __all__ = [
     "ElementBalanceReport",
     "IntegrationMethod",
     "LogConcentrationTransform",
+    "OracleSpectrum",
     "ReactionSystem",
+    "brusselator",
     "check_element_balance",
+    "conservation_laws",
     "element_balance_violation",
+    "equilibrium",
+    "first_order_chain",
     "integrate_expm",
     "integrate_reaction_system",
     "integrate_rk4",
     "integrate_stiff",
     "linear_rate_equations",
+    "lotka_volterra",
     "mass_action_jacobian",
+    "michaelis_menten",
+    "oracle_spectrum",
+    "oracle_timescales",
     "reaction_directed_hyperedges",
     "reaction_hyperedge_index",
     "require_scipy",
+    "reversible_dimerization",
     "species_influence_graph",
     "species_reaction_bipartite",
+    "stoichiometric_rank",
 ]

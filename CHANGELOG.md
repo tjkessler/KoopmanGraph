@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Jacobian behind a lazy `require_scipy()` guard (`integrate_stiff`;
   `[reaction]` extra), the `integrate_reaction_system` dispatcher
   (`method="auto"`), and `mass_action_jacobian`.
+- `koopman_graph.datasets.reaction.catalog`: reference systems with frozen
+  default parameters (`first_order_chain`, `reversible_dimerization`,
+  `michaelis_menten`, `brusselator`, `lotka_volterra`). Closed systems carry
+  an element matrix.
+- `koopman_graph.datasets.reaction.oracles`: `conservation_laws` (orthonormal
+  left nullspace of `N`), `stoichiometric_rank`, `equilibrium` (exact for
+  linear systems, damped non-negative Newton within the compatibility
+  class otherwise), and `oracle_spectrum` / `oracle_timescales` /
+  `OracleSpectrum`. These give the Jacobian, dynamic eigenvalues with the
+  conservation zero modes removed, timescales `-1/Re(λ)`, and flow-map
+  eigenvalues `exp(λ Δt)` to compare with a learned discrete operator.
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
 - `cantera` pytest marker; marked tests are skipped automatically when the
