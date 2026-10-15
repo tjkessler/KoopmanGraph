@@ -477,6 +477,10 @@ def test_relgraph_encode_decode_shapes_match_per_type_widths() -> None:
 
 def test_rectangular_model_forward_and_gradients() -> None:
     """Factory model encode→advance→decode runs with gradients on unequal d_τ."""
+    # About 7% of random inits give an all-zero relation gradient (dead ReLU
+    # paths on this tiny graph), so pin the init instead of inheriting
+    # whatever RNG state earlier tests in the xdist worker left behind.
+    torch.manual_seed(0)
     encoder, decoder = _relgraph_peers()
     model = GraphKoopmanModel(
         encoder=encoder,
