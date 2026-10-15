@@ -1,0 +1,131 @@
+{
+  "dataset_id": "reaction_random_network_v1",
+  "version": "v1",
+  "scope": "Seeded random element-balanced mass-action network (6 species, 2 elements, 8 reactions, order <= 2).",
+  "generator": {
+    "kind": "random_network",
+    "params": {
+      "num_species": 6,
+      "num_elements": 2,
+      "num_reactions": 8,
+      "max_atoms": 4,
+      "max_order": 2,
+      "rate_log10_range": [
+        -1.0,
+        1.0
+      ],
+      "seed": 0
+    }
+  },
+  "simulator": {
+    "kind": "rk4",
+    "substeps": 20
+  },
+  "time_step": 0.1,
+  "default_num_timesteps": 64,
+  "default_num_trajectories": 32,
+  "default_seed": 0,
+  "initial_ranges": {
+    "X0": [
+      0.1,
+      1.0
+    ],
+    "X1": [
+      0.1,
+      1.0
+    ],
+    "X2": [
+      0.1,
+      1.0
+    ],
+    "X3": [
+      0.1,
+      1.0
+    ],
+    "X4": [
+      0.1,
+      1.0
+    ],
+    "X5": [
+      0.1,
+      1.0
+    ]
+  },
+  "oracle_relaxation_time": 200.0,
+  "transform": {
+    "kind": "log_concentration",
+    "floor": 1e-08
+  },
+  "graph_encoding": "species_influence",
+  "limitations": "Synthetic chemistry with no physical species; rates are log-uniform draws, not measured kinetics.",
+  "units": {
+    "time": "s",
+    "concentration": "mol/L"
+  },
+  "controls": null,
+  "cantera": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "In-repo mass-action generator (koopman_graph.datasets.reaction).",
+  "license": "Apache-2.0",
+  "species": [
+    "X0",
+    "X1",
+    "X2",
+    "X3",
+    "X4",
+    "X5"
+  ],
+  "elements": [
+    "e0",
+    "e1"
+  ],
+  "num_reactions": 8,
+  "oracle": {
+    "state": "equilibrium_from_range_midpoints_after_relaxation",
+    "reference_state": [
+      0.9371973830410871,
+      2.668598691520542,
+      7.203240409913488e-32,
+      1.181401308479456,
+      2.8981443113177526e-30,
+      1.6307572951339986e-30
+    ],
+    "num_conservation_laws": 2,
+    "conservation_laws": [
+      [
+        0.2889695340165011,
+        -0.4048248518165172,
+        -0.11585531780001589,
+        0.1731142162164851,
+        -0.23171063560003166,
+        -0.8096497036330341
+      ],
+      [
+        0.31116631768677233,
+        0.00715999869017006,
+        0.3183263163769422,
+        0.6294926340637144,
+        0.6366526327538841,
+        0.014319997380339834
+      ]
+    ],
+    "dynamic_eigenvalues_real": [
+      -1.1843321716463685e-17,
+      -0.8165944002656043,
+      -0.8249568943108102,
+      -30.345958028796638
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "timescales": [
+      null,
+      1.2245981599613487,
+      1.2121845479398354,
+      0.032953317837290066
+    ]
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "dataset_id": "reaction_van_de_vusse_v1",
+  "version": "v1",
+  "scope": "Van de Vusse CSTR (A -> B -> C, 2 A -> D) with seeded piecewise-constant reactor temperature and dilution-rate inputs stored as global control_inputs.",
+  "generator": {
+    "kind": "cstr",
+    "params": {}
+  },
+  "simulator": {
+    "kind": "cstr",
+    "substeps": 20
+  },
+  "time_step": 0.01,
+  "default_num_timesteps": 100,
+  "default_num_trajectories": 32,
+  "default_seed": 0,
+  "initial_ranges": {
+    "A": [
+      0.5,
+      3.0
+    ],
+    "B": [
+      0.0,
+      1.5
+    ],
+    "C": [
+      0.0,
+      1.5
+    ],
+    "D": [
+      0.0,
+      0.5
+    ]
+  },
+  "controls": {
+    "names": [
+      "temperature_k",
+      "dilution_rate"
+    ],
+    "ranges": {
+      "temperature_k": [
+        380.0,
+        400.0
+      ],
+      "dilution_rate": [
+        5.0,
+        30.0
+      ]
+    },
+    "hold_steps": 10,
+    "units": {
+      "temperature_k": "K",
+      "dilution_rate": "1/h"
+    }
+  },
+  "transform": null,
+  "graph_encoding": "species_influence",
+  "units": {
+    "time": "h",
+    "concentration": "mol/L"
+  },
+  "references": [
+    "K.-U. Klatt and S. Engell, Comput. Chem. Eng. 22(4-5), 491-502, 1998 (kinetics)",
+    "H. Chen, A. Kremling and F. Allgower, Proc. 3rd ECC, 1995 (operating point)"
+  ],
+  "limitations": "Reactor temperature is a direct input (no energy balance); the graph uses the reaction network only, not the feed.",
+  "cantera": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "In-repo mass-action generator (koopman_graph.datasets.reaction).",
+  "license": "Apache-2.0",
+  "species": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "elements": null,
+  "num_reactions": 3,
+  "oracle": {
+    "state": "cstr_steady_state_at_control_midpoint",
+    "reference_state": [
+      2.187229135690542,
+      1.0935337017908153,
+      1.0933719935983206,
+      0.3629325844601609
+    ],
+    "num_conservation_laws": 0,
+    "conservation_laws": [],
+    "dynamic_eigenvalues_real": [
+      -17.5,
+      -17.5,
+      -34.99741215715252,
+      -46.6126931067593
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "timescales": [
+      0.05714285714285714,
+      0.05714285714285714,
+      0.028573541252410208,
+      0.021453383903600073
+    ]
+  }
+}

@@ -69,6 +69,12 @@ ContactEpidemicBenchmark
 ERA5SliceCard / generate_tiny_era5_mesh
     Documented ERA5 teaching-slice card and a tiny generated mesh
     (not production GraphCast / ERA5 training).
+ReactionNetworkBenchmark
+    Card-defined mass-action reaction networks (catalog systems, random
+    networks, Van de Vusse CSTR, Cantera ``h2o2``) with oracle equilibria,
+    spectra, and timescales. The rest of the reaction toolkit lives in
+    :mod:`koopman_graph.datasets.reaction`; SciPy / Cantera stay behind the
+    ``[reaction]`` / ``[cantera]`` extras.
 """
 
 from koopman_graph.datasets.contact_epidemic import ContactEpidemicBenchmark
@@ -91,6 +97,7 @@ from koopman_graph.datasets.kuramoto_sivashinsky import KuramotoSivashinskyBench
 from koopman_graph.datasets.lorenz96 import Lorenz96GraphBenchmark
 from koopman_graph.datasets.metr_la import MetrLaTrafficBenchmark
 from koopman_graph.datasets.pems import PemsBayTrafficBenchmark, PemsTrafficBenchmark
+from koopman_graph.datasets.reaction.benchmark import ReactionNetworkBenchmark
 from koopman_graph.datasets.synthetic import SyntheticDynamicGraphBenchmark
 from koopman_graph.datasets.topology import TopologyPayload
 
@@ -107,6 +114,7 @@ __all__ = [
     "MetrLaTrafficBenchmark",
     "PemsBayTrafficBenchmark",
     "PemsTrafficBenchmark",
+    "ReactionNetworkBenchmark",
     "SyntheticDynamicGraphBenchmark",
     "TopologyPayload",
     "TypedIEEE118Topology",

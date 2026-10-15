@@ -1,0 +1,98 @@
+{
+  "dataset_id": "reaction_michaelis_menten_v1",
+  "version": "v1",
+  "scope": "Mass-action Michaelis-Menten E + S <-> ES -> E + P with two conservation laws (enzyme, substrate backbone) and a boundary equilibrium.",
+  "generator": {
+    "kind": "catalog",
+    "name": "michaelis_menten",
+    "params": {}
+  },
+  "simulator": {
+    "kind": "rk4",
+    "substeps": 50
+  },
+  "time_step": 0.5,
+  "default_num_timesteps": 64,
+  "default_num_trajectories": 32,
+  "default_seed": 0,
+  "initial_ranges": {
+    "E": [
+      0.05,
+      0.15
+    ],
+    "S": [
+      0.5,
+      1.5
+    ],
+    "ES": [
+      0.0,
+      0.05
+    ],
+    "P": [
+      0.0,
+      0.1
+    ]
+  },
+  "transform": {
+    "kind": "log_concentration",
+    "floor": 1e-08
+  },
+  "graph_encoding": "reaction_hyperedge",
+  "limitations": "Irreversible catalysis: trajectories end on the boundary S = ES = 0, where the log transform saturates at the floor.",
+  "units": {
+    "time": "s",
+    "concentration": "mol/L"
+  },
+  "controls": null,
+  "cantera": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "In-repo mass-action generator (koopman_graph.datasets.reaction).",
+  "license": "Apache-2.0",
+  "species": [
+    "E",
+    "S",
+    "ES",
+    "P"
+  ],
+  "elements": [
+    "Enz",
+    "Sub"
+  ],
+  "num_reactions": 3,
+  "oracle": {
+    "state": "equilibrium_from_range_midpoints",
+    "reference_state": [
+      0.12499999999999997,
+      0.0,
+      0.0,
+      1.0750000000000002
+    ],
+    "num_conservation_laws": 2,
+    "conservation_laws": [
+      [
+        -0.7123282872413622,
+        0.010643277802640164,
+        -0.701685009438722,
+        0.01064327780264014
+      ],
+      [
+        -0.3042834389114655,
+        0.6323659704930491,
+        0.32808253158158357,
+        0.632365970493049
+      ]
+    ],
+    "dynamic_eigenvalues_real": [
+      -0.25,
+      -2.5
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.0,
+      0.0
+    ],
+    "timescales": [
+      4.0,
+      0.4
+    ]
+  }
+}

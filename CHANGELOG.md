@@ -80,14 +80,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ideal-gas reactors, adiabatic or isothermal.
   - Also: `require_cantera`, `resolve_mechanism_path`, and
     `mechanism_sha256`.
-- `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
-  and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
-- `cantera` pytest marker; marked tests are skipped automatically when the
-  `[cantera]` extra is not installed.
-- CI test jobs and the release verify job install `[reaction]` and
-  `[cantera]`, so `cantera`-marked tests run there.
-- `tests/test_import_hygiene.py`: `import koopman_graph` must not load
-  SciPy, Cantera, or torchdiffeq.
+- `ReactionNetworkBenchmark` (exported from `koopman_graph.datasets` and
+  `koopman_graph.datasets.reaction`): card-defined, seeded reaction-network
+  datasets.
+  - Six packaged FAIR JSON cards under `reaction/data/`:
+    `reaction_chain_v1`, `reaction_michaelis_menten_v1`,
+    `reaction_brusselator_v1`, `reaction_random_network_v1`,
+    `reaction_van_de_vusse_v1` (piecewise-constant temperature /
+    dilution-rate controls), and `reaction_cantera_h2o2_v1` (`[cantera]`).
+    Each card records the generator, simulator, time grid, seed,
+    initial-condition ranges, log floor, graph encoding, oracle references
+    (equilibrium, dynamic eigenvalues, timescales, conservation laws),
+    units, license, limitations, and Cantera provenance.
+  - `generate` returns a `ReactionDataset` (raw `float64` concentrations,
+    optional controls, per-trajectory `GraphSnapshotSequence` with species
+    nodes, `timestamps`, and global `control_inputs`), with an optional
+    Gillespie `simulator="ssa"`. Also: deterministic trajectory `split`, and
+    versioned `save` / `load` payloads (`weights_only` loading).
+  - `compute_card_oracle` and `scripts/build_reaction_cards.py` (with
+    `--check`) regenerate the oracle sections; tests recompute them to catch
+    drift.
+- `eigenvalue_timescales`: `-1/Re(λ)` with numerically zero real parts
+  (relative to `max|λ|`) mapped to `inf`; `OracleSpectrum.timescales` uses it.
 
 ### Changed
 
@@ -97,6 +111,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached: installing the extra mid-session takes effect on the next call.
 - `uv.lock` relocked; it was missing extras already declared in
   `pyproject.toml` (`export`, `control-lmi`, ...).
+
+### Fixed
+
+- `equilibrium` no longer returns a clamped Newton stall that is not
+  stationary. It now requires `|dc_s/dt| <= 1e-6 · gross turnover_s +
+  1e-12 · (peak initial turnover)` and otherwise raises `RuntimeError`.
+  Previously the converted Cantera `h2o2` system could report a
+  near-boundary point with one-way flux as its equilibrium.
+- `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
+  and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
+- `cantera` pytest marker; marked tests are skipped automatically when the
+  `[cantera]` extra is not installed.
+- CI test jobs and the release verify job install `[reaction]` and
+  `[cantera]`, so `cantera`-marked tests run there.
+- `tests/test_import_hygiene.py`: `import koopman_graph` must not load
+  SciPy, Cantera, or torchdiffeq.
 
 ## [0.15.0] - 2026-08-19
 

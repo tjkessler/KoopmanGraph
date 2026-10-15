@@ -1,0 +1,167 @@
+{
+  "dataset_id": "reaction_cantera_h2o2_v1",
+  "version": "v1",
+  "scope": "Isothermal constant-volume H2/O2/Ar chemistry at 1200 K from Cantera's bundled h2o2.yaml (10 species, 29 reactions); trajectories come from Cantera's ReactorNet.",
+  "generator": {
+    "kind": "cantera",
+    "params": {}
+  },
+  "simulator": {
+    "kind": "cantera"
+  },
+  "time_step": 2e-05,
+  "default_num_timesteps": 50,
+  "default_num_trajectories": 16,
+  "default_seed": 0,
+  "cantera": {
+    "mechanism": "h2o2.yaml",
+    "sha256": "0efc6c52862741a29e0c29b65d979c7d8cb409db5282bca83b9c5437b3d8c8d4",
+    "cantera_version": "3.2.0",
+    "temperature_k": 1200.0,
+    "pressure_pa": 101325.0,
+    "reactor": "const_volume",
+    "isothermal": true,
+    "state_dependent": "freeze",
+    "reference_mole_fractions": "H2:2, O2:1, AR:4",
+    "initial_mole_fraction_ranges": {
+      "H2": [
+        1.0,
+        3.0
+      ],
+      "O2": [
+        0.5,
+        1.5
+      ],
+      "AR": [
+        3.0,
+        5.0
+      ]
+    },
+    "note": "Cantera's bundled input files are provided for illustration only; they are not validated kinetic models for quantitative use.",
+    "citation_doi": "10.5281/zenodo.17620923",
+    "license": "Cantera is BSD-3-Clause"
+  },
+  "transform": {
+    "kind": "log_concentration",
+    "floor": 1e-12
+  },
+  "graph_encoding": "species_influence",
+  "limitations": "Illustration-only mechanism; the graph and oracle use the mass-action conversion with the falloff reaction frozen at the reference state, while trajectories are exact Cantera integrations.",
+  "units": {
+    "time": "s",
+    "concentration": "mol/L"
+  },
+  "controls": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "Cantera ReactorNet integration of the bundled mechanism; see the cantera section for version and SHA-256.",
+  "license": "Apache-2.0",
+  "species": [
+    "H2",
+    "H",
+    "O",
+    "O2",
+    "OH",
+    "H2O",
+    "HO2",
+    "H2O2",
+    "AR",
+    "N2"
+  ],
+  "elements": [
+    "O",
+    "H",
+    "Ar",
+    "N"
+  ],
+  "num_reactions": 136,
+  "oracle": {
+    "state": "cantera_thermochemical_equilibrium_TV",
+    "reference_state": [
+      3.0669032201594336e-08,
+      3.482844896613705e-12,
+      3.059422020259053e-13,
+      1.4677299229464722e-08,
+      2.6314766744630864e-09,
+      0.0029015385787945157,
+      3.1032512185622856e-14,
+      8.412261154894816e-14,
+      0.00580314113081214,
+      0.0
+    ],
+    "num_conservation_laws": 4,
+    "conservation_laws": [
+      [
+        0.28064053942470113,
+        0.1403202697123506,
+        -0.3167114270242802,
+        -0.6334228540485629,
+        -0.17639115731193028,
+        -0.036070887599579333,
+        -0.493102584336212,
+        -0.3527823146238605,
+        0.0,
+        0.0
+      ],
+      [
+        0.5812981629921767,
+        0.2906490814960885,
+        -0.062133233127772275,
+        -0.12426646625554473,
+        0.2285158483683161,
+        0.5191649298644041,
+        0.16638261524054332,
+        0.4570316967366318,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    ],
+    "dynamic_eigenvalues_real": [
+      -0.000469766753797218,
+      -0.023066363423131318,
+      -390.50523712580406,
+      -4998.956241475473,
+      -48124.93946401666,
+      -53087.23619072366
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "timescales": [
+      2128.7159891942147,
+      43.35317109402621,
+      0.0025607851186841904,
+      0.0002000417590582557,
+      2.0779246917239383e-05,
+      1.8836919601678898e-05
+    ]
+  }
+}

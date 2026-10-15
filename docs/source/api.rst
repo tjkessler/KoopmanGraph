@@ -1046,6 +1046,7 @@ Datasets
 .. automodule:: koopman_graph.datasets.reaction
    :members:
    :show-inheritance:
+   :exclude-members: ReactionNetworkBenchmark
 
 .. automodule:: koopman_graph.datasets.era5
    :members:

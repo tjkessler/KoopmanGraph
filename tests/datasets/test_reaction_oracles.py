@@ -206,3 +206,17 @@ def test_equilibrium_rejects_one_way_boundary_point() -> None:
 
     with pytest.raises(RuntimeError, match="non-stationary point"):
         _require_stationary(system, torch.tensor([1.0, 0.0, 1e-9], dtype=_F64))
+
+
+def test_equilibrium_accepts_vanishing_leftovers_on_boundary() -> None:
+    """Draining onto a zero-flux boundary is stationary despite tiny leftovers."""
+    from koopman_graph.datasets.reaction import sample_random_network
+
+    system = sample_random_network(seed=0).system
+    c0 = torch.full((6,), 0.55, dtype=_F64)
+    relaxed = integrate_rk4(system, c0, torch.tensor([0.0, 200.0]), substeps=4000)[-1]
+    c_eq = equilibrium(system, c0, guess=relaxed)
+    assert float(system.time_derivative(c_eq).abs().max()) < 1e-12
+    assert system.element_matrix is not None
+    drift = system.element_matrix @ (c_eq - c0)
+    assert float(drift.abs().max()) < 1e-10

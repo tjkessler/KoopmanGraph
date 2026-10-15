@@ -67,15 +67,12 @@ class OracleSpectrum:
         -------
         Tensor
             ``float64`` tensor aligned with :attr:`dynamic_eigenvalues`:
-            positive for decaying modes, ``inf`` when ``Re(λ) = 0`` (e.g. a
-            neutral centre), and negative for growing modes.
+            positive for decaying modes, ``inf`` when ``Re(λ)`` is zero to
+            within ``1e-12 · max|λ|`` (a neutral centre, or a species
+            drained onto a zero-flux boundary), and negative for growing
+            modes.
         """
-        real = self.dynamic_eigenvalues.real
-        return torch.where(
-            real == 0,
-            torch.full_like(real, math.inf),
-            -1.0 / real,
-        )
+        return eigenvalue_timescales(self.dynamic_eigenvalues)
 
     @property
     def is_stable(self) -> bool:
@@ -113,6 +110,30 @@ class OracleSpectrum:
             msg = f"time_step must be finite and > 0, got {time_step!r}"
             raise ValueError(msg)
         return torch.exp(self.dynamic_eigenvalues * dt)
+
+
+_ZERO_EIGENVALUE_RTOL = 1e-12
+
+
+def eigenvalue_timescales(eigenvalues: Tensor) -> Tensor:
+    """Return relaxation timescales ``-1 / Re(λ)`` with numerical zeros as ``inf``.
+
+    Parameters
+    ----------
+    eigenvalues : Tensor
+        Complex (or real) eigenvalues ``(k,)``.
+
+    Returns
+    -------
+    Tensor
+        ``float64`` timescales ``(k,)``. ``|Re(λ)| <= 1e-12 · max|λ|`` maps
+        to ``inf``.
+    """
+    real = eigenvalues.real.to(torch.float64)
+    scale = float(eigenvalues.abs().max()) if eigenvalues.numel() else 0.0
+    zero = real.abs() <= _ZERO_EIGENVALUE_RTOL * scale
+    safe = torch.where(zero, torch.ones_like(real), real)
+    return torch.where(zero, torch.full_like(real, math.inf), -1.0 / safe)
 
 
 def stoichiometric_rank(system: ReactionSystem) -> int:
@@ -232,6 +253,8 @@ def equilibrium(
 
     start = c0 if guess is None else _state(system, guess, "guess")
     c = start.clamp(min=0)
+    # Turnover at the initial state sets the absolute stationarity scale.
+    flux_scale = float(_gross_turnover(system, c0.clamp(min=0)).max())
     f = residual(c)
     for _ in range(max_iter):
         jac = torch.cat([q.T @ mass_action_jacobian(system, c), w])
@@ -247,7 +270,7 @@ def equilibrium(
         moved = float((candidate - c).abs().max())
         c, f = candidate, f_candidate
         if moved <= tol * (1.0 + float(c.abs().max())):
-            _require_stationary(system, c)
+            _require_stationary(system, c, flux_scale=flux_scale)
             return c
     msg = (
         f"Newton did not converge for {system.name!r} in {max_iter} iterations "
@@ -316,21 +339,50 @@ def oracle_timescales(system: ReactionSystem, state: Tensor) -> Tensor:
 _STATIONARY_RTOL = 1e-6
 
 
-def _require_stationary(system: ReactionSystem, c: Tensor) -> None:
-    """Raise unless net rates are negligible against gross species turnover.
+_STATIONARY_ATOL = 1e-12
+
+
+def _gross_turnover(system: ReactionSystem, c: Tensor) -> Tensor:
+    """Return per-species gross turnover ``Σ_j r_j (α_js + β_js)``.
 
     Parameters
     ----------
     system
         See signature.
     c
+        See signature.
+
+    Returns
+    -------
         See signature."""
     rates = system.reaction_rates(c)
+    return rates @ (system.reactant_stoichiometry + system.product_stoichiometry)
+
+
+def _require_stationary(
+    system: ReactionSystem, c: Tensor, *, flux_scale: float = 0.0
+) -> None:
+    """Raise unless net rates are negligible against species turnover.
+
+    A species passes when ``|dc_s/dt| <= rtol * gross_s + atol * flux_scale``:
+    the relative term rejects one-way flux at a clamped boundary point, and
+    the absolute term (scaled by the peak gross turnover at ``initial``)
+    accepts vanishing leftovers on the way to a boundary steady state.
+
+    Parameters
+    ----------
+    system
+        See signature.
+    c
+        See signature.
+    flux_scale
+        See signature."""
     net = system.time_derivative(c).abs()
-    gross = rates @ (system.reactant_stoichiometry + system.product_stoichiometry)
-    tiny = torch.finfo(torch.float64).tiny
-    ratio = float((net / gross.clamp(min=tiny)).max())
-    if ratio > _STATIONARY_RTOL:
+    gross = _gross_turnover(system, c)
+    allowed = _STATIONARY_RTOL * gross + _STATIONARY_ATOL * flux_scale
+    if bool((net > allowed).any()):
+        tiny = torch.finfo(torch.float64).tiny
+        ratio = float((net / gross.clamp(min=tiny)).max())
         msg = (
             f"Newton stalled at a non-stationary point for {system.name!r} "
             f"(max net/gross species turnover {ratio:.3e}); pass a guess "
