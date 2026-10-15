@@ -96,6 +96,17 @@ md = [
 msm = [
     "deeptime>=0.4",
 ]
+# Optional SciPy stiff solvers for koopman_graph.datasets.reaction. Linear and
+# non-stiff reaction systems integrate in pure PyTorch without this extra.
+reaction = [
+    "scipy>=1.11.0",
+]
+# Optional Cantera mechanisms / reactors for koopman_graph.datasets.reaction.
+# Mechanism files (e.g. h2o2.yaml) are read from the installed package, not
+# vendored; generated datasets record the Cantera version and file SHA-256.
+cantera = [
+    "cantera>=3.0",
+]
 # Optional torchdiffeq for the STGODE teaching traffic baseline.
 baselines-ode = [
     "torchdiffeq>=0.2.3",
@@ -141,6 +152,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "koopman_graph.datasets.molecular" = ["data/*.json"]
+"koopman_graph.datasets.reaction" = ["data/*.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "koopman_graph.__version__" }
@@ -158,6 +170,7 @@ markers = [
     "slow: long-running CPU tests reserved for full Ubuntu matrix (exclude on macOS smoke)",
     "multinode: opt-in multi-node Ray/torchrun smoke (KOOPMAN_GRAPH_MULTINODE=1)",
     "benchmark_smoke: identity-bound manifests under benchmarks/v0.15/",
+    "cantera: requires the optional [cantera] extra (exclude where not installed)",
 ]
 
 [tool.coverage.run]

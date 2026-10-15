@@ -25,10 +25,10 @@ from koopman_graph.baselines.gnn.protocol import ForecasterProtocol
 from koopman_graph.data import GraphSnapshotSequence, resolve_sequence
 from koopman_graph.graph_utils import snapshot_edge_weight
 
-try:
-    from torchdiffeq import odeint as _odeint
-except ImportError:  # pragma: no cover - exercised via monkeypatch / missing extra
-    _odeint = None
+# Resolved lazily by ``_require_odeint``: torchdiffeq imports scipy, which must
+# not load on ``import koopman_graph``. Tests monkeypatch this slot directly.
+_UNRESOLVED: Any = object()
+_odeint: Any = _UNRESOLVED
 
 # Teaching solver defaults (also listed in protocol deviations).
 _SOLVER_METHOD = "dopri5"
@@ -55,6 +55,13 @@ def _require_odeint() -> Callable[..., Any]:
     ImportError
         If ``torchdiffeq`` is not installed.
     """
+    global _odeint
+    if _odeint is _UNRESOLVED:
+        try:
+            from torchdiffeq import odeint as _resolved
+        except ImportError:  # pragma: no cover - depends on optional extra
+            _resolved = None
+        _odeint = _resolved
     if _odeint is None:
         raise ImportError(_TORCHDIFFEQ_IMPORT_ERROR)
     return _odeint
