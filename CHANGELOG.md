@@ -48,6 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OracleSpectrum`. These give the Jacobian, dynamic eigenvalues with the
   conservation zero modes removed, timescales `-1/Re(λ)`, and flow-map
   eigenvalues `exp(λ Δt)` to compare with a learned discrete operator.
+- `koopman_graph.datasets.reaction.random_network`: `sample_random_network`
+  builds seeded, element-balanced mass-action networks. Species
+  compositions are sampled first, so every candidate reaction conserves
+  elements; reaction order is capped at 2 (`max_order=1` gives linear
+  dissociation networks); rates are log-uniform. The returned
+  `SampledReactionNetwork` records the seed and every sampler parameter.
+- `koopman_graph.datasets.reaction.cstr`: `van_de_vusse_cstr` /
+  `VanDeVusseCSTR`, a Van de Vusse CSTR with Klatt & Engell (1998)
+  Arrhenius kinetics. Reactor temperature and dilution rate are inputs,
+  either constant or piecewise-constant schedules. It provides the
+  controlled right-hand side, RK4 simulation, and a Newton steady state; the
+  nominal point (114.2 °C, `F/V = 14.19 1/h`) gives `c_A ≈ 2.14`,
+  `c_B ≈ 1.09`.
+- `koopman_graph.datasets.reaction.gillespie`: seeded Gillespie direct-method
+  SSA (`gillespie_ssa`, `SSATrajectory`) with mass-action propensities
+  (falling factorials, volume scaling) that match the ODE rates, plus
+  last-value-hold binning onto a grid (`bin_to_grid`).
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
 - `cantera` pytest marker; marked tests are skipped automatically when the
