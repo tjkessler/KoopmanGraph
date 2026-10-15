@@ -194,7 +194,12 @@ def equilibrium(
         accumulating into a species with no outflow), or arguments are
         invalid.
     RuntimeError
-        If Newton does not converge within ``max_iter`` iterations.
+        If Newton does not converge within ``max_iter`` iterations, or
+        stalls at a non-negative point that is not stationary. Clamping can
+        stop Newton on the boundary where every flux is tiny but flows one
+        way; pass a ``guess`` closer to the interior steady state, or use a
+        thermochemical equilibrium (e.g. Cantera's ``equilibrate``) as the
+        reference.
     """
     c0 = _state(system, initial, "initial")
     if not math.isfinite(float(tol)) or float(tol) <= 0.0:
@@ -242,6 +247,7 @@ def equilibrium(
         moved = float((candidate - c).abs().max())
         c, f = candidate, f_candidate
         if moved <= tol * (1.0 + float(c.abs().max())):
+            _require_stationary(system, c)
             return c
     msg = (
         f"Newton did not converge for {system.name!r} in {max_iter} iterations "
@@ -305,6 +311,32 @@ def oracle_timescales(system: ReactionSystem, state: Tensor) -> Tensor:
         ``OracleSpectrum.timescales`` of :func:`oracle_spectrum`.
     """
     return oracle_spectrum(system, state).timescales
+
+
+_STATIONARY_RTOL = 1e-6
+
+
+def _require_stationary(system: ReactionSystem, c: Tensor) -> None:
+    """Raise unless net rates are negligible against gross species turnover.
+
+    Parameters
+    ----------
+    system
+        See signature.
+    c
+        See signature."""
+    rates = system.reaction_rates(c)
+    net = system.time_derivative(c).abs()
+    gross = rates @ (system.reactant_stoichiometry + system.product_stoichiometry)
+    tiny = torch.finfo(torch.float64).tiny
+    ratio = float((net / gross.clamp(min=tiny)).max())
+    if ratio > _STATIONARY_RTOL:
+        msg = (
+            f"Newton stalled at a non-stationary point for {system.name!r} "
+            f"(max net/gross species turnover {ratio:.3e}); pass a guess "
+            "closer to the steady state"
+        )
+        raise RuntimeError(msg)
 
 
 def _linear_equilibrium(system: ReactionSystem, c0: Tensor, w: Tensor) -> Tensor:

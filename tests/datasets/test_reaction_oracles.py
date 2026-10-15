@@ -185,3 +185,24 @@ def test_equilibrium_validation() -> None:
     for dt in (0.0, -1.0, math.inf):
         with pytest.raises(ValueError, match="time_step must be"):
             spectrum.discrete_eigenvalues(dt)
+
+
+def test_equilibrium_rejects_one_way_boundary_point() -> None:
+    """A clamped Newton stall where flux runs one way is not a steady state."""
+    # A -> B with a slow B -> A: from (1, 0) the only steady state is interior.
+    system = ReactionSystem(
+        species=("A", "B", "C"),
+        reactant_stoichiometry=torch.tensor(
+            [[1.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=_F64
+        ),
+        product_stoichiometry=torch.tensor(
+            [[0.0, 0.0, 1.0], [1.0, 1.0, 0.0]], dtype=_F64
+        ),
+        rate_constants=torch.tensor([1.0, 1e-3], dtype=_F64),
+    )
+    c_eq = equilibrium(system, torch.tensor([1.0, 1.0, 0.0], dtype=_F64))
+    assert float(system.time_derivative(c_eq).abs().max()) < 1e-12
+    from koopman_graph.datasets.reaction.oracles import _require_stationary
+
+    with pytest.raises(RuntimeError, match="non-stationary point"):
+        _require_stationary(system, torch.tensor([1.0, 0.0, 1e-9], dtype=_F64))
