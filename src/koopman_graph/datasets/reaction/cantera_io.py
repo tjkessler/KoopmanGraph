@@ -21,9 +21,16 @@ state ``(T, P, X)``:
   picks what happens: ``"freeze"`` (default) uses the effective rate
   constant at the reference state, which is exact there and approximate
   away from it; ``"skip"`` drops the reaction; ``"error"`` raises. Every
-  frozen or skipped reaction is listed in the provenance.
+  frozen or skipped reaction is listed in the provenance. A frozen
+  reaction with a mass-action third body (e.g. three-body Blowers-Masel)
+  keeps its ``[M]`` factor by the same per-collider expansion.
 * Reactions with explicit non-stoichiometric ``orders`` are always
-  rejected or skipped (``"freeze"`` does not apply to them).
+  rejected or skipped (``"freeze"`` does not apply to them). Orders equal
+  to the reactant stoichiometry are mass action and convert normally.
+
+Rate constants are read with Cantera's legacy rate-constant mode
+(``cantera.use_legacy_rate_constants``) switched off, whatever the
+process-wide setting is, and the setting is restored afterwards.
 
 Units: Cantera's kmol/m³ equals mol/L, so concentrations (mol/L), rate
 constants ((L/mol)^(order-1)/s) and time (s) carry over without
@@ -73,6 +80,33 @@ _CANTERA_IMPORT_ERROR = (
 
 _EXACT_TYPES = {"Arrhenius", "three-body-Arrhenius"}
 
+# Rate types whose effective rate constant already includes ``[M]``
+# (through the reduced pressure), so no collider is expanded.
+_FALLOFF_PREFIXES = ("falloff", "chemically-activated")
+
+# One-reaction mechanism used to read the process-wide legacy rate-constant
+# setting, which Cantera can set but not query: with A = 1 the forward rate
+# constant is 1 normally and ``[M]`` (≈ 0.04 kmol/m³ here) in legacy mode.
+_LEGACY_PROBE_YAML = """
+phases:
+- name: probe
+  thermo: ideal-gas
+  elements: [Ar]
+  species: [A, A2]
+  kinetics: gas
+  state: {T: 300.0, P: 1 atm}
+species:
+- name: A
+  composition: {Ar: 1}
+  thermo: {model: constant-cp}
+- name: A2
+  composition: {Ar: 2}
+  thermo: {model: constant-cp}
+reactions:
+- equation: 2 A + M <=> A2 + M
+  rate-constant: {A: 1.0, b: 0.0, Ea: 0.0}
+"""
+
 
 @dataclass(frozen=True)
 class CanteraProvenance:
@@ -94,8 +128,9 @@ class CanteraProvenance:
         Reference pressure.
     mole_fractions : dict of str to float
         Reference composition (non-zero mole fractions).
-    state_dependent : str
-        Policy used for non-mass-action rates.
+    state_dependent : str or None
+        Policy used for non-mass-action rates, or ``None`` when no
+        conversion happened (reactor simulation).
     frozen_reactions : tuple of str
         Equations whose effective rate was frozen at the reference state.
     skipped_reactions : tuple of str
@@ -113,7 +148,7 @@ class CanteraProvenance:
     temperature_k: float
     pressure_pa: float
     mole_fractions: dict[str, float]
-    state_dependent: str
+    state_dependent: str | None
     frozen_reactions: tuple[str, ...]
     skipped_reactions: tuple[str, ...]
     note: str = CANTERA_ILLUSTRATION_NOTE
@@ -226,8 +261,11 @@ def resolve_mechanism_path(name_or_path: str | Path = DEFAULT_MECHANISM) -> Path
     Parameters
     ----------
     name_or_path : str or Path, optional
-        Existing file path, or a file name searched in
-        ``cantera.get_data_directories()``. Default is
+        A :class:`~pathlib.Path` or a string with a directory part is an
+        explicit path. A bare file name is searched in
+        ``cantera.get_data_directories()``, bundled directories first and
+        the current directory last, so a stray copy in the working
+        directory does not shadow the bundled input. Default is
         :data:`DEFAULT_MECHANISM`.
 
     Returns
@@ -243,11 +281,17 @@ def resolve_mechanism_path(name_or_path: str | Path = DEFAULT_MECHANISM) -> Path
         If no such file exists.
     """
     candidate = Path(name_or_path).expanduser()
-    if candidate.is_file():
-        return candidate.resolve()
+    if isinstance(name_or_path, Path) or candidate.name != str(name_or_path):
+        if candidate.is_file():
+            return candidate.resolve()
+        msg = f"mechanism file {str(name_or_path)!r} does not exist"
+        raise FileNotFoundError(msg)
     ct = require_cantera()
-    for directory in ct.get_data_directories():
-        path = Path(directory) / str(name_or_path)
+    directories = [Path(d) for d in ct.get_data_directories()]
+    cwd = Path.cwd().resolve()
+    directories.sort(key=lambda d: d.resolve() == cwd)  # stable: cwd last
+    for directory in directories:
+        path = directory / candidate.name
         if path.is_file():
             return path.resolve()
     msg = (
@@ -307,11 +351,9 @@ def load_cantera_mechanism(
             f"{state_dependent!r}"
         )
         raise ValueError(msg)
-    temperature = _positive("temperature_k", temperature_k)
-    pressure = _positive("pressure_pa", pressure_pa)
-    ct = require_cantera()
-    path = resolve_mechanism_path(name_or_path)
-    gas = ct.Solution(str(path), phase) if phase else ct.Solution(str(path))
+    ct, path, gas, temperature, pressure = _open_solution(
+        name_or_path, phase, temperature_k, pressure_pa
+    )
     if mole_fractions is None:
         gas.TP = temperature, pressure
     else:
@@ -319,8 +361,7 @@ def load_cantera_mechanism(
 
     species = tuple(gas.species_names)
     index = {name: i for i, name in enumerate(species)}
-    k_forward = gas.forward_rate_constants
-    k_reverse = gas.reverse_rate_constants
+    k_forward, k_reverse = _rate_constants(ct, gas)
     reactant_rows: list[list[float]] = []
     product_rows: list[list[float]] = []
     rates: list[float] = []
@@ -354,44 +395,59 @@ def load_cantera_mechanism(
         rates.append(float(rate))
         names.append(label)
 
+    def collider_efficiencies(third_body: Any) -> list[tuple[str | None, float]]:
+        """Return ``(species, ε_s)`` for every collider with ``ε_s > 0``.
+
+        Parameters
+        ----------
+        third_body
+            See signature.
+
+        Returns
+        -------
+            See signature."""
+        efficiencies = ((name, third_body.efficiency(name)) for name in species)
+        return [(name, eff) for name, eff in efficiencies if eff > 0.0]
+
     for j, reaction in enumerate(gas.reactions()):
         equation = reaction.equation
-        if reaction.orders:
+        if not _has_mass_action_orders(reaction):
             if state_dependent == "error":
                 msg = f"reaction {equation!r} has non-mass-action orders"
                 raise ValueError(msg)
             skipped.append(equation)
             continue
         kind = reaction.reaction_type
-        third_body = reaction.third_body
-        if kind in _EXACT_TYPES and (third_body is None or third_body.mass_action):
-            colliders: list[tuple[str | None, float]] = [(None, 1.0)]
-            if third_body is not None:
-                colliders = [
-                    (name, third_body.efficiency(name))
-                    for name in species
-                    if third_body.efficiency(name) > 0.0
-                ]
-        elif state_dependent == "freeze":
-            colliders = [(None, 1.0)]
+        if kind not in _EXACT_TYPES:
+            if state_dependent == "skip":
+                skipped.append(equation)
+                continue
+            if state_dependent == "error":
+                msg = (
+                    f"reaction {equation!r} has state-dependent rate type "
+                    f"{kind!r}; use state_dependent='freeze' or 'skip'"
+                )
+                raise ValueError(msg)
             frozen.append(equation)
-        elif state_dependent == "skip":
-            skipped.append(equation)
-            continue
-        else:
-            msg = (
-                f"reaction {equation!r} has state-dependent rate type {kind!r}; "
-                "use state_dependent='freeze' or 'skip'"
-            )
-            raise ValueError(msg)
+        third_body = reaction.third_body
+        colliders: list[tuple[str | None, float]] = [(None, 1.0)]
+        # Falloff constants already contain [M] (through the reduced
+        # pressure), and Cantera applies no [M] to non-mass-action third
+        # bodies; every other third body is expanded per collider.
+        if (
+            third_body is not None
+            and third_body.mass_action
+            and not kind.startswith(_FALLOFF_PREFIXES)
+        ):
+            colliders = collider_efficiencies(third_body)
         for collider, efficiency in colliders:
             lhs = dict(reaction.reactants)
             rhs = dict(reaction.products)
-            suffix = ""
+            suffix = f" #{j}" if reaction.duplicate else ""
             if collider is not None:
                 lhs[collider] = lhs.get(collider, 0.0) + 1.0
                 rhs[collider] = rhs.get(collider, 0.0) + 1.0
-                suffix = f" [M={collider}]"
+                suffix = f"{suffix} [M={collider}]"
             add(lhs, rhs, k_forward[j] * efficiency, f"{equation}{suffix} (fwd)")
             if reaction.reversible:
                 add(rhs, lhs, k_reverse[j] * efficiency, f"{equation}{suffix} (rev)")
@@ -484,21 +540,22 @@ def simulate_cantera_reactor(
         msg = "times must be a non-empty 1-D Tensor"
         raise ValueError(msg)
     t = times.to(torch.float64)
+    if not bool(torch.isfinite(t).all()):
+        msg = "times must be finite"
+        raise ValueError(msg)
     if float(t[0]) != 0.0 or (t.numel() > 1 and not bool((t[1:] > t[:-1]).all())):
         msg = "times must start at 0 and be strictly increasing"
         raise ValueError(msg)
-    temperature = _positive("temperature_k", temperature_k)
-    pressure = _positive("pressure_pa", pressure_pa)
-    ct = require_cantera()
-    path = resolve_mechanism_path(name_or_path)
-    gas = ct.Solution(str(path), phase) if phase else ct.Solution(str(path))
+    ct, path, gas, temperature, pressure = _open_solution(
+        name_or_path, phase, temperature_k, pressure_pa
+    )
     gas.TPX = temperature, pressure, mole_fractions
     provenance = _provenance(
         ct,
         gas,
         mechanism=str(name_or_path),
         path=path,
-        state_dependent="exact",
+        state_dependent=None,
         frozen=(),
         skipped=(),
     )
@@ -553,7 +610,7 @@ def _provenance(
     *,
     mechanism: str,
     path: Path,
-    state_dependent: str,
+    state_dependent: str | None,
     frozen: tuple[str, ...],
     skipped: tuple[str, ...],
 ) -> CanteraProvenance:
@@ -595,6 +652,98 @@ def _provenance(
         state_dependent=state_dependent,
         frozen_reactions=frozen,
         skipped_reactions=skipped,
+    )
+
+
+def _open_solution(
+    name_or_path: str | Path,
+    phase: str | None,
+    temperature_k: float,
+    pressure_pa: float,
+) -> tuple[Any, Path, Any, float, float]:
+    """Validate the state, then load the mechanism as a Cantera ``Solution``.
+
+    Parameters
+    ----------
+    name_or_path
+        See signature.
+    phase
+        See signature.
+    temperature_k
+        See signature.
+    pressure_pa
+        See signature.
+
+    Returns
+    -------
+        ``(cantera, path, solution, temperature, pressure)``."""
+    temperature = _positive("temperature_k", temperature_k)
+    pressure = _positive("pressure_pa", pressure_pa)
+    ct = require_cantera()
+    path = resolve_mechanism_path(name_or_path)
+    gas = ct.Solution(str(path), phase) if phase else ct.Solution(str(path))
+    return ct, path, gas, temperature, pressure
+
+
+def _legacy_rate_constants_enabled(ct: Any) -> bool:
+    """Return whether Cantera's legacy rate-constant mode is on.
+
+    Cantera can set this process-wide flag but not report it, so a
+    one-reaction probe mechanism with ``A = 1`` is evaluated instead.
+
+    Parameters
+    ----------
+    ct
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    probe = ct.Solution(yaml=_LEGACY_PROBE_YAML)
+    return not math.isclose(float(probe.forward_rate_constants[0]), 1.0)
+
+
+def _rate_constants(ct: Any, gas: Any) -> tuple[Any, Any]:
+    """Return forward and reverse rate constants without ``[M]`` factors.
+
+    Legacy mode (which multiplies three-body constants by ``[M]``) is
+    switched off while reading and restored afterwards.
+
+    Parameters
+    ----------
+    ct
+        See signature.
+    gas
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    legacy = _legacy_rate_constants_enabled(ct)
+    if legacy:
+        ct.use_legacy_rate_constants(False)
+    try:
+        return gas.forward_rate_constants.copy(), gas.reverse_rate_constants.copy()
+    finally:
+        if legacy:
+            ct.use_legacy_rate_constants(True)
+
+
+def _has_mass_action_orders(reaction: Any) -> bool:
+    """Return whether every explicit order equals the reactant coefficient.
+
+    Parameters
+    ----------
+    reaction
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    reactants = reaction.reactants
+    return all(
+        math.isclose(float(order), float(reactants.get(name, 0.0)))
+        for name, order in reaction.orders.items()
     )
 
 
