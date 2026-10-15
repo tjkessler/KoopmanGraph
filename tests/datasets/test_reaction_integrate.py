@@ -127,6 +127,29 @@ def test_auto_picks_expm_for_linear_and_rk4_otherwise() -> None:
     )
 
 
+def test_auto_accepts_substeps_for_linear_and_nonlinear() -> None:
+    times = torch.tensor([0.0, 1.0], dtype=torch.float64)
+    c0 = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+    linear = integrate_reaction_system(_chain(), c0, times, substeps=20)
+    assert torch.allclose(linear, integrate_expm(_chain(), c0, times))
+    explicit = integrate_reaction_system(_chain(), c0, times, method="expm")
+    assert torch.allclose(explicit, linear)
+    dimer0 = torch.tensor([1.0, 0.0], dtype=torch.float64)
+    nonlinear = integrate_reaction_system(_dimerization(), dimer0, times, substeps=20)
+    assert torch.allclose(
+        nonlinear, integrate_rk4(_dimerization(), dimer0, times, substeps=20)
+    )
+    with pytest.raises(ValueError, match="only accepts 'substeps'"):
+        integrate_reaction_system(_chain(), c0, times, rtol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_expm_keeps_input_device() -> None:
+    c0 = torch.tensor([1.0, 0.0, 0.0], device="cuda")
+    states = integrate_expm(_chain(), c0, torch.tensor([0.0, 1.0]))
+    assert states.device == c0.device
+
+
 def test_rk4_conserves_elements_and_keeps_dtype() -> None:
     system = _dimerization()
     c0 = torch.tensor([1.0, 0.2], dtype=torch.float32)
@@ -160,6 +183,36 @@ def test_mass_action_jacobian_matches_autograd() -> None:
         assert bool(torch.isfinite(jac).all())
     with pytest.raises(ValueError, match=r"shape \(3,\)"):
         mass_action_jacobian(system, torch.zeros(2, 3, dtype=torch.float64))
+    with pytest.raises(ValueError, match="concentrations must be finite"):
+        mass_action_jacobian(system, torch.tensor([math.nan, 0.0, 0.0]))
+
+
+def test_mass_action_jacobian_with_wide_reactant_sets() -> None:
+    """Three-reactant and zeroth-order reactions over unused species."""
+    system = ReactionSystem(
+        species=("A", "B", "C", "D", "E"),
+        reactant_stoichiometry=torch.tensor(
+            [
+                [2.0, 1.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0, 0.0, 0.0],
+            ]
+        ),
+        product_stoichiometry=torch.tensor(
+            [
+                [0.0, 0.0, 1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+        rate_constants=torch.tensor([1.5, 0.2, 0.7]),
+    )
+    for c in (
+        torch.tensor([0.4, 1.3, 0.8, 0.6, 2.0], dtype=torch.float64),
+        torch.tensor([0.0, 1.3, 0.0, 0.6, 0.0], dtype=torch.float64),
+    ):
+        expected = torch.autograd.functional.jacobian(system.time_derivative, c)
+        assert torch.allclose(mass_action_jacobian(system, c), expected)
 
 
 def test_stiff_robertson_conserves_mass() -> None:
@@ -237,11 +290,11 @@ def test_integer_times_are_accepted() -> None:
 @pytest.mark.parametrize(
     ("initial", "error", "match"),
     [
-        ([1.0, 0.0, 0.0], TypeError, "floating-point Tensor"),
-        (torch.ones(3, dtype=torch.long), TypeError, "floating-point Tensor"),
+        ([1.0, 0.0, 0.0], TypeError, "must be a Tensor"),
+        (torch.ones(3, dtype=torch.long), TypeError, "must be floating point"),
         (torch.ones(2), ValueError, r"shape \(\.\.\., 3\)"),
         (torch.tensor(1.0), ValueError, r"shape \(\.\.\., 3\)"),
-        (torch.tensor([1.0, math.nan, 0.0]), ValueError, "must be finite"),
+        (torch.tensor([1.0, math.nan, 0.0]), ValueError, "initial must be finite"),
     ],
 )
 def test_initial_validation(
@@ -267,3 +320,5 @@ def test_option_validation() -> None:
         integrate_stiff(_chain(), torch.ones(2, 3), times)
     with pytest.raises(TypeError, match="must be a ReactionSystem"):
         integrate_rk4("chain", c0, times)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be a ReactionSystem"):
+        integrate_reaction_system(None, c0, times)  # type: ignore[arg-type]

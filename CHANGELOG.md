@@ -12,12 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `koopman_graph.datasets.reaction` skeleton: module docstring, empty
   `__all__`, placeholder submodules, and a `data/` directory for packaged
   JSON. Not exported from `koopman_graph.datasets` or the root `__all__`.
-- `koopman_graph.datasets.reaction.system`: immutable `ReactionSystem`
+- `koopman_graph.datasets.reaction.system`: frozen `ReactionSystem`
   (reactant / product stoichiometry, mass-action rates and right-hand side,
   stoichiometric matrix, linearity check, optional element matrix and
   per-reaction `ArrheniusParams`, `at_temperature`, dict round trip) and
   `check_element_balance`, which reports per-reaction element residuals
-  (open-system source / sink reactions show up as unbalanced).
+  (open-system source / sink reactions show up as unbalanced). Stored
+  tensors are owned copies but not write-protected; treat them as
+  read-only.
 - `koopman_graph.datasets.reaction.transform`: `LogConcentrationTransform`
   (floored `log c`, its inverse, a below-floor mask, and a serializable
   record of the floor) and `element_balance_violation` for element-total
@@ -71,14 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reactions convert exactly: `[M]` is expanded into one reaction per
     collider with rate `k ε_s`.
   - Falloff and other state-dependent rates are frozen at the reference
-    state, skipped, or rejected (`state_dependent=`); reactions with
-    non-mass-action `orders` are skipped or rejected. Every frozen or
+    state, skipped, or rejected (`state_dependent=`); frozen rates with a
+    mass-action third body keep the per-collider `[M]` expansion.
+    Reactions with non-mass-action `orders` are skipped or rejected
+    (orders equal to the stoichiometry convert normally). Rate constants
+    are read with Cantera's legacy rate-constant mode off, whatever the
+    process setting. Duplicate reactions get unique names. Every frozen or
     skipped reaction is listed in `CanteraProvenance`, which also records
     the Cantera version, mechanism path and SHA-256, the reference state,
     the "illustration only" caveat, and the Cantera citation DOI.
   - `simulate_cantera_reactor` runs constant-pressure or constant-volume
     ideal-gas reactors, adiabatic or isothermal.
-  - Also: `require_cantera`, `resolve_mechanism_path`, and
+  - Also: `require_cantera`, `resolve_mechanism_path` (bare names prefer
+    Cantera's bundled data over the working directory), and
     `mechanism_sha256`.
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.

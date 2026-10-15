@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from koopman_graph.datasets.reaction import (
+    OracleSpectrum,
     ReactionSystem,
     brusselator,
     conservation_laws,
@@ -38,6 +39,18 @@ def _fed_chain(*, outflow: bool) -> ReactionSystem:
         species=("A", "B"),
         reactant_stoichiometry=torch.tensor(alpha, dtype=_F64),
         product_stoichiometry=torch.tensor(beta, dtype=_F64),
+        rate_constants=torch.tensor(rates, dtype=_F64),
+    )
+
+
+def _system(
+    reactants: list[list[float]], products: list[list[float]], rates: list[float]
+) -> ReactionSystem:
+    """Build a small system from nested lists."""
+    return ReactionSystem(
+        species=tuple(f"S{i}" for i in range(len(reactants[0]))),
+        reactant_stoichiometry=torch.tensor(reactants, dtype=_F64),
+        product_stoichiometry=torch.tensor(products, dtype=_F64),
         rate_constants=torch.tensor(rates, dtype=_F64),
     )
 
@@ -90,6 +103,53 @@ def test_linear_open_equilibrium_and_missing_steady_state() -> None:
     assert torch.allclose(c_eq, torch.tensor([0.5, 2.0], dtype=_F64))
     with pytest.raises(ValueError, match="no steady state"):
         equilibrium(_fed_chain(outflow=False), torch.zeros(2, dtype=_F64))
+
+
+def test_linear_equilibrium_with_non_unique_steady_state_is_the_limit() -> None:
+    # A -> B (1), A -> C (3): every (0, B, 1 - B) is steady; the limit
+    # splits A in the ratio of the rates.
+    system = _system([[1.0, 0.0, 0.0]] * 2, [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [1, 3])
+    c0 = torch.tensor([1.0, 0.0, 0.0], dtype=_F64)
+    c_eq = equilibrium(system, c0)
+    assert c_eq[0] == 0.0  # rounding noise is snapped to zero, not negative
+    assert torch.allclose(c_eq, torch.tensor([0.0, 0.25, 0.75], dtype=_F64))
+    late = integrate_rk4(system, c0, torch.tensor([0.0, 40.0]), substeps=4000)[-1]
+    assert torch.allclose(late, c_eq, atol=1e-10)
+
+
+def test_linear_equilibrium_rejects_defective_zero_mode() -> None:
+    # S1 -> S0 + S1: S0 grows linearly while S1 > 0 and never settles.
+    system = _system([[0.0, 1.0]], [[1.0, 1.0]], [1.0])
+    with pytest.raises(ValueError, match="no limiting steady state"):
+        equilibrium(system, torch.tensor([0.0, 1.0], dtype=_F64))
+
+
+def test_newton_stall_raises_instead_of_returning_non_root() -> None:
+    # -> X (1), 2 X -> 3 X (1): dX/dt = 1 + X^2 > 0 has no root. From X = 0
+    # the Jacobian vanishes, Newton cannot move, and it must not report
+    # convergence.
+    system = _system([[0.0], [2.0]], [[1.0], [3.0]], [1.0, 1.0])
+    with pytest.raises(RuntimeError, match="stalled"):
+        equilibrium(system, torch.zeros(1, dtype=_F64))
+
+
+def test_near_zero_real_parts_are_neutral() -> None:
+    eigenvalues = torch.tensor([1e-17 + 1j, -1e-17 - 1j], dtype=torch.complex128)
+    fields = {
+        "state": torch.zeros(2, dtype=_F64),
+        "jacobian": torch.zeros(2, 2, dtype=_F64),
+        "dynamic_eigenvalues": eigenvalues,
+        "conservation_eigenvalues": torch.zeros(0, dtype=torch.complex128),
+        "num_conservation_laws": 0,
+    }
+    exact = OracleSpectrum(**fields)
+    assert torch.isfinite(exact.timescales).all()
+    tolerant = OracleSpectrum(**fields, zero_tolerance=1e-12)
+    assert torch.isinf(tolerant.timescales).all()
+    assert (tolerant.timescales > 0).all()
+    assert not tolerant.is_stable
+    spectrum = oracle_spectrum(lotka_volterra(), torch.ones(2, dtype=_F64))
+    assert spectrum.zero_tolerance > 0.0
 
 
 def test_dimerization_equilibrium_matches_closed_form_and_rk4() -> None:
@@ -218,7 +278,9 @@ def test_equilibrium_rejects_one_way_boundary_point(
         "mass_action_jacobian",
         lambda system, c: torch.zeros(3, 3, dtype=_F64),
     )
-    with pytest.raises(RuntimeError, match="non-stationary point"):
+    # Either guard may fire first, the line-search stall check or the
+    # stationarity check; both refuse the point.
+    with pytest.raises(RuntimeError, match="non-stationary point|line search stalled"):
         equilibrium(system, torch.tensor([1.0, 1.0, 0.0], dtype=_F64))
 
 

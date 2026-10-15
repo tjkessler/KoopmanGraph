@@ -71,7 +71,8 @@ def first_order_chain(
     Raises
     ------
     ValueError
-        If ``num_species`` is out of range or the rate count is wrong.
+        If ``num_species`` is out of range, the rate count is wrong, or a
+        rate is not finite and positive.
     """
     if (
         isinstance(num_species, bool)
@@ -96,6 +97,9 @@ def first_order_chain(
                 f"{num_species} species, got {len(rates)}"
             )
             raise ValueError(msg)
+        _require_positive(
+            *((f"rate_constants[{i}]", k) for i, k in enumerate(rate_constants))
+        )
     reactants = torch.zeros(num_reactions, num_species, dtype=torch.float64)
     products = torch.zeros(num_reactions, num_species, dtype=torch.float64)
     index = torch.arange(num_reactions)
@@ -135,7 +139,13 @@ def reversible_dimerization(
         Closed, nonlinear system; element ``X`` counts monomer units
         (``A: 1``, ``A2: 2``). Equilibrium satisfies
         ``k_forward A² = k_reverse A2``.
+
+    Raises
+    ------
+    ValueError
+        If a rate constant is not finite and positive.
     """
+    _require_positive(("k_forward", k_forward), ("k_reverse", k_reverse))
     return ReactionSystem(
         species=("A", "A2"),
         reactant_stoichiometry=torch.tensor(
@@ -174,7 +184,13 @@ def michaelis_menten(
         Closed system over species ``(E, S, ES, P)`` with elements ``Enz``
         (enzyme units) and ``Sub`` (substrate backbone). All substrate ends
         up as ``P``, a boundary equilibrium with ``S = ES = 0``.
+
+    Raises
+    ------
+    ValueError
+        If a rate constant is not finite and positive.
     """
+    _require_positive(("k_on", k_on), ("k_off", k_off), ("k_cat", k_cat))
     return ReactionSystem(
         species=("E", "S", "ES", "P"),
         reactant_stoichiometry=torch.tensor(
@@ -223,10 +239,7 @@ def brusselator(
     ValueError
         If ``a`` or ``b`` is not finite and positive.
     """
-    for name, value in (("a", a), ("b", b)):
-        if not math.isfinite(float(value)) or float(value) <= 0.0:
-            msg = f"{name} must be finite and > 0, got {value!r}"
-            raise ValueError(msg)
+    _require_positive(("a", a), ("b", b))
     return ReactionSystem(
         species=("X", "Y"),
         reactant_stoichiometry=torch.tensor(
@@ -264,7 +277,13 @@ def lotka_volterra(
         ``(gamma / beta, alpha / beta)`` is a neutral centre with Jacobian
         eigenvalues ``± i sqrt(alpha gamma)``, so trajectories are closed
         orbits and the oracle timescale is infinite.
+
+    Raises
+    ------
+    ValueError
+        If a rate constant is not finite and positive.
     """
+    _require_positive(("alpha", alpha), ("beta", beta), ("gamma", gamma))
     return ReactionSystem(
         species=("X", "Y"),
         reactant_stoichiometry=torch.tensor(
@@ -277,3 +296,20 @@ def lotka_volterra(
         reaction_names=("X -> 2 X", "X + Y -> 2 Y", "Y ->"),
         name="lotka_volterra",
     )
+
+
+def _require_positive(*params: tuple[str, float]) -> None:
+    """Raise unless every ``(name, value)`` is finite and positive.
+
+    Parameters
+    ----------
+    *params
+        See signature.
+
+    Raises
+    ------
+        See signature."""
+    for name, value in params:
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            msg = f"{name} must be finite and > 0, got {value!r}"
+            raise ValueError(msg)

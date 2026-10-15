@@ -318,3 +318,44 @@ def test_arrhenius_validation(kwargs: dict[str, object], match: str) -> None:
 def test_arrhenius_rejects_bad_temperature(temperature: object) -> None:
     with pytest.raises(ValueError, match="temperature_k must be"):
         ArrheniusParams(1.0, 1.0).rate_constant(temperature)  # type: ignore[arg-type]
+
+
+def test_rate_constant_override_is_validated() -> None:
+    system = _dimerization()
+    c = torch.ones(2, dtype=torch.float64)
+    with pytest.raises(ValueError, match=r"shape \(\.\.\., 2\)"):
+        system.reaction_rates(c, rate_constants=torch.tensor([5.0]))
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        system.reaction_rates(c, rate_constants=torch.tensor([-5.0, 1.0]))
+    with pytest.raises(ValueError, match="finite and >= 0"):
+        system.time_derivative(c, rate_constants=torch.tensor([math.nan, 1.0]))
+    with pytest.raises(TypeError, match="rate_constants must be a Tensor"):
+        system.reaction_rates(c, rate_constants=[1.0, 2.0])  # type: ignore[arg-type]
+
+    # Valid overrides keep autograd history for parameter fitting.
+    k = torch.tensor([1.0, 2.0], dtype=torch.float64, requires_grad=True)
+    system.time_derivative(c, rate_constants=k).sum().backward()
+    assert k.grad is not None
+    assert bool(torch.isfinite(k.grad).all())
+
+
+def test_empty_element_matrix_round_trips_through_dict() -> None:
+    system = ReactionSystem(
+        species=("A", "B"),
+        reactant_stoichiometry=torch.tensor([[1.0, 0.0]]),
+        product_stoichiometry=torch.tensor([[0.0, 1.0]]),
+        rate_constants=torch.tensor([1.0]),
+        element_matrix=torch.zeros(0, 2),
+        elements=(),
+    )
+    restored = ReactionSystem.from_dict(system.to_dict())
+    assert restored.element_matrix is not None
+    assert restored.element_matrix.shape == (0, 2)
+    assert restored.elements == ()
+
+
+def test_element_balance_reports_compare_by_identity() -> None:
+    first = check_element_balance(_dimerization())
+    second = check_element_balance(_dimerization())
+    assert first == first
+    assert first != second
