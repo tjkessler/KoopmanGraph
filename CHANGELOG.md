@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `conservation_laws` returns a canonical basis (Gram-Schmidt in species
+  order on the basis-independent projector) instead of whatever an SVD
+  returns. With two or more conservation laws the SVD basis differed
+  between LAPACK builds, so the Michaelis-Menten, random-network, and
+  Cantera cards did not reproduce on Linux CI. Card oracle values change
+  only at rounding level (<= 3e-14) apart from the rotated laws.
+
 - `equilibrium` no longer returns a clamped Newton stall that is not
   stationary. It now requires `|dc_s/dt| <= 1e-6 · gross turnover_s +
   1e-12 · (peak initial turnover)` and otherwise raises `RuntimeError`.

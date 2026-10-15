@@ -193,6 +193,18 @@ def conservation_laws(system: ReactionSystem) -> Tensor:
         num_species)`` and orthonormal rows, ``W N = 0``. It has zero rows
         when nothing is conserved (e.g. an open system with independent
         sources).
+
+    Notes
+    -----
+    With two or more laws any rotation of an orthonormal basis is equally
+    valid, and the one an SVD returns depends on the LAPACK build. The rows
+    here are canonical instead: Gram-Schmidt in species order on the
+    columns of the projector ``P = WᵀW``, which does not depend on the
+    starting basis. Row ``k`` is the normalized component of the ``k``-th
+    independent species unit vector inside the conserved subspace, with a
+    positive entry for that species. The same network therefore gives the
+    same ``W`` (to rounding) on every platform, which keeps dataset cards
+    reproducible.
     """
     return _stoichiometric_basis(system)[2]
 
@@ -448,10 +460,43 @@ def _stoichiometric_basis(system: ReactionSystem) -> tuple[int, Tensor, Tensor]:
     -------
         ``(rank, q, w)`` with ``q`` of shape ``(num_species, rank)`` and the
         conservation laws ``w`` of shape ``(num_species - rank, num_species)``,
-        from one SVD."""
+        from one SVD; ``w`` is canonicalized (see :func:`conservation_laws`)."""
     _require_system(system)
     u, _vh, rank = _svd_rank(system.stoichiometric_matrix)
-    return rank, u[:, :rank], u[:, rank:].T.contiguous()
+    return rank, u[:, :rank], _canonical_row_basis(u[:, rank:].T.contiguous())
+
+
+_CANONICAL_PIVOT_TOL = 1e-6
+
+
+def _canonical_row_basis(w: Tensor) -> Tensor:
+    """Return a basis-independent orthonormal basis of ``rowspace(w)``.
+
+    Parameters
+    ----------
+    w
+        See signature.
+
+    Returns
+    -------
+        Orthonormal rows spanning the same subspace, chosen by Gram-Schmidt in
+        coordinate order on the projector ``wᵀw`` (independent of which
+        orthonormal ``w`` was passed)."""
+    num_laws, num_species = int(w.shape[0]), int(w.shape[1])
+    if num_laws == 0:
+        return w
+    projector = w.T @ w  # basis independent
+    basis: list[Tensor] = []
+    for j in range(num_species):
+        v = projector[:, j].clone()
+        for b in basis:
+            v = v - (b @ v) * b
+        norm = float(v.norm())
+        if norm > _CANONICAL_PIVOT_TOL:
+            basis.append(v / norm)
+            if len(basis) == num_laws:
+                break
+    return torch.stack(basis)
 
 
 def _svd_rank(matrix: Tensor) -> tuple[Tensor, Tensor, int]:
