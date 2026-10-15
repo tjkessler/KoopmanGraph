@@ -252,8 +252,8 @@ version with the tag you intend; see PyPI and ``CHANGELOG.md``):
 
 .. code-block:: bash
 
-   pip install koopman-graph==0.15.0
-   # or: uv pip install koopman-graph==0.15.0
+   pip install koopman-graph==0.16.0
+   # or: uv pip install koopman-graph==0.16.0
 
 YAML CLI configs from PyPI:
 
