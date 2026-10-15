@@ -154,10 +154,11 @@ Featured tutorials: [01 synthetic](https://github.com/tjkessler/KoopmanGraph/blo
 - [Installation](https://koopmangraph.readthedocs.io/en/latest/installation.html) — dependencies, install paths, and CI platforms
 - [CLI](https://koopmangraph.readthedocs.io/en/latest/cli.html) — `koopman-graph train` / `predict` / `benchmark` config workflow
 - [SECURITY.md](SECURITY.md) — supported versions and checkpoint trust boundaries
-- What’s new in 0.15.0: opt-in closed-form identification, identity-bound
-  benchmark manifests, polynomial graph filters, Nyquist / conditioning
-  diagnostics, and graph-state / cochain / matrix-free MVPs — defaults
-  unchanged vs 0.14.0; see [CHANGELOG.md](CHANGELOG.md).
+- What’s new in 0.16.0: mass-action reaction-network datasets
+  (`ReactionNetworkBenchmark`, `koopman_graph.datasets.reaction`) with
+  oracle equilibria, conservation laws, and kinetic timescales; optional
+  `[reaction]` (SciPy stiff solvers) and `[cantera]` extras — defaults
+  unchanged vs 0.15.0; see [CHANGELOG.md](CHANGELOG.md).
 
 ## Related software
 
@@ -182,7 +183,7 @@ If you use KoopmanGraph in research, please cite:
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.22045904},
   url          = {https://github.com/tjkessler/KoopmanGraph},
-  version      = {0.15.0},
+  version      = {0.16.0},
 }
 ```
 

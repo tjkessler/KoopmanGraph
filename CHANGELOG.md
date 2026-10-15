@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-15
+
+Mass-action reaction-network datasets under
+`koopman_graph.datasets.reaction`, with exact oracle references
+(equilibria, conservation laws, Jacobian spectra and timescales) for
+checking whether a learned latent operator recovers kinetic timescales
+and respects conservation. `ReactionNetworkBenchmark` is the only new
+name in `koopman_graph.datasets`; the root `__all__`, homogeneous
+scientific defaults, and the linear latent operator contract are
+unchanged (`koopman=None` still selects `"pernode"`). SciPy and Cantera
+stay optional behind the new `[reaction]` / `[cantera]` extras.
+`FORMAT_VERSION` stays 1.
+
 ### Added
 
-- `koopman_graph.datasets.reaction` skeleton: module docstring, empty
-  `__all__`, placeholder submodules, and a `data/` directory for packaged
-  JSON. Not exported from `koopman_graph.datasets` or the root `__all__`.
+- `koopman_graph.datasets.reaction` subpackage (pure PyTorch unless an
+  optional extra is used) with the modules below and packaged FAIR cards
+  under `reaction/data/`. Its names are exported from the subpackage;
+  only `ReactionNetworkBenchmark` is added to `koopman_graph.datasets`,
+  and the root `__all__` is unchanged.
 - `koopman_graph.datasets.reaction.system`: frozen `ReactionSystem`
   (reactant / product stoichiometry, mass-action rates and right-hand side,
   stoichiometric matrix, linearity check, optional element matrix and
@@ -1289,6 +1304,7 @@ claimed wall-time percentages.
 - Built-in benchmarks: synthetic diffusion, 2D grid, IEEE 118-bus, and METR-LA traffic loaders
 - Sphinx documentation, Jupyter tutorials, pytest suite with CI, and Apache-2.0 packaging for PyPI
 
+[0.16.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.15.0...0.16.0
 [0.15.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.14.0...0.15.0
 [0.14.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.13.0...0.14.0
 [0.13.0]: https://github.com/tjkessler/KoopmanGraph/compare/0.12.0...0.13.0
