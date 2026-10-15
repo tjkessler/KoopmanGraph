@@ -88,6 +88,20 @@ def test_brusselator_rejects_bad_params(a: float, b: float) -> None:
         brusselator(a, b)
 
 
+@pytest.mark.parametrize(
+    ("factory", "kwargs"),
+    [
+        (first_order_chain, {"rate_constants": (1.0, 0.0)}),
+        (reversible_dimerization, {"k_reverse": 0.0}),
+        (michaelis_menten, {"k_cat": math.nan}),
+        (lotka_volterra, {"gamma": -1.0}),
+    ],
+)
+def test_catalog_rejects_non_positive_rates(factory: object, kwargs: dict) -> None:
+    with pytest.raises(ValueError, match="must be finite and > 0"):
+        factory(**kwargs)  # type: ignore[operator]
+
+
 def test_lotka_volterra_orbit_is_closed() -> None:
     """Conserved quantity ``V = βx - γ ln x + βy - α ln y`` along RK4 orbits."""
     system = lotka_volterra()

@@ -28,7 +28,7 @@ from typing import Any, Literal
 import torch
 from torch import Tensor
 
-from koopman_graph.datasets.reaction.system import ReactionSystem
+from koopman_graph.datasets.reaction.system import ReactionSystem, _require_system
 
 IntegrationMethod = Literal["auto", "expm", "rk4", "bdf", "radau", "lsoda"]
 """Accepted ``method`` names for :func:`integrate_reaction_system`."""
@@ -114,7 +114,8 @@ def integrate_expm(
     Returns
     -------
     Tensor
-        Concentrations ``(len(times), ..., num_species)`` in ``float64``.
+        Concentrations ``(len(times), ..., num_species)`` in ``float64`` on
+        the device of ``initial``.
 
     Raises
     ------
@@ -122,13 +123,17 @@ def integrate_expm(
         If the system is not linear or inputs are malformed.
     """
     a, b = linear_rate_equations(system)
-    c0 = _validate_initial(system, initial).to(torch.float64)
+    c0 = _validate_state(system, initial, "initial").to(torch.float64)
     t = _validate_times(times)
     num_species = system.num_species
-    generator = torch.zeros(num_species + 1, num_species + 1, dtype=torch.float64)
-    generator[:num_species, :num_species] = a
-    generator[:num_species, num_species] = b
-    elapsed = (t - t[0]).to(dtype=torch.float64, device="cpu")
+    device = c0.device
+    generator = torch.zeros(
+        num_species + 1, num_species + 1, dtype=torch.float64, device=device
+    )
+    generator[:num_species, :num_species] = a.to(device)
+    generator[:num_species, num_species] = b.to(device)
+    t = t.to(dtype=torch.float64, device=device)
+    elapsed = t - t[0]
     propagators = torch.linalg.matrix_exp(elapsed[:, None, None] * generator)
     augmented = torch.cat([c0, torch.ones_like(c0[..., :1])], dim=-1)
     # result[t, ..., i] = Σ_j P[t, i, j] y[..., j]
@@ -171,7 +176,7 @@ def integrate_rk4(
     if isinstance(substeps, bool) or not isinstance(substeps, int) or substeps < 1:
         msg = f"substeps must be a positive int, got {substeps!r}"
         raise ValueError(msg)
-    c = _validate_initial(system, initial)
+    c = _validate_state(system, initial, "initial")
     t = _validate_times(times).to(dtype=c.dtype, device=c.device)
     states = [c]
     for index in range(1, int(t.shape[0])):
@@ -231,7 +236,7 @@ def integrate_stiff(
     if method not in _STIFF_METHODS:
         msg = f"method must be one of {sorted(_STIFF_METHODS)}, got {method!r}"
         raise ValueError(msg)
-    c0 = _validate_initial(system, initial)
+    c0 = _validate_state(system, initial, "initial")
     if c0.ndim != 1:
         msg = (
             "stiff integration takes a single initial state of shape "
@@ -240,6 +245,11 @@ def integrate_stiff(
         raise ValueError(msg)
     t = _validate_times(times).to(dtype=torch.float64, device="cpu")
     scipy_integrate = require_scipy()
+    # Built once; solve_ivp calls rhs / jac many times per solve.
+    alpha = system.reactant_stoichiometry
+    k = system.rate_constants
+    n = system.stoichiometric_matrix
+    terms = _jacobian_terms(system, dtype=torch.float64, device=torch.device("cpu"))
 
     def rhs(_time: float, y: Any) -> Any:
         """Evaluate ``dc/dt`` on a NumPy state for ``solve_ivp``.
@@ -254,8 +264,8 @@ def integrate_stiff(
         Returns
         -------
             See signature."""
-        state = torch.from_numpy(y)
-        return system.time_derivative(state).numpy()
+        rates = k * torch.pow(torch.from_numpy(y), alpha).prod(dim=-1)
+        return (n @ rates).numpy()
 
     def jac(_time: float, y: Any) -> Any:
         """Evaluate the mass-action Jacobian on a NumPy state for ``solve_ivp``.
@@ -270,7 +280,7 @@ def integrate_stiff(
         Returns
         -------
             See signature."""
-        return mass_action_jacobian(system, torch.from_numpy(y)).numpy()
+        return _jacobian_from_terms(torch.from_numpy(y), *terms).numpy()
 
     t_values = t.tolist()
     solution = scipy_integrate.solve_ivp(
@@ -315,7 +325,8 @@ def integrate_reaction_system(
         explicitly.
     **kwargs
         Forwarded to :func:`integrate_rk4` (``substeps``) or
-        :func:`integrate_stiff` (``rtol``, ``atol``).
+        :func:`integrate_stiff` (``rtol``, ``atol``). With ``"auto"`` only
+        ``substeps`` is accepted; it is ignored when the exact path is used.
 
     Returns
     -------
@@ -324,11 +335,20 @@ def integrate_reaction_system(
 
     Raises
     ------
+    TypeError
+        If ``system`` is not a :class:`ReactionSystem`.
     ValueError
         If ``method`` is unknown or ``kwargs`` do not apply to it.
     """
+    _require_system(system)
     if method == "auto":
-        method = "expm" if system.is_linear else "rk4"
+        unknown = sorted(set(kwargs) - {"substeps"})
+        if unknown:
+            msg = f"method='auto' only accepts 'substeps', got {unknown}"
+            raise ValueError(msg)
+        if system.is_linear:
+            return integrate_expm(system, initial, times)
+        method = "rk4"
     if method == "expm":
         if kwargs:
             msg = f"method='expm' takes no options, got {sorted(kwargs)}"
@@ -367,27 +387,94 @@ def mass_action_jacobian(system: ReactionSystem, concentrations: Tensor) -> Tens
     ValueError
         If ``concentrations`` is not a single state.
     """
-    c = _validate_initial(system, concentrations)
+    c = _validate_state(system, concentrations, "concentrations")
     if c.ndim != 1:
         msg = (
             f"concentrations must have shape ({system.num_species},), got "
             f"{tuple(c.shape)}"
         )
         raise ValueError(msg)
-    alpha = system.reactant_stoichiometry.to(dtype=c.dtype, device=c.device)
-    k = system.rate_constants.to(dtype=c.dtype, device=c.device)
-    num_species = system.num_species
-    # ∂r_j/∂c_s = k_j α_js c_s^(α_js - 1) ∏_{s'≠s} c_s'^α_js'; building the
-    # product with exponent α - e_s keeps c = 0 finite (no division by c).
-    eye = torch.eye(num_species, dtype=c.dtype, device=c.device)
-    shifted = alpha.unsqueeze(1) - eye.unsqueeze(0)  # (R, S_s, S_s')
+    terms = _jacobian_terms(system, dtype=c.dtype, device=c.device)
+    return _jacobian_from_terms(c, *terms)
+
+
+def _jacobian_terms(
+    system: ReactionSystem,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Pack each reaction's reactants into padded slots for the Jacobian.
+
+    Parameters
+    ----------
+    system
+        See signature.
+    dtype
+        See signature.
+    device
+        See signature.
+
+    Returns
+    -------
+        ``(slot_species, slot_alpha, k, n)``: reactant species indices and
+        coefficients with shape ``(num_reactions, width)`` (padding has
+        ``α = 0``), rate constants, and the stoichiometric matrix."""
+    alpha = system.reactant_stoichiometry
+    is_reactant = alpha > 0
+    width = max(int(is_reactant.sum(dim=1).max()), 1)
+    # A stable sort moves each reaction's reactant columns to the front.
+    order = torch.sort((~is_reactant).to(torch.uint8), dim=1, stable=True).indices
+    slot_species = order[:, :width]
+    slot_alpha = alpha.gather(1, slot_species)
+    return (
+        slot_species.to(device=device),
+        slot_alpha.to(dtype=dtype, device=device),
+        system.rate_constants.to(dtype=dtype, device=device),
+        system.stoichiometric_matrix.to(dtype=dtype, device=device),
+    )
+
+
+def _jacobian_from_terms(
+    c: Tensor,
+    slot_species: Tensor,
+    slot_alpha: Tensor,
+    k: Tensor,
+    n: Tensor,
+) -> Tensor:
+    """Evaluate the mass-action Jacobian from :func:`_jacobian_terms` slots.
+
+    Parameters
+    ----------
+    c
+        See signature.
+    slot_species
+        See signature.
+    slot_alpha
+        See signature.
+    k
+        See signature.
+    n
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    # ∂r_j/∂c_s = k_j α_js c_s^(α_js - 1) ∏_{s'≠s} c_s'^α_js', taken over the
+    # reactant slots only (memory O(R·width²), not O(R·S²)). Lowering the
+    # exponent by one instead of dividing by c keeps c = 0 finite.
+    values = c[slot_species].unsqueeze(1)  # (R, 1, width)
+    eye = torch.eye(slot_alpha.shape[1], dtype=c.dtype, device=c.device)
+    shifted = slot_alpha.unsqueeze(1) - eye  # (R, width_s, width_s')
     powered = torch.where(
         shifted < 0,
         torch.ones((), dtype=c.dtype, device=c.device),
-        torch.pow(c, shifted.clamp(min=0)),
+        torch.pow(values, shifted.clamp(min=0)),
     )
-    d_rates = k[:, None] * alpha * powered.prod(dim=-1)  # (R, S)
-    n = system.stoichiometric_matrix.to(dtype=c.dtype, device=c.device)
+    slot_grad = k[:, None] * slot_alpha * powered.prod(dim=-1)  # (R, width)
+    d_rates = torch.zeros(
+        k.shape[0], n.shape[0], dtype=c.dtype, device=c.device
+    ).scatter_add(1, slot_species, slot_grad)  # (R, S)
     return n @ d_rates
 
 
@@ -398,9 +485,7 @@ def _require_linear(system: ReactionSystem) -> None:
     ----------
     system
         See signature."""
-    if not isinstance(system, ReactionSystem):
-        msg = f"system must be a ReactionSystem, got {type(system).__name__}"
-        raise TypeError(msg)
+    _require_system(system)
     if not system.is_linear:
         orders = system.reaction_orders.tolist()
         msg = (
@@ -410,35 +495,27 @@ def _require_linear(system: ReactionSystem) -> None:
         raise ValueError(msg)
 
 
-def _validate_initial(system: ReactionSystem, initial: Tensor) -> Tensor:
-    """Validate an initial state ``(..., num_species)`` of finite floats.
+def _validate_state(system: ReactionSystem, state: Tensor, name: str) -> Tensor:
+    """Validate a finite floating state ``(..., num_species)``.
 
     Parameters
     ----------
     system
         See signature.
-    initial
+    state
         See signature.
+    name
+        Argument name used in the finiteness error.
 
     Returns
     -------
         See signature."""
-    if not isinstance(system, ReactionSystem):
-        msg = f"system must be a ReactionSystem, got {type(system).__name__}"
-        raise TypeError(msg)
-    if not isinstance(initial, Tensor) or not initial.is_floating_point():
-        msg = "initial concentrations must be a floating-point Tensor"
-        raise TypeError(msg)
-    if initial.ndim == 0 or int(initial.shape[-1]) != system.num_species:
-        msg = (
-            f"initial concentrations must have shape (..., {system.num_species}), "
-            f"got {tuple(initial.shape)}"
-        )
+    _require_system(system)
+    state = system._validate_concentrations(state)
+    if not bool(torch.isfinite(state).all()):
+        msg = f"{name} must be finite"
         raise ValueError(msg)
-    if not bool(torch.isfinite(initial).all()):
-        msg = "initial concentrations must be finite"
-        raise ValueError(msg)
-    return initial
+    return state
 
 
 def _validate_times(times: Tensor) -> Tensor:
