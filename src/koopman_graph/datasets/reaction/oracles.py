@@ -68,9 +68,9 @@ class OracleSpectrum:
         Tensor
             ``float64`` tensor aligned with :attr:`dynamic_eigenvalues`:
             positive for decaying modes, ``inf`` when ``Re(λ)`` is zero to
-            within ``1e-12 · max|λ|`` (a neutral centre, or a species
-            drained onto a zero-flux boundary), and negative for growing
-            modes.
+            within eigensolver round-off, ``100 · eps · max|λ|`` (a neutral
+            centre, or a species drained onto a zero-flux boundary), and
+            negative for growing modes.
         """
         return eigenvalue_timescales(self.dynamic_eigenvalues)
 
@@ -112,7 +112,11 @@ class OracleSpectrum:
         return torch.exp(self.dynamic_eigenvalues * dt)
 
 
-_ZERO_EIGENVALUE_RTOL = 1e-12
+# Eigenvalues are only resolved to about ``eps · ‖J‖``; real parts below a
+# small multiple of that are numerical zeros. Keeping the cutoff at round-off
+# level preserves genuinely slow modes in stiff mechanisms, whose eigenvalue
+# magnitudes can span ten or more decades.
+_ZERO_EIGENVALUE_RTOL = 100.0 * torch.finfo(torch.float64).eps
 
 
 def eigenvalue_timescales(eigenvalues: Tensor) -> Tensor:
@@ -126,8 +130,8 @@ def eigenvalue_timescales(eigenvalues: Tensor) -> Tensor:
     Returns
     -------
     Tensor
-        ``float64`` timescales ``(k,)``. ``|Re(λ)| <= 1e-12 · max|λ|`` maps
-        to ``inf``.
+        ``float64`` timescales ``(k,)``. ``|Re(λ)| <= 100 · eps · max|λ|``
+        (about ``2.2e-14 · max|λ|``) maps to ``inf``.
     """
     real = eigenvalues.real.to(torch.float64)
     scale = float(eigenvalues.abs().max()) if eigenvalues.numel() else 0.0

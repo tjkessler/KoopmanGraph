@@ -187,9 +187,11 @@ def test_equilibrium_validation() -> None:
             spectrum.discrete_eigenvalues(dt)
 
 
-def test_equilibrium_rejects_one_way_boundary_point() -> None:
+def test_equilibrium_rejects_one_way_boundary_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A clamped Newton stall where flux runs one way is not a steady state."""
-    # A -> B with a slow B -> A: from (1, 0) the only steady state is interior.
+    # A + B -> C with a slow C -> A + B: the only steady state is interior.
     system = ReactionSystem(
         species=("A", "B", "C"),
         reactant_stoichiometry=torch.tensor(
@@ -206,6 +208,32 @@ def test_equilibrium_rejects_one_way_boundary_point() -> None:
 
     with pytest.raises(RuntimeError, match="non-stationary point"):
         _require_stationary(system, torch.tensor([1.0, 0.0, 1e-9], dtype=_F64))
+
+    # Force Newton to stall where it starts (zero Jacobian -> zero step): the
+    # step test passes immediately, and equilibrium must still refuse the point.
+    from koopman_graph.datasets.reaction import oracles
+
+    monkeypatch.setattr(
+        oracles,
+        "mass_action_jacobian",
+        lambda system, c: torch.zeros(3, 3, dtype=_F64),
+    )
+    with pytest.raises(RuntimeError, match="non-stationary point"):
+        equilibrium(system, torch.tensor([1.0, 1.0, 0.0], dtype=_F64))
+
+
+def test_eigenvalue_timescales_keep_slow_modes_in_stiff_spectra() -> None:
+    """Only round-off-level real parts become infinite, not slow stiff modes."""
+    from koopman_graph.datasets.reaction import eigenvalue_timescales
+
+    # max|λ| = 1e10, so the round-off cutoff is about 2.2e-4.
+    eigenvalues = torch.tensor([-1e10, -1e-2, -1e-3, 1e-6], dtype=_F64)
+    timescales = eigenvalue_timescales(eigenvalues)
+    assert torch.allclose(
+        timescales[:3], torch.tensor([1e-10, 1e2, 1e3], dtype=_F64), rtol=1e-12
+    )
+    assert math.isinf(float(timescales[3]))
+    assert eigenvalue_timescales(torch.zeros(0, dtype=_F64)).shape == (0,)
 
 
 def test_equilibrium_accepts_vanishing_leftovers_on_boundary() -> None:

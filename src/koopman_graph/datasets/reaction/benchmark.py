@@ -173,7 +173,13 @@ class ReactionDataset:
         Tensor
             Transformed concentrations when :attr:`transform` is set, raw
             concentrations otherwise.
+
+        Raises
+        ------
+        IndexError
+            If ``index`` is out of range.
         """
+        self._check_index(index)
         c = self.concentrations[index]
         values = c if self.transform is None else self.transform.forward(c)
         return values.unsqueeze(-1).to(dtype)
@@ -204,9 +210,7 @@ class ReactionDataset:
         IndexError
             If ``index`` is out of range.
         """
-        if not 0 <= index < self.num_trajectories:
-            msg = f"index {index} out of range for {self.num_trajectories} trajectories"
-            raise IndexError(msg)
+        self._check_index(index)
         edge_index, edge_weight = species_influence_graph(self.system)
         hyperedge_index = (
             reaction_hyperedge_index(self.system)
@@ -226,6 +230,17 @@ class ReactionDataset:
             timestamps=self.times.to(dtype=torch.float64),
             control_inputs=controls,
         )
+
+    def _check_index(self, index: int) -> None:
+        """Raise ``IndexError`` unless ``0 <= index < num_trajectories``.
+
+        Parameters
+        ----------
+        index
+            See signature."""
+        if not 0 <= index < self.num_trajectories:
+            msg = f"index {index} out of range for {self.num_trajectories} trajectories"
+            raise IndexError(msg)
 
     def subset(self, indices: list[int] | Tensor) -> ReactionDataset:
         """Return a dataset restricted to the given trajectory indices.
@@ -459,6 +474,9 @@ class ReactionNetworkBenchmark:
             If arguments are invalid or ``simulator="ssa"`` does not apply.
         ImportError
             For the Cantera card when the ``[cantera]`` extra is missing.
+        RuntimeError
+            For the Cantera card when the installed mechanism's SHA-256 does
+            not match the card.
         """
         card = cls.load_card(dataset_id)
         n_traj = _count(
@@ -498,7 +516,7 @@ class ReactionNetworkBenchmark:
             if simulator == "ssa":
                 used_volume = float(volume)
                 concentrations = _simulate_ssa(
-                    system, initial, times, used_volume, resolved_seed
+                    system, initial, times, used_volume, generator
                 )
             elif kind == "cstr":
                 concentrations, controls = _simulate_cstr(
@@ -547,7 +565,8 @@ class ReactionNetworkBenchmark:
         dataset : ReactionDataset
             Dataset with at least three trajectories.
         train_ratio, val_ratio, test_ratio : float, optional
-            Fractions summing to ``1``. Defaults are ``0.7 / 0.1 / 0.2``.
+            Positive fractions summing to ``1``. Defaults are
+            ``0.7 / 0.1 / 0.2``.
 
         Returns
         -------
@@ -561,10 +580,10 @@ class ReactionNetworkBenchmark:
         """
         ratios = (train_ratio, val_ratio, test_ratio)
         if (
-            any(r < 0 or not math.isfinite(r) for r in ratios)
+            any(r <= 0 or not math.isfinite(r) for r in ratios)
             or abs(sum(ratios) - 1.0) > 1e-6
         ):
-            msg = f"ratios must be non-negative and sum to 1, got {ratios}"
+            msg = f"ratios must be positive and sum to 1, got {ratios}"
             raise ValueError(msg)
         n = dataset.num_trajectories
         if n < 3:
@@ -600,6 +619,9 @@ def system_from_card(card: dict[str, Any]) -> ReactionSystem:
     ------
     ValueError
         If the generator kind or catalog name is unknown.
+    RuntimeError
+        For a Cantera card whose recorded mechanism SHA-256 differs from the
+        installed mechanism file.
     """
     generator = card["generator"]
     kind = generator["kind"]
@@ -615,9 +637,22 @@ def system_from_card(card: dict[str, Any]) -> ReactionSystem:
     if kind == "cstr":
         return van_de_vusse_cstr(**params).system
     if kind == "cantera":
-        from koopman_graph.datasets.reaction.cantera_io import load_cantera_mechanism
+        from koopman_graph.datasets.reaction.cantera_io import (
+            load_cantera_mechanism,
+            mechanism_sha256,
+            resolve_mechanism_path,
+        )
 
         cantera = card["cantera"]
+        installed = mechanism_sha256(resolve_mechanism_path(cantera["mechanism"]))
+        if installed != cantera["sha256"]:
+            msg = (
+                f"installed {cantera['mechanism']} has SHA-256 {installed}, but "
+                f"card {card.get('dataset_id', '?')!r} was built from "
+                f"{cantera['sha256']} (Cantera {cantera['cantera_version']}); "
+                "the generated data would not match the card"
+            )
+            raise RuntimeError(msg)
         return load_cantera_mechanism(
             cantera["mechanism"],
             temperature_k=cantera["temperature_k"],
@@ -649,23 +684,24 @@ def compute_card_oracle(card: dict[str, Any]) -> dict[str, Any]:
         steady state.
     """
     kind = card["generator"]["kind"]
-    system = system_from_card(card)
     if kind == "cstr":
         controls = card["controls"]["ranges"]
         temperature = sum(controls["temperature_k"]) / 2.0
         dilution = sum(controls["dilution_rate"]) / 2.0
         reactor = van_de_vusse_cstr(**card["generator"].get("params", {}))
+        num_species = reactor.system.num_species
         state = reactor.steady_state(temperature_k=temperature, dilution_rate=dilution)
         jac = mass_action_jacobian(reactor.system.at_temperature(temperature), state)
-        jac = jac - dilution * torch.eye(system.num_species, dtype=torch.float64)
+        jac = jac - dilution * torch.eye(num_species, dtype=torch.float64)
         eigenvalues = torch.linalg.eigvals(jac)
         eigenvalues = eigenvalues[torch.argsort(eigenvalues.real, descending=True)]
         return _oracle_dict(
             "cstr_steady_state_at_control_midpoint",
             state,
             eigenvalues,
-            torch.zeros(0, system.num_species, dtype=torch.float64),
+            torch.zeros(0, num_species, dtype=torch.float64),
         )
+    system = system_from_card(card)
     if kind == "cantera":
         from koopman_graph.datasets.reaction.cantera_io import require_cantera
 
@@ -820,9 +856,12 @@ def _simulate_ssa(
     initial: Tensor,
     times: Tensor,
     volume: float,
-    seed: int,
+    generator: torch.Generator,
 ) -> Tensor:
     """Run one Gillespie path per initial state and sample it on ``times``.
+
+    Each path gets its own seed drawn from ``generator``, so paths are
+    independent within and across dataset seeds.
 
     Parameters
     ----------
@@ -834,7 +873,7 @@ def _simulate_ssa(
         See signature.
     volume
         See signature.
-    seed
+    generator
         See signature.
 
     Returns
@@ -844,12 +883,13 @@ def _simulate_ssa(
         msg = f"volume must be finite and > 0, got {volume!r}"
         raise ValueError(msg)
     t_end = float(times[-1])
+    path_seeds = torch.randint(
+        0, 2**62, (initial.shape[0],), generator=generator, dtype=torch.long
+    ).tolist()
     paths = []
-    for i, c0 in enumerate(initial):
+    for c0, path_seed in zip(initial, path_seeds, strict=True):
         counts = torch.round(c0 * volume).to(torch.long)
-        path = gillespie_ssa(
-            system, counts, t_end, volume=volume, seed=seed * 100_003 + i
-        )
+        path = gillespie_ssa(system, counts, t_end, volume=volume, seed=path_seed)
         paths.append(path.concentrations_on_grid(times))
     return torch.stack(paths)
 
