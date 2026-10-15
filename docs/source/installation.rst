@@ -142,6 +142,8 @@ paths use core PyTorch only — no extra required:
    pip install -e ".[md]"                  # mdtraj molecular I/O stubs
    pip install -e ".[equivariance]"        # e3nn Tier-B steerable encoder
    pip install -e ".[baselines-ode]"       # torchdiffeq for STGODEBaseline
+   pip install -e ".[reaction]"            # SciPy stiff solvers (reaction networks)
+   pip install -e ".[cantera]"             # Cantera 3.2 mechanisms / reactors
    pip install -e ".[baselines-graphcast]" # reserved no-op (pure PyTorch)
    pip install -e ".[distributed]"         # meta: lightning + ray + dask
 
@@ -172,8 +174,15 @@ encode to invariant latents by default; pass
 :class:`~koopman_graph.operators.EquivariantKoopmanOperator`, whose
 optional :math:`l=2` blocks are ``scale * I_5``). The extra also
 runs the rotation test for that block.
-``[baselines-ode]`` is required to construct
-:class:`~koopman_graph.baselines.gnn.STGODEBaseline`.
+``[baselines-ode]`` is required to fit or predict with
+:class:`~koopman_graph.baselines.gnn.STGODEBaseline` (construction and
+``import koopman_graph`` do not load torchdiffeq).
+The ``[reaction]`` extra pins SciPy for the stiff solvers under
+:mod:`koopman_graph.datasets.reaction`; linear and non-stiff reaction
+systems integrate in pure PyTorch. The ``[cantera]`` extra pins the
+Cantera 3.2 series for mechanism loading (e.g. ``h2o2.yaml``, read from the
+installed package and recorded by version and SHA-256). Importing
+:mod:`koopman_graph.datasets.reaction` loads neither SciPy nor Cantera.
 ``[baselines-graphcast]`` is a reserved no-op — the GraphCast teaching
 path is pure PyTorch. Exact-automorphism isotypic mode
 (``koopman_symmetry="isotypic"``) needs optional ``pynauty`` separately

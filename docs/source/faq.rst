@@ -79,6 +79,8 @@ Optional feature extras
    pip install "koopman-graph[md]"                # mdtraj molecular I/O stubs
    pip install "koopman-graph[equivariance]"      # e3nn Tier-B encoder
    pip install "koopman-graph[baselines-ode]"     # torchdiffeq for STGODE
+   pip install "koopman-graph[reaction]"          # SciPy stiff solvers for reaction networks
+   pip install "koopman-graph[cantera]"           # Cantera 3.2 mechanisms / reactors
    pip install "koopman-graph[baselines-graphcast]"  # reserved; teaching GraphCast is pure PyTorch
    pip install "koopman-graph[distributed]"       # meta: lightning + ray + dask
 
@@ -104,6 +106,10 @@ Optional feature extras
   :mod:`koopman_graph.interop`. ``[md]`` pins mdtraj for optional
   trajectory I/O under :mod:`koopman_graph.datasets.molecular`; the
   synthetic contact-graph oracle needs no extra.
+* **Reaction networks:** ``[reaction]`` pins SciPy for stiff solvers and
+  ``[cantera]`` pins Cantera 3.2 for mechanism loading under
+  :mod:`koopman_graph.datasets.reaction`. Importing that package loads
+  neither.
 * See :doc:`installation` for the full extras table.
 
 Import paths after 0.6
