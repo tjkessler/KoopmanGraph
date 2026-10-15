@@ -38,6 +38,20 @@ operator recovers slow kinetic timescales and respects conservation — not a
 replacement for a production kinetics solver.
 """
 
+from koopman_graph.datasets.reaction.cantera_io import (
+    CANTERA_CITATION_DOI,
+    CANTERA_ILLUSTRATION_NOTE,
+    DEFAULT_MECHANISM,
+    CanteraMechanism,
+    CanteraProvenance,
+    CanteraReactorTrajectory,
+    StateDependentPolicy,
+    load_cantera_mechanism,
+    mechanism_sha256,
+    require_cantera,
+    resolve_mechanism_path,
+    simulate_cantera_reactor,
+)
 from koopman_graph.datasets.reaction.catalog import (
     DEFAULT_BRUSSELATOR_PARAMS,
     DEFAULT_CHAIN_RATE,
@@ -111,6 +125,8 @@ from koopman_graph.datasets.reaction.transform import (
 )
 
 __all__ = [
+    "CANTERA_CITATION_DOI",
+    "CANTERA_ILLUSTRATION_NOTE",
     "DEFAULT_BRUSSELATOR_PARAMS",
     "DEFAULT_CHAIN_RATE",
     "DEFAULT_CHAIN_RATIO",
@@ -118,6 +134,7 @@ __all__ = [
     "DEFAULT_LOG_FLOOR",
     "DEFAULT_LOTKA_VOLTERRA_RATES",
     "DEFAULT_MAX_EVENTS",
+    "DEFAULT_MECHANISM",
     "DEFAULT_MICHAELIS_MENTEN_RATES",
     "GAS_CONSTANT_J_PER_MOL_K",
     "PRODUCT_RELATION",
@@ -128,6 +145,9 @@ __all__ = [
     "VAN_DE_VUSSE_NOMINAL_DILUTION",
     "VAN_DE_VUSSE_NOMINAL_TEMPERATURE_K",
     "ArrheniusParams",
+    "CanteraMechanism",
+    "CanteraProvenance",
+    "CanteraReactorTrajectory",
     "ElementBalanceReport",
     "IntegrationMethod",
     "LogConcentrationTransform",
@@ -135,6 +155,7 @@ __all__ = [
     "ReactionSystem",
     "SSATrajectory",
     "SampledReactionNetwork",
+    "StateDependentPolicy",
     "VanDeVusseCSTR",
     "bin_to_grid",
     "brusselator",
@@ -149,17 +170,22 @@ __all__ = [
     "integrate_rk4",
     "integrate_stiff",
     "linear_rate_equations",
+    "load_cantera_mechanism",
     "lotka_volterra",
     "mass_action_jacobian",
+    "mechanism_sha256",
     "michaelis_menten",
     "oracle_spectrum",
     "oracle_timescales",
     "propensities",
     "reaction_directed_hyperedges",
     "reaction_hyperedge_index",
+    "require_cantera",
     "require_scipy",
+    "resolve_mechanism_path",
     "reversible_dimerization",
     "sample_random_network",
+    "simulate_cantera_reactor",
     "species_influence_graph",
     "species_reaction_bipartite",
     "stoichiometric_rank",

@@ -63,10 +63,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSA (`gillespie_ssa`, `SSATrajectory`) with mass-action propensities
   (falling factorials, volume scaling) that match the ODE rates, plus
   last-value-hold binning onto a grid (`bin_to_grid`).
+- `koopman_graph.datasets.reaction.cantera_io` (lazy `[cantera]` boundary):
+  - `load_cantera_mechanism` converts a Cantera gas mechanism (default the
+    bundled `h2o2.yaml`, read from the installed package) to a mass-action
+    `ReactionSystem` at a reference `(T, P, X)`. Reversible reactions are
+    split into forward and reverse. Elementary and mass-action three-body
+    reactions convert exactly: `[M]` is expanded into one reaction per
+    collider with rate `k ε_s`.
+  - Falloff and other state-dependent rates are frozen at the reference
+    state, skipped, or rejected (`state_dependent=`); reactions with
+    non-mass-action `orders` are skipped or rejected. Every frozen or
+    skipped reaction is listed in `CanteraProvenance`, which also records
+    the Cantera version, mechanism path and SHA-256, the reference state,
+    the "illustration only" caveat, and the Cantera citation DOI.
+  - `simulate_cantera_reactor` runs constant-pressure or constant-volume
+    ideal-gas reactors, adiabatic or isothermal.
+  - Also: `require_cantera`, `resolve_mechanism_path`, and
+    `mechanism_sha256`.
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
 - `cantera` pytest marker; marked tests are skipped automatically when the
   `[cantera]` extra is not installed.
+- CI test jobs and the release verify job install `[reaction]` and
+  `[cantera]`, so `cantera`-marked tests run there.
 - `tests/test_import_hygiene.py`: `import koopman_graph` must not load
   SciPy, Cantera, or torchdiffeq.
 
