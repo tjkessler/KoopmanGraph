@@ -626,6 +626,18 @@ def check_element_balance(
     )
 
 
+def _require_system(system: object) -> None:
+    """Raise ``TypeError`` unless ``system`` is a :class:`ReactionSystem`.
+
+    Parameters
+    ----------
+    system
+        See signature."""
+    if not isinstance(system, ReactionSystem):
+        msg = f"system must be a ReactionSystem, got {type(system).__name__}"
+        raise TypeError(msg)
+
+
 def _finite_float(value: Any, name: str) -> float:
     """Coerce ``value`` to a finite float or raise ``ValueError``.
 
