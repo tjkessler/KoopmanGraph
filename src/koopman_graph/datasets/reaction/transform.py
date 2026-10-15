@@ -15,14 +15,17 @@ Pure PyTorch; importing this module does not import scipy or cantera.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch import Tensor
 
-from koopman_graph.datasets.reaction.system import ReactionSystem
+from koopman_graph.datasets.reaction.system import (
+    ReactionSystem,
+    _finite_float,
+    _floating_tensor,
+)
 
 DEFAULT_LOG_FLOOR = 1e-12
 """Default concentration floor applied before ``log`` (same units as ``c``)."""
@@ -51,12 +54,8 @@ class LogConcentrationTransform:
         ValueError
             If ``floor`` is not a finite number greater than zero.
         """
-        try:
-            floor = float(self.floor)
-        except (TypeError, ValueError) as exc:
-            msg = f"floor must be a real number, got {self.floor!r}"
-            raise ValueError(msg) from exc
-        if not math.isfinite(floor) or floor <= 0.0:
+        floor = _finite_float(self.floor, "floor")
+        if floor <= 0.0:
             msg = f"floor must be finite and > 0, got {self.floor!r}"
             raise ValueError(msg)
         object.__setattr__(self, "floor", floor)
@@ -73,8 +72,14 @@ class LogConcentrationTransform:
         -------
         Tensor
             ``log(clamp(c, min=floor))`` with the input's shape and dtype.
+
+        Raises
+        ------
+        ValueError
+            If ``floor`` is below the smallest normal number of the input
+            dtype (e.g. the default ``1e-12`` in ``float16``).
         """
-        c = _floating_tensor(concentrations, "concentrations")
+        c = self._checked(concentrations)
         return torch.log(torch.clamp(c, min=self.floor))
 
     def inverse(self, log_concentrations: Tensor) -> Tensor:
@@ -105,9 +110,36 @@ class LogConcentrationTransform:
         -------
         Tensor
             Boolean tensor, ``True`` where ``c < floor``.
+
+        Raises
+        ------
+        ValueError
+            If ``floor`` is not representable in the input dtype; see
+            :meth:`forward`.
         """
-        c = _floating_tensor(concentrations, "concentrations")
+        c = self._checked(concentrations)
         return c < self.floor
+
+    def _checked(self, concentrations: Tensor) -> Tensor:
+        """Validate ``concentrations`` and that its dtype can hold ``floor``.
+
+        Parameters
+        ----------
+        concentrations
+            See signature.
+
+        Returns
+        -------
+            See signature."""
+        c = _floating_tensor(concentrations, "concentrations")
+        if self.floor < torch.finfo(c.dtype).tiny:
+            msg = (
+                f"floor {self.floor!r} is below the smallest normal {c.dtype} "
+                f"value {torch.finfo(c.dtype).tiny!r}; use a larger floor or a "
+                "wider dtype"
+            )
+            raise ValueError(msg)
+        return c
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the transform for a dataset card.
@@ -212,25 +244,3 @@ def element_balance_violation(
             raise ValueError(msg)
     delta = c - ref.to(dtype=c.dtype, device=c.device)
     return delta @ element_matrix.to(dtype=c.dtype, device=c.device).T
-
-
-def _floating_tensor(value: Any, name: str) -> Tensor:
-    """Require a floating-point Tensor.
-
-    Parameters
-    ----------
-    value
-        See signature.
-    name
-        See signature.
-
-    Returns
-    -------
-        See signature."""
-    if not isinstance(value, Tensor):
-        msg = f"{name} must be a Tensor, got {type(value).__name__}"
-        raise TypeError(msg)
-    if not value.is_floating_point():
-        msg = f"{name} must be floating point, got {value.dtype}"
-        raise TypeError(msg)
-    return value
