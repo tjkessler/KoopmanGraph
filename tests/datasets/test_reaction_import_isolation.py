@@ -40,3 +40,12 @@ def test_root_all_does_not_export_reaction_names() -> None:
 def test_cantera_marker_runs_only_with_extra() -> None:
     """``tests/conftest.py`` skips this unless ``[cantera]`` is installed."""
     assert importlib.util.find_spec("cantera") is not None
+
+
+def test_datasets_exports_only_the_benchmark() -> None:
+    import koopman_graph.datasets as datasets
+    from koopman_graph.datasets.reaction import ReactionNetworkBenchmark
+
+    assert datasets.ReactionNetworkBenchmark is ReactionNetworkBenchmark
+    assert "ReactionNetworkBenchmark" in datasets.__all__
+    assert "ReactionSystem" not in datasets.__all__

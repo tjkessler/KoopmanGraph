@@ -95,6 +95,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[cantera]`, so `cantera`-marked tests run there.
 - `tests/test_import_hygiene.py`: `import koopman_graph` must not load
   SciPy, Cantera, or torchdiffeq.
+- `ReactionNetworkBenchmark` (exported from `koopman_graph.datasets` and
+  `koopman_graph.datasets.reaction`): card-defined, seeded reaction-network
+  datasets.
+  - Six packaged FAIR JSON cards under `reaction/data/`:
+    `reaction_chain_v1`, `reaction_michaelis_menten_v1`,
+    `reaction_brusselator_v1`, `reaction_random_network_v1`,
+    `reaction_van_de_vusse_v1` (piecewise-constant temperature /
+    dilution-rate controls), and `reaction_cantera_h2o2_v1` (`[cantera]`).
+    Each card records the generator, simulator, time grid, seed,
+    initial-condition ranges, log floor, graph encoding, oracle references
+    (equilibrium, dynamic eigenvalues, timescales, conservation laws),
+    units, license, limitations, and Cantera provenance.
+  - `generate` returns a `ReactionDataset` (raw `float64` concentrations,
+    optional controls, per-trajectory `GraphSnapshotSequence` with species
+    nodes, `timestamps`, and global `control_inputs`), with an optional
+    Gillespie `simulator="ssa"`. Also: deterministic trajectory `split`, and
+    versioned `save` / `load` payloads (`weights_only` loading).
+  - `compute_card_oracle` and `scripts/build_reaction_cards.py` (with
+    `--check`) regenerate the oracle sections; tests recompute them to catch
+    drift.
+- `eigenvalue_timescales`: `-1/Re(λ)` with real parts below eigensolver
+  round-off (`100 · eps · max|λ|`) mapped to `inf`;
+  `OracleSpectrum.timescales` uses it. `ReactionNetworkBenchmark.generate`
+  refuses a Cantera card whose recorded mechanism SHA-256 differs from the
+  installed file.
 
 ### Changed
 
@@ -104,6 +129,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached: installing the extra mid-session takes effect on the next call.
 - `uv.lock` relocked; it was missing extras already declared in
   `pyproject.toml` (`export`, `control-lmi`, ...).
+
+### Fixed
+
+- `conservation_laws` returns a canonical basis (Gram-Schmidt in species
+  order on the basis-independent projector) instead of whatever an SVD
+  returns. With two or more conservation laws the SVD basis differed
+  between LAPACK builds, so the Michaelis-Menten, random-network, and
+  Cantera cards did not reproduce on Linux CI. Card oracle values change
+  only at rounding level (<= 3e-14) apart from the rotated laws.
+
+- `equilibrium` no longer returns a clamped Newton stall that is not
+  stationary. It now requires `|dc_s/dt| <= 1e-6 · gross turnover_s +
+  1e-12 · (peak initial turnover)` and otherwise raises `RuntimeError`.
+  Previously the converted Cantera `h2o2` system could report a
+  near-boundary point with one-way flux as its equilibrium.
 
 ## [0.15.0] - 2026-08-19
 

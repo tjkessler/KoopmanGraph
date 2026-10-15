@@ -1,0 +1,67 @@
+{
+  "dataset_id": "reaction_brusselator_v1",
+  "version": "v1",
+  "scope": "Open Brusselator (a = 1, b = 3) with an unstable focus and a limit cycle; tests oscillatory, non-decaying dynamics.",
+  "generator": {
+    "kind": "catalog",
+    "name": "brusselator",
+    "params": {}
+  },
+  "simulator": {
+    "kind": "rk4",
+    "substeps": 10
+  },
+  "time_step": 0.1,
+  "default_num_timesteps": 128,
+  "default_num_trajectories": 32,
+  "default_seed": 0,
+  "initial_ranges": {
+    "X": [
+      0.5,
+      1.5
+    ],
+    "Y": [
+      2.0,
+      4.0
+    ]
+  },
+  "transform": null,
+  "graph_encoding": "species_influence",
+  "limitations": "Open system without conservation laws; the oracle fixed point is unstable, so its timescales are negative (growth).",
+  "units": {
+    "time": "s",
+    "concentration": "mol/L"
+  },
+  "controls": null,
+  "cantera": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "In-repo mass-action generator (koopman_graph.datasets.reaction).",
+  "license": "Apache-2.0",
+  "species": [
+    "X",
+    "Y"
+  ],
+  "elements": null,
+  "num_reactions": 4,
+  "oracle": {
+    "state": "equilibrium_from_range_midpoints",
+    "reference_state": [
+      1.0,
+      3.0
+    ],
+    "num_conservation_laws": 0,
+    "conservation_laws": [],
+    "dynamic_eigenvalues_real": [
+      0.5,
+      0.5
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.8660254037844388,
+      -0.8660254037844388
+    ],
+    "timescales": [
+      -2.0,
+      -2.0
+    ]
+  }
+}

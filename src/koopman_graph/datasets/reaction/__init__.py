@@ -38,6 +38,16 @@ operator recovers slow kinetic timescales and respects conservation — not a
 replacement for a production kinetics solver.
 """
 
+from koopman_graph.datasets.reaction.benchmark import (
+    PAYLOAD_FORMAT,
+    PAYLOAD_FORMAT_VERSION,
+    GraphEncoding,
+    ReactionDataset,
+    ReactionDatasetSplit,
+    ReactionNetworkBenchmark,
+    compute_card_oracle,
+    system_from_card,
+)
 from koopman_graph.datasets.reaction.cantera_io import (
     CANTERA_CITATION_DOI,
     CANTERA_ILLUSTRATION_NOTE,
@@ -102,6 +112,7 @@ from koopman_graph.datasets.reaction.integrate import (
 from koopman_graph.datasets.reaction.oracles import (
     OracleSpectrum,
     conservation_laws,
+    eigenvalue_timescales,
     equilibrium,
     oracle_spectrum,
     oracle_timescales,
@@ -137,6 +148,8 @@ __all__ = [
     "DEFAULT_MECHANISM",
     "DEFAULT_MICHAELIS_MENTEN_RATES",
     "GAS_CONSTANT_J_PER_MOL_K",
+    "PAYLOAD_FORMAT",
+    "PAYLOAD_FORMAT_VERSION",
     "PRODUCT_RELATION",
     "REACTANT_RELATION",
     "REACTION_NODE",
@@ -149,9 +162,13 @@ __all__ = [
     "CanteraProvenance",
     "CanteraReactorTrajectory",
     "ElementBalanceReport",
+    "GraphEncoding",
     "IntegrationMethod",
     "LogConcentrationTransform",
     "OracleSpectrum",
+    "ReactionDataset",
+    "ReactionDatasetSplit",
+    "ReactionNetworkBenchmark",
     "ReactionSystem",
     "SSATrajectory",
     "SampledReactionNetwork",
@@ -160,7 +177,9 @@ __all__ = [
     "bin_to_grid",
     "brusselator",
     "check_element_balance",
+    "compute_card_oracle",
     "conservation_laws",
+    "eigenvalue_timescales",
     "element_balance_violation",
     "equilibrium",
     "first_order_chain",
@@ -189,5 +208,6 @@ __all__ = [
     "species_influence_graph",
     "species_reaction_bipartite",
     "stoichiometric_rank",
+    "system_from_card",
     "van_de_vusse_cstr",
 ]

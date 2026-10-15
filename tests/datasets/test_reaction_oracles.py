@@ -245,3 +245,93 @@ def test_equilibrium_validation() -> None:
     for dt in (0.0, -1.0, math.inf):
         with pytest.raises(ValueError, match="time_step must be"):
             spectrum.discrete_eigenvalues(dt)
+
+
+def test_equilibrium_rejects_one_way_boundary_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clamped Newton stall where flux runs one way is not a steady state."""
+    # A + B -> C with a slow C -> A + B: the only steady state is interior.
+    system = ReactionSystem(
+        species=("A", "B", "C"),
+        reactant_stoichiometry=torch.tensor(
+            [[1.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=_F64
+        ),
+        product_stoichiometry=torch.tensor(
+            [[0.0, 0.0, 1.0], [1.0, 1.0, 0.0]], dtype=_F64
+        ),
+        rate_constants=torch.tensor([1.0, 1e-3], dtype=_F64),
+    )
+    c_eq = equilibrium(system, torch.tensor([1.0, 1.0, 0.0], dtype=_F64))
+    assert float(system.time_derivative(c_eq).abs().max()) < 1e-12
+    from koopman_graph.datasets.reaction.oracles import _require_stationary
+
+    with pytest.raises(RuntimeError, match="non-stationary point"):
+        _require_stationary(system, torch.tensor([1.0, 0.0, 1e-9], dtype=_F64))
+
+    # Force Newton to stall where it starts (zero Jacobian -> zero step): the
+    # step test passes immediately, and equilibrium must still refuse the point.
+    from koopman_graph.datasets.reaction import oracles
+
+    monkeypatch.setattr(
+        oracles,
+        "mass_action_jacobian",
+        lambda system, c: torch.zeros(3, 3, dtype=_F64),
+    )
+    # Either guard may fire first, the line-search stall check or the
+    # stationarity check; both refuse the point.
+    with pytest.raises(RuntimeError, match="non-stationary point|line search stalled"):
+        equilibrium(system, torch.tensor([1.0, 1.0, 0.0], dtype=_F64))
+
+
+def test_eigenvalue_timescales_keep_slow_modes_in_stiff_spectra() -> None:
+    """Only round-off-level real parts become infinite, not slow stiff modes."""
+    from koopman_graph.datasets.reaction import eigenvalue_timescales
+
+    # max|λ| = 1e10, so the round-off cutoff is about 2.2e-4.
+    eigenvalues = torch.tensor([-1e10, -1e-2, -1e-3, 1e-6], dtype=_F64)
+    timescales = eigenvalue_timescales(eigenvalues)
+    assert torch.allclose(
+        timescales[:3], torch.tensor([1e-10, 1e2, 1e3], dtype=_F64), rtol=1e-12
+    )
+    assert math.isinf(float(timescales[3]))
+    assert eigenvalue_timescales(torch.zeros(0, dtype=_F64)).shape == (0,)
+
+
+def test_equilibrium_accepts_vanishing_leftovers_on_boundary() -> None:
+    """Draining onto a zero-flux boundary is stationary despite tiny leftovers."""
+    from koopman_graph.datasets.reaction import sample_random_network
+
+    system = sample_random_network(seed=0).system
+    c0 = torch.full((6,), 0.55, dtype=_F64)
+    relaxed = integrate_rk4(system, c0, torch.tensor([0.0, 200.0]), substeps=4000)[-1]
+    c_eq = equilibrium(system, c0, guess=relaxed)
+    assert float(system.time_derivative(c_eq).abs().max()) < 1e-12
+    assert system.element_matrix is not None
+    drift = system.element_matrix @ (c_eq - c0)
+    assert float(drift.abs().max()) < 1e-10
+
+
+def test_conservation_laws_are_canonical_across_bases() -> None:
+    """The basis does not depend on which orthonormal basis an SVD returns."""
+    from koopman_graph.datasets.reaction.oracles import _canonical_row_basis
+
+    system = michaelis_menten()
+    w = conservation_laws(system)
+    theta = torch.tensor(0.7, dtype=_F64)
+    rotation = torch.stack(
+        [
+            torch.stack([torch.cos(theta), -torch.sin(theta)]),
+            torch.stack([torch.sin(theta), torch.cos(theta)]),
+        ]
+    )
+    rotated = -(rotation @ w)  # another valid orthonormal basis, sign flipped
+    assert torch.allclose(_canonical_row_basis(rotated), w, atol=1e-12)
+    # Substrate backbone S + ES + P is the second canonical row.
+    expected = torch.tensor([0.0, 1.0, 1.0, 1.0], dtype=_F64) / math.sqrt(3.0)
+    assert torch.allclose(w[1], expected, atol=1e-12)
+    assert _canonical_row_basis(torch.zeros(0, 4, dtype=_F64)).shape == (0, 4)
+    # Round-off zeros are exact zeros, so stored bases match across platforms.
+    assert float(w[1, 0]) == 0.0
+    noisy = w + 1e-16 * torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    assert float(_canonical_row_basis(noisy.to(_F64))[1, 0]) == 0.0

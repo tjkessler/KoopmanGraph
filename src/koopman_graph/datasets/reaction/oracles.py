@@ -79,14 +79,12 @@ class OracleSpectrum:
         Tensor
             ``float64`` tensor aligned with :attr:`dynamic_eigenvalues`:
             positive for decaying modes, ``inf`` when ``|Re(λ)|`` is within
-            :attr:`zero_tolerance` (e.g. a neutral centre), and negative for
-            growing modes.
+            :attr:`zero_tolerance` (a neutral centre, or a species drained
+            onto a zero-flux boundary), and negative for growing modes.
+            ``zero_tolerance = 0`` compares exactly.
         """
-        real = self.dynamic_eigenvalues.real
-        return torch.where(
-            real.abs() <= self.zero_tolerance,
-            torch.full_like(real, math.inf),
-            -1.0 / real,
+        return eigenvalue_timescales(
+            self.dynamic_eigenvalues, zero_tolerance=self.zero_tolerance
         )
 
     @property
@@ -128,6 +126,42 @@ class OracleSpectrum:
         return torch.exp(self.dynamic_eigenvalues * dt)
 
 
+# Eigenvalues are only resolved to about ``eps · ‖J‖``; real parts below a
+# small multiple of that are numerical zeros. Keeping the default cutoff at
+# round-off level preserves genuinely slow modes in stiff mechanisms, whose
+# eigenvalue magnitudes can span ten or more decades.
+_ZERO_EIGENVALUE_RTOL = 100.0 * torch.finfo(torch.float64).eps
+
+
+def eigenvalue_timescales(
+    eigenvalues: Tensor, *, zero_tolerance: float | None = None
+) -> Tensor:
+    """Return relaxation timescales ``-1 / Re(λ)`` with numerical zeros as ``inf``.
+
+    Parameters
+    ----------
+    eigenvalues : Tensor
+        Complex (or real) eigenvalues ``(k,)``.
+    zero_tolerance : float or None, optional
+        Absolute cutoff: ``|Re(λ)| <= zero_tolerance`` maps to ``inf``.
+        Default ``None`` uses round-off level, ``100 · eps · max|λ|``
+        (about ``2.2e-14 · max|λ|``). :func:`oracle_spectrum` passes
+        ``1e-10 ‖J‖_F`` through :attr:`OracleSpectrum.zero_tolerance`.
+
+    Returns
+    -------
+    Tensor
+        ``float64`` timescales ``(k,)``.
+    """
+    real = eigenvalues.real.to(torch.float64)
+    if zero_tolerance is None:
+        scale = float(eigenvalues.abs().max()) if eigenvalues.numel() else 0.0
+        zero_tolerance = _ZERO_EIGENVALUE_RTOL * scale
+    zero = real.abs() <= zero_tolerance
+    safe = torch.where(zero, torch.ones_like(real), real)
+    return torch.where(zero, torch.full_like(real, math.inf), -1.0 / safe)
+
+
 def stoichiometric_rank(system: ReactionSystem) -> int:
     """Return the rank of the stoichiometric matrix ``N``.
 
@@ -159,6 +193,18 @@ def conservation_laws(system: ReactionSystem) -> Tensor:
         num_species)`` and orthonormal rows, ``W N = 0``. It has zero rows
         when nothing is conserved (e.g. an open system with independent
         sources).
+
+    Notes
+    -----
+    With two or more laws any rotation of an orthonormal basis is equally
+    valid, and the one an SVD returns depends on the LAPACK build. The rows
+    here are canonical instead: Gram-Schmidt in species order on the
+    columns of the projector ``P = WᵀW``, which does not depend on the
+    starting basis. Row ``k`` is the normalized component of the ``k``-th
+    independent species unit vector inside the conserved subspace, with a
+    positive entry for that species. The same network therefore gives the
+    same ``W`` (to rounding) on every platform, which keeps dataset cards
+    reproducible.
     """
     return _stoichiometric_basis(system)[2]
 
@@ -211,7 +257,12 @@ def equilibrium(
         zero eigenvalue), or arguments are invalid.
     RuntimeError
         If Newton does not reach a steady state within ``max_iter``
-        iterations, or its line search stalls away from one.
+        iterations, its line search stalls away from one, or it stops at a
+        non-negative point that is not stationary. Clamping can stop Newton
+        on the boundary where every flux is tiny but flows one way; pass a
+        ``guess`` closer to the interior steady state, or use a
+        thermochemical equilibrium (e.g. Cantera's ``equilibrate``) as the
+        reference.
     """
     c0 = _state(system, initial, "initial")
     if not math.isfinite(float(tol)) or float(tol) <= 0.0:
@@ -245,6 +296,8 @@ def equilibrium(
 
     start = c0 if guess is None else _state(system, guess, "guess")
     c = start.clamp(min=0)
+    # Turnover at the initial state sets the absolute stationarity scale.
+    flux_scale = float(_gross_turnover(system, c0.clamp(min=0)).max())
     f = residual(c)
     for _ in range(max_iter):
         jac = torch.cat([q.T @ mass_action_jacobian(system, c), w])
@@ -259,6 +312,7 @@ def equilibrium(
             alpha *= 0.5
         else:
             if norm <= residual_tol:
+                _require_stationary(system, c, flux_scale=flux_scale)
                 return c
             msg = (
                 f"Newton line search stalled for {system.name!r} "
@@ -271,6 +325,7 @@ def equilibrium(
             moved <= tol * (1.0 + float(c.abs().max()))
             and float(f.norm()) <= residual_tol
         ):
+            _require_stationary(system, c, flux_scale=flux_scale)
             return c
     msg = (
         f"Newton did not converge for {system.name!r} in {max_iter} iterations "
@@ -338,6 +393,61 @@ def oracle_timescales(system: ReactionSystem, state: Tensor) -> Tensor:
     return oracle_spectrum(system, state).timescales
 
 
+_STATIONARY_RTOL = 1e-6
+
+
+_STATIONARY_ATOL = 1e-12
+
+
+def _gross_turnover(system: ReactionSystem, c: Tensor) -> Tensor:
+    """Return per-species gross turnover ``Σ_j r_j (α_js + β_js)``.
+
+    Parameters
+    ----------
+    system
+        See signature.
+    c
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    rates = system.reaction_rates(c)
+    return rates @ (system.reactant_stoichiometry + system.product_stoichiometry)
+
+
+def _require_stationary(
+    system: ReactionSystem, c: Tensor, *, flux_scale: float = 0.0
+) -> None:
+    """Raise unless net rates are negligible against species turnover.
+
+    A species passes when ``|dc_s/dt| <= rtol * gross_s + atol * flux_scale``:
+    the relative term rejects one-way flux at a clamped boundary point, and
+    the absolute term (scaled by the peak gross turnover at ``initial``)
+    accepts vanishing leftovers on the way to a boundary steady state.
+
+    Parameters
+    ----------
+    system
+        See signature.
+    c
+        See signature.
+    flux_scale
+        See signature."""
+    net = system.time_derivative(c).abs()
+    gross = _gross_turnover(system, c)
+    allowed = _STATIONARY_RTOL * gross + _STATIONARY_ATOL * flux_scale
+    if bool((net > allowed).any()):
+        tiny = torch.finfo(torch.float64).tiny
+        ratio = float((net / gross.clamp(min=tiny)).max())
+        msg = (
+            f"Newton stalled at a non-stationary point for {system.name!r} "
+            f"(max net/gross species turnover {ratio:.3e}); pass a guess "
+            "closer to the steady state"
+        )
+        raise RuntimeError(msg)
+
+
 def _stoichiometric_basis(system: ReactionSystem) -> tuple[int, Tensor, Tensor]:
     """Return ``rank(N)`` and orthonormal bases of ``range(N)`` and its complement.
 
@@ -350,10 +460,50 @@ def _stoichiometric_basis(system: ReactionSystem) -> tuple[int, Tensor, Tensor]:
     -------
         ``(rank, q, w)`` with ``q`` of shape ``(num_species, rank)`` and the
         conservation laws ``w`` of shape ``(num_species - rank, num_species)``,
-        from one SVD."""
+        from one SVD; ``w`` is canonicalized (see :func:`conservation_laws`)."""
     _require_system(system)
     u, _vh, rank = _svd_rank(system.stoichiometric_matrix)
-    return rank, u[:, :rank], u[:, rank:].T.contiguous()
+    return rank, u[:, :rank], _canonical_row_basis(u[:, rank:].T.contiguous())
+
+
+_CANONICAL_PIVOT_TOL = 1e-6
+
+# Entries of the canonical rows that should be exactly zero come out as
+# round-off (~1e-16) whose value depends on the LAPACK build; snap them so
+# the stored basis is identical across platforms, not just close.
+_CANONICAL_ZERO_TOL = 1e-12
+
+
+def _canonical_row_basis(w: Tensor) -> Tensor:
+    """Return a basis-independent orthonormal basis of ``rowspace(w)``.
+
+    Parameters
+    ----------
+    w
+        See signature.
+
+    Returns
+    -------
+        Orthonormal rows spanning the same subspace, chosen by Gram-Schmidt in
+        coordinate order on the projector ``wᵀw`` (independent of which
+        orthonormal ``w`` was passed), with round-off entries below
+        ``1e-12`` set to exactly zero."""
+    num_laws, num_species = int(w.shape[0]), int(w.shape[1])
+    if num_laws == 0:
+        return w
+    projector = w.T @ w  # basis independent
+    basis: list[Tensor] = []
+    for j in range(num_species):
+        v = projector[:, j].clone()
+        for b in basis:
+            v = v - (b @ v) * b
+        norm = float(v.norm())
+        if norm > _CANONICAL_PIVOT_TOL:
+            basis.append(v / norm)
+            if len(basis) == num_laws:
+                break
+    rows = torch.stack(basis)
+    return torch.where(rows.abs() < _CANONICAL_ZERO_TOL, torch.zeros_like(rows), rows)
 
 
 def _svd_rank(matrix: Tensor) -> tuple[Tensor, Tensor, int]:

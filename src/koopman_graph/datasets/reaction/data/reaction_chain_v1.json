@@ -1,0 +1,95 @@
+{
+  "dataset_id": "reaction_chain_v1",
+  "version": "v1",
+  "scope": "Linear first-order chain S0 -> S1 -> S2 -> S3 (rates 1, 0.5, 0.25); exact matrix-exponential trajectories with closed-form dynamic spectrum {-0.25, -0.5, -1} plus one conservation zero mode.",
+  "generator": {
+    "kind": "catalog",
+    "name": "first_order_chain",
+    "params": {
+      "num_species": 4
+    }
+  },
+  "simulator": {
+    "kind": "expm"
+  },
+  "time_step": 0.25,
+  "default_num_timesteps": 64,
+  "default_num_trajectories": 32,
+  "default_seed": 0,
+  "initial_ranges": {
+    "S0": [
+      0.5,
+      1.5
+    ],
+    "S1": [
+      0.0,
+      0.2
+    ],
+    "S2": [
+      0.0,
+      0.2
+    ],
+    "S3": [
+      0.0,
+      0.2
+    ]
+  },
+  "transform": {
+    "kind": "log_concentration",
+    "floor": 1e-08
+  },
+  "graph_encoding": "species_influence",
+  "limitations": "Linear and closed; every mode is a pure decay. Use as the exact-spectrum sanity check, not as a nonlinear benchmark.",
+  "units": {
+    "time": "s",
+    "concentration": "mol/L"
+  },
+  "controls": null,
+  "cantera": null,
+  "format": "Per-trajectory GraphSnapshotSequence (one node per species, float32 features of shape (num_species, 1), timestamps, optional global control_inputs); raw float64 concentrations in ReactionDataset.",
+  "provenance": "In-repo mass-action generator (koopman_graph.datasets.reaction).",
+  "license": "Apache-2.0",
+  "species": [
+    "S0",
+    "S1",
+    "S2",
+    "S3"
+  ],
+  "elements": [
+    "M"
+  ],
+  "num_reactions": 3,
+  "oracle": {
+    "state": "equilibrium_from_range_midpoints",
+    "reference_state": [
+      0.0,
+      0.0,
+      0.0,
+      1.3000000000000007
+    ],
+    "num_conservation_laws": 1,
+    "conservation_laws": [
+      [
+        0.5000000000000001,
+        0.5000000000000001,
+        0.5,
+        0.49999999999999983
+      ]
+    ],
+    "dynamic_eigenvalues_real": [
+      -0.25,
+      -0.5,
+      -1.0
+    ],
+    "dynamic_eigenvalues_imag": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "timescales": [
+      4.0,
+      2.0,
+      1.0
+    ]
+  }
+}
