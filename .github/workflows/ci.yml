@@ -170,6 +170,7 @@ jobs:
           --extra dev --extra rl --extra mpc --extra symmetry
           --extra distributed --extra equivariance
           --extra baselines-ode --extra msm
+          --extra reaction --extra cantera
 
       - name: Run tests
         if: matrix.coverage != 'true'
@@ -231,6 +232,7 @@ jobs:
           --extra dev --extra rl --extra mpc --extra symmetry
           --extra lightning --extra equivariance
           --extra baselines-ode --extra msm
+          --extra reaction --extra cantera
 
       - name: Run macOS core smoke tests
         env:

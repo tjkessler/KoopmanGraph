@@ -24,6 +24,7 @@ jobs:
           --extra dev --extra rl --extra mpc --extra symmetry --extra docs
           --extra distributed --extra equivariance
           --extra baselines-ode --extra msm
+          --extra reaction --extra cantera
 
       - name: Lint with Ruff
         run: |
