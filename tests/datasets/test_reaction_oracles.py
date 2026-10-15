@@ -310,3 +310,24 @@ def test_equilibrium_accepts_vanishing_leftovers_on_boundary() -> None:
     assert system.element_matrix is not None
     drift = system.element_matrix @ (c_eq - c0)
     assert float(drift.abs().max()) < 1e-10
+
+
+def test_conservation_laws_are_canonical_across_bases() -> None:
+    """The basis does not depend on which orthonormal basis an SVD returns."""
+    from koopman_graph.datasets.reaction.oracles import _canonical_row_basis
+
+    system = michaelis_menten()
+    w = conservation_laws(system)
+    theta = torch.tensor(0.7, dtype=_F64)
+    rotation = torch.stack(
+        [
+            torch.stack([torch.cos(theta), -torch.sin(theta)]),
+            torch.stack([torch.sin(theta), torch.cos(theta)]),
+        ]
+    )
+    rotated = -(rotation @ w)  # another valid orthonormal basis, sign flipped
+    assert torch.allclose(_canonical_row_basis(rotated), w, atol=1e-12)
+    # Substrate backbone S + ES + P is the second canonical row.
+    expected = torch.tensor([0.0, 1.0, 1.0, 1.0], dtype=_F64) / math.sqrt(3.0)
+    assert torch.allclose(w[1], expected, atol=1e-12)
+    assert _canonical_row_basis(torch.zeros(0, 4, dtype=_F64)).shape == (0, 4)
