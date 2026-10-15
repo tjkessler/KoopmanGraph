@@ -1043,6 +1043,10 @@ Datasets
    :members:
    :show-inheritance:
 
+.. automodule:: koopman_graph.datasets.reaction
+   :members:
+   :show-inheritance:
+
 .. automodule:: koopman_graph.datasets.era5
    :members:
    :show-inheritance:

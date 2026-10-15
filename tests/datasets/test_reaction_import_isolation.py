@@ -21,10 +21,12 @@ def test_reaction_import_does_not_load_scipy_or_cantera() -> None:
     assert loaded == []
 
 
-def test_reaction_all_is_empty_skeleton() -> None:
+def test_reaction_all_lists_importable_names() -> None:
     import koopman_graph.datasets.reaction as reaction
 
-    assert reaction.__all__ == []
+    assert "ReactionSystem" in reaction.__all__
+    for name in reaction.__all__:
+        assert hasattr(reaction, name), name
 
 
 def test_root_all_does_not_export_reaction_names() -> None:
