@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (floored `log c`, its inverse, a below-floor mask, and a serializable
   record of the floor) and `element_balance_violation` for element-total
   drift from a reference state.
+- `koopman_graph.datasets.reaction.graphs`: `species_influence_graph`
+  (directed species graph matching the mass-action Jacobian's sparsity,
+  weighted by linking-reaction count), `reaction_hyperedge_index` (one
+  hyperedge per reaction), `reaction_directed_hyperedges` (reactant tail /
+  product head incidences), and `species_reaction_bipartite` (PyG
+  `HeteroData` with stoichiometric edge weights).
+- `koopman_graph.datasets.reaction.integrate`: exact augmented
+  matrix-exponential propagation for linear systems (`integrate_expm`,
+  `linear_rate_equations`), batched and differentiable torch RK4
+  (`integrate_rk4`), SciPy BDF / Radau / LSODA with an exact mass-action
+  Jacobian behind a lazy `require_scipy()` guard (`integrate_stiff`;
+  `[reaction]` extra), the `integrate_reaction_system` dispatcher
+  (`method="auto"`), and `mass_action_jacobian`.
 - `[reaction]` extra (`scipy>=1.11.0`) for stiff reaction-network solvers
   and `[cantera]` extra (`cantera>=3.2,<3.3`) for Cantera mechanisms.
 - `cantera` pytest marker; marked tests are skipped automatically when the
