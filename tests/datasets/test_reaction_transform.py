@@ -122,3 +122,14 @@ def test_element_balance_violation_validation() -> None:
     )
     with pytest.raises(ValueError, match="no element_matrix"):
         element_balance_violation(torch.ones(2), torch.ones(2), no_elements)
+
+
+def test_log_transform_rejects_floor_below_dtype_range() -> None:
+    transform = LogConcentrationTransform()
+    half = torch.zeros(2, dtype=torch.float16)
+    with pytest.raises(ValueError, match="smallest normal"):
+        transform.forward(half)
+    with pytest.raises(ValueError, match="smallest normal"):
+        transform.floored_mask(half)
+    coarse = LogConcentrationTransform(floor=1e-4)
+    assert bool(torch.isfinite(coarse.forward(half)).all())

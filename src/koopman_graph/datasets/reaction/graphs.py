@@ -25,7 +25,7 @@ import torch
 from torch import Tensor
 from torch_geometric.data import HeteroData
 
-from koopman_graph.datasets.reaction.system import ReactionSystem
+from koopman_graph.datasets.reaction.system import ReactionSystem, _require_system
 
 SPECIES_NODE = "species"
 """Node type name for species in :func:`species_reaction_bipartite`."""
@@ -153,13 +153,15 @@ def species_reaction_bipartite(system: ReactionSystem) -> HeteroData:
         and ``edge_weight`` = reactant coefficient ``α``;
         :data:`PRODUCT_RELATION` carries reaction → species edges with
         ``edge_weight`` = product coefficient ``β``. The ``reaction`` nodes
-        also store ``rate_constant`` with shape ``(num_reactions,)``.
+        also store ``float64`` ``rate_constant`` with shape
+        ``(num_reactions,)``; it stays ``float64`` because rate constants
+        span many decades and would under- or overflow in ``float32``.
     """
     _require_system(system)
     data = HeteroData()
     data[SPECIES_NODE].num_nodes = system.num_species
     data[REACTION_NODE].num_nodes = system.num_reactions
-    data[REACTION_NODE].rate_constant = system.rate_constants.to(torch.float32)
+    data[REACTION_NODE].rate_constant = system.rate_constants.clone()
 
     alpha = system.reactant_stoichiometry
     reaction, species = (alpha > 0).nonzero(as_tuple=True)
@@ -186,15 +188,3 @@ def _incidence(mask: Tensor) -> Tensor:
         See signature."""
     reaction, species = mask.nonzero(as_tuple=True)
     return torch.stack([species, reaction]).to(dtype=torch.long)
-
-
-def _require_system(system: object) -> None:
-    """Raise ``TypeError`` unless ``system`` is a :class:`ReactionSystem`.
-
-    Parameters
-    ----------
-    system
-        See signature."""
-    if not isinstance(system, ReactionSystem):
-        msg = f"system must be a ReactionSystem, got {type(system).__name__}"
-        raise TypeError(msg)
