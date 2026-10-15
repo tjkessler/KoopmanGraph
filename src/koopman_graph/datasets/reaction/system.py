@@ -104,7 +104,7 @@ class ArrheniusParams:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ElementBalanceReport:
     """Per-reaction element-balance residuals of a :class:`ReactionSystem`.
 
@@ -156,9 +156,12 @@ class ElementBalanceReport:
 class ReactionSystem:
     """Mass-action reaction network with optional composition and Arrhenius data.
 
-    Tensors are validated and stored as owned ``float64`` copies; the
-    instance is immutable. Use :meth:`with_rate_constants` or
-    :meth:`at_temperature` to derive a system with new rate constants.
+    Tensors are validated and stored as owned ``float64`` CPU copies, and
+    fields cannot be reassigned. The tensors themselves are not
+    write-protected: treat them as read-only, since an in-place edit (e.g.
+    ``system.rate_constants[0] = 1.0``) bypasses validation. Use
+    :meth:`with_rate_constants` or :meth:`at_temperature` to derive a
+    system with new rate constants.
 
     Attributes
     ----------
@@ -233,8 +236,9 @@ class ReactionSystem:
         if num_reactions == 0:
             msg = "a reaction system needs at least one reaction"
             raise ValueError(msg)
-        if bool(torch.all(reactants == products, dim=1).any()):
-            index = int(torch.all(reactants == products, dim=1).nonzero()[0].item())
+        unchanged = torch.all(reactants == products, dim=1)
+        if bool(unchanged.any()):
+            index = int(unchanged.nonzero()[0].item())
             msg = f"reaction {index} has identical reactants and products"
             raise ValueError(msg)
 
@@ -369,8 +373,9 @@ class ReactionSystem:
         concentrations : Tensor
             Floating tensor with shape ``(..., num_species)``.
         rate_constants : Tensor or None, optional
-            Override rate constants with shape ``(num_reactions,)`` or
-            ``(..., num_reactions)``. Default uses :attr:`rate_constants`.
+            Finite, non-negative override rate constants with shape
+            ``(num_reactions,)`` or ``(..., num_reactions)``; autograd
+            history is kept. Default uses :attr:`rate_constants`.
 
         Returns
         -------
@@ -381,15 +386,21 @@ class ReactionSystem:
         Raises
         ------
         TypeError
-            If ``concentrations`` is not a floating Tensor.
+            If ``concentrations`` is not a floating Tensor or the override is
+            not a Tensor.
         ValueError
-            If the trailing dimension is not ``num_species``.
+            If the trailing dimension is not ``num_species``, or the override
+            has the wrong trailing dimension or invalid values.
         """
         c = self._validate_concentrations(concentrations)
         alpha = self.reactant_stoichiometry.to(dtype=c.dtype, device=c.device)
         # c^α with 0^0 = 1, so species absent from a reaction never zero it.
         monomials = torch.pow(c.unsqueeze(-2), alpha).prod(dim=-1)
-        k = self.rate_constants if rate_constants is None else rate_constants
+        k = (
+            self.rate_constants
+            if rate_constants is None
+            else _rate_constant_override(rate_constants, self.num_reactions)
+        )
         return k.to(dtype=c.dtype, device=c.device) * monomials
 
     def time_derivative(
@@ -469,8 +480,8 @@ class ReactionSystem:
         Returns
         -------
         ReactionSystem
-            New validated system; other fields are shared (they are
-            immutable owned copies).
+            New system; every field is re-validated and copied, so the
+            result does not share tensor storage with ``self``.
         """
         return replace(self, rate_constants=rate_constants)
 
@@ -526,12 +537,13 @@ class ReactionSystem:
         KeyError
             If a required key is missing.
         """
+        species = tuple(payload["species"])
         element_matrix = payload.get("element_matrix")
         elements = payload.get("elements")
         reaction_names = payload.get("reaction_names")
         arrhenius = payload.get("arrhenius")
         return cls(
-            species=tuple(payload["species"]),
+            species=species,
             reactant_stoichiometry=torch.tensor(
                 payload["reactant_stoichiometry"], dtype=torch.float64
             ),
@@ -542,7 +554,10 @@ class ReactionSystem:
             element_matrix=(
                 None
                 if element_matrix is None
-                else torch.tensor(element_matrix, dtype=torch.float64)
+                # An empty (0, S) matrix serializes as [], which loads as (0,).
+                else torch.tensor(element_matrix, dtype=torch.float64).reshape(
+                    -1, len(species)
+                )
             ),
             elements=None if elements is None else tuple(elements),
             reaction_names=None if reaction_names is None else tuple(reaction_names),
@@ -565,14 +580,7 @@ class ReactionSystem:
         Returns
         -------
             See signature."""
-        if not isinstance(concentrations, Tensor):
-            msg = (
-                f"concentrations must be a Tensor, got {type(concentrations).__name__}"
-            )
-            raise TypeError(msg)
-        if not concentrations.is_floating_point():
-            msg = f"concentrations must be floating point, got {concentrations.dtype}"
-            raise TypeError(msg)
+        concentrations = _floating_tensor(concentrations, "concentrations")
         if concentrations.ndim == 0 or concentrations.shape[-1] != self.num_species:
             msg = (
                 f"concentrations must have shape (..., {self.num_species}), got "
@@ -626,6 +634,18 @@ def check_element_balance(
     )
 
 
+def _require_system(system: object) -> None:
+    """Raise ``TypeError`` unless ``system`` is a :class:`ReactionSystem`.
+
+    Parameters
+    ----------
+    system
+        See signature."""
+    if not isinstance(system, ReactionSystem):
+        msg = f"system must be a ReactionSystem, got {type(system).__name__}"
+        raise TypeError(msg)
+
+
 def _finite_float(value: Any, name: str) -> float:
     """Coerce ``value`` to a finite float or raise ``ValueError``.
 
@@ -648,6 +668,28 @@ def _finite_float(value: Any, name: str) -> float:
         msg = f"{name} must be finite, got {value!r}"
         raise ValueError(msg)
     return result
+
+
+def _floating_tensor(value: Any, name: str) -> Tensor:
+    """Require a floating-point Tensor.
+
+    Parameters
+    ----------
+    value
+        See signature.
+    name
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    if not isinstance(value, Tensor):
+        msg = f"{name} must be a Tensor, got {type(value).__name__}"
+        raise TypeError(msg)
+    if not value.is_floating_point():
+        msg = f"{name} must be floating point, got {value.dtype}"
+        raise TypeError(msg)
+    return value
 
 
 def _validate_temperature(temperature_k: float | Tensor) -> Tensor:
@@ -769,3 +811,32 @@ def _rate_constant_vector(value: Any, num_reactions: int) -> Tensor:
         msg = "rate_constants must be finite and >= 0"
         raise ValueError(msg)
     return k
+
+
+def _rate_constant_override(value: Any, num_reactions: int) -> Tensor:
+    """Validate override rate constants ``(..., num_reactions)``, keeping autograd.
+
+    Parameters
+    ----------
+    value
+        See signature.
+    num_reactions
+        See signature.
+
+    Returns
+    -------
+        See signature."""
+    if not isinstance(value, Tensor):
+        msg = f"rate_constants must be a Tensor, got {type(value).__name__}"
+        raise TypeError(msg)
+    if value.ndim == 0 or int(value.shape[-1]) != num_reactions:
+        msg = (
+            f"rate_constants must have shape (..., {num_reactions}), got "
+            f"{tuple(value.shape)}"
+        )
+        raise ValueError(msg)
+    k = value.detach()
+    if not bool(torch.isfinite(k).all()) or bool((k < 0).any()):
+        msg = "rate_constants must be finite and >= 0"
+        raise ValueError(msg)
+    return value

@@ -13,12 +13,18 @@ Usage::
 
     python scripts/build_reaction_cards.py            # write all cards
     python scripts/build_reaction_cards.py --check    # exit 1 if any differ
+
+``--check`` compares numbers with a tolerance (oracle values come from
+eigensolvers, Newton, RK4, and Cantera, whose last digits vary across
+platforms and BLAS builds) and also flags ``reaction_*.json`` files in the
+data directory that no spec produces.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -253,6 +259,45 @@ def build_card(spec: dict[str, Any]) -> dict[str, Any]:
     return card
 
 
+# Tolerances for ``--check``; they match tests/datasets/test_reaction_benchmark.py.
+_RTOL, _ATOL = 1e-8, 1e-12
+_CANTERA_RTOL, _CANTERA_ATOL = 1e-6, 1e-18
+
+
+def cards_match(a: Any, b: Any, *, rtol: float, atol: float) -> bool:
+    """Compare two parsed cards, with a tolerance on floating-point leaves.
+
+    Parameters
+    ----------
+    a, b : Any
+        Parsed JSON values.
+    rtol, atol : float
+        Relative and absolute tolerance for floats.
+
+    Returns
+    -------
+    bool
+        ``True`` when the structures are equal and every float pair is close.
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(
+            cards_match(a[k], b[k], rtol=rtol, atol=atol) for k in a
+        )
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(
+            cards_match(x, y, rtol=rtol, atol=atol) for x, y in zip(a, b, strict=True)
+        )
+    numeric = (int, float)
+    if (
+        isinstance(a, numeric)
+        and isinstance(b, numeric)
+        and not isinstance(a, bool)
+        and not isinstance(b, bool)
+    ):
+        return math.isclose(a, b, rel_tol=rtol, abs_tol=atol)
+    return type(a) is type(b) and a == b
+
+
 def main(argv: list[str] | None = None) -> int:
     """Write (or check) every card.
 
@@ -272,18 +317,31 @@ def main(argv: list[str] | None = None) -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     stale = []
     for spec in SPECS:
-        text = json.dumps(build_card(spec), indent=2) + "\n"
+        card = build_card(spec)
         path = DATA_DIR / f"{spec['dataset_id']}.json"
         if args.check:
-            if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            cantera = card["cantera"] is not None
+            if not path.is_file() or not cards_match(
+                json.loads(path.read_text(encoding="utf-8")),
+                card,
+                rtol=_CANTERA_RTOL if cantera else _RTOL,
+                atol=_CANTERA_ATOL if cantera else _ATOL,
+            ):
                 stale.append(path.name)
         else:
-            path.write_text(text, encoding="utf-8")
+            path.write_text(json.dumps(card, indent=2) + "\n", encoding="utf-8")
             print(f"wrote {path.relative_to(DATA_DIR.parents[3])}")
+    expected = {f"{spec['dataset_id']}.json" for spec in SPECS}
+    orphans = sorted(
+        path.name
+        for path in DATA_DIR.glob("reaction_*.json")
+        if path.name not in expected
+    )
     if stale:
         print("stale cards: " + ", ".join(stale), file=sys.stderr)
-        return 1
-    return 0
+    if orphans:
+        print("cards without a spec: " + ", ".join(orphans), file=sys.stderr)
+    return 1 if stale or orphans else 0
 
 
 if __name__ == "__main__":

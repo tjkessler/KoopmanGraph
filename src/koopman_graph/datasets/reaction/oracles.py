@@ -31,6 +31,11 @@ from koopman_graph.datasets.reaction.integrate import (
 )
 from koopman_graph.datasets.reaction.system import ReactionSystem
 
+_ZERO_REAL_RTOL = 1e-10
+"""Relative tolerance, in units of ``‖J‖``, below which ``Re(λ)`` counts as 0."""
+
+_MAX_BACKTRACKS = 40
+
 
 @dataclass(frozen=True)
 class OracleSpectrum:
@@ -51,6 +56,11 @@ class OracleSpectrum:
         ``num_conservation_laws`` eigenvalues of smallest modulus).
     num_conservation_laws : int
         ``num_species - rank(N)``.
+    zero_tolerance : float
+        Absolute tolerance below which ``|Re(λ)|`` is treated as zero, so
+        rounding in ``eigvals`` cannot turn a neutral mode into a growing or
+        decaying one. Default is ``0.0`` (exact comparison);
+        :func:`oracle_spectrum` sets it relative to ``‖J‖``.
     """
 
     state: Tensor
@@ -58,6 +68,7 @@ class OracleSpectrum:
     dynamic_eigenvalues: Tensor
     conservation_eigenvalues: Tensor
     num_conservation_laws: int
+    zero_tolerance: float = 0.0
 
     @property
     def timescales(self) -> Tensor:
@@ -67,12 +78,14 @@ class OracleSpectrum:
         -------
         Tensor
             ``float64`` tensor aligned with :attr:`dynamic_eigenvalues`:
-            positive for decaying modes, ``inf`` when ``Re(λ)`` is zero to
-            within ``1e-12 · max|λ|`` (a neutral centre, or a species
-            drained onto a zero-flux boundary), and negative for growing
-            modes.
+            positive for decaying modes, ``inf`` when ``|Re(λ)|`` is within
+            :attr:`zero_tolerance` (a neutral centre, or a species drained
+            onto a zero-flux boundary), and negative for growing modes.
+            ``zero_tolerance = 0`` compares exactly.
         """
-        return eigenvalue_timescales(self.dynamic_eigenvalues)
+        return eigenvalue_timescales(
+            self.dynamic_eigenvalues, zero_tolerance=self.zero_tolerance
+        )
 
     @property
     def is_stable(self) -> bool:
@@ -81,9 +94,10 @@ class OracleSpectrum:
         Returns
         -------
         bool
-            ``True`` when all dynamic eigenvalues have ``Re(λ) < 0``.
+            ``True`` when all dynamic eigenvalues have
+            ``Re(λ) < -zero_tolerance``.
         """
-        return bool((self.dynamic_eigenvalues.real < 0).all())
+        return bool((self.dynamic_eigenvalues.real < -self.zero_tolerance).all())
 
     def discrete_eigenvalues(self, time_step: float) -> Tensor:
         """Return the eigenvalues of the flow map over ``time_step``.
@@ -112,26 +126,38 @@ class OracleSpectrum:
         return torch.exp(self.dynamic_eigenvalues * dt)
 
 
-_ZERO_EIGENVALUE_RTOL = 1e-12
+# Eigenvalues are only resolved to about ``eps · ‖J‖``; real parts below a
+# small multiple of that are numerical zeros. Keeping the default cutoff at
+# round-off level preserves genuinely slow modes in stiff mechanisms, whose
+# eigenvalue magnitudes can span ten or more decades.
+_ZERO_EIGENVALUE_RTOL = 100.0 * torch.finfo(torch.float64).eps
 
 
-def eigenvalue_timescales(eigenvalues: Tensor) -> Tensor:
+def eigenvalue_timescales(
+    eigenvalues: Tensor, *, zero_tolerance: float | None = None
+) -> Tensor:
     """Return relaxation timescales ``-1 / Re(λ)`` with numerical zeros as ``inf``.
 
     Parameters
     ----------
     eigenvalues : Tensor
         Complex (or real) eigenvalues ``(k,)``.
+    zero_tolerance : float or None, optional
+        Absolute cutoff: ``|Re(λ)| <= zero_tolerance`` maps to ``inf``.
+        Default ``None`` uses round-off level, ``100 · eps · max|λ|``
+        (about ``2.2e-14 · max|λ|``). :func:`oracle_spectrum` passes
+        ``1e-10 ‖J‖_F`` through :attr:`OracleSpectrum.zero_tolerance`.
 
     Returns
     -------
     Tensor
-        ``float64`` timescales ``(k,)``. ``|Re(λ)| <= 1e-12 · max|λ|`` maps
-        to ``inf``.
+        ``float64`` timescales ``(k,)``.
     """
     real = eigenvalues.real.to(torch.float64)
-    scale = float(eigenvalues.abs().max()) if eigenvalues.numel() else 0.0
-    zero = real.abs() <= _ZERO_EIGENVALUE_RTOL * scale
+    if zero_tolerance is None:
+        scale = float(eigenvalues.abs().max()) if eigenvalues.numel() else 0.0
+        zero_tolerance = _ZERO_EIGENVALUE_RTOL * scale
+    zero = real.abs() <= zero_tolerance
     safe = torch.where(zero, torch.ones_like(real), real)
     return torch.where(zero, torch.full_like(real, math.inf), -1.0 / safe)
 
@@ -149,8 +175,7 @@ def stoichiometric_rank(system: ReactionSystem) -> int:
     int
         Numerical rank of ``N`` (``num_species × num_reactions``).
     """
-    _require_system(system)
-    return int(torch.linalg.matrix_rank(system.stoichiometric_matrix).item())
+    return _stoichiometric_basis(system)[0]
 
 
 def conservation_laws(system: ReactionSystem) -> Tensor:
@@ -169,9 +194,7 @@ def conservation_laws(system: ReactionSystem) -> Tensor:
         when nothing is conserved (e.g. an open system with independent
         sources).
     """
-    rank = stoichiometric_rank(system)
-    u, _s, _vh = torch.linalg.svd(system.stoichiometric_matrix, full_matrices=True)
-    return u[:, rank:].T.contiguous()
+    return _stoichiometric_basis(system)[2]
 
 
 def equilibrium(
@@ -206,19 +229,26 @@ def equilibrium(
     -------
     Tensor
         ``float64`` steady state ``c*`` with ``dc/dt(c*) ≈ 0`` and
-        ``W c* = W initial``. Nonlinear solves are kept non-negative.
+        ``W c* = W initial``. For a linear system this is
+        ``c_p + P0 (initial - c_p)``, where ``c_p`` is any steady state and
+        ``P0`` the spectral projector onto the kernel of ``A``. That is the
+        ``t → ∞`` limit from ``initial`` whenever the nonzero modes decay,
+        also when the steady state in the class is not unique (e.g.
+        ``A → B`` and ``A → C`` split ``A`` in the ratio of their rates).
+        Entries within rounding of zero are set to zero.
 
     Raises
     ------
     ValueError
-        If a linear system has no steady state in the class (e.g. a feed
-        accumulating into a species with no outflow), or arguments are
-        invalid.
+        If a linear system has no steady state (e.g. a feed accumulating
+        into a species with no outflow) or no limiting one (a defective
+        zero eigenvalue), or arguments are invalid.
     RuntimeError
-        If Newton does not converge within ``max_iter`` iterations, or
-        stalls at a non-negative point that is not stationary. Clamping can
-        stop Newton on the boundary where every flux is tiny but flows one
-        way; pass a ``guess`` closer to the interior steady state, or use a
+        If Newton does not reach a steady state within ``max_iter``
+        iterations, its line search stalls away from one, or it stops at a
+        non-negative point that is not stationary. Clamping can stop Newton
+        on the boundary where every flux is tiny but flows one way; pass a
+        ``guess`` closer to the interior steady state, or use a
         thermochemical equilibrium (e.g. Cantera's ``equilibrate``) as the
         reference.
     """
@@ -229,14 +259,15 @@ def equilibrium(
     if isinstance(max_iter, bool) or not isinstance(max_iter, int) or max_iter < 1:
         msg = f"max_iter must be a positive int, got {max_iter!r}"
         raise ValueError(msg)
-    w = conservation_laws(system)
     if system.is_linear:
-        return _linear_equilibrium(system, c0, w)
+        return _linear_equilibrium(system, c0)
 
-    rank = int(system.num_species - w.shape[0])
-    u, _s, _vh = torch.linalg.svd(system.stoichiometric_matrix, full_matrices=True)
-    q = u[:, :rank]  # orthonormal basis of range(N); dc/dt always lies in it
+    # q is an orthonormal basis of range(N); dc/dt always lies in it.
+    _rank, q, w = _stoichiometric_basis(system)
     targets = w @ c0
+    # Step convergence alone also fires when the line search or the c >= 0
+    # clamp stalls, so the residual must be small as well.
+    residual_tol = math.sqrt(float(tol)) * (1.0 + float(c0.abs().max()))
 
     def residual(c: Tensor) -> Tensor:
         """Stack the projected rate equations and conservation constraints.
@@ -261,15 +292,27 @@ def equilibrium(
         step = torch.linalg.lstsq(jac, -f.unsqueeze(-1)).solution.squeeze(-1)
         alpha = 1.0
         norm = float(f.norm())
-        for _ in range(40):
+        for _ in range(_MAX_BACKTRACKS):
             candidate = (c + alpha * step).clamp(min=0)
             f_candidate = residual(candidate)
-            if float(f_candidate.norm()) < norm or norm == 0.0:
+            if float(f_candidate.norm()) < norm:
                 break
             alpha *= 0.5
+        else:
+            if norm <= residual_tol:
+                _require_stationary(system, c, flux_scale=flux_scale)
+                return c
+            msg = (
+                f"Newton line search stalled for {system.name!r} "
+                f"(residual norm {norm:.3e})"
+            )
+            raise RuntimeError(msg)
         moved = float((candidate - c).abs().max())
         c, f = candidate, f_candidate
-        if moved <= tol * (1.0 + float(c.abs().max())):
+        if (
+            moved <= tol * (1.0 + float(c.abs().max()))
+            and float(f.norm()) <= residual_tol
+        ):
             _require_stationary(system, c, flux_scale=flux_scale)
             return c
     msg = (
@@ -299,7 +342,8 @@ def oracle_spectrum(system: ReactionSystem, state: Tensor) -> OracleSpectrum:
     ``J = N ∂r/∂c`` has rank at most ``rank(N)``, so at least
     ``num_species - rank(N)`` eigenvalues are exactly zero. These are the
     ones removed. Extra zeros (e.g. at a boundary state) stay among the
-    dynamic eigenvalues and show up as ``inf`` timescales.
+    dynamic eigenvalues and show up as ``inf`` timescales. Real parts within
+    ``1e-10 ‖J‖_F`` of zero count as zero.
     """
     c = _state(system, state, "state")
     jac = mass_action_jacobian(system, c)
@@ -315,6 +359,7 @@ def oracle_spectrum(system: ReactionSystem, state: Tensor) -> OracleSpectrum:
         dynamic_eigenvalues=dynamic,
         conservation_eigenvalues=conservation,
         num_conservation_laws=num_laws,
+        zero_tolerance=_ZERO_REAL_RTOL * float(torch.linalg.matrix_norm(jac)),
     )
 
 
@@ -391,8 +436,44 @@ def _require_stationary(
         raise RuntimeError(msg)
 
 
-def _linear_equilibrium(system: ReactionSystem, c0: Tensor, w: Tensor) -> Tensor:
-    """Solve ``A c + b = 0`` with ``W c = W c0`` for a linear system.
+def _stoichiometric_basis(system: ReactionSystem) -> tuple[int, Tensor, Tensor]:
+    """Return ``rank(N)`` and orthonormal bases of ``range(N)`` and its complement.
+
+    Parameters
+    ----------
+    system
+        See signature.
+
+    Returns
+    -------
+        ``(rank, q, w)`` with ``q`` of shape ``(num_species, rank)`` and the
+        conservation laws ``w`` of shape ``(num_species - rank, num_species)``,
+        from one SVD."""
+    _require_system(system)
+    u, _vh, rank = _svd_rank(system.stoichiometric_matrix)
+    return rank, u[:, :rank], u[:, rank:].T.contiguous()
+
+
+def _svd_rank(matrix: Tensor) -> tuple[Tensor, Tensor, int]:
+    """Return the full singular vectors and numerical rank of ``matrix``.
+
+    Parameters
+    ----------
+    matrix
+        See signature.
+
+    Returns
+    -------
+        ``(u, vh, rank)``, with the ``torch.linalg.matrix_rank`` default
+        tolerance ``max(m, n) eps σ_max``."""
+    u, singular, vh = torch.linalg.svd(matrix, full_matrices=True)
+    eps = torch.finfo(matrix.dtype).eps
+    cutoff = max(matrix.shape) * eps * float(singular.max())
+    return u, vh, int((singular > cutoff).sum())
+
+
+def _linear_equilibrium(system: ReactionSystem, c0: Tensor) -> Tensor:
+    """Return ``c_p + P0 (c0 - c_p)`` for the linear field ``A c + b``.
 
     Parameters
     ----------
@@ -400,24 +481,38 @@ def _linear_equilibrium(system: ReactionSystem, c0: Tensor, w: Tensor) -> Tensor
         See signature.
     c0
         See signature.
-    w
-        See signature.
 
     Returns
     -------
         See signature."""
     a, b = linear_rate_equations(system)
-    lhs = torch.cat([a, w])
-    rhs = torch.cat([-b, w @ c0])
-    solution = torch.linalg.lstsq(lhs, rhs.unsqueeze(-1)).solution.squeeze(-1)
-    scale = 1.0 + float(rhs.abs().max())
-    if float((lhs @ solution - rhs).abs().max()) > 1e-9 * scale:
+    particular = torch.linalg.lstsq(a, -b.unsqueeze(-1)).solution.squeeze(-1)
+    scale = 1.0 + max(float(b.abs().max()), float(c0.abs().max()))
+    if float((a @ particular + b).abs().max()) > 1e-9 * scale:
         msg = (
             f"{system.name!r} has no steady state for this initial state "
             "(a source feeds a species with no outflow)"
         )
         raise ValueError(msg)
-    return solution
+    # P0 = K (L K)^-1 L projects onto ker(A) along range(A), where K and L
+    # are orthonormal right and left kernel bases. L K is singular exactly
+    # when the zero eigenvalue is defective and the trajectory never settles.
+    u, vh, rank = _svd_rank(a)
+    solution = particular
+    if rank < system.num_species:
+        right = vh[rank:].T
+        left = u[:, rank:].T
+        coupling = left @ right
+        if float(torch.linalg.svdvals(coupling).min()) < 1e-8:
+            msg = (
+                f"{system.name!r} has no limiting steady state for this "
+                "initial state (the zero eigenvalue of its rate matrix is "
+                "defective)"
+            )
+            raise ValueError(msg)
+        projector = right @ torch.linalg.solve(coupling, left)
+        solution = particular + projector @ (c0 - particular)
+    return torch.where(solution.abs() <= 1e-12 * scale, 0.0, solution)
 
 
 def _state(system: ReactionSystem, value: Tensor, name: str) -> Tensor:

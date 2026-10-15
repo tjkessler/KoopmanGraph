@@ -108,11 +108,23 @@ def test_species_reaction_bipartite_heterodata() -> None:
     assert data[SPECIES_NODE].num_nodes == 2
     assert data[REACTION_NODE].num_nodes == 1
     assert data[REACTION_NODE].rate_constant.tolist() == [4.0]
+    assert data[REACTION_NODE].rate_constant.dtype == torch.float64
     assert data[REACTANT_RELATION].edge_index.tolist() == [[0], [0]]
     assert data[REACTANT_RELATION].edge_weight.tolist() == [2.0]
     assert data[PRODUCT_RELATION].edge_index.tolist() == [[0], [1]]
     assert data[PRODUCT_RELATION].edge_weight.tolist() == [1.0]
     data.validate()
+
+
+def test_bipartite_keeps_tiny_rate_constants() -> None:
+    system = ReactionSystem(
+        species=("A", "B"),
+        reactant_stoichiometry=torch.tensor([[1.0, 0.0]]),
+        product_stoichiometry=torch.tensor([[0.0, 1.0]]),
+        rate_constants=torch.tensor([1e-50], dtype=torch.float64),
+    )
+    rate = species_reaction_bipartite(system)[REACTION_NODE].rate_constant
+    assert rate.tolist() == [1e-50]
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import subprocess
 import sys
@@ -344,7 +345,57 @@ def test_split_is_deterministic_and_covers_all() -> None:
         ReactionNetworkBenchmark.split(dataset, train_ratio=0.5)
     with pytest.raises(ValueError, match="leave no training data"):
         ReactionNetworkBenchmark.split(
-            dataset.subset([0, 1, 2]), train_ratio=0.0, val_ratio=0.5, test_ratio=0.5
+            dataset.subset([0, 1, 2, 3]),
+            train_ratio=0.1,
+            val_ratio=0.45,
+            test_ratio=0.45,
+        )
+    # A zero ratio would be silently raised to one trajectory; reject it.
+    for ratios in ((0.8, 0.0, 0.2), (0.8, 0.2, 0.0), (0.0, 0.5, 0.5)):
+        with pytest.raises(ValueError, match="positive and sum to 1"):
+            ReactionNetworkBenchmark.split(
+                dataset,
+                train_ratio=ratios[0],
+                val_ratio=ratios[1],
+                test_ratio=ratios[2],
+            )
+
+
+def test_features_and_sequence_reject_out_of_range_index() -> None:
+    dataset = ReactionNetworkBenchmark.generate(
+        "reaction_chain_v1", num_trajectories=2, num_timesteps=3
+    )
+    for index in (-1, 2):
+        with pytest.raises(IndexError, match="out of range"):
+            dataset.features(index)
+        with pytest.raises(IndexError, match="out of range"):
+            dataset.sequence(index)
+
+
+def test_ssa_paths_differ_across_seeds_and_trajectories() -> None:
+    def ssa(seed: int) -> torch.Tensor:
+        return ReactionNetworkBenchmark.generate(
+            "reaction_chain_v1",
+            num_trajectories=2,
+            num_timesteps=8,
+            seed=seed,
+            simulator="ssa",
+            volume=50.0,
+        ).concentrations
+
+    assert not torch.equal(ssa(0), ssa(1))
+
+
+def test_cantera_card_rejects_mechanism_sha_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from koopman_graph.datasets.reaction import cantera_io
+
+    monkeypatch.setattr(cantera_io, "resolve_mechanism_path", lambda name: Path(name))
+    monkeypatch.setattr(cantera_io, "mechanism_sha256", lambda path: "0" * 64)
+    with pytest.raises(RuntimeError, match="would not match the card"):
+        ReactionNetworkBenchmark.generate(
+            "reaction_cantera_h2o2_v1", num_trajectories=1, num_timesteps=2
         )
 
 
@@ -414,6 +465,46 @@ def test_card_validation_helpers() -> None:
         system_from_card({"generator": {"kind": "magic"}})
     with pytest.raises(ValueError, match="unknown catalog system"):
         system_from_card({"generator": {"kind": "catalog", "name": "nope"}})
+
+
+def _load_card_builder() -> object:
+    """Import ``scripts/build_reaction_cards.py`` as a module."""
+    path = REPO_ROOT / "scripts" / "build_reaction_cards.py"
+    spec = importlib.util.spec_from_file_location("build_reaction_cards", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_card_builder_compares_floats_with_tolerance() -> None:
+    builder = _load_card_builder()
+    card = {"oracle": {"x": [1.0, -0.5], "label": "a"}, "n": 3, "flag": True}
+    near = {"oracle": {"x": [1.0 + 1e-12, -0.5], "label": "a"}, "n": 3, "flag": True}
+    assert builder.cards_match(card, near, rtol=1e-8, atol=1e-12)
+    far = {"oracle": {"x": [1.001, -0.5], "label": "a"}, "n": 3, "flag": True}
+    assert not builder.cards_match(card, far, rtol=1e-8, atol=1e-12)
+    relabeled = {"oracle": {"x": [1.0, -0.5], "label": "b"}, "n": 3, "flag": True}
+    assert not builder.cards_match(card, relabeled, rtol=1e-8, atol=1e-12)
+    assert not builder.cards_match({"a": True}, {"a": 1}, rtol=1e-8, atol=1e-12)
+    assert not builder.cards_match([1.0], [1.0, 2.0], rtol=1e-8, atol=1e-12)
+
+
+def test_card_builder_check_flags_orphan_cards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    builder = _load_card_builder()
+    spec = next(s for s in builder.SPECS if s["dataset_id"] == "reaction_chain_v1")
+    monkeypatch.setattr(builder, "SPECS", [spec])
+    monkeypatch.setattr(builder, "DATA_DIR", tmp_path)
+    assert builder.main(["--check"]) == 1  # card missing
+    (tmp_path / "reaction_chain_v1.json").write_text(
+        json.dumps(builder.build_card(spec), indent=2), encoding="utf-8"
+    )
+    assert builder.main(["--check"]) == 0
+    (tmp_path / "reaction_old_v1.json").write_text("{}", encoding="utf-8")
+    assert builder.main(["--check"]) == 1
+    assert "reaction_old_v1.json" in capsys.readouterr().err
 
 
 def test_card_builder_script_check_is_clean() -> None:
