@@ -185,7 +185,11 @@ class ReactionDataset:
         return values.unsqueeze(-1).to(dtype)
 
     def sequence(
-        self, index: int, *, dtype: torch.dtype = torch.float32
+        self,
+        index: int,
+        *,
+        dtype: torch.dtype = torch.float32,
+        graph_encoding: GraphEncoding | None = None,
     ) -> GraphSnapshotSequence:
         """Return one trajectory as a species-node snapshot sequence.
 
@@ -195,6 +199,10 @@ class ReactionDataset:
             Trajectory index in ``[0, num_trajectories)``.
         dtype : torch.dtype, optional
             Feature dtype. Default is ``torch.float32``.
+        graph_encoding : {"species_influence", "reaction_hyperedge"} or None
+            Override the card's encoding, e.g. ``"species_influence"`` to
+            drop ``hyperedge_index`` for consumers that reject hyperedges.
+            Default ``None`` uses :attr:`graph_encoding`.
 
         Returns
         -------
@@ -209,12 +217,21 @@ class ReactionDataset:
         ------
         IndexError
             If ``index`` is out of range.
+        ValueError
+            If ``graph_encoding`` is not a known encoding.
         """
+        encoding = self.graph_encoding if graph_encoding is None else graph_encoding
+        if encoding not in ("species_influence", "reaction_hyperedge"):
+            msg = (
+                "graph_encoding must be 'species_influence' or "
+                f"'reaction_hyperedge', got {graph_encoding!r}"
+            )
+            raise ValueError(msg)
         self._check_index(index)
         edge_index, edge_weight = species_influence_graph(self.system)
         hyperedge_index = (
             reaction_hyperedge_index(self.system)
-            if self.graph_encoding == "reaction_hyperedge"
+            if encoding == "reaction_hyperedge"
             else None
         )
         features = self.features(index, dtype=dtype)

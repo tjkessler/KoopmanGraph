@@ -115,6 +115,12 @@ Analysis and stability
    * - `54_criticality_monitor.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/54_criticality_monitor.ipynb>`_
      - Closing-gap diagonal toy: ``monitor_critical_transition`` score
        rises versus a constant-gap control (not a Ghosh certificate)
+   * - `55_reaction_network_oracles.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/55_reaction_network_oracles.ipynb>`_
+     - ``ReactionNetworkBenchmark`` card oracles: exact DMD recovers the
+       chain's :math:`e^{\lambda \Delta t}`, log features and a short
+       ``koopman="graph"`` fit do not, ``element_balance_violation`` flags
+       rollout drift, and a late-window DMD recovers the Michaelis-Menten
+       slow mode (linearization, not a production kinetics benchmark)
    * - `40_resdmd_pseudospectra.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
      - Finite-dictionary ResDMD MVP + resolvent-norm grid (≠ ``spectral_residuals``; not infinite-dim certificates)
    * - `46_representation_explain.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/46_representation_explain.ipynb>`_
