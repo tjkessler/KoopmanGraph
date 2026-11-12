@@ -514,11 +514,12 @@ _V015_GUIDE_PAGES = (
     "matrix_free",
     "criticality",
     "time_conditioning",
+    "reaction",
 )
 
 
 def test_v015_guide_pages_exist_and_are_in_toctree() -> None:
-    """v0.15 guide pages must be tracked RST files listed in the Sphinx toctree."""
+    """Guide pages (v0.15 and later) must be tracked RST files in the toctree."""
     index = (_PROJECT_ROOT / "docs" / "source" / "index.rst").read_text(
         encoding="utf-8"
     )

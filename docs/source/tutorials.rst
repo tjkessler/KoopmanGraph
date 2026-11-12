@@ -121,6 +121,13 @@ Analysis and stability
        ``koopman="graph"`` fit do not, ``element_balance_violation`` flags
        rollout drift, and a late-window DMD recovers the Michaelis-Menten
        slow mode (linearization, not a production kinetics benchmark)
+   * - `56_reaction_network_koopman.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/56_reaction_network_koopman.ipynb>`_
+     - Michaelis-Menten with species-graph, per-node, hypergraph, and
+       bipartite encodings against ``hold_last``, DMD, and EDMD;
+       ResDMD-gated timescales versus the oracle, a ridge operator refit
+       on frozen encodings, atom balance versus the log floor, a
+       ``LinearConservingDecoder`` projection, and a negative
+       :math:`k_\mathrm{cat}` transfer (short CPU fits, not tuned models)
    * - `40_resdmd_pseudospectra.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/40_resdmd_pseudospectra.ipynb>`_
      - Finite-dictionary ResDMD MVP + resolvent-norm grid (≠ ``spectral_residuals``; not infinite-dim certificates)
    * - `46_representation_explain.ipynb <https://github.com/tjkessler/KoopmanGraph/blob/main/examples/46_representation_explain.ipynb>`_
