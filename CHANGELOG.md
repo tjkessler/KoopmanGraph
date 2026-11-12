@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Example `56_reaction_network_koopman.ipynb`: Michaelis-Menten with
+  species-graph, per-node, hypergraph, and bipartite encodings against
+  `hold_last`, DMD, and EDMD; ResDMD-gated implied timescales versus the
+  card oracle; a ridge operator refit on frozen encodings; atom balance
+  versus the log-floor bias; a `LinearConservingDecoder` projection on a
+  fixed-atom-budget family; and a `k_cat` shift. It runs in the
+  full-suite notebook shard only.
+- `docs/source/reaction.rst` guide page for
+  `koopman_graph.datasets.reaction` (cards, encodings, oracles,
+  recommended workflow, limitations), linked from the toctree and the
+  tutorial gallery.
+
 ## [0.16.0] - 2026-10-15
 
 Mass-action reaction-network datasets under

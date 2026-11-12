@@ -1,4 +1,4 @@
-"""Honesty locks for examples 48–49 and 51–55 (guides; no telemetry download)."""
+"""Honesty locks for examples 48–49 and 51–56 (guides; no telemetry download)."""
 
 from __future__ import annotations
 
@@ -95,6 +95,19 @@ _NOTEBOOKS = {
             "does not download metr-la",
         ),
     ),
+    "56_reaction_network_koopman.ipynb": (
+        "# Reaction-network Koopman: species graphs, log concentrations, "
+        "and kinetic timescales",
+        (
+            "does not download",
+            "diagnostic",
+            "ResDMD",
+            "Nyquist",
+            "floor",
+            "negative",
+            "not a production kinetics benchmark",
+        ),
+    ),
 }
 
 
@@ -125,7 +138,7 @@ def _notebook_text(path: pathlib.Path) -> str:
 
 
 def test_v015_guide_notebooks_exist_with_scientific_arc() -> None:
-    """Examples 48–49 and 51–55 must exist and follow the scientific arc."""
+    """Examples 48–49 and 51–56 must exist and follow the scientific arc."""
     for name, (title, _needles) in _NOTEBOOKS.items():
         path = _PROJECT_ROOT / "examples" / name
         assert path.is_file(), f"missing {name}"

@@ -38,6 +38,7 @@ for the public vs power-user API contract.
    benchmarks
    identification
    spectral_diagnostics
+   reaction
    graph_dynamics
    matrix_free
    criticality
