@@ -585,6 +585,68 @@ Benchmarks and baselines
   alone saturates past the predictability horizon. See
   ``examples/24_nonlinear_chaotic_benchmarks.ipynb``.
 
+Reaction networks
+-----------------
+
+These limits apply to :mod:`koopman_graph.datasets.reaction`, the
+``benchmarks/v0.16/`` manifests, and the models trained on them (see
+:doc:`reaction` and the dataset cards in :doc:`data`).
+
+* **Log features saturate at the floor.**
+  :class:`~koopman_graph.datasets.reaction.LogConcentrationTransform`
+  maps :math:`c` to :math:`\log \max(c, \varepsilon)`. A species that
+  decays below :math:`\varepsilon` stops at the floor, which a linear
+  operator can only approximate with a near-unit eigenvalue, so gated
+  spectra can keep slow modes with no kinetic counterpart. In log
+  coordinates the floor alone adds an element drift of
+  :math:`E\,\varepsilon\mathbf{1}`, so
+  :func:`~koopman_graph.datasets.reaction.element_balance_violation`
+  below that bias is not model error.
+* **Enforced balance needs a fixed atom budget.**
+  :class:`~koopman_graph.nn.LinearConservingDecoder` projects onto
+  :math:`\{x : Cx = c_0\}` with one target :math:`c_0` fixed at
+  construction, and the constraint is linear in the decoded features.
+  It applies to raw concentrations from a family whose trajectories
+  share the same element totals, not to log features or to datasets
+  whose initial conditions change the totals. In 0.16.0 its projection
+  passes no gradient inside
+  :meth:`~koopman_graph.GraphKoopmanModel.fit`; apply
+  :meth:`~koopman_graph.nn.LinearConservingDecoder.project` after
+  training.
+* **Hypergraph reaction operators are discrete-time only.**
+  :class:`~koopman_graph.operators.HypergraphKoopmanOperator`, the
+  operator for the ``reaction_hyperedge`` encoding, has no
+  continuous-time generator, so ``dynamics_mode="continuous"`` and
+  ``predict_at`` need the species-graph operators.
+* **Export refuses the hypergraph and controlled reaction models.**
+  :mod:`koopman_graph.export` covers fixed-topology, discrete,
+  homogeneous models only, so models trained on the
+  ``reaction_hyperedge`` encoding or with the CSTR control inputs are
+  refused.
+* **MPC is per-node only.** :class:`~koopman_graph.mpc.KoopmanMPC`
+  refuses graph, hypergraph, and continuous operators, so a CSTR
+  controller needs a per-node
+  :class:`~koopman_graph.operators.KoopmanOperator`. The demonstration
+  depth matches :class:`~koopman_graph.mpc.TubeKoopmanMPC`: an MVP, not
+  a certified closed-loop controller.
+* **The stochastic arm is process noise, not chemical noise.**
+  ``simulator="ssa"`` draws Gillespie paths, but
+  ``dynamics_mode="stochastic"`` models them with learned diagonal
+  Gaussian noise after a linear map. That noise is not the chemical
+  master equation or the chemical Langevin equation, and it does not
+  scale with the SSA volume.
+* **Cantera trajectories are simulations of a published mechanism.**
+  The H2/O2 card integrates Cantera's ``h2o2.yaml`` (a submechanism of
+  GRI-Mech 3.0). Its data are not measurements and carry the
+  mechanism's own uncertainty. It needs the ``[cantera]`` extra and the
+  matching mechanism SHA-256.
+* **The v0.16 payloads are compact and identity-bound.** The manifests
+  under ``benchmarks/v0.16/`` bind the committed payload bytes, and their
+  summaries record protocol identity (``executed=False``), not forecast
+  scores. The random family commits the training side only (``S`` in
+  {8, 12, 16}); the ``unseen_n``, ``rewire``, and ``parameter_shift``
+  test networks are drawn from the same sampler settings.
+
 .. _limitations-remaining:
 
 Remaining limits
