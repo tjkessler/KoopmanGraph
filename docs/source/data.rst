@@ -191,6 +191,200 @@ Dataset card: alanine dipeptide (teaching fetch)
 Loader metadata:
 :func:`~koopman_graph.datasets.molecular.alanine_dipeptide_card`.
 
+Reaction-network cards
+----------------------
+
+Six mass-action reaction-network datasets ship as JSON cards with
+:class:`~koopman_graph.datasets.ReactionNetworkBenchmark`
+(:meth:`~koopman_graph.datasets.ReactionNetworkBenchmark.load_card`). They
+are generated, not downloaded: there is no fetch script or tracked cache.
+:meth:`~koopman_graph.datasets.ReactionNetworkBenchmark.generate` draws
+seeded initial conditions inside the card's ranges and integrates every
+trajectory on its grid in ``float64``. Every card shares these
+conventions:
+
+* **Format:** one species-node
+  :class:`~koopman_graph.GraphSnapshotSequence` per trajectory
+  (:meth:`~koopman_graph.datasets.reaction.ReactionDataset.sequence`),
+  ``float32`` features of shape ``(num_species, 1)``, timestamps, and
+  global ``control_inputs`` when the card has inputs. The raw ``float64``
+  concentrations stay on the
+  :class:`~koopman_graph.datasets.reaction.ReactionDataset`.
+* **Features:** :math:`\log \max(c, \varepsilon)` when the card's
+  ``transform`` is ``log_concentration`` (the floor :math:`\varepsilon` is
+  stored on the card), raw concentrations when it is ``null``.
+* **Oracle:** the ``oracle`` block holds the reference state, the
+  conservation laws, and the Jacobian eigenvalues there (slowest first)
+  with their timescales. See :doc:`reaction`.
+* **Stochastic variant:** ``simulator="ssa"`` with a ``volume`` replaces
+  the ODE trajectories by Gillespie realizations of the same network on
+  ``expm`` and ``rk4`` cards. The card is unchanged; the CSTR and Cantera
+  cards do not support it.
+* **License:** generated data and cards are Apache-2.0, like the package.
+
+Dataset card: linear first-order chain
+--------------------------------------
+
+* **Scope:** Closed linear chain S0 → S1 → S2 → S3 with rates 1, 0.5 and
+  0.25. The exact-spectrum sanity check.
+* **Size:** 4 species, 3 reactions, one element ``M``. By default, 32
+  trajectories of 64 steps, :math:`\Delta t = 0.25` s
+* **Format:** exact matrix-exponential trajectories (``expm``); log
+  features with floor :math:`10^{-8}`; ``species_influence`` graph
+* **Units:** time in s, concentration in mol/L
+* **Oracle:** eigenvalues :math:`-0.25, -0.5, -1` (timescales 4, 2, 1 s)
+  plus one conservation zero mode
+* **Source:** in-repo generator
+  (:func:`~koopman_graph.datasets.reaction.first_order_chain`)
+* **License:** Apache-2.0
+* **Limitations:** Linear and closed, so every mode is a pure decay. Not
+  a nonlinear benchmark. In log coordinates the dynamics are no longer
+  exactly linear.
+* **Version:** ``reaction_chain_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_chain_v1"``.
+
+Dataset card: Michaelis-Menten
+------------------------------
+
+* **Scope:** Mass-action enzyme kinetics E + S ⇌ ES → E + P, with two
+  conservation laws (enzyme and substrate backbone)
+* **Size:** 4 species, 3 reactions. By default, 32 trajectories of 64
+  steps, :math:`\Delta t = 0.5` s
+* **Format:** RK4 with 50 substeps; log features with floor
+  :math:`10^{-8}`; ``reaction_hyperedge`` graph (one hyperedge per
+  reaction)
+* **Units:** time in s, concentration in mol/L
+* **Oracle:** boundary equilibrium with eigenvalues :math:`-0.25` and
+  :math:`-2.5` (timescales 4 and 0.4 s) and two conservation laws
+* **Source:** in-repo generator
+  (:func:`~koopman_graph.datasets.reaction.michaelis_menten`)
+* **License:** Apache-2.0
+* **Limitations:** The catalysis is irreversible, so trajectories end on
+  the boundary S = ES = 0, where log features saturate at the floor. The
+  oracle linearizes at that boundary only.
+* **Version:** ``reaction_michaelis_menten_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_michaelis_menten_v1"``.
+
+Dataset card: Brusselator
+-------------------------
+
+* **Scope:** Open Brusselator (:math:`a = 1`, :math:`b = 3`) with an
+  unstable focus and a limit cycle: oscillatory dynamics that do not
+  decay
+* **Size:** 2 species, 4 reactions. By default, 32 trajectories of 128
+  steps, :math:`\Delta t = 0.1` s
+* **Format:** RK4 with 10 substeps; raw concentrations (no transform);
+  ``species_influence`` graph
+* **Units:** time in s, concentration in mol/L
+* **Oracle:** fixed-point eigenvalues :math:`0.5 \pm 0.866i` (growth, so
+  the stored timescales are negative); no conservation laws
+* **Source:** in-repo generator
+  (:func:`~koopman_graph.datasets.reaction.brusselator`)
+* **License:** Apache-2.0
+* **Limitations:** Open system. The fixed point is unstable, so its
+  spectrum describes departure from it, not the limit cycle. The cycle
+  period has no oracle.
+* **Version:** ``reaction_brusselator_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_brusselator_v1"``.
+
+Dataset card: van de Vusse CSTR
+-------------------------------
+
+* **Scope:** Van de Vusse kinetics A → B → C, 2 A → D in a continuous
+  stirred-tank reactor. Seeded piecewise-constant reactor temperature
+  (380 to 400 K) and dilution rate (5 to 30 1/h), each held 10 steps,
+  are stored as global ``control_inputs``.
+* **Size:** 4 species, 3 reactions, 2 inputs. By default, 32
+  trajectories of 100 steps, :math:`\Delta t = 0.01` h
+* **Format:** CSTR integration with 20 substeps; raw concentrations (no
+  transform); ``species_influence`` graph
+* **Units:** time in h, concentration in mol/L, temperature in K,
+  dilution rate in 1/h
+* **Oracle:** the spectrum of :math:`J - D I` at the steady state for the
+  midpoint inputs (390 K, 17.5 1/h). Its eigenvalues are :math:`-17.5`
+  (twice), :math:`-35.0` and :math:`-46.6` 1/h.
+* **Source:** in-repo generator
+  (:func:`~koopman_graph.datasets.reaction.van_de_vusse_cstr`); kinetics
+  from Klatt and Engell, Comput. Chem. Eng. 22(4-5), 491-502 (1998);
+  operating point from Chen, Kremling and Allgöwer, Proc. 3rd ECC (1995)
+* **License:** Apache-2.0
+* **Limitations:** Reactor temperature is a direct input, with no energy
+  balance. The graph covers the reaction network only, not the feed. The
+  oracle describes one operating point.
+* **Version:** ``reaction_van_de_vusse_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_van_de_vusse_v1"``.
+
+Dataset card: random mass-action network
+----------------------------------------
+
+* **Scope:** A seeded, element-balanced random network (generator seed
+  0)
+* **Size:** 6 species, 2 elements, 8 reactions of order at most 2, with
+  rate constants log-uniform in :math:`[10^{-1}, 10^{1}]`. By default, 32
+  trajectories of 64 steps, :math:`\Delta t = 0.1` s
+* **Format:** RK4 with 20 substeps; log features with floor
+  :math:`10^{-8}`; ``species_influence`` graph
+* **Units:** time in s, concentration in mol/L
+* **Oracle:** the equilibrium reached from the range midpoints after a
+  200 s relaxation. Two conservation laws, one zero eigenvalue, and
+  timescales 1.22, 1.21 and 0.033 s.
+* **Source:** in-repo generator
+  (:func:`~koopman_graph.datasets.reaction.sample_random_network`)
+* **License:** Apache-2.0
+* **Limitations:** Synthetic chemistry with no physical species. The
+  rates are random draws, not measured kinetics.
+* **Version:** ``reaction_random_network_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_random_network_v1"``.
+
+Dataset card: H\ :sub:`2`/O\ :sub:`2` (Cantera)
+-----------------------------------------------
+
+* **Scope:** Isothermal, constant-volume H\ :sub:`2`/O\ :sub:`2`/Ar
+  chemistry at 1200 K and 1 atm. Initial mole fractions are drawn from
+  H\ :sub:`2` 1 to 3, O\ :sub:`2` 0.5 to 1.5 and Ar 3 to 5 (relative).
+* **Size:** 10 species (H2, H, O, O2, OH, H2O, HO2, H2O2, AR, N2) and 29
+  mechanism reactions. The card's ``num_reactions`` (136) counts the
+  mass-action conversion, which splits reversible reactions into forward
+  and reverse and expands third-body reactions per collision partner. By
+  default, 16 trajectories of 50 steps, :math:`\Delta t = 2 \times
+  10^{-5}` s.
+* **Format:** exact Cantera ``ReactorNet`` integrations; log features
+  with floor :math:`10^{-12}`; ``species_influence`` graph from the
+  mass-action conversion (falloff frozen at the reference state). Needs
+  the optional ``[cantera]`` extra. The mechanism file's SHA-256 is
+  pinned on the card, and generation refuses a different file.
+* **Units:** time in s, concentration in mol/L
+* **Oracle:** the thermochemical (TV) equilibrium of the reference
+  mixture H2:2, O2:1, AR:4. Four conservation laws (O, H, Ar, N), and
+  timescales from about :math:`2 \times 10^{3}` s down to
+  :math:`2 \times 10^{-5}` s.
+* **Source:** Cantera 3.2.0's bundled ``h2o2.yaml``, a hydrogen-oxygen
+  submechanism of GRI-Mech 3.0 (version 3.0, 30 July 1999,
+  http://combustion.berkeley.edu/gri-mech/version30/text30.html) modified
+  to include N\ :sub:`2`. Cite Cantera (DOI 10.5281/zenodo.17620923) and
+  GRI-Mech 3.0.
+* **License:** card and generated data Apache-2.0; Cantera is
+  BSD-3-Clause
+* **Limitations:** Illustration only. In Cantera's words, its bundled
+  input files are not validated kinetic models for quantitative use. The
+  graph and oracle use the mass-action conversion with the falloff
+  reaction frozen at the reference state, while the trajectories come
+  from the full Cantera kinetics.
+* **Version:** ``reaction_cantera_h2o2_v1``
+
+Loader: :class:`~koopman_graph.datasets.ReactionNetworkBenchmark` with
+``"reaction_cantera_h2o2_v1"``.
+
 Presence masks vs observation masks
 -----------------------------------
 
@@ -270,6 +464,7 @@ Related pages
 -------------
 
 * :doc:`capabilities` — benchmark inventory table
+* :doc:`reaction` — reaction-network oracles, workflow, and limitations
 * :doc:`limitations` — churn / MD honesty boundaries
 * :doc:`tutorials` — notebook gallery (including molecular / churn demos)
 * :doc:`api` — dataset module reference

@@ -658,6 +658,35 @@ Research tooling
   hatch); ≥90% coverage enforced in CI. See the repository
   ``SECURITY.md`` for load trust boundaries.
 
+Reaction networks
+~~~~~~~~~~~~~~~~~
+
+* Mass-action reaction networks as graph dynamical systems
+  (:mod:`koopman_graph.datasets.reaction`):
+  :class:`~koopman_graph.datasets.reaction.ReactionSystem` (stoichiometry,
+  rate constants, element matrix) and a small catalog (first-order chain,
+  Michaelis-Menten, reversible dimerization, Brusselator, Lotka-Volterra,
+  van de Vusse CSTR), plus seeded element-balanced random networks
+  (:func:`~koopman_graph.datasets.reaction.sample_random_network`)
+* Integrators: exact matrix exponential for linear networks, fixed-step
+  RK4, SciPy stiff solvers (``[reaction]``), Gillespie SSA, and Cantera
+  ``ReactorNet`` trajectories with a pinned-mechanism loader
+  (``[cantera]``)
+* Graph encodings: the ``species_influence`` species graph,
+  per-reaction hyperedges, and a species-reaction bipartite
+  ``HeteroData``; :class:`~koopman_graph.datasets.reaction.LogConcentrationTransform`
+  for log-concentration features with a stated floor
+* Oracles: equilibria, mass-action Jacobians, conservation laws, and the
+  Jacobian spectrum with its timescales
+  (:func:`~koopman_graph.datasets.reaction.oracle_spectrum`), plus the
+  element-balance drift of a decoded rollout
+  (:func:`~koopman_graph.datasets.reaction.element_balance_violation`)
+* Six JSON cards with oracle blocks
+  (:class:`~koopman_graph.datasets.ReactionNetworkBenchmark`); see
+  :doc:`data` for the per-dataset cards and :doc:`reaction` for the
+  workflow. Diagnostic and teaching datasets of a few species, not a
+  production kinetics benchmark
+
 Experiment tracking (fit callbacks)
 -----------------------------------
 
@@ -751,6 +780,10 @@ Built-in datasets
        typed helpers (``load_typed_topology`` / ``generate_typed``,
        generator/load/slack) for hetero demos — simulated-dynamics
        disclaimer applies
+   * - ``ReactionNetworkBenchmark``
+     - Chemistry (generated)
+     - Six mass-action reaction-network cards with Jacobian-spectrum and
+       conservation oracles (Cantera card needs ``[cantera]``)
    * - ``MetrLaTrafficBenchmark``
      - Traffic
      - METR-LA sensor graph with cached speed snapshots
@@ -766,7 +799,9 @@ Related pages
 
 * :doc:`quickstart` — runnable train/predict walkthrough
 * :doc:`limitations` — consolidated scope boundaries and “when not to use”
-* :doc:`data` — FAIR dataset cards (PEMS / contact epidemic / acquisition)
+* :doc:`data` — FAIR dataset cards (PEMS / contact epidemic / reaction
+  networks / acquisition)
+* :doc:`reaction` — reaction-network oracles and workflow
 * :doc:`tutorials` — notebook gallery
 * :doc:`architecture` — public vs power-user API layers
 * :doc:`benchmarks` — identity-bound manifests (not trained scores)
