@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compares regenerations within `rtol=1e-5`. CI `benchmark-smoke`
   verifies the new manifests, and `tests/benchmark/test_smoke.py` covers
   both directories.
+- A "Reaction networks" section in `docs/source/limitations.rst`: the
+  log-floor bias, enforced balance only for a fixed atom budget,
+  discrete-only hypergraph operators, export refusals, per-node-only MPC,
+  process noise versus chemical noise, Cantera trajectories as
+  simulations of a published mechanism, and the compact, identity-bound
+  v0.16 payloads.
 
 ## [0.16.0] - 2026-10-15
 
