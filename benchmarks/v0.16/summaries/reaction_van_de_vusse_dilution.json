@@ -1,0 +1,64 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "reaction-van-de-vusse-dilution",
+  "manifest_sha256": "031baed255869f9878eb8ab4d9f733fbc5ebc44d21e7a3ff35924e4597659768",
+  "dataset_sha256": "5a69bd5400a651069bd5c907041b8cddf79ffb8ffef37edb9447d84e3f944a02",
+  "track": "multiphysics",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "pernode_k",
+      "role": "koopman"
+    },
+    {
+      "name": "hold_last",
+      "role": "control"
+    },
+    {
+      "name": "pernode_ls",
+      "role": "control"
+    },
+    {
+      "name": "joint_ls",
+      "role": "control"
+    },
+    {
+      "name": "dmd_flat",
+      "role": "control"
+    },
+    {
+      "name": "dmdc_flat",
+      "role": "control"
+    },
+    {
+      "name": "edmd_poly2",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    1,
+    5,
+    20,
+    100
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "hold_last",
+    "pernode",
+    "joint_ls"
+  ],
+  "package_version": "0.16.0",
+  "executed": false,
+  "summary_sha256": "a7f77e4b6e826739694696a8b46c206b2ec0bf3f4b22fa9263666fa1e7f1346a"
+}

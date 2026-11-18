@@ -1,0 +1,49 @@
+manifest_id: reaction-michaelis-menten
+schema_version: benchmark_manifest_v1
+track: multiphysics
+dataset:
+  name: reaction_michaelis_menten_v1
+  version: "1"
+  sha256: e4c6c42b47f23f95b6b6bf94ecb4a28cf6cff1e23f3c78a5d75edbab58918ad0
+  card: benchmarks/v0.16/cards/reaction_michaelis_menten.md
+split:
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  history_len: 8
+preprocessing:
+  zscore: false
+  notes:
+    - Log-concentration node features with floor 1e-8 applied at load; the payload stores raw concentrations
+    - Closed mass-action system; element balance is reported as a metric, not enforced
+methods:
+  - name: graph_koopman
+    role: koopman
+  - name: pernode_k
+    role: koopman
+  - name: hold_last
+    role: control
+  - name: pernode_ls
+    role: control
+  - name: joint_ls
+    role: control
+  - name: dmd_flat
+    role: control
+  - name: edmd_poly2
+    role: control
+seeds: [0, 1, 2]
+horizons: [1, 5, 20, 100]
+metrics: [mae, rmse]
+ood_shifts:
+  - name: ic_shift
+    kind: ic_shift
+    description: Initial-condition box one decade outside training
+  - name: kcat_shift
+    kind: parameter_shift
+    description: k_cat one decade outside training
+compute_budget:
+  max_epochs: 300
+  device: cpu
+  notes:
+    - CPU hours per seed
+controls: [hold_last, pernode, joint_ls]

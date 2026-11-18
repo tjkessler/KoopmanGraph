@@ -197,11 +197,14 @@ Reaction-network cards
 Six mass-action reaction-network datasets ship as JSON cards with
 :class:`~koopman_graph.datasets.ReactionNetworkBenchmark`
 (:meth:`~koopman_graph.datasets.ReactionNetworkBenchmark.load_card`). They
-are generated, not downloaded: there is no fetch script or tracked cache.
+are generated, not downloaded: there is no fetch script.
 :meth:`~koopman_graph.datasets.ReactionNetworkBenchmark.generate` draws
 seeded initial conditions inside the card's ranges and integrates every
-trajectory on its grid in ``float64``. Every card shares these
-conventions:
+trajectory on its grid in ``float64``. Compact hashed payloads of three
+benchmark datasets (two derived from these cards with
+:meth:`~koopman_graph.datasets.ReactionNetworkBenchmark.generate_from_card`)
+are tracked under ``benchmarks/v0.16/`` with their own cards (see
+:doc:`benchmarks`). Every card shares these conventions:
 
 * **Format:** one species-node
   :class:`~koopman_graph.GraphSnapshotSequence` per trajectory

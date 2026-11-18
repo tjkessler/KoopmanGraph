@@ -1,0 +1,60 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "reaction-michaelis-menten",
+  "manifest_sha256": "2fff969d84df6594cf8f5115bbc2e162f5878af9cc52dcdc23f28858b21d45f9",
+  "dataset_sha256": "e4c6c42b47f23f95b6b6bf94ecb4a28cf6cff1e23f3c78a5d75edbab58918ad0",
+  "track": "multiphysics",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "pernode_k",
+      "role": "koopman"
+    },
+    {
+      "name": "hold_last",
+      "role": "control"
+    },
+    {
+      "name": "pernode_ls",
+      "role": "control"
+    },
+    {
+      "name": "joint_ls",
+      "role": "control"
+    },
+    {
+      "name": "dmd_flat",
+      "role": "control"
+    },
+    {
+      "name": "edmd_poly2",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    1,
+    5,
+    20,
+    100
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "hold_last",
+    "pernode",
+    "joint_ls"
+  ],
+  "package_version": "0.16.0",
+  "executed": false,
+  "summary_sha256": "db31126b59a7d253016de3a7e45438c30bf8d0df2c51932a5c77bfcb420ba37a"
+}

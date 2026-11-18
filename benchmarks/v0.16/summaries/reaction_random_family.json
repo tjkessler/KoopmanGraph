@@ -1,0 +1,56 @@
+{
+  "schema_version": "benchmark_summary_v1",
+  "manifest_id": "reaction-random-family",
+  "manifest_sha256": "966c9b7da0d332fa9c54af97dc5891d290278d6c27eee1d1fd933d32724baf91",
+  "dataset_sha256": "33d6b2250a7aef305f8b787140c942ea193482a9025f801672c5f595d3acdfd3",
+  "track": "topology_transfer",
+  "methods": [
+    {
+      "name": "graph_koopman",
+      "role": "koopman"
+    },
+    {
+      "name": "pernode_k",
+      "role": "koopman"
+    },
+    {
+      "name": "hold_last",
+      "role": "control"
+    },
+    {
+      "name": "pernode_ls",
+      "role": "control"
+    },
+    {
+      "name": "joint_ls",
+      "role": "control"
+    },
+    {
+      "name": "dmd_flat",
+      "role": "control"
+    }
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "horizons": [
+    1,
+    5,
+    20,
+    100
+  ],
+  "metrics": [
+    "mae",
+    "rmse"
+  ],
+  "controls": [
+    "hold_last",
+    "pernode",
+    "joint_ls"
+  ],
+  "package_version": "0.16.0",
+  "executed": false,
+  "summary_sha256": "3cb76181da084d75b5ca56a5879234206846ab50f49f8c437e422e02af661113"
+}

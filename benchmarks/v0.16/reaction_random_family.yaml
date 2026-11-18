@@ -1,0 +1,51 @@
+manifest_id: reaction-random-family
+schema_version: benchmark_manifest_v1
+track: topology_transfer
+dataset:
+  name: reaction_random_family_v1
+  version: "1"
+  sha256: 33d6b2250a7aef305f8b787140c942ea193482a9025f801672c5f595d3acdfd3
+  card: benchmarks/v0.16/cards/reaction_random_family.md
+split:
+  train_ratio: 0.7
+  val_ratio: 0.1
+  test_ratio: 0.2
+  history_len: 8
+preprocessing:
+  zscore: false
+  notes:
+    - dataset.sha256 is the SHA-256 of index.json, which lists the SHA-256 of every member payload
+    - Log-concentration node features with floor 1e-8 applied at load; the payloads store raw concentrations
+    - The committed members are the training side (S in 8, 12, 16); shift test networks are drawn with the same sampler settings
+methods:
+  - name: graph_koopman
+    role: koopman
+  - name: pernode_k
+    role: koopman
+  - name: hold_last
+    role: control
+  - name: pernode_ls
+    role: control
+  - name: joint_ls
+    role: control
+  - name: dmd_flat
+    role: control
+seeds: [0, 1, 2]
+horizons: [1, 5, 20, 100]
+metrics: [mae, rmse]
+ood_shifts:
+  - name: unseen_n
+    kind: unseen_n
+    description: Train on S in {8, 12, 16}; test on S = 32 networks from the same sampler
+  - name: rewire
+    kind: rewire
+    description: Same S and reaction count, a different network seed; negative transfer remains allowed
+  - name: parameter_shift
+    kind: parameter_shift
+    description: log10 k drawn from [1, 2], one decade above the training range [-1, 1]
+compute_budget:
+  max_epochs: 300
+  device: cpu
+  notes:
+    - CPU hours per seed
+controls: [hold_last, pernode, joint_ls]

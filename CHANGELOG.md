@@ -26,6 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ReactionNetworkBenchmark` row in `docs/source/capabilities.rst`. The
   Cantera card names its mechanism source: Cantera 3.2.0's `h2o2.yaml`,
   a hydrogen-oxygen submechanism of GRI-Mech 3.0.
+- `ReactionNetworkBenchmark.generate_from_card` generates a dataset from
+  a card that is not packaged (for example a packaged card with other
+  generator parameters); `generate` now calls it. CSTR cards may hold one
+  input constant with `controls["fixed"]`.
+- `benchmarks/v0.16/`: three reaction-network manifests with compact
+  hashed payloads, FAIR cards, and identity-bound summaries
+  (`executed=False`). `reaction_michaelis_menten_v1` and
+  `reaction_van_de_vusse_dilution_v1` (isothermal CSTR, dilution-rate
+  input) are `multiphysics`; `reaction_random_family_v1` (twelve random
+  networks at 8, 12, and 16 species, bound through `index.json`) is
+  `topology_transfer` with `unseen_n`, `rewire`, and `parameter_shift`.
+  `scripts/build_reaction_payloads.py` writes the payloads and `--check`
+  compares regenerations within `rtol=1e-5`. CI `benchmark-smoke`
+  verifies the new manifests, and `tests/benchmark/test_smoke.py` covers
+  both directories.
 
 ## [0.16.0] - 2026-10-15
 
