@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `koopman_graph.datasets.reaction` (cards, encodings, oracles,
   recommended workflow, limitations), linked from the toctree and the
   tutorial gallery.
+- FAIR dataset cards for the six reaction-network datasets in
+  `docs/source/data.rst` (scope, size, format, units, oracle, source,
+  license, limitations, version), and a "Reaction networks" group plus a
+  `ReactionNetworkBenchmark` row in `docs/source/capabilities.rst`. The
+  Cantera card names its mechanism source: Cantera 3.2.0's `h2o2.yaml`,
+  a hydrogen-oxygen submechanism of GRI-Mech 3.0.
 
 ## [0.16.0] - 2026-10-15
 
