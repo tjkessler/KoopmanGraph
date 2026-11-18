@@ -82,6 +82,19 @@ GraphEncoding = Literal["species_influence", "reaction_hyperedge"]
 """Topology attached to each snapshot (see :mod:`.graphs`)."""
 
 _PACKAGE = "koopman_graph.datasets.reaction"
+_REQUIRED_CARD_KEYS = frozenset(
+    {
+        "dataset_id",
+        "generator",
+        "simulator",
+        "time_step",
+        "default_num_timesteps",
+        "default_num_trajectories",
+        "default_seed",
+        "transform",
+    }
+)
+_CSTR_INPUTS = ("temperature_k", "dilution_rate")
 _CATALOG_FACTORIES = {
     "first_order_chain": first_order_chain,
     "reversible_dimerization": reversible_dimerization,
@@ -495,7 +508,67 @@ class ReactionNetworkBenchmark:
             For the Cantera card when the installed mechanism's SHA-256 does
             not match the card.
         """
-        card = cls.load_card(dataset_id)
+        return cls.generate_from_card(
+            cls.load_card(dataset_id),
+            num_trajectories=num_trajectories,
+            num_timesteps=num_timesteps,
+            seed=seed,
+            simulator=simulator,
+            volume=volume,
+        )
+
+    @classmethod
+    def generate_from_card(
+        cls,
+        card: dict[str, Any],
+        *,
+        num_trajectories: int | None = None,
+        num_timesteps: int | None = None,
+        seed: int | None = None,
+        simulator: Literal["card", "ssa"] = "card",
+        volume: float = 1000.0,
+    ) -> ReactionDataset:
+        """Generate the trajectories of a card that is not packaged.
+
+        :meth:`generate` calls this with a packaged card. Pass a card of the
+        same shape (for example a packaged card with different generator
+        parameters or control ranges) to build a variant dataset; its
+        ``dataset_id`` names the result and is written into saved payloads.
+
+        Parameters
+        ----------
+        card : dict
+            Card with the packaged keys (``dataset_id``, ``generator``,
+            ``simulator``, ``time_step``, ``default_num_timesteps``,
+            ``default_num_trajectories``, ``default_seed``, ``transform``;
+            ``initial_ranges`` for non-Cantera cards, ``controls`` for CSTR
+            cards, ``cantera`` for Cantera cards). A CSTR card may hold one of the
+            two inputs constant with ``controls["fixed"]``, a mapping from
+            ``"temperature_k"`` or ``"dilution_rate"`` to its value.
+        num_trajectories, num_timesteps, seed, simulator, volume
+            As in :meth:`generate`.
+
+        Returns
+        -------
+        ReactionDataset
+            Concentrations, controls, and the card.
+
+        Raises
+        ------
+        ValueError
+            If arguments are invalid, the card lacks a required key, or
+            ``simulator="ssa"`` does not apply.
+        ImportError
+            For a Cantera card when the ``[cantera]`` extra is missing.
+        RuntimeError
+            For a Cantera card whose mechanism SHA-256 differs from the
+            installed file.
+        """
+        missing = sorted(_REQUIRED_CARD_KEYS - set(card))
+        if missing:
+            msg = f"card is missing required keys {missing}"
+            raise ValueError(msg)
+        dataset_id = str(card["dataset_id"])
         n_traj = _count(
             "num_trajectories",
             card["default_num_trajectories"]
@@ -935,7 +1008,15 @@ def _simulate_cstr(
         See signature."""
     reactor = van_de_vusse_cstr(**card["generator"].get("params", {}))
     spec = card["controls"]
-    names = spec["names"]
+    names = list(spec["names"])
+    fixed = dict(spec.get("fixed") or {})
+    if sorted(names + list(fixed)) != sorted(_CSTR_INPUTS) or not names:
+        msg = (
+            "a CSTR card needs temperature_k and dilution_rate, each either a "
+            f"control or a fixed input; got controls {names} and fixed "
+            f"{sorted(fixed)}"
+        )
+        raise ValueError(msg)
     hold = int(spec["hold_steps"])
     substeps = int(card["simulator"]["substeps"])
     num_intervals = int(times.shape[0]) - 1
@@ -950,15 +1031,13 @@ def _simulate_cstr(
             )
             columns.append(block.repeat_interleave(hold)[:num_intervals])
         schedule = torch.stack(columns, dim=-1)  # (T - 1, C)
-        states.append(
-            reactor.simulate(
-                c0,
-                times,
-                temperature_k=schedule[:, names.index("temperature_k")],
-                dilution_rate=schedule[:, names.index("dilution_rate")],
-                substeps=substeps,
-            )
-        )
+        inputs = {
+            name: schedule[:, names.index(name)]
+            if name in names
+            else float(fixed[name])
+            for name in _CSTR_INPUTS
+        }
+        states.append(reactor.simulate(c0, times, substeps=substeps, **inputs))
         schedules.append(torch.cat([schedule, schedule[-1:]], dim=0))
     return torch.stack(states), torch.stack(schedules)
 

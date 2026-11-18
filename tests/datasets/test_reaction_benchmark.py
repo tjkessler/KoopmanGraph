@@ -399,6 +399,69 @@ def test_cantera_card_rejects_mechanism_sha_mismatch(
         )
 
 
+def test_generate_from_card_matches_generate_on_a_packaged_card() -> None:
+    card = ReactionNetworkBenchmark.load_card("reaction_chain_v1")
+    direct = ReactionNetworkBenchmark.generate(
+        "reaction_chain_v1", num_trajectories=3, num_timesteps=5, seed=4
+    )
+    via_card = ReactionNetworkBenchmark.generate_from_card(
+        card, num_trajectories=3, num_timesteps=5, seed=4
+    )
+    assert via_card.dataset_id == direct.dataset_id
+    assert torch.equal(via_card.concentrations, direct.concentrations)
+    assert torch.equal(via_card.times, direct.times)
+
+
+def test_generate_from_card_names_a_variant_by_its_card() -> None:
+    card = ReactionNetworkBenchmark.load_card("reaction_random_network_v1")
+    card["dataset_id"] = "variant_v1"
+    card["generator"]["params"]["seed"] = 3
+    dataset = ReactionNetworkBenchmark.generate_from_card(
+        card, num_trajectories=2, num_timesteps=4
+    )
+    assert dataset.dataset_id == "variant_v1"
+    assert dataset.concentrations.shape == (2, 4, 6)
+
+
+def test_generate_from_card_rejects_a_card_missing_keys() -> None:
+    card = ReactionNetworkBenchmark.load_card("reaction_chain_v1")
+    del card["time_step"]
+    with pytest.raises(ValueError, match="missing required keys"):
+        ReactionNetworkBenchmark.generate_from_card(card)
+
+
+def test_cstr_card_can_fix_one_input() -> None:
+    card = ReactionNetworkBenchmark.load_card("reaction_van_de_vusse_v1")
+    card["controls"]["names"] = ["dilution_rate"]
+    card["controls"]["fixed"] = {"temperature_k": 387.35}
+    dataset = ReactionNetworkBenchmark.generate_from_card(
+        card, num_trajectories=2, num_timesteps=12
+    )
+    assert dataset.controls is not None
+    assert dataset.controls.shape == (2, 12, 1)
+    assert bool(torch.isfinite(dataset.concentrations).all())
+
+
+@pytest.mark.parametrize(
+    ("names", "fixed"),
+    [
+        (["dilution_rate"], {}),
+        (["dilution_rate"], {"dilution_rate": 10.0}),
+        ([], {"temperature_k": 387.35, "dilution_rate": 14.19}),
+    ],
+)
+def test_cstr_card_rejects_incomplete_or_overlapping_inputs(
+    names: list[str], fixed: dict[str, float]
+) -> None:
+    card = ReactionNetworkBenchmark.load_card("reaction_van_de_vusse_v1")
+    card["controls"]["names"] = names
+    card["controls"]["fixed"] = fixed
+    with pytest.raises(ValueError, match="CSTR card needs"):
+        ReactionNetworkBenchmark.generate_from_card(
+            card, num_trajectories=1, num_timesteps=3
+        )
+
+
 def test_payload_round_trip(tmp_path: Path) -> None:
     for dataset_id in ("reaction_van_de_vusse_v1", "reaction_chain_v1"):
         dataset = ReactionNetworkBenchmark.generate(

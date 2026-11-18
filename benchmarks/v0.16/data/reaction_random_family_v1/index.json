@@ -1,0 +1,144 @@
+{
+  "format": "koopman_graph.reaction_family",
+  "format_version": 1,
+  "family_id": "reaction_random_family_v1",
+  "num_timesteps": 128,
+  "sampler": {
+    "num_elements": 3,
+    "max_atoms": 5,
+    "max_order": 2,
+    "num_reactions": "3 * num_species // 2",
+    "rate_log10_range": [
+      -1.0,
+      1.0
+    ],
+    "networks_per_size": 4,
+    "member_rule": "the first network seeds whose species graph is connected and uses every species"
+  },
+  "protocol": {
+    "unseen_n": {
+      "train_num_species": [
+        8,
+        12,
+        16
+      ],
+      "test_num_species": 32
+    },
+    "rewire": {
+      "held_fixed": [
+        "num_species",
+        "num_reactions"
+      ],
+      "varies": "seed"
+    },
+    "parameter_shift": {
+      "train_rate_log10_range": [
+        -1.0,
+        1.0
+      ],
+      "test_rate_log10_range": [
+        1.0,
+        2.0
+      ]
+    }
+  },
+  "members": [
+    {
+      "dataset_id": "reaction_random_family_v1_s08_n0",
+      "file": "reaction_random_family_v1_s08_n0.pt",
+      "sha256": "33358fdc5711a93a7256c351062442117ea5053fd1eb5222fcb4443665877ff4",
+      "num_species": 8,
+      "num_reactions": 12,
+      "network_seed": 0
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s08_n1",
+      "file": "reaction_random_family_v1_s08_n1.pt",
+      "sha256": "2f9fe3b4c84c7d3e2176c4cb896f12e0dbd3320771596c2501a45d502d60efa7",
+      "num_species": 8,
+      "num_reactions": 12,
+      "network_seed": 1
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s08_n2",
+      "file": "reaction_random_family_v1_s08_n2.pt",
+      "sha256": "60782db13f3189355533207358ceb1dd12db2ec5c59a9352278c1d5cc0f3e77c",
+      "num_species": 8,
+      "num_reactions": 12,
+      "network_seed": 2
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s08_n5",
+      "file": "reaction_random_family_v1_s08_n5.pt",
+      "sha256": "de9b2371274016c59d572b8c45bf8edb56ff1ee16f8e14e7be8557ec8c7b3fb3",
+      "num_species": 8,
+      "num_reactions": 12,
+      "network_seed": 5
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s12_n0",
+      "file": "reaction_random_family_v1_s12_n0.pt",
+      "sha256": "7e1488e716bc05facbef99a8d081d257dae6b7c19f8d4829991c97f69c27dbcd",
+      "num_species": 12,
+      "num_reactions": 18,
+      "network_seed": 0
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s12_n1",
+      "file": "reaction_random_family_v1_s12_n1.pt",
+      "sha256": "ef3d684fcdec000b822715d489b53de646aaca59c39c289f94810f5d451cad0f",
+      "num_species": 12,
+      "num_reactions": 18,
+      "network_seed": 1
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s12_n2",
+      "file": "reaction_random_family_v1_s12_n2.pt",
+      "sha256": "c663b7de7961e036e647d4623e18d49e63ad46d915c817b86b8d2280b4a55841",
+      "num_species": 12,
+      "num_reactions": 18,
+      "network_seed": 2
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s12_n3",
+      "file": "reaction_random_family_v1_s12_n3.pt",
+      "sha256": "acc72b1417e2b4631c2371bdd1f6798042fcfb99f2de6fc8ef32dd1e27486e76",
+      "num_species": 12,
+      "num_reactions": 18,
+      "network_seed": 3
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s16_n0",
+      "file": "reaction_random_family_v1_s16_n0.pt",
+      "sha256": "a78013513e981a7b54012186cf31f3070a3201b60d7dd437ca0fdf4dbba2fd70",
+      "num_species": 16,
+      "num_reactions": 24,
+      "network_seed": 0
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s16_n2",
+      "file": "reaction_random_family_v1_s16_n2.pt",
+      "sha256": "20859f3cb7396292fef71dce92d1342daf44dfe93bc3e0d1ced36860622dfba0",
+      "num_species": 16,
+      "num_reactions": 24,
+      "network_seed": 2
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s16_n4",
+      "file": "reaction_random_family_v1_s16_n4.pt",
+      "sha256": "ece11b6b594a264fb34a85b9a16684337bc406fec9fc5db43b93f34ff438151b",
+      "num_species": 16,
+      "num_reactions": 24,
+      "network_seed": 4
+    },
+    {
+      "dataset_id": "reaction_random_family_v1_s16_n5",
+      "file": "reaction_random_family_v1_s16_n5.pt",
+      "sha256": "b3c80ed23619ff2f159e0883355e1478daf5bcf628bf9778626daeac08896a0a",
+      "num_species": 16,
+      "num_reactions": 24,
+      "network_seed": 5
+    }
+  ],
+  "license": "Apache-2.0"
+}

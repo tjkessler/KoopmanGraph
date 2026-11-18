@@ -99,7 +99,9 @@ jobs:
           # - notebooks → Ubuntu nbmake only (never macOS)
           # - docs / lint → as named
           lint = hit("src/", "tests/", "pyproject.toml", ".pre-commit-config.yaml")
-          test = hit("src/", "tests/", "scripts/", "pyproject.toml", "uv.lock")
+          test = hit(
+              "src/", "tests/", "scripts/", "benchmarks/", "pyproject.toml", "uv.lock"
+          )
           notebooks = hit("examples/", "src/", "pyproject.toml", "uv.lock")
           docs = hit("docs/", "README.md", "src/", "pyproject.toml")
           workflow = hit(".github/workflows/ci.yml")
@@ -401,6 +403,14 @@ jobs:
             uv run --no-sync koopman-graph benchmark verify \
               --manifest "benchmarks/v0.15/${track}.yaml" \
               --against "benchmarks/v0.15/summaries/${track}.json"
+          done
+
+      - name: Verify reaction-network manifests
+        run: |
+          for track in reaction_michaelis_menten reaction_van_de_vusse_dilution reaction_random_family; do
+            uv run --no-sync koopman-graph benchmark verify \
+              --manifest "benchmarks/v0.16/${track}.yaml" \
+              --against "benchmarks/v0.16/summaries/${track}.json"
           done
 
   # Single required check for branch protection. Individual jobs may be skipped

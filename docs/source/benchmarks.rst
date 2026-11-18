@@ -28,6 +28,17 @@ multiphysics, topology transfer). Payloads are tiny hashed UTF-8
 stand-ins, not METR-LA HDF5. Default CI runs ``benchmark verify`` on
 those stubs.
 
+Reaction-network manifests live under ``benchmarks/v0.16/``:
+Michaelis-Menten and an isothermal Van de Vusse CSTR with a dilution-rate
+input (``multiphysics``), and a family of twelve random mass-action
+networks (``topology_transfer``). Their payloads are compact
+:class:`~koopman_graph.datasets.reaction.ReactionDataset` files, each
+under 300 kB, bound by file SHA-256 (the family is bound by the SHA-256
+of its ``index.json``). ``scripts/build_reaction_payloads.py --check``
+regenerates them and compares within ``rtol=1e-5``. Default CI verifies
+these three manifests too; their summaries are identity records, not
+forecast scores. See :doc:`data` for the dataset cards.
+
 How to use it
 -------------
 
